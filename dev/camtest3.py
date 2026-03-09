@@ -73,7 +73,7 @@ def build_camera() -> Picamera2:
     config = picam2.create_still_configuration(
         main={
             "size":   (SENSOR_WIDTH, SENSOR_HEIGHT),
-            "format": "BGR888",          # OpenCV-native; we will promote to 16-bit
+            "format": "RGB888",          # OpenCV-native is BR888; we will promote to 16-bit
         },
         raw={
             "size":   (SENSOR_WIDTH, SENSOR_HEIGHT),
@@ -231,7 +231,7 @@ def check_exposure(bgr_image: np.ndarray, clip_fraction: float = 0.001) -> dict:
 def estimate_exposure(picam2: Picamera2,
                       target_fraction: float = 0.70,
                       reference_channel: str = "G",
-                      max_exposure_us: int = 500_000) -> int:
+                      max_exposure_us: int = 900_000) -> int:
     """
     Fire a test capture at the current ExposureTime and calculate the
     exposure needed to bring the reference channel to target_fraction
@@ -264,6 +264,9 @@ def estimate_exposure(picam2: Picamera2,
 
     # Report
     print(f"\nExposure estimation:")
+    print(f"    Blue  mean: {float(bgr[:, :, 0].mean()):4.1f} / 255")
+    print(f"    Green mean: {float(bgr[:, :, 1].mean()):4.1f} / 255")
+    print(f"    Red   mean: {float(bgr[:, :, 2].mean()):4.1f} / 255")
     print(f"  Current ExposureTime : {current_exposure:,} µs")
     print(f"  {reference_channel}-channel mean      : {current_mean:.1f} / 255")
     print(f"  Target mean          : {target_mean:.1f} / 255  ({target_fraction*100:.0f}%)")
@@ -272,7 +275,7 @@ def estimate_exposure(picam2: Picamera2,
           f"({recommended_us/1e6:.3f} s)")
 
     if recommended_us >= max_exposure_us:
-        print(f"  ⚠  Clamped to {max_exposure_us:,} µs — your illumination "
+        print(f"  ⚠  Clamped recommended_us to {max_exposure_us:,} µs — your illumination "
               f"may be insufficient. Consider brighter LEDs.")
 
     return recommended_us
@@ -400,9 +403,11 @@ def calibrate_wb_from_bayer(bayer_uint16: np.ndarray,
 if __name__ == "__main__":
     picam2 = build_camera()
     try:
+        input ("Press any key when ready - but NOT CTL-Z!")
         # --- Step 1: find the right exposure ---
         print("=== Exposure calibration ===")
-        recommended = estimate_exposure(picam2, target_fraction=0.70)
+        time.sleep(2.0) 
+        recommended = estimate_exposure(picam2, reference_channel="B", target_fraction=0.70)
 
         print(f"\n=== Applying recommended exposure ({recommended}) and verifying ===")
         picam2.set_controls({"ExposureTime": recommended})
@@ -418,3 +423,15 @@ if __name__ == "__main__":
     finally:
         picam2.stop()
         picam2.close()
+
+#---------------------------------- #
+# Color calibration card # 1        #
+# --------------------------------- #
+ROI_CARDS = {
+    'Calibration card 1':{
+        'bounds':  [(   0,   0, 3280, 2464)]
+        'blue':    [(   0,   0,  400,  400)],
+        'white':   [( 440,   0,  400,  400),
+                    ( 880, 320,  410,  390)]
+    }
+}
