@@ -54,46 +54,49 @@ except ImportError:
 import numpy as np
 
 
+MAIN_FORMT = "RGB888"
+RAW_FORMAT = "SBGGR10"
+
 # ---------------------------------------------------------------------------
 # Camera configurations (same as camtest2.py)
 # ---------------------------------------------------------------------------
 CONFIGS = {
-    # '1': {
-    #     "size":    (640, 480),
-    #     "format":  "RGB888",
-    #     "is_raw":  False,
-    #     "comment": "Config 1: Small RGB (640×480)"
-    # },
-    # '2': {
-    #     "size":    (1640, 1232),
-    #     "format":  "RGB888",
-    #     "is_raw":  False,
-    #     "comment": "Config 2: Medium RGB (1640×1232)"
-    # },
-    # '3': {
-    #     "size":    (3280, 2464),
-    #     "format":  "RGB888",
-    #     "is_raw":  False,
-    #     "comment": "Config 3: Full RGB (3280×2464)"
-    # },
-    # '4': {
-    #     "size":    (640, 480),
-    #     "format":  "SBGGR10_CSI2P",
-    #     "is_raw":  True,
-    #     "comment": "Config 4: Small dual-stream RGB + Bayer (640×480)"
-    # },
+    '1': {
+        "size":    (640, 480),
+        "format":  MAIN_FORMT,
+        "is_raw":  False,
+        "comment": "Config 1: Small RGB (640×480)"
+    },
+    '2': {
+        "size":    (1640, 1232),
+        "format":  MAIN_FORMT,
+        "is_raw":  False,
+        "comment": "Config 2: Medium RGB (1640×1232)"
+    },
+    '3': {
+        "size":    (3280, 2464),
+        "format":  MAIN_FORMT,
+        "is_raw":  False,
+        "comment": "Config 3: Full RGB (3280×2464)"
+    },
+    '4': {
+        "size":    (640, 480),
+        "format":  RAW_FORMAT,
+        "is_raw":  True,
+        "comment": "Config 4: Small dual-stream RGB + Bayer (640×480)"
+    },
     '5': {
         "size":    (1640, 1232),
-        "format":  "SBGGR10_CSI2P",
+        "format":  RAW_FORMAT,
         "is_raw":  True,
         "comment": "Config 5: Medium dual-stream RGB + Bayer (1640×1232)"
     },
-    # '6': {
-    #     "size":    (3280, 2464),
-    #     "format":  "SBGGR10_CSI2P",
-    #     "is_raw":  True,
-    #     "comment": "Config 6: Full dual-stream RGB + Bayer (3280×2464)"
-    # },
+    '6': {
+        "size":    (3280, 2464),
+        "format":  RAW_FORMAT,
+        "is_raw":  True,
+        "comment": "Config 6: Full dual-stream RGB + Bayer (3280×2464)"
+    },
 }
 
 # Camera control settings
@@ -190,7 +193,7 @@ def capture_config(picam2, config_key, output_dir):
         print("Dual-stream capture")
         request = picam2.capture_request()
         rgb8 = request.make_array("main")      # uint8 H×W×3 BGR
-        bayer = request.make_array("raw")      # uint8 H×800 packed 10-bit Bayer
+        bayer = request.make_array("raw")      # uint16 H×W BGGR Bayer
         meta = request.get_metadata()
         request.release()
         
@@ -198,17 +201,10 @@ def capture_config(picam2, config_key, output_dir):
         print(f"    Shape: {rgb8.shape} (H×W×3)")
         print(f"    B mean: {rgb8[:,:,0].mean():.1f}, G mean: {rgb8[:,:,1].mean():.1f}, R mean: {rgb8[:,:,2].mean():.1f}")
         
-        print(f"\n  Raw Bayer Stream (before unpacking):")
-        print(f"    Shape: {bayer.shape} (H×packed_W)")
+        print(f"\n  Raw Bayer Stream (SBGGR10):") 
+        print(f"    Shape: {bayer.shape} (H×W)")
         print(f"    Dtype: {bayer.dtype}")
-        
-        print("\nSkipping unpacking on RPi (too slow).")
-        print(f"    Packed data will be saved as-is: {bayer.shape} uint8")
-        print(f"    (Unpacking will happen on desktop for analysis)")
-        
-        print(f"\n  Raw Bayer Stream (after unpacking):")
-        print(f"    Shape: {bayer.shape}")
-        print(f"    Dtype: {bayer.dtype}")
+        print(f"    Value range: {bayer.min()}-{bayer.max()} (10-bit: 0-1023)")
         
         print("Save RGB as JPG")
         rgb_file = out_dir / f"{basename}_rgb_00.jpg"
@@ -216,11 +212,11 @@ def capture_config(picam2, config_key, output_dir):
         files['rgb'] = rgb_file
         print(f"    ✓ RGB:      {rgb_file.name} ({rgb8.shape})")
         
-        print("Save Bayer as NPY")
+        print("Save Bayer as NPY (SBGGR10 10-bit uint16)")
         raw_file = out_dir / f"{basename}_raw_00.npy"
         np.save(str(raw_file), bayer)
         files['raw'] = raw_file
-        print(f"    ✓ Bayer:    {raw_file.name} ({bayer.shape}, {bayer.dtype})")
+        print(f"    ✓ Bayer:    {raw_file.name} (H={bayer.shape[0]}, W={bayer.shape[1]}, dtype={bayer.dtype})")
         
         # Save metadata
         meta_file = out_dir / f"{basename}_raw_00.txt"
@@ -246,128 +242,6 @@ def capture_config(picam2, config_key, output_dir):
         print(f"    ✓ Metadata: {meta_file.name}")
     
     return files
-
-def check_Bayer_packed(packed_data, width):
-    """
-    Diagnostic: examine packed SBGGR10_CSI2P data before unpacking.
-    """
-    print(f"\n  ╔═══ PACKED DATA DIAGNOSTIC ═══╗")
-    print(f"    dtype: {packed_data.dtype}")
-    print(f"    shape: {packed_data.shape}  (H={packed_data.shape[0]}, packed_W={packed_data.shape[1]})")
-    packed_bytes_expected = (width * 10 + 7) // 8
-    print(f"    Expected: ~{packed_bytes_expected} bytes per row ({width} pixels × 10 bits / 8)")
-    print(f"    Actual:   {packed_data.shape[1]} bytes per row")
-    
-    # Sample bytes from middle region where blue pixel should be bright
-    row, col = min(300, packed_data.shape[0]//2), 10   
-    print(f"\n    Sample region (row {row}, packed cols {col}-{col+4}):")
-    sample_bytes = packed_data[row, col:col+5]
-    for i, b in enumerate(sample_bytes):
-        print(f"      byte[{col+i}]: {b:3d} = {b:08b}")
-    
-    print(f"\n    Data range: min={packed_data.min()}, max={packed_data.max()}")
-    print(f"  ╚════════════════════════════╝")
-
-
-def check_Bayer_unpacked(unpacked_data):
-    """
-    Diagnostic: examine unpacked 10-bit Bayer data after unpacking.
-    """
-    print(f"\n  ╔═══ UNPACKED DATA DIAGNOSTIC ═══╗")
-    print(f"    dtype: {unpacked_data.dtype}")
-    print(f"    shape: {unpacked_data.shape}  (H={unpacked_data.shape[0]}, W={unpacked_data.shape[1]})")
-    print(f"    Expected: 640 pixels per row, uint16, values 0-1023")
-    
-    # Sample bytes from middle region where blue pixel should be bright
-    row, col = 300, 10
-    print(f"\n    Sample region (row {row}, unpacked cols {col}-{col+9}):")
-    sample_pixels = unpacked_data[row, col:col+5]
-    for i, p in enumerate(sample_pixels):
-        print(f"      pixel[{col+i}]: {p:4d} = {p:010b}")
-    
-    # Extract BGGR layers to check Blue channel
-    b_layer = unpacked_data[0::2, 0::2]     # Blue pixels
-    gb_layer = unpacked_data[0::2, 1::2]    # Gb pixels
-    gr_layer = unpacked_data[1::2, 0::2]    # Gr pixels
-    r_layer = unpacked_data[1::2, 1::2]     # Red pixels
-    
-    print(f"\n    BGGR Layer Analysis:")
-    print(f"      B  layer:  mean={b_layer.mean():7.1f}, min={b_layer.min():4d}, max={b_layer.max():4d}")
-    print(f"      Gb layer:  mean={gb_layer.mean():7.1f}, min={gb_layer.min():4d}, max={gb_layer.max():4d}")
-    print(f"      Gr layer:  mean={gr_layer.mean():7.1f}, min={gr_layer.min():4d}, max={gr_layer.max():4d}")
-    print(f"      R  layer:  mean={r_layer.mean():7.1f}, min={r_layer.min():4d}, max={r_layer.max():4d}")
-    
-    print(f"\n    Data range: min={unpacked_data.min()}, max={unpacked_data.max()}")
-    print(f"    ✓ Valid 10-bit range [0-1023] expected; actual {unpacked_data.min()}-{unpacked_data.max()}")
-    print(f"  ╚═════════════════════════════════╝")
-
-def _unpack_sbggr10_csi2p(packed_data, width):
-    """
-    Unpack SBGGR10_CSI2P packed 10-bit Bayer data to uint16.
-    
-    Picamera2 raw stream returns SBGGR10_CSI2P as packed bytes:
-    - width pixels × 10 bits = width*10 bits = (width*10+7)//8 bytes per row
-    - Saved as (H, packed_W) uint8
-    
-    This function unpacks to proper (H, width) uint16 with values 0-1023.
-    
-    CSI2P packing (5 bytes → 4 pixels):
-        Pixel 0: bits [9:2] in byte 0, bits [1:0] in byte 1 [7:6]
-        Pixel 1: bits [5:0] in byte 1, bits [9:8] in byte 2 [7:6]
-        Pixel 2: bits [3:0] in byte 2, bits [9:6] in byte 3 [7:4]
-        Pixel 3: bits [1:0] in byte 3, bits [9:0] in byte 4
-    
-    Args:
-        packed_data: numpy array (H, packed_W) uint8 - packed 10-bit Bayer data
-        width: Expected number of pixels per row (e.g., 640, 1640, 3280)
-    
-    Returns:
-        numpy array (H, width) uint16 - unpacked 10-bit values
-    """
-    height = packed_data.shape[0]
-    unpacked = np.zeros((height, width), dtype=np.uint16)
-
-    print("\n  [DIAGNOSTICS] BEFORE unpacking:")
-    check_Bayer_packed(packed_data, width) 
-
-    for row in range(height):
-        packed_row = packed_data[row]
-        
-        # Unpack 5 bytes → 4 pixels (40 bits = 4×10 bits)
-        pixel_idx = 0
-        for byte_idx in range(0, len(packed_row), 5):
-            if byte_idx + 4 < len(packed_row):
-                b0, b1, b2, b3, b4 = packed_row[byte_idx:byte_idx+5].astype(np.uint16)
-            else:
-                # Handle edge case if data is not byte-aligned
-                b0 = packed_row[byte_idx] if byte_idx < len(packed_row) else 0
-                b1 = packed_row[byte_idx+1] if byte_idx+1 < len(packed_row) else 0
-                b2 = packed_row[byte_idx+2] if byte_idx+2 < len(packed_row) else 0
-                b3 = packed_row[byte_idx+3] if byte_idx+3 < len(packed_row) else 0
-                b4 = packed_row[byte_idx+4] if byte_idx+4 < len(packed_row) else 0
-            
-            # Extract 4 10-bit values from 5 bytes (CSI2P packing)
-            p0 = ((b0 << 2) | (b1 >> 6)) & 0x3FF
-            p1 = ((b1 << 4) | (b2 >> 4)) & 0x3FF
-            p2 = ((b2 << 6) | (b3 >> 2)) & 0x3FF
-            p3 = ((b3 << 8) | b4) & 0x3FF
-            
-            # Store unpacked pixels (but don't exceed width)
-            if pixel_idx < width:
-                unpacked[row, pixel_idx] = p0
-            if pixel_idx + 1 < width:
-                unpacked[row, pixel_idx + 1] = p1
-            if pixel_idx + 2 < width:
-                unpacked[row, pixel_idx + 2] = p2
-            if pixel_idx + 3 < width:
-                unpacked[row, pixel_idx + 3] = p3
-            
-            pixel_idx += 4
-    
-    print("\n  [DIAGNOSTICS] AFTER unpacking:")
-    check_Bayer_unpacked(unpacked)
-    return unpacked
-
 
 def _save_metadata(fpath, meta):
     """
@@ -427,10 +301,11 @@ def estimate_exposure(picam2, target_fraction=0.70, reference_channel="B",
     print(    f"         Exp recommended_us  {recommended_us:,}")
     if recommended_us >= max_exposure_us:
         print(f"      ⚠  Exposure clamped to {max_exposure_us:,} µs — illumination may be insufficient")
+        recommended_us = max_exposure_us
     if recommended_us <= min_exposure_us:
         print(f"      ⚠  Exposure clamped to {min_exposure_us:,} µs — illumination may too bright")
-
-    recommended_us = max( min(recommended_us, max_exposure_us), min_exposure_us)
+        recommended_us = min_exposure_us
+    #recommended_us = max( min(recommended_us, max_exposure_us), min_exposure_us)
 
     # Report
     bgr_means = {
@@ -531,15 +406,19 @@ def main():
                 print(f"  Estimating exposure...")
                 exp_result = estimate_exposure(picam2, target_fraction=0.70,
                                                reference_channel="B",
-                                               max_exposure_us=330_000,
-                                               min_exposure_us=330_000)
+                                               max_exposure_us=900_000,
+                                               min_exposure_us=  1_000)
                 exposure_results[config_key] = exp_result
                 
                 # Apply the recommended exposure
                 recommended_us = exp_result["recommended_exposure"]
                 print(f"  Applying recommended exposure: {recommended_us:,} µs")
                 picam2.set_controls({"ExposureTime": recommended_us})
-                time.sleep(0.5)  # Allow camera to stabilize with new exposure
+                time.sleep(1.0)  # Allow camera to stabilize with new exposure
+                
+                # Capture a throwaway frame to ensure exposure takes effect
+                _ = picam2.capture_array()
+                time.sleep(0.5)
                 
                 # Capture and save
                 files = capture_config(picam2, config_key, output_dir)
@@ -566,7 +445,7 @@ def main():
         print(f"{'-'*60}")
         
         recommended_exposures = set()
-        for config_key in ['5']: #sorted(CONFIGS.keys()):
+        for config_key in sorted(CONFIGS.keys()):
             if config_key in exposure_results:
                 result = exposure_results[config_key]
                 current = result["current_exposure"]
