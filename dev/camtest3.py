@@ -8,10 +8,16 @@ Key design decisions:
   - Dual-stream capture: processed RGB (for grid analysis) + raw Bayer
     (for archival / offline recalibration)
   - All ISP "creative" processing disabled or neutralised
-  - Fixed, validated exposure in the sensor's linear region
+  - Adaptive exposure in the sensor's linear region
   - Output as 16-bit PNG (lossless, preserves full tonal depth)
   - White-balance gains must be calibrated against your white reference
     sample BEFORE production use (see calibrate_wb() below)
+
+Testing: Some methods not yet used or tested
+TODO:
+  - Verify capture of bayer image and ability to 
+  - Improve documentation
+  - White balance calculations
 """
 
 import time
