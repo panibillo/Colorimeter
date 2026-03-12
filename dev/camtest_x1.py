@@ -4,7 +4,7 @@ scientific_colorimeter_capture.py
 CONFIGS 4,5,6 do not work.  1,2,3 do work.
 
 Captures a single, maximally objective image from the Raspberry Pi
-Camera Module 2 (IMX219) for colorimetric analysis.
+Camera Module 2 (Sony IMX219) for colorimetric analysis.
 """
 
 import time
