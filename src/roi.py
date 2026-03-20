@@ -5,71 +5,162 @@ Lets write roi.py. This file has a few jobs:
 - Define a roi object
 - Write roi defs to the database
 - Read roi defs from the database into roi objects.
+
+TODO:
+- shrink rectangles to avoid edge noise
+- remove matplotlib, which should be used only in test.
+- cleanup unused code
+- Create new format for color cards
+    - encode card id on the margin: machine readable and human readable areas
+    - ¿draw alignment ticks on the margins and redo pattern recognition?
+
 """
 
 import numpy as np
+import cv2
 import db_manager as cdb
 import logging_manager as log
 import matplotlib.pyplot as plt
 
 from color_cam import ColorCam
 
-def smooth_ema(signal: np.ndarray, alpha: float = 0.1) -> np.ndarray:
+class Rect:
     """
-    Exponential Moving Average smoother - memory efficient for Raspberry Pi.
+    Recall for drawing that a rect x,y is upper left corner.
+    """
+    def __init__(self, x, y, w, h)
+        self.x = int(x)
+        self.y = int(y)
+        self.w = int(w)
+        self.h = int(h)
 
+    def x2(self):
+        return self.x + self.w
+    def y2(self):
+        return self.y + self.h
+    def xywh(self):
+        return self.x, self.y, self.w, self.h
+    def win(self):
+        return self.x, self.x2, self.y, self.y2
+    def xyslice(self):
+        return slice(self.x, self.x2), slice(self.y, self.y2)
+    def zslice(self, iz):
+        """
+        Returns a function L(s2d) that remembers iz and returns tuple(s2d[0], s2d[1], iz)
+        Example: A[L(s2d)] == A[s2d[0], s2d[1], iz]
+        """
+        return lambda s2d: (s2d[0], s2d[1], iz)
+
+class Roi(Rect):
+    def __init__(self, x, y, w, h, id, name, color=None):
+        super().__init__(x, y, w, h)
+        self.id = int(id)
+        self.name = str(name)
+        self.color = color
+
+class Roi_group:
+    def __init__(self, *roi):
+        self.group = set{*roi}
+
+def buffer(bayer_array, roi):
+    
+
+
+
+def _filter_margin_rectangles(rectangles: list, layer_height: int, layer_width: int, 
+                              margin_tolerance_fraction: float = 0.05) -> list:
+    """
+    Remove rectangles that represent image margins (border regions).
+    
+    Margins are rectangles whose boundaries are physically close to the image edges.
+    This is determined by physical distance, not grid position, so it correctly
+    identifies all four margins (top, bottom, left, right) regardless of grid order.
+    
+    Algorithm:
+    1. Calculate expected interior region based on margin tolerance
+    2. For each rectangle, check if it extends beyond the interior region
+    3. Keep only rectangles completely within the interior region
+    
     Args:
-        signal: 1D numpy array
-        alpha: Smoothing factor (0 < alpha <= 1).
-               Lower = more smoothing, higher = more responsive
-               Typical range: 0.2-0.4 for edge detection
-
+        rectangles: List of rectangle dicts with keys {'row', 'col', 'x', 'y', 'w', 'h'}
+        layer_height: Height of Bayer layer image in pixels (bayer_height // 2)
+        layer_width: Width of Bayer layer image in pixels (bayer_width // 2)
+        margin_tolerance_fraction: Fraction of image dimension to consider as margin (default 0.15 = 15%)
+    
     Returns:
-        Smoothed 1D array
-
-    Memory: O(1) - only previous value stored
-    Time: O(n) - single pass
-    """
-    smoothed = np.zeros_like(signal, dtype=np.float64)
-    smoothed[0] = signal[0]
-
-    for i in range(1, len(signal)):
-        smoothed[i] = alpha * signal[i] + (1 - alpha) * smoothed[i-1]
-
-    return smoothed
-
-
-def smooth_triangular(signal: np.ndarray, window_size: int = 10) -> np.ndarray:
-    """
-    Triangular (Bartlett) window smoother - linear weighting.
-
-    Args:
-        signal: 1D numpy array
-        window_size: Kernel size (e.g., 5, 7, 9, 10)
-
-    Returns:
-        Smoothed 1D array (guaranteed same length as input)
-
-    Memory: O(window_size) - minimal vs full convolution
-    Time: O(n * window_size)
-    """
-    # Create triangular kernel (peaks at center)
-    kernel = np.array([i + 1 if i < window_size // 2 + 1 else window_size - i
-                       for i in range(window_size)], dtype=np.float64)
-    print ('kernel = ', kernel)
+        Filtered list containing only interior (non-margin) rectangles
     
-    kernel = kernel / np.sum(kernel)
-
-    result = np.convolve(signal, kernel, mode="same")
+    Example:
+        >>> rects = [{'x': 10, 'y': 5, 'w': 100, 'h': 100, ...}]
+        >>> interior = _filter_margin_rectangles(rects, 616, 820)  # half-resolution layer space
+    """
+    if not rectangles:
+        return rectangles
     
-    # Ensure output is exactly same length as input
-    if len(result) != len(signal):
-        result = result[:len(signal)]
+    # Calculate margin boundary thresholds based on layer dimensions
+    margin_left = int(layer_width * margin_tolerance_fraction)
+    margin_right = int(layer_width * (1.0 - margin_tolerance_fraction))
+    margin_top = int(layer_height * margin_tolerance_fraction)
+    margin_bottom = int(layer_height * (1.0 - margin_tolerance_fraction))
     
-    return result
+    log.info(f"Margin boundaries: layer_height={layer_height}, layer_width={layer_width}, "
+              f"left={margin_left}, right={margin_right}, "
+              f"top={margin_top}, bottom={margin_bottom}", 
+             location="filter_margin_rectangles:L54")
+    
+    # Filter rectangles: keep only those completely within interior region
+    interior_rects = []
+    margin_rects = []
+    
+    for rect in rectangles:
+        x, y, w, h = rect["x"], rect["y"], rect["w"], rect["h"]
+        x_end = x + w
+        y_end = y + h
+        
+        # Check if rectangle is within interior region
+        # Rectangle is interior if:
+        # - Left edge is past left margin
+        # - Right edge is before right margin
+        # - Top edge is past top margin
+        # - Bottom edge is before bottom margin
+        is_interior = (x >= margin_left and 
+                      x_end <= margin_right and 
+                      y >= margin_top and 
+                      y_end <= margin_bottom)
+        
+        if is_interior:
+            interior_rects.append(rect)
+        else:
+            margin_rects.append({
+                'rectid': f"[{rect['row']},{rect['col']}]",
+                'x': x, 'y': y, 'w': w, 'h': h,
+                'x_end': x_end, 'y_end': y_end
+            })
+    
+    # Log margin rectangles for debugging
+    if margin_rects:
+        log.info(f"Filtered margin rectangles:", location="filter_margin_rectangles:L89")
+        for m in margin_rects:
+            edges = []
+            if m['x'] < margin_left:
+                edges.append(f"left ({m['x']} < {margin_left})")
+            if m['x_end'] > margin_right:
+                edges.append(f"right ({m['x_end']} > {margin_right})")
+            if m['y'] < margin_top:
+                edges.append(f"top ({m['y']} < {margin_top})")
+            if m['y_end'] > margin_bottom:
+                edges.append(f"bottom ({m['y_end']} > {margin_bottom})")
+            edges_str = ", ".join(edges)
+            log.info(f"  {m['rectid']}: {edges_str}", location="filter_margin_rectangles:L101")
+    
+    log.info(f"Kept {len(interior_rects)} interior rectangles, removed {len(margin_rects)} margins", 
+             location="filter_margin_rectangles:L103")
+    
+    return interior_rects
 
 
-def rect_to_slices(X, Y, x, y, w, h, scale_x=1, scale_y=1):
+
+
     """
     Calculate yslice and xslice encompassing rectangle definition x,y,w,h.
 
@@ -100,71 +191,6 @@ def rect_to_slices(X, Y, x, y, w, h, scale_x=1, scale_y=1):
     x1 = int(round((X + x + w) * scale_x))
 
     return (slice(y0,y1), slice(x0,x1))
-
-
-def _find_edges_1d(signal: np.ndarray, threshold: float = 0.22) -> list:
-    """
-    Find peaks in second derivative to detect edges.
-
-    Args:
-        signal: 1D numpy array of values (e.g., average pixel intensity)
-        threshold: Minimum peak height as fraction of max second derivative
-
-    Returns:
-        List of indices where edges occur
-    """
-    
-    # Smooth signal using efficient EMA (exponential moving average) - memory efficient for Raspberry Pi
-    # smoothed = smooth_ema(signal, alpha=0.1)
-    signal = (signal[:-1] + signal[1:]) / 2
-    smoothed = smooth_triangular(signal, window_size=9)
-
-    # Compute first and second differences on smoothed signal
-    # diff1 = smooth_triangular(np.diff(smoothed), window_size=10)
-    diff1 = smooth_triangular(np.diff(smoothed), window_size=7)
-    diff2 = np.diff(diff1)
-
-    print (signal.shape, smoothed.shape, diff1.shape, diff2.shape)
-
-    # Second derivative of signal: positive = rising edge, negative = falling
-    # Find absolute value to detect both types of edges
-    edges = np.abs(diff1)
-
-    # Threshold to find significant edges (ignore noise)
-    threshold_val = np.max(edges) * threshold if np.max(edges) > 0 else 0
-    #threshold_val = np.median(edges)
-    edge_indices = np.where(edges > threshold_val)[0] + 1  # +1 because diff reduces array
-    print ('edges', len(edges), edge_indices[-4:])
-
-    # DEBUG: Plot signal and edge detection
-    fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(14, 6), sharex=True)
-    
-    ax1.plot(signal, label="Raw Signal", linewidth=1, alpha=0.5)
-    ax1.plot(smoothed, label="Smoothed (6-pt avg)", linewidth=1.5, color="blue")
-    ax1.set_ylabel("Pixel Value")
-    ax1.set_title("Signal (Luminance) - Raw vs Smoothed")
-    ax1.grid(True, alpha=0.3)
-    ax1.legend()
-    
-    ax2.plot(diff1, label="First Derivative", linewidth=1, color="orange")
-    ax2.set_ylabel("d/dx")
-    ax2.set_xlabel("Position")
-    ax2.grid(True, alpha=0.3)
-    ax2.legend()
-    
-    ax3.plot(edges, label="Abs(Second Derivative)", linewidth=1, color="orange")
-    ax3.axhline(y=threshold_val, color="red", linestyle="--", linewidth=2, label=f"Threshold ({threshold_val:.1f})")
-    # ax3.scatter(edge_indices, edges[edge_indices], color="green", s=40, zorder=5, label="Detected edges")
-    ax3.set_ylabel("Abs(d²/dx²)")
-    ax3.set_xlabel("Position")
-    ax3.set_title(f"Edge Detection (threshold={threshold:.2f}, found {len(edge_indices)} edges)")
-    ax3.grid(True, alpha=0.3)
-    ax3.legend()
-    
-    plt.tight_layout()
-    plt.show()
-
-    return edge_indices.tolist()
 
 
 def _classify_color(rgb_mean: tuple) -> str:
@@ -234,13 +260,18 @@ def register_colorcard(cardid: int, cardname: str, bayer_array: np.ndarray) -> b
     """
     Analyze an image of a color card and register rectangle ROIs to database.
 
+    Uses Canny edge detection and Hough line transform for robust grid detection:
+
     Algorithm:
-    1. Extract Bayer color channels (B, Gb, Gr, R)
-    2. Sample horizontal lines and find X boundaries (column edges) via second derivative
-    3. Sample vertical lines and find Y boundaries (row edges) via second derivative
-    4. Refine and validate the rectangular grid
-    5. For each rectangle, extract RGB mean values and classify color
-    6. Write all rectangles to database with metadata
+    1. Extract best Bayer channel and normalize to 0-255
+    2. Apply Gaussian blur to reduce noise
+    3. Use Canny edge detection to find edges
+    4. Use Hough line transform to detect grid lines (horizontal & vertical)
+    5. Cluster nearby parallel lines (lines at same position = same grid line)
+    6. Find line intersections to define rectangular patches
+    7. Validate grid structure (expect ~5x7 internal grid)
+    8. Extract RGB mean values for each patch and classify colors
+    9. Write rectangles to database
 
     Args:
         cardid: Unique identifier for this color card
@@ -250,189 +281,303 @@ def register_colorcard(cardid: int, cardname: str, bayer_array: np.ndarray) -> b
     Returns:
         True if registration successful, False on error
     """
-    log.info(f"Registering color card '{cardname}' (ID {cardid})")
+    log.info(f"Registering color card '{cardname}' (ID {cardid})", location="register_colorcard:L231")
 
     try:
         H, W = bayer_array.shape
         log.debug(f"Bayer array shape: {H} x {W}")
 
-        # Extract the four Bayer channels
+        # ==========================================
+        # STEP 1: Extract best channel and normalize
+        # ==========================================
         channels = ColorCam.extract_bayer_layers(bayer_array)
         log.debug(f"Extracted Bayer channels: {list(channels.keys())}")
 
-        # Pick the channel with highest standard deviation (best contrast for edge detection)
-        # Green is typically good, but test image may have better contrast in another channel
-        channel_stdevs = {}
-        for name, channel in channels.items():
-            channel_stdevs[name] = float(np.std(channel))
-
+        # Pick channel with highest contrast (std dev)
+        channel_stdevs = {name: float(np.std(channel)) for name, channel in channels.items()}
         best_channel = max(channel_stdevs, key=channel_stdevs.get)
         log.info(f"Channel stdevs: B={channel_stdevs['B']:.1f}, Gb={channel_stdevs['Gb']:.1f}, "
-                 f"Gr={channel_stdevs['Gr']:.1f}, R={channel_stdevs['R']:.1f}")
-        log.info(f"Using '{best_channel}' channel (stdev={channel_stdevs[best_channel]:.1f})")
+                 f"Gr={channel_stdevs['Gr']:.1f}, R={channel_stdevs['R']:.1f}", 
+                 location="register_colorcard:L246")
+        log.info(f"Using '{best_channel}' channel for edge detection (stdev={channel_stdevs[best_channel]:.1f})",
+                 location="register_colorcard:L247")
 
-        # Use best channel for edge detection
-        luminance = channels[best_channel].astype(np.float32)
-        log.debug(f"Luminance channel shape: {luminance.shape}")
+        # Normalize to 0-255 uint8
+        channel_data = channels[best_channel].astype(np.float32)
+        channel_normalized = ((channel_data - channel_data.min()) / (channel_data.max() - channel_data.min() + 1e-6) * 255).astype(np.uint8)
+        log.debug(f"Normalized channel to 0-255 range")
 
         # ==========================================
-        # STEP 1: Find X boundaries (column edges)
+        # STEP 2: Detect edges using Canny
         # ==========================================
-        log.info("Finding X boundaries (vertical edges)...")
+        log.info("Detecting edges with Canny edge detector...", location="register_colorcard:L260")
+        
+        # Apply Gaussian blur to reduce noise
+        blurred = cv2.GaussianBlur(channel_normalized, (5, 5), 1.0)
+        
+        # Apply Canny edge detection
+        # For checkerboard, we want to find the transitions between colors
+        # Threshold values: lower = more edges, higher = fewer edges
+        edges = cv2.Canny(blurred, threshold1=30, threshold2=80)
+        log.debug(f"Edge map created: {np.count_nonzero(edges)} edge pixels")
 
-        # Sample horizontal lines at multiple Y positions to find consistent X boundaries
-        # Use 5 samples evenly distributed across image height, omitting edges
-        sample_count_y = 5
-        sample_y_indices = np.linspace(20, luminance.shape[0] - 20, sample_count_y+2, dtype=int)[1:-1]
+        # ==========================================
+        # STEP 3: Detect grid lines using Hough transform
+        # ==========================================
+        log.info("Detecting grid lines with Hough transform...", location="register_colorcard:L274")
+        
+        # Use HoughLinesP for line segment detection (more robust than HoughLines)
+        # minLineLength: minimum line length to accept (helps filter noise)
+        # maxLineGap: maximum gap between line segments to join them
+        lines = cv2.HoughLinesP(edges, rho=1, theta=np.pi/180, threshold=50, 
+                                 minLineLength=50, maxLineGap=10)
+        
+        if lines is None or len(lines) == 0:
+            log.error("No lines detected by Hough transform!")
+            return False
+        
+        log.debug(f"Detected {len(lines)} line segments")
 
-        all_x_boundaries = []
-        for y_idx in sample_y_indices:
-            # Extract horizontal line and find edges
-            h_line = luminance[y_idx, :]
-            edges = _find_edges_1d(h_line, threshold=0.4)
-            all_x_boundaries.extend(edges)
-            log.debug(f"  Y={y_idx}: found {len(edges)} edges at X positions: {edges[:5]}...")
+        # ==========================================
+        # STEP 4: Classify lines as horizontal or vertical
+        # ==========================================
+        horizontal_lines = []
+        vertical_lines = []
+        
+        for line in lines:
+            x1, y1, x2, y2 = line[0]
+            angle = np.abs(np.arctan2(y2 - y1, x2 - x1) * 180 / np.pi)
+            
+            # Normalize angle to 0-90 degrees
+            if angle > 90:
+                angle = 180 - angle
+            
+            # Classify based on angle
+            # Horizontal: angle close to 0 (tolerance ±15°)
+            # Vertical: angle close to 90 (tolerance ±15°)
+            if angle < 15:
+                horizontal_lines.append(((y1 + y2) / 2, x1, x2))  # Store as (y_pos, x_start, x_end)
+            elif angle > 75:
+                vertical_lines.append(((x1 + x2) / 2, y1, y2))    # Store as (x_pos, y_start, y_end)
+        
+        log.info(f"Classified lines: {len(horizontal_lines)} horizontal, {len(vertical_lines)} vertical",
+                 location="register_colorcard:L310")
+        
+        if len(horizontal_lines) < 2 or len(vertical_lines) < 2:
+            log.error(f"Not enough lines detected! H={len(horizontal_lines)}, V={len(vertical_lines)}")
+            return False
 
-        # Find consensus X boundaries (edges that appear in multiple samples)
-        if all_x_boundaries:
-            # Cluster nearby edges together
-            all_x_boundaries = sorted(all_x_boundaries)
-            x_boundaries = []
-            current_cluster = [all_x_boundaries[0]]
-
-            for x_val in all_x_boundaries[1:]:
-                if x_val - current_cluster[-1] < 10:  # Within 10 pixels = same edge
-                    current_cluster.append(x_val)
+        # ==========================================
+        # STEP 5: Cluster parallel lines
+        # ==========================================
+        log.info("Clustering parallel lines...")
+        
+        def cluster_lines_1d(lines_1d, tolerance=10):
+            """
+            Cluster 1D positions of parallel lines.
+            lines_1d: list of positions (y for horizontal, x for vertical)
+            Returns: list of clustered positions (averaged)
+            """
+            if not lines_1d:
+                return []
+            
+            positions = sorted([pos for pos, *_ in lines_1d])
+            clusters = []
+            current_cluster = [positions[0]]
+            
+            for pos in positions[1:]:
+                if pos - current_cluster[-1] < tolerance:
+                    current_cluster.append(pos)
                 else:
-                    x_boundaries.append(int(np.mean(current_cluster)))
-                    current_cluster = [x_val]
+                    clusters.append(int(np.mean(current_cluster)))
+                    current_cluster = [pos]
             if current_cluster:
-                x_boundaries.append(int(np.mean(current_cluster)))
-
-            log.info(f"Found {len(x_boundaries)} X boundaries: {x_boundaries}")
-        else:
-            log.error("No X boundaries found!")
-            return False
+                clusters.append(int(np.mean(current_cluster)))
+            
+            return clusters
+        
+        h_positions = cluster_lines_1d(horizontal_lines, tolerance=15)
+        v_positions = cluster_lines_1d(vertical_lines, tolerance=15)
+        
+        log.info(f"Clustered to {len(h_positions)} horizontal and {len(v_positions)} vertical grid lines")
+        log.debug(f"  Horizontal positions: {h_positions}")
+        log.debug(f"  Vertical positions: {v_positions}")
+        
+        # ==========================================
+        # STEP 5b: Interpolate missing lines in large gaps
+        # ==========================================
+        # Detect anomalously large gaps that suggest missed edge detection
+        # (e.g., low-contrast regions where lines split between adjacent rows)
+        
+        def interpolate_missing_lines(positions: list, dimension_name: str = "grid", 
+                                      max_gap_multiplier: float = 1.8) -> list:
+            """
+            Detect and interpolate missing lines in a grid.
+            
+            If a gap is significantly larger than the median gap, interpolate
+            a line at the midpoint. This recovers grid lines missed in 
+            low-contrast regions.
+            
+            Args:
+                positions: Sorted list of grid line positions
+                dimension_name: "horizontal" or "vertical" for logging
+                max_gap_multiplier: Threshold ratio (gap / median_gap) for interpolation
+                                  Lower = more aggressive (default 1.3 = 30% larger)
+            
+            Returns:
+                New position list with interpolated lines added
+            """
+            if len(positions) < 2:
+                return positions
+            
+            gaps = [positions[i+1] - positions[i] for i in range(len(positions)-1)]
+            median_gap = np.median(gaps)
+            mean_gap = np.mean(gaps)
+            
+            log.debug(f"Gap statistics ({dimension_name}): median={median_gap:.1f}, "
+                     f"mean={mean_gap:.1f}, min={min(gaps):.1f}, max={max(gaps):.1f}")
+            
+            new_positions = [positions[0]]
+            interpolated_count = 0
+            split_gaps = []  # Track which gaps were likely split rows
+            
+            for i in range(len(positions) - 1):
+                gap = positions[i+1] - positions[i]
+                
+                # If gap is much larger than median, interpolate missing line(s)
+                if gap > median_gap * max_gap_multiplier:
+                    # Estimate number of missing lines based on gap size
+                    # For a gap of 2.5x median, we're missing about 1 line
+                    num_missing = max(1, int(round(gap / median_gap - 1)))
+                    
+                    split_gaps.append((i, gap, num_missing))
+                    log.info(f"Large gap detected: {gap:.1f} vs {median_gap * max_gap_multiplier:.1f} "
+                            f"({num_missing} lines likely missed)", 
+                            location="register_colorcard:L360")
+                    
+                    for j in range(num_missing):
+                        interpolated = int(positions[i] + (j+1) * gap / (num_missing + 1))
+                        new_positions.append(interpolated)
+                        interpolated_count += 1
+                        log.debug(f"  Interpolated {dimension_name} line at position {interpolated}")
+                
+                new_positions.append(positions[i+1])
+            
+            if split_gaps:
+                log.info(f"Interpolation summary ({dimension_name}): "
+                        f"added {interpolated_count} lines from {len(split_gaps)} gaps",
+                        location="register_colorcard:L371")
+            
+            return sorted(new_positions)
+        
+        h_positions_before = len(h_positions)
+        v_positions_before = len(v_positions)
+        
+        h_positions = interpolate_missing_lines(h_positions, dimension_name="horizontal")
+        v_positions = interpolate_missing_lines(v_positions, dimension_name="vertical")
+        
+        if len(h_positions) > h_positions_before or len(v_positions) > v_positions_before:
+            log.info(f"After interpolation: {len(h_positions)} horizontal, {len(v_positions)} vertical "
+                    f"(added {len(h_positions) - h_positions_before}H, {len(v_positions) - v_positions_before}V)",
+                    location="register_colorcard:L379")
 
         # ==========================================
-        # STEP 2: Find Y boundaries (row edges)
+        # STEP 6: Build rectangles from grid
         # ==========================================
-        log.info("Finding Y boundaries (horizontal edges)...")
-
-        # Between each pair of X boundaries, sample vertical lines
-        y_boundaries_list = []  # Will be a list of boundary sets, one per X section
-
-        for i in range(len(x_boundaries) - 1):
-            x_start = x_boundaries[i]
-            x_end = x_boundaries[i + 1]
-            x_mid = (x_start + x_end) // 2
-
-            # Sample vertical column at middle of this X section
-            v_line = luminance[:, x_mid]
-            edges = _find_edges_1d(v_line, threshold=0.4)
-
-            if edges:
-                # Cluster nearby edges
-                edges = sorted(edges)
-                y_boundaries = []
-                current_cluster = [edges[0]]
-
-                for y_val in edges[1:]:
-                    if y_val - current_cluster[-1] < 10:
-                        current_cluster.append(y_val)
-                    else:
-                        y_boundaries.append(int(np.mean(current_cluster)))
-                        current_cluster = [y_val]
-                if current_cluster:
-                    y_boundaries.append(int(np.mean(current_cluster)))
-
-                y_boundaries_list.append(y_boundaries)
-                log.debug(f"  X section [{x_start}:{x_end}]: found {len(y_boundaries)} Y edges")
-
-        if not y_boundaries_list:
-            log.error("No Y boundaries found!")
-            return False
-
-        # Use the most common Y boundaries (assumed to be the main grid)
-        # For now, use the first valid set
-        y_boundaries = y_boundaries_list[0]
-        log.info(f"Using Y boundaries: {y_boundaries}")
-
-        # ==========================================
-        # STEP 3: Build rectangle list from grid
-        # ==========================================
-        log.info("Building rectangle grid...")
-
+        log.info("Building rectangle grid from line intersections...")
+        
         rectangles = []
-        for row_idx in range(len(y_boundaries) - 1):
-            for col_idx in range(len(x_boundaries) - 1):
-                y = y_boundaries[row_idx]
-                y_next = y_boundaries[row_idx + 1]
-                x = x_boundaries[col_idx]
-                x_next = x_boundaries[col_idx + 1]
-
-                rect_h = y_next - y
-                rect_w = x_next - x
-
-                # Filter out very small rectangles (likely noise)
-                if rect_h > 10 and rect_w > 10:
+        for row in range(len(h_positions) - 1):
+            for col in range(len(v_positions) - 1):
+                y1 = h_positions[row]
+                y2 = h_positions[row + 1]
+                x1 = v_positions[col]
+                x2 = v_positions[col + 1]
+                
+                rect_h = max(1, y2 - y1)
+                rect_w = max(1, x2 - x1)
+                
+                # Filter out very small rectangles (noise)
+                if rect_h > 5 and rect_w > 5:
                     rectangles.append({
-                        "row": row_idx,
-                        "col": col_idx,
-                        "x": x,
-                        "y": y,
+                        "row": row,
+                        "col": col,
+                        "x": x1,
+                        "y": y1,
                         "w": rect_w,
                         "h": rect_h,
                     })
-
-        log.info(f"Found {len(rectangles)} valid rectangles")
-        log.debug(f"Rectangle grid: {len(y_boundaries)-1} rows x {len(x_boundaries)-1} cols")
+        
+        grid_rows = len(h_positions) - 1
+        grid_cols = len(v_positions) - 1
+        log.info(f"Found {len(rectangles)} valid rectangles in {grid_rows}×{grid_cols} grid")
+        
+        # Validate expected grid size (5x7 checkerboard pattern)
+        if grid_rows < 4 or grid_cols < 5:
+            log.warning(f"Grid size {grid_rows}×{grid_cols} is smaller than expected 5×7")
+        if grid_rows > 8 or grid_cols > 10:
+            log.warning(f"Grid size {grid_rows}×{grid_cols} is larger than expected 5×7 (may include border)")
 
         # ==========================================
-        # STEP 4: Extract and classify colors
+        # STEP 6b: Filter out margin rectangles
+        # ==========================================
+        log.info("Filtering out margin rectangles...")
+        
+        # Get layer dimensions (channels are half resolution of full Bayer array)
+        layer_h, layer_w = channels['B'].shape
+        rectangles = _filter_margin_rectangles(rectangles, layer_h, layer_w)
+        
+        if not rectangles:
+            log.error("No interior rectangles remaining after filtering margins!")
+            return False
+
+        # ==========================================
+        # STEP 7: Extract and classify colors
         # ==========================================
         log.info("Classifying rectangle colors...")
-
-        # Convert Bayer channels to 0-255 range for color classification
-        r_mean = channels["R"].astype(np.float32)
-        g_mean = (channels["Gb"].astype(np.float32) + channels["Gr"].astype(np.float32)) / 2
-        b_mean = channels["B"].astype(np.float32)
-
-        # Normalize to 0-255
-        r_norm = (r_mean / r_mean.max() * 255).astype(np.uint8) if r_mean.max() > 0 else r_mean.astype(np.uint8)
-        g_norm = (g_mean / g_mean.max() * 255).astype(np.uint8) if g_mean.max() > 0 else g_mean.astype(np.uint8)
-        b_norm = (b_mean / b_mean.max() * 255).astype(np.uint8) if b_mean.max() > 0 else b_mean.astype(np.uint8)
+        
+        # Prepare normalized Bayer channels for color extraction
+        r_data = channels["R"].astype(np.float32)
+        gbgr_data = (channels["Gb"].astype(np.float32) + channels["Gr"].astype(np.float32)) / 2
+        b_data = channels["B"].astype(np.float32)
+        
+        # Normalize each channel independently to 0-255
+        r_norm = ((r_data - r_data.min()) / (r_data.max() - r_data.min() + 1e-6) * 255).astype(np.uint8)
+        g_norm = ((gbgr_data - gbgr_data.min()) / (gbgr_data.max() - gbgr_data.min() + 1e-6) * 255).astype(np.uint8)
+        b_norm = ((b_data - b_data.min()) / (b_data.max() - b_data.min() + 1e-6) * 255).astype(np.uint8)
 
         for rect in rectangles:
             x, y, w, h = rect["x"], rect["y"], rect["w"], rect["h"]
-
-            # Extract rectangle region from Bayer channels
-            # Bayer channels are downsampled by 2, so divide coordinates by 2
-            bx, by = x // 2, y // 2
-            bw, bh = (w + 1) // 2, (h + 1) // 2
-
-            # Clip to channel bounds
-            bx = min(bx, r_norm.shape[1] - 1)
-            by = min(by, r_norm.shape[0] - 1)
-            bw = min(bw, r_norm.shape[1] - bx)
-            bh = min(bh, r_norm.shape[0] - by)
-
-            # Compute mean RGB for this rectangle
+            
+            # Convert from full resolution to Bayer channel coordinates (Bayer is half resolution)
+            bx, by = max(0, x // 2), max(0, y // 2)
+            bw = min((x + w) // 2, r_norm.shape[1]) - bx
+            bh = min((y + h) // 2, r_norm.shape[0]) - by
+            
+            # Ensure valid dimensions
+            if bw <= 0 or bh <= 0:
+                log.warning(f"Rect [{rect['row']},{rect['col']}] has invalid dimensions after conversion")
+                rect["rgb"] = (0, 0, 0)
+                rect["color"] = "unknown"
+                continue
+            
+            # Extract mean RGB values
             r_val = int(np.mean(r_norm[by:by+bh, bx:bx+bw]))
             g_val = int(np.mean(g_norm[by:by+bh, bx:bx+bw]))
             b_val = int(np.mean(b_norm[by:by+bh, bx:bx+bw]))
-
+            
             color_name = _classify_color((r_val, g_val, b_val))
-
+            
             rect["color"] = color_name
             rect["rgb"] = (r_val, g_val, b_val)
             log.debug(f"  Rect [{rect['row']},{rect['col']}]: {color_name} RGB=({r_val},{g_val},{b_val})")
 
         # ==========================================
-        # STEP 5: Write to database
+        # STEP 8: Write to database
         # ==========================================
-        log.info(f"Writing {len(rectangles)} rectangles to database...")
-
+        log.info(f"Writing {len(rectangles)} rectangles to database...",
+                 location="register_colorcard:L444")
+        
         for rectid, rect in enumerate(rectangles):
             sql = """
                 INSERT INTO colorcard 
@@ -449,12 +594,13 @@ def register_colorcard(cardid: int, cardname: str, bayer_array: np.ndarray) -> b
                 rect["w"],
                 rect["h"],
             )
-
+            
             rows_affected = cdb.write_one(sql, vals)
             if rows_affected != 1:
                 log.warning(f"Unexpected rows affected: {rows_affected}")
-
-        log.info(f"Successfully registered {len(rectangles)} rectangles for '{cardname}'")
+        
+        log.info(f"✓ Successfully registered {len(rectangles)} rectangles for '{cardname}'",
+                 location="register_colorcard:L468")
         return True
 
     except Exception as e:
@@ -465,25 +611,5 @@ def register_colorcard(cardid: int, cardname: str, bayer_array: np.ndarray) -> b
 
 
 # ==========================================
-# TEST
+# For testing, use: python test/test_roi.py
 # ==========================================
-if __name__ == "__main__":
-    log.set_level("DEBUG")
-    log.info("Starting roi.py test...")
-
-    # Load test Bayer array
-    try:
-        bayer_test = np.load("mock_camera/cfg5_sbggr1_raw_00checkerB.npy")
-        log.info(f"Loaded test Bayer array: shape={bayer_test.shape}, dtype={bayer_test.dtype}")
-    except FileNotFoundError as e:
-        log.error(f"Cannot load test file: {e}")
-        exit(1)
-
-    # Run registration
-    success = register_colorcard(1, "test_checkerboard", bayer_test)
-
-    if success:
-        log.info("✓ Test passed!")
-    else:
-        log.error("✗ Test failed")
-        exit(1)
