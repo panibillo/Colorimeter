@@ -40,6 +40,8 @@ Examples:
 """
 
 import argparse
+import os
+import signal
 import sys
 import time
 from pathlib import Path
@@ -60,7 +62,7 @@ except ImportError:
     PLATFORM = "desktop"
 
 try:
-    from gpiozero import LED as GpioLED
+    from gpiozero import LED as GpioLED, Device as GpioDevice
     GPIO_AVAILABLE = True
 except ImportError:
     GPIO_AVAILABLE = False
@@ -75,6 +77,8 @@ except ImportError:
 # Constants
 # ---------------------------------------------------------------------------
 
+VERSION    = "1.2"     # increment each time a fix is applied
+
 RAW_FORMAT = "SBGGR10"
 
 # Camera config 5: dual-stream RGB + Bayer, medium resolution
@@ -87,8 +91,9 @@ ANALOGUE_GAIN       = 1.0
 WB_GAINS_RB         = (1.0, 1.0)   # Neutral (R-gain, B-gain)
 
 # Auto-exposure parameters
-TARGET_FRACTION     = 0.70     # Target 70 % of full-scale (8-bit mean = 178)
-MAX_EXPOSURE_US     = 9000_000  # 9 second / 900 ms ceiling
+TARGET_FRACTION     = 0.70     # Target 70 % of full-scale
+BAYER_MAX           = 1023     # 10-bit raw pixel maximum (2^10 - 1)
+MAX_EXPOSURE_US     = 9000_000  # 9 second ceiling
 MIN_EXPOSURE_US     = 1_000    # 1 ms floor
 EXPOSURE_TOLERANCE  = 0.01     # Converge when change < 1 %
 
@@ -122,18 +127,46 @@ class LedController:
         """
         Initialize all LED GPIO pins and ensure they start OFF.
 
+        If any pin reports 'GPIO busy' (left claimed by a previous run that
+        did not clean up), the gpiozero pin factory is closed to release
+        stale lgpio handles and the initialization is retried once.
+
         Raises:
-            RuntimeError: If any GPIO pin fails to initialize on RPi
+            RuntimeError: If any GPIO pin fails to initialize after retry
         """
         self._leds: dict = {}
         if GPIO_AVAILABLE:
+            self._init_leds()
+            print("  LED controller ready (GPIO)")
+        else:
+            print("  LED controller ready (stub — no GPIO detected)")
+
+    def _init_leds(self) -> None:
+        """Claim all LED pins, retrying once if any pin reports GPIO busy."""
+        try:
             for name, pin in LED_PINS.items():
                 led = GpioLED(pin)
                 led.off()
                 self._leds[name] = led
-            print("  LED controller ready (GPIO)")
-        else:
-            print("  LED controller ready (stub — no GPIO detected)")
+        except Exception as exc:
+            if "GPIO busy" not in str(exc):
+                raise
+            # A previous run left one or more pins claimed without cleanup.
+            # Close the gpiozero pin factory (which releases the lgpio
+            # chip handle and all its claims) then retry.
+            print("  WARNING: GPIO busy — closing pin factory and retrying "
+                  "(previous run may not have exited cleanly)")
+            try:
+                GpioDevice.pin_factory.close()
+                for led in self._leds.values():
+                    led.close()
+            except Exception:
+                pass
+            self._leds.clear()
+            for name, pin in LED_PINS.items():
+                led = GpioLED(pin)
+                led.off()
+                self._leds[name] = led
 
     def on(self, color: str) -> None:
         """
@@ -203,10 +236,16 @@ def build_camera() -> "Picamera2":
         RuntimeError: If the camera cannot be initialized
     """
     picam2 = Picamera2()
+    # FrameDurationLimits must be set in the configuration object, not only
+    # via set_controls().  Setting it only in set_controls() before start()
+    # is silently overridden by the configuration defaults when the camera
+    # starts (~1.24 s cap for this dual-stream mode), and each subsequent
+    # set_controls(ExposureTime=…) call resets it to that same default.
     config = picam2.create_still_configuration(
         main={"size": CAMERA_SIZE, "format": "RGB888"},
         raw= {"size": CAMERA_SIZE, "format": RAW_FORMAT},
         buffer_count=1,
+        controls={"FrameDurationLimits": (MIN_EXPOSURE_US, MAX_EXPOSURE_US)},
     )
     picam2.configure(config)
     picam2.set_controls({
@@ -219,35 +258,49 @@ def build_camera() -> "Picamera2":
         "Sharpness":          0.0,
         "Contrast":           1.0,
         "Saturation":         1.0,
-        # Open frame-duration window to the sensor hardware maximum (~11.77 s).
-        # Without this, libcamera silently clips ExposureTime to whatever
-        # default FrameDurationLimits the configuration chose — in dual-stream
-        # SBGGR10 at 1640×1232 that default appears to be ~1.24 s.
-        "FrameDurationLimits": (MIN_EXPOSURE_US, MAX_EXPOSURE_US),
     })
     picam2.start()
     time.sleep(3.0)     # Allow sensor to stabilize after start
+    fdl = picam2.camera_controls.get("FrameDurationLimits")
+    print(f"  FrameDurationLimits (hardware): {fdl}")
     return picam2
 
 
-def _channel_snr(bgr: np.ndarray) -> dict[str, float]:
+def _bayer_channel_stats(
+    bayer: np.ndarray,
+) -> tuple[dict[str, float], dict[str, float]]:
     """
-    Compute per-channel SNR (mean / std) from an 8-bit BGR image.
+    Extract per-channel means and SNRs from a BGGR Bayer array.
 
-    Channels with std == 0 return SNR = 0.0 to avoid division by zero.
+    The BGGR layout assigns one colour per pixel in a 2×2 repeating tile:
+
+        B  G  B  G ...     (even rows)
+        G  R  G  R ...     (odd rows)
+
+    Both G sub-arrays (even-row and odd-row) are merged into a single G
+    channel, giving twice as many G samples as B or R.
 
     Args:
-        bgr: uint8 array (H, W, 3) in OpenCV BGR channel order
+        bayer: uint16 array (H, W), 10-bit BGGR values (range 0–1023)
 
     Returns:
-        Dict mapping "B", "G", "R" to their SNR values
+        Tuple (means, snr) where each is a dict mapping "B", "G", "R"
+        to a float.  SNR is mean/std; channels with std == 0 return 0.0.
     """
-    snr: dict[str, float] = {}
-    for idx, name in enumerate(("B", "G", "R")):
-        ch  = bgr[:, :, idx].astype(np.float32)
-        std = float(ch.std())
-        snr[name] = float(ch.mean() / std) if std > 0.0 else 0.0
-    return snr
+    # Extract per-colour sub-arrays (already float32 for arithmetic)
+    b_px = bayer[0::2, 0::2].astype(np.float32).ravel()
+    g_px = np.concatenate([bayer[0::2, 1::2].ravel(),
+                           bayer[1::2, 0::2].ravel()]).astype(np.float32)
+    r_px = bayer[1::2, 1::2].astype(np.float32).ravel()
+
+    means: dict[str, float] = {}
+    snr:   dict[str, float] = {}
+    for name, px in (("B", b_px), ("G", g_px), ("R", r_px)):
+        m = float(px.mean())
+        s = float(px.std())
+        means[name] = m
+        snr[name]   = m / s if s > 0.0 else 0.0
+    return means, snr
 
 
 def _set_exposure_and_settle(picam2, exposure_us: int) -> None:
@@ -268,18 +321,31 @@ def _set_exposure_and_settle(picam2, exposure_us: int) -> None:
     immediately, both discards land on old-exposure frames, and the next
     probe still reports the previous applied value.
     """
-    picam2.set_controls({"ExposureTime": exposure_us})
-
-    # Wait for at least one full frame at the new exposure before draining.
     frame_secs   = exposure_us / 1_000_000
     initial_wait = max(2.0, frame_secs + 1.0)
+    print(f"      → set {exposure_us:,} µs ({frame_secs:.2f} s)  "
+          f"settle {initial_wait:.1f} s + 2 frames")
+    # Set FrameDurationLimits to (exposure_us, exposure_us) to force the
+    # camera to use exactly this frame duration.  Using (MIN, MAX) leaves
+    # the camera free to choose a default (~1.24 s) within the range, which
+    # then silently clips any ExposureTime longer than that default.
+    picam2.set_controls({
+        "ExposureTime":        exposure_us,
+        "FrameDurationLimits": (exposure_us, exposure_us),
+    })
+
+    # Wait for at least one full frame at the new exposure before draining.
     time.sleep(initial_wait)
 
     # Discard two frames.  Each capture_array() blocks until the next
     # complete frame, flushing any residual old-exposure frames.
+    t0 = time.monotonic()
     picam2.capture_array()
+    print(f"      frame 1: {(time.monotonic() - t0) * 1000:.0f} ms")
     time.sleep(0.5)
+    t0 = time.monotonic()
     picam2.capture_array()
+    print(f"      frame 2: {(time.monotonic() - t0) * 1000:.0f} ms")
     time.sleep(0.5)
 
     
@@ -287,13 +353,17 @@ def _set_exposure_and_settle(picam2, exposure_us: int) -> None:
 
 def _probe_exposure(picam2) -> dict:
     """
-    Capture a probe RGB frame and return exposure estimation data.
+    Capture a probe Bayer frame and return exposure estimation data.
 
-    Captures one RGB frame atomically with its metadata so that the
+    Captures one raw Bayer frame atomically with its metadata so that the
     reported ExposureTime and the pixel values are guaranteed to be from
-    the same frame. Computes per-channel means and SNRs, and recommends
-    a new exposure to reach TARGET_FRACTION of full scale using the
-    highest-SNR channel as the guide.
+    the same frame.  Computes per-channel means and SNRs from the raw
+    10-bit Bayer data, and recommends a new exposure to reach
+    TARGET_FRACTION of BAYER_MAX using the highest-SNR channel as guide.
+
+    Using raw Bayer (rather than the ISP-processed RGB888 stream) gives a
+    linear pixel-vs-exposure relationship, so a single scale factor
+    (target / mean) converges in one step without overrelaxation.
 
     Using capture_request() is critical: separate calls to capture_metadata()
     and capture_array() return different frames, causing the reported
@@ -301,36 +371,34 @@ def _probe_exposure(picam2) -> dict:
     convergence loop oscillate.
 
     Args:
-        picam2: Picamera2 instance (started)
+        picam2: Picamera2 instance (started, dual-stream configured)
 
     Returns:
         Dict with keys:
             "applied_us":     exposure time reported by the camera (µs)
             "recommended_us": exposure to reach TARGET_FRACTION (µs, clamped)
             "best_channel":   which channel was used as guide ("B", "G", "R")
-            "channel_means":  dict of per-channel means (float)
+            "channel_means":  dict of per-channel raw means (float, 0–1023)
             "channel_snr":    dict of per-channel SNR values (float)
             "scale_factor":   recommended / applied ratio
             "clamped":        True if min/max clamp was applied
     """
-    # Atomic capture: metadata and image are from the same frame.
+    # Atomic capture: metadata and Bayer data are from the same frame.
+    t0         = time.monotonic()
     request    = picam2.capture_request()
-    bgr        = request.make_array("main")
+    probe_ms   = (time.monotonic() - t0) * 1000
+    bayer      = request.make_array("raw")
     meta       = request.get_metadata()
     request.release()
     applied_us = int(meta["ExposureTime"])
+    frame_dur  = meta.get("FrameDuration", 0)
 
-    means = {
-        "B": float(bgr[:, :, 0].mean()),
-        "G": float(bgr[:, :, 1].mean()),
-        "R": float(bgr[:, :, 2].mean()),
-    }
-    snr = _channel_snr(bgr)
+    means, snr = _bayer_channel_stats(bayer)
 
     # Highest-SNR channel is the most reliable for exposure scaling
     best_ch      = max(snr, key=snr.get)
     current_mean = means[best_ch]
-    target_mean  = TARGET_FRACTION * 255.0
+    target_mean  = TARGET_FRACTION * BAYER_MAX
 
     if current_mean < 1.0:
         print("    WARNING: image nearly black — check illumination and lens")
@@ -367,13 +435,15 @@ def _probe_exposure(picam2) -> dict:
         "channel_snr":    snr,
         "scale_factor":   scale,
         "clamped":        clamped,
+        "probe_ms":       probe_ms,
+        "frame_dur_us":   frame_dur,
     }
 
 
 def converge_exposure(
     picam2,
     initial_us: int = INITIAL_EXPOSURE_US,
-    over_relax: float = 1.5,
+    over_relax: float = 1.0,
 ) -> int:
     """
     Auto-expose iteratively until the recommended exposure is stable.
@@ -410,8 +480,9 @@ def converge_exposure(
         >>> print(f"Nominal: {nominal_us:,} µs")
     """
     MAX_ITER = 5
-    print("    Auto-exposure:")
-    rec_us = initial_us   # Fallback if loop never executes
+    print(f"    Auto-exposure (v{VERSION}):")
+    rec_us      = initial_us   # Fallback if loop never executes
+    prev_set_us = None         # What we requested in the previous iteration
 
     for i in range(MAX_ITER):
         result  = _probe_exposure(picam2)
@@ -419,6 +490,16 @@ def converge_exposure(
         best_ch = result["best_channel"]
         means   = result["channel_means"]
         snr     = result["channel_snr"]
+
+        # Show whether the camera accepted the exposure we set last iteration.
+        if prev_set_us is not None:
+            delta_pct = (applied - prev_set_us) / max(prev_set_us, 1) * 100
+            if abs(delta_pct) <= 2.0:
+                accept_tag = f"  accept Δ{delta_pct:+.1f}%"
+            else:
+                accept_tag = f"  REJECTED set={prev_set_us:,} Δ{delta_pct:+.1f}%"
+        else:
+            accept_tag = ""
 
         # Linear recommendation from _probe_exposure
         linear_rec_us = result["recommended_us"]
@@ -429,13 +510,15 @@ def converge_exposure(
         rec_us = int(applied * (linear_scale ** over_relax))
         rec_us = max(MIN_EXPOSURE_US, min(MAX_EXPOSURE_US, rec_us))
 
-        relax_tag = f"  ×{over_relax:.2g}" if over_relax != 1.0 else ""
-        print(f"      [{i+1}] applied={applied:,} µs  "
+        probe_ms    = result["probe_ms"]
+        frame_dur   = result["frame_dur_us"]
+        relax_tag   = f"  ×{over_relax:.2g}" if over_relax != 1.0 else ""
+        print(f"      [{i+1}] applied={applied:,} µs{accept_tag}  "
               f"recommended={rec_us:,} µs{relax_tag}  "
               f"guide={best_ch} "
               f"(SNR {snr[best_ch]:.1f})  "
-              f"means B={means['B']:.1f} G={means['G']:.1f} "
-              f"R={means['R']:.1f}")
+              f"means B={means['B']:.1f} G={means['G']:.1f} R={means['R']:.1f}  "
+              f"probe={probe_ms:.0f} ms  FrameDur={frame_dur:,} µs")
 
         change = abs(rec_us - applied) / max(applied, 1)
         if change <= EXPOSURE_TOLERANCE:
@@ -445,6 +528,7 @@ def converge_exposure(
 
         # Apply recommendation and re-probe on next iteration
         _set_exposure_and_settle(picam2, rec_us)
+        prev_set_us = rec_us
 
     print(f"      Did not fully converge after {MAX_ITER} iterations; "
           f"using {rec_us:,} µs")
@@ -702,7 +786,7 @@ def capture_color(
     jpeg_only: bool = False,
     fixed_exposure_us: int | None = None,
     initial_exposure_us: int = INITIAL_EXPOSURE_US,
-    over_relax: float = 1.5,
+    over_relax: float = 1.0,
 ) -> tuple[list[dict[str, Path]], int]:
     """
     Capture a complete bracketed image set under one LED color.
@@ -869,10 +953,10 @@ def main() -> int:
     )
     parser.add_argument(
         "-r", "--relax",
-        type=float, default=1.5, metavar="ω",
-        help="Overrelaxation exponent for auto-exposure (default 1.5). "
-             "1.0 = linear (original); >1 compensates for the sub-linear "
-             "pixel-vs-exposure response of the camera ISP.",
+        type=float, default=1.0, metavar="ω",
+        help="Overrelaxation exponent for auto-exposure (default 1.0). "
+             "1.0 = linear, exact for raw Bayer data. "
+             ">1 may help if ISP-processed streams are used instead.",
     )
     args = parser.parse_args()
 
@@ -892,7 +976,7 @@ def main() -> int:
     files_per   = 2 if jpeg_only else 3   # jpg + txt, or jpg + npy + txt
     n_files     = n_captures * files_per
 
-    print(f"\nColorimeter Capture Session")
+    print(f"\nColorimeter Capture Session  (camtest5 v{VERSION})")
     print(f"{'='*52}")
     print(f"  Test name   : {test_name}")
     print(f"  Platform    : {PLATFORM}")
@@ -935,6 +1019,21 @@ def main() -> int:
     leds   = LedController()
     picam2 = None
 
+    # Handle Ctrl-Z (SIGTSTP): run GPIO/camera cleanup before suspending so
+    # the next run does not encounter "GPIO busy" on restart.
+    def _sigtstp_handler(*_):
+        try:
+            leds.all_off()
+            leds.close()
+            if picam2 is not None:
+                picam2.stop()
+        except Exception:
+            pass
+        signal.signal(signal.SIGTSTP, signal.SIG_DFL)   # restore default
+        os.kill(os.getpid(), signal.SIGTSTP)             # re-raise to suspend
+
+    signal.signal(signal.SIGTSTP, _sigtstp_handler)
+
     try:
         print("Initializing camera...")
         picam2 = build_camera()
@@ -946,7 +1045,7 @@ def main() -> int:
 
         for color in colors:
             print(f"\n{'─'*52}")
-            print(f"Color: {color}")
+            print(f"Color: {color}    (camtest5 v{VERSION})")
             print(f"{'─'*52}")
             initial_us = saved_exposures.get(color, INITIAL_EXPOSURE_US)
             results, nominal_us = capture_color(
