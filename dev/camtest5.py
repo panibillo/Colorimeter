@@ -77,7 +77,7 @@ except ImportError:
 # Constants
 # ---------------------------------------------------------------------------
 
-VERSION    = "1.2"     # increment each time a fix is applied
+VERSION    = "1.3"     # increment each time a fix is applied
 
 RAW_FORMAT = "SBGGR10"
 
@@ -91,11 +91,13 @@ ANALOGUE_GAIN       = 1.0
 WB_GAINS_RB         = (1.0, 1.0)   # Neutral (R-gain, B-gain)
 
 # Auto-exposure parameters
+# IMX219 hardware maximum is 1,238,765 µs across all modes and resolutions.
+# Using 1,200,000 as the ceiling leaves a small margin below the hard cap.
 TARGET_FRACTION     = 0.70     # Target 70 % of full-scale
 BAYER_MAX           = 1023     # 10-bit raw pixel maximum (2^10 - 1)
-MAX_EXPOSURE_US     = 9000_000  # 9 second ceiling
-MIN_EXPOSURE_US     = 1_000    # 1 ms floor
-EXPOSURE_TOLERANCE  = 0.01     # Converge when change < 1 %
+MAX_EXPOSURE_US     = 1_200_000  # Hardware ceiling ~1,238,765 µs
+MIN_EXPOSURE_US     = 1_000      # 1 ms floor
+EXPOSURE_TOLERANCE  = 0.01       # Converge when change < 1 %
 
 # LED GPIO pin numbers, matching blink.py
 LED_PINS = {
@@ -228,6 +230,7 @@ def build_camera() -> "Picamera2":
     - Fixed analogue gain and neutral colour gains
     - Noise reduction and sharpening disabled (preserve raw signal)
     - Initial exposure INITIAL_EXPOSURE_US
+    - Raw stream in SBGGR10 (unpacked uint16, range 0–1023)
 
     Returns:
         Picamera2 instance (started, ready for capture)
@@ -236,16 +239,10 @@ def build_camera() -> "Picamera2":
         RuntimeError: If the camera cannot be initialized
     """
     picam2 = Picamera2()
-    # FrameDurationLimits must be set in the configuration object, not only
-    # via set_controls().  Setting it only in set_controls() before start()
-    # is silently overridden by the configuration defaults when the camera
-    # starts (~1.24 s cap for this dual-stream mode), and each subsequent
-    # set_controls(ExposureTime=…) call resets it to that same default.
     config = picam2.create_still_configuration(
         main={"size": CAMERA_SIZE, "format": "RGB888"},
         raw= {"size": CAMERA_SIZE, "format": RAW_FORMAT},
         buffer_count=1,
-        controls={"FrameDurationLimits": (MIN_EXPOSURE_US, MAX_EXPOSURE_US)},
     )
     picam2.configure(config)
     picam2.set_controls({
@@ -261,8 +258,6 @@ def build_camera() -> "Picamera2":
     })
     picam2.start()
     time.sleep(3.0)     # Allow sensor to stabilize after start
-    fdl = picam2.camera_controls.get("FrameDurationLimits")
-    print(f"  FrameDurationLimits (hardware): {fdl}")
     return picam2
 
 
@@ -316,39 +311,24 @@ def _set_exposure_and_settle(picam2, exposure_us: int) -> None:
 
     The initial sleep must be at least as long as one full frame at the new
     exposure so that any in-progress old-exposure frame completes before we
-    start draining dummy frames.  Fixed 1-second sleeps fail when
-    exposure_us > 1 s: capture_array() returns the buffered old frame
-    immediately, both discards land on old-exposure frames, and the next
-    probe still reports the previous applied value.
+    start draining dummy frames.  The IMX219 hardware maximum is ~1.24 s, so
+    MAX_EXPOSURE_US is set well within that limit.
     """
     frame_secs   = exposure_us / 1_000_000
     initial_wait = max(2.0, frame_secs + 1.0)
     print(f"      → set {exposure_us:,} µs ({frame_secs:.2f} s)  "
           f"settle {initial_wait:.1f} s + 2 frames")
-    # Set FrameDurationLimits to (exposure_us, exposure_us) to force the
-    # camera to use exactly this frame duration.  Using (MIN, MAX) leaves
-    # the camera free to choose a default (~1.24 s) within the range, which
-    # then silently clips any ExposureTime longer than that default.
-    picam2.set_controls({
-        "ExposureTime":        exposure_us,
-        "FrameDurationLimits": (exposure_us, exposure_us),
-    })
+    picam2.set_controls({"ExposureTime": exposure_us})
 
     # Wait for at least one full frame at the new exposure before draining.
     time.sleep(initial_wait)
 
-    # Discard two frames.  Each capture_array() blocks until the next
-    # complete frame, flushing any residual old-exposure frames.
-    t0 = time.monotonic()
+    # Discard two frames so the next probe sees only the new setting.
     picam2.capture_array()
-    print(f"      frame 1: {(time.monotonic() - t0) * 1000:.0f} ms")
     time.sleep(0.5)
-    t0 = time.monotonic()
     picam2.capture_array()
-    print(f"      frame 2: {(time.monotonic() - t0) * 1000:.0f} ms")
     time.sleep(0.5)
 
-    
 
 
 def _probe_exposure(picam2) -> dict:

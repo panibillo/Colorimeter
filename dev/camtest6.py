@@ -112,22 +112,15 @@ def main() -> None:
     print()
 
     # --- configure ------------------------------------------------------
-    # FrameDurationLimits set to (TARGET, TARGET) in the configuration
-    # object.  This is required for exposures longer than the default
-    # ~1.24 s cap: setting it only in set_controls() is overridden at
-    # start(); using (MIN, MAX) lets the driver pick a default within the
-    # range (still ~1.24 s).  Pinning both limits to TARGET forces the
-    # exact frame duration.
+    # NOTE: TARGET_EXPOSURE_US = 4,000,000 µs cannot be achieved on the
+    # IMX219.  sensor_modes confirms the hardware maximum is 1,238,765 µs
+    # across all modes.  This script is retained as a diagnostic reference.
     print("Configuring camera ...")
     config = picam2.create_still_configuration(
         main={"size": CAMERA_SIZE, "format": "RGB888"},
         raw= {"size": CAMERA_SIZE, "format": RAW_FORMAT},
         buffer_count=1,
-        controls={
-            "FrameDurationLimits": (TARGET_EXPOSURE_US, TARGET_EXPOSURE_US),
-        },
     )
-    print(f"  Configuration object controls: {config.get('controls', {})}")
     picam2.configure(config)
 
     # --- controls before start -----------------------------------------
@@ -170,17 +163,6 @@ def main() -> None:
         elapsed_ms = (time.monotonic() - t0) * 1000
         print(f"  dummy frame {n}: {elapsed_ms:.0f} ms")
         time.sleep(0.5)
-
-    # --- re-assert controls before live capture ------------------------
-    # Re-assert every time: some drivers reset FrameDurationLimits when
-    # ExposureTime is set without it.
-    print()
-    print("Re-asserting controls before capture ...")
-    picam2.set_controls({
-        "ExposureTime":        TARGET_EXPOSURE_US,
-        "FrameDurationLimits": (TARGET_EXPOSURE_US, TARGET_EXPOSURE_US),
-    })
-    time.sleep(0.5)
 
     # ------------------------------------------------------------------
     # Turn on LED and wait for warm-up
