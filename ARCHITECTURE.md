@@ -2,12 +2,47 @@
 
 ## Initialization Sequence
 
-1. Load configuration from `config_manager.py`
-2. Initialize logging (`logging_manager.py`)
-3. Detect platform and configure mock vs. real hardware
-4. Initialize GPIO pins (if physical_interface or lighting)
-5. Initialize camera (`colorcam.py`)
-6. Connect to database (lightweight, on-demand per interaction)
+- Power on event
+    - systemd launches main.py --ili9341
+
+- Commandline launch:  
+    - python -m main
+
+- Detect platform and configure mock vs. real hardware
+- Initialize logging (`logging_manager.py`)
+- Load configuration from `config_manager.py`
+- Branch 1: (running on desktop: test environment)
+    - initialize mock_GPIO
+    - import ui_terminal as ui
+    - initialize mock_camera
+    - call mainloop(ui)
+
+- Branch 2: (running on Rpi from remote terminal)
+    - Initialize GPIO pins (for physical_interface or lighting)
+    - import ui_terminal as ui
+    - Initialize camera (`colorcam.py`)
+    - call mainloop(ui)
+
+
+- Branch 3: (running on Rpi with physical interface)
+    (Adafruit ILI9341 2.8" Color TFT Touchscreen Breakout v2)
+    - Initialize GPIO pins (for physical_interface or lighting)
+    - import ui_ILI9341 as ui
+    - Initialize camera (`colorcam.py`)
+    - call mainloop(ui)
+
+- mainloop    
+    - Connect to database (lightweight, on-demand per interaction)
+    - while True: try:
+      - ui.read_input()      : read_touch() / input()
+      - update state machine
+      - dispatch()
+      - ui.update()          : redraw screen / print()
+ 
+      
+      
+3.    
+    
 7. Start main event loop
 
 ## Program Flow

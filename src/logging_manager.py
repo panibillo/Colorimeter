@@ -36,9 +36,22 @@ def _should_log(level: str) -> bool:
     return LEVELS.get(level, 0) >= LEVELS.get(LOG_LEVEL, 0)
 
 
-def _format_message(level: str, msg: str) -> str:
-    """Format message with timestamp and level."""
-    return f"{_timestamp()} [{level:8}] {msg}"
+def _format_message(level: str, msg: str, location: str = None) -> str:
+    """
+    Format message with timestamp, level, and optional location.
+    
+    Args:
+        level: Log level string (DEBUG, INFO, WARNING, ERROR)
+        msg: Main message text
+        location: Optional location string (e.g., "function_name:L42" or "module.function")
+    
+    Returns:
+        Formatted message string
+    """
+    if location:
+        return f"{_timestamp()} [{level:8}] [{location}] {msg}"
+    else:
+        return f"{_timestamp()} [{level:8}] {msg}"
 
 
 def _write_log(message: str):
@@ -52,28 +65,52 @@ def _write_log(message: str):
             print(f"Warning: Could not write to log file {LOG_FILE}")
 
 
-def debug(msg: str):
-    """Log debug message."""
+def debug(msg: str, location: str = None):
+    """
+    Log debug message.
+    
+    Args:
+        msg: Message text
+        location: Optional location string (e.g., "function_name" or "module:function")
+    """
     if _should_log("DEBUG"):
-        _write_log(_format_message("DEBUG", msg))
+        _write_log(_format_message("DEBUG", msg, location))
 
 
-def info(msg: str):
-    """Log info message."""
+def info(msg: str, location: str = None):
+    """
+    Log info message.
+    
+    Args:
+        msg: Message text
+        location: Optional location string (e.g., "function_name" or "module:function")
+    """
     if _should_log("INFO"):
-        _write_log(_format_message("INFO", msg))
+        _write_log(_format_message("INFO", msg, location))
 
 
-def warning(msg: str):
-    """Log warning message."""
+def warning(msg: str, location: str = None):
+    """
+    Log warning message.
+    
+    Args:
+        msg: Message text
+        location: Optional location string (e.g., "function_name" or "module:function")
+    """
     if _should_log("WARNING"):
-        _write_log(_format_message("WARNING", msg))
+        _write_log(_format_message("WARNING", msg, location))
 
 
-def error(msg: str):
-    """Log error message."""
+def error(msg: str, location: str = None):
+    """
+    Log error message.
+    
+    Args:
+        msg: Message text
+        location: Optional location string (e.g., "function_name" or "module:function")
+    """
     if _should_log("ERROR"):
-        _write_log(_format_message("ERROR", msg))
+        _write_log(_format_message("ERROR", msg, location))
 
 
 def set_level(level: str):

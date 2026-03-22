@@ -40,16 +40,8 @@ class Rect:
         return self.y + self.h
     def xywh(self):
         return self.x, self.y, self.w, self.h
-    def win(self):
-        return self.x, self.x2, self.y, self.y2
     def xyslice(self):
         return slice(self.x, self.x2), slice(self.y, self.y2)
-    def zslice(self, iz):
-        """
-        Returns a function L(s2d) that remembers iz and returns tuple(s2d[0], s2d[1], iz)
-        Example: A[L(s2d)] == A[s2d[0], s2d[1], iz]
-        """
-        return lambda s2d: (s2d[0], s2d[1], iz)
 
 class Roi(Rect):
     def __init__(self, x, y, w, h, id, name, color=None):

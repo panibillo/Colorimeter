@@ -55,7 +55,7 @@ scp dev/camtest5.py rpizero2:~/pi/Colorimeter/camtest5.py
 Or using rsync:
 
 ```bash (desktop)
-rsync -avz dev/camtest5.py pi@<rpi-ip>:~/
+rsync -avz dev/camtest5.py rpizero2:~/  
 ```
 
 ---
@@ -162,10 +162,10 @@ After the run completes, retrieve the files from your desktop:
 
 ```bash
 # Using scp (copies the whole directory in one step)
-scp -r pi@<rpi-ip>:~/pi/colorimeter/vial_A/ images/
+scp -r rpizero2:~/pi/colorimeter/vial_A/ images/
 
 # Using rsync (faster on re-runs; skips unchanged files)
-rsync -avz pi@<rpi-ip>:~/pi/colorimeter/vial_A/ images/vial_A/
+rsync -avz rpizero2:~/pi/colorimeter/vial_A/ images/vial_A/
 ```
 
 The `images/` directory on your desktop is the standard location for test

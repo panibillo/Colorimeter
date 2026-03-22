@@ -219,6 +219,11 @@ def build_camera() -> "Picamera2":
         "Sharpness":          0.0,
         "Contrast":           1.0,
         "Saturation":         1.0,
+        # Open frame-duration window to the sensor hardware maximum (~11.77 s).
+        # Without this, libcamera silently clips ExposureTime to whatever
+        # default FrameDurationLimits the configuration chose — in dual-stream
+        # SBGGR10 at 1640×1232 that default appears to be ~1.24 s.
+        "FrameDurationLimits": (MIN_EXPOSURE_US, MAX_EXPOSURE_US),
     })
     picam2.start()
     time.sleep(3.0)     # Allow sensor to stabilize after start
@@ -247,22 +252,37 @@ def _channel_snr(bgr: np.ndarray) -> dict[str, float]:
 
 def _set_exposure_and_settle(picam2, exposure_us: int) -> None:
     """
-    Apply a new ExposureTime and wait for the sensor pipeline to stabilize.
+    Apply a new ExposureTime and wait for the pipeline to fully adopt it.
 
-    Discards one frame after the wait so the next capture reflects the
-    new setting.
+    Sets the exposure, sleeps for at least one full frame duration, then
+    discards two frames so the next probe sees only the new setting.
 
     Args:
         picam2:      Picamera2 instance (started)
         exposure_us: Desired exposure in microseconds
+
+    The initial sleep must be at least as long as one full frame at the new
+    exposure so that any in-progress old-exposure frame completes before we
+    start draining dummy frames.  Fixed 1-second sleeps fail when
+    exposure_us > 1 s: capture_array() returns the buffered old frame
+    immediately, both discards land on old-exposure frames, and the next
+    probe still reports the previous applied value.
     """
     picam2.set_controls({"ExposureTime": exposure_us})
-    time.sleep(1.0)
-    # Discard two frames: libcamera typically takes 2 frames to apply a new
-    # ExposureTime, especially at long exposure times (> 100 ms).
+
+    # Wait for at least one full frame at the new exposure before draining.
+    frame_secs   = exposure_us / 1_000_000
+    initial_wait = max(2.0, frame_secs + 1.0)
+    time.sleep(initial_wait)
+
+    # Discard two frames.  Each capture_array() blocks until the next
+    # complete frame, flushing any residual old-exposure frames.
     picam2.capture_array()
+    time.sleep(0.5)
     picam2.capture_array()
-    time.sleep(0.3)
+    time.sleep(0.5)
+
+    
 
 
 def _probe_exposure(picam2) -> dict:
@@ -350,7 +370,11 @@ def _probe_exposure(picam2) -> dict:
     }
 
 
-def converge_exposure(picam2, initial_us: int = INITIAL_EXPOSURE_US) -> int:
+def converge_exposure(
+    picam2,
+    initial_us: int = INITIAL_EXPOSURE_US,
+    over_relax: float = 1.5,
+) -> int:
     """
     Auto-expose iteratively until the recommended exposure is stable.
 
@@ -358,17 +382,31 @@ def converge_exposure(picam2, initial_us: int = INITIAL_EXPOSURE_US) -> int:
     repeatedly until the change is within EXPOSURE_TOLERANCE or 5 iterations
     are exhausted.
 
+    The camera's ISP applies a gamma curve to the RGB888 output so pixel
+    values grow as exposure^(1/γ) rather than linearly.  A plain linear
+    recommendation (over_relax=1.0) therefore always undershoots the target
+    mean.  over_relax raises the scale factor to a power > 1, compensating:
+
+        rec_us = applied × (target_mean / current_mean) ^ over_relax
+
+    With γ ≈ 0.55–0.65 (observed), over_relax ≈ 1.5 is close to ideal.
+
     Args:
         picam2:     Picamera2 instance (started)
         initial_us: Starting exposure in microseconds (default INITIAL_EXPOSURE_US).
                     Pass a saved value from a previous session to reduce
                     the number of iterations needed.
+        over_relax: Exponent applied to the linear scale factor (default 1.5).
+                    1.0 = no overrelaxation (original behaviour).
+                    Values above 1.0 accelerate convergence when the
+                    pixel-vs-exposure response is sub-linear.
 
     Returns:
         Converged nominal exposure in microseconds
 
     Example:
-        >>> nominal_us = converge_exposure(picam2, initial_us=312_000)
+        >>> nominal_us = converge_exposure(picam2, initial_us=312_000,
+        ...                               over_relax=1.5)
         >>> print(f"Nominal: {nominal_us:,} µs")
     """
     MAX_ITER = 5
@@ -376,15 +414,24 @@ def converge_exposure(picam2, initial_us: int = INITIAL_EXPOSURE_US) -> int:
     rec_us = initial_us   # Fallback if loop never executes
 
     for i in range(MAX_ITER):
-        result     = _probe_exposure(picam2)
-        applied    = result["applied_us"]
-        rec_us     = result["recommended_us"]
-        best_ch    = result["best_channel"]
-        means      = result["channel_means"]
-        snr        = result["channel_snr"]
+        result  = _probe_exposure(picam2)
+        applied = result["applied_us"]
+        best_ch = result["best_channel"]
+        means   = result["channel_means"]
+        snr     = result["channel_snr"]
 
+        # Linear recommendation from _probe_exposure
+        linear_rec_us = result["recommended_us"]
+
+        # Apply overrelaxation: raise the scale factor to over_relax.
+        # Clamped to [MIN, MAX] in case the power pushes past the ceiling.
+        linear_scale = linear_rec_us / max(applied, 1)
+        rec_us = int(applied * (linear_scale ** over_relax))
+        rec_us = max(MIN_EXPOSURE_US, min(MAX_EXPOSURE_US, rec_us))
+
+        relax_tag = f"  ×{over_relax:.2g}" if over_relax != 1.0 else ""
         print(f"      [{i+1}] applied={applied:,} µs  "
-              f"recommended={rec_us:,} µs  "
+              f"recommended={rec_us:,} µs{relax_tag}  "
               f"guide={best_ch} "
               f"(SNR {snr[best_ch]:.1f})  "
               f"means B={means['B']:.1f} G={means['G']:.1f} "
@@ -655,6 +702,7 @@ def capture_color(
     jpeg_only: bool = False,
     fixed_exposure_us: int | None = None,
     initial_exposure_us: int = INITIAL_EXPOSURE_US,
+    over_relax: float = 1.5,
 ) -> tuple[list[dict[str, Path]], int]:
     """
     Capture a complete bracketed image set under one LED color.
@@ -682,6 +730,8 @@ def capture_color(
         initial_exposure_us: Starting point for the auto-exposure loop in µs.
                            Ignored when fixed_exposure_us is set.
                            (default INITIAL_EXPOSURE_US)
+        over_relax:        Overrelaxation exponent passed to converge_exposure.
+                           (default 1.5)
 
     Returns:
         Tuple of:
@@ -711,7 +761,8 @@ def capture_color(
             _set_exposure_and_settle(picam2, initial_exposure_us)
 
             # Auto-expose
-            nominal_us = converge_exposure(picam2, initial_exposure_us)
+            nominal_us = converge_exposure(picam2, initial_exposure_us,
+                                           over_relax)
 
         # Apply nominal and capture
         print(f"    Capturing nominal ({nominal_us:,} µs / "
@@ -816,6 +867,13 @@ def main() -> int:
         help="Save converged exposures to cam5exp.csv (also saved automatically "
              "when cam5exp.csv does not exist)",
     )
+    parser.add_argument(
+        "-r", "--relax",
+        type=float, default=1.5, metavar="ω",
+        help="Overrelaxation exponent for auto-exposure (default 1.5). "
+             "1.0 = linear (original); >1 compensates for the sub-linear "
+             "pixel-vs-exposure response of the camera ISP.",
+    )
     args = parser.parse_args()
 
     test_name  = args.test_name
@@ -826,6 +884,7 @@ def main() -> int:
     fixed_exposure_us = (int(args.exposure_ms * 1000)
                          if args.exposure_ms is not None else None)
     save_exposures = args.save_exposures
+    over_relax     = args.relax
 
     colors      = ["White"] if white_only else LED_ORDER
     n_exposures = 1 + len(over_pcts) + len(under_pcts)
@@ -856,6 +915,8 @@ def main() -> int:
     if fixed_exposure_us is not None:
         print(f"  Exposure    : fixed {fixed_exposure_us / 1000:.1f} ms "
               f"(auto-expose skipped)")
+    else:
+        print(f"  Relax ω     : {over_relax:.2g}")
 
     # Load per-color initial exposures from CSV if it exists
     exp_csv = Path("cam5exp.csv")
@@ -891,7 +952,7 @@ def main() -> int:
             results, nominal_us = capture_color(
                 picam2, leds, out_dir, test_name,
                 color, over_pcts, under_pcts, jpeg_only,
-                fixed_exposure_us, initial_us,
+                fixed_exposure_us, initial_us, over_relax,
             )
             all_results[color] = results
             nominal_exposures[color] = nominal_us

@@ -39,3 +39,7 @@ Three focused files provide **better navigation and maintainability**:
 - Changes stay isolated to relevant documentation
 - Keeps the project small and organized
 
+# AI assistance guidelines
+
+Work in small, incremental steps
+ 

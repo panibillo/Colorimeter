@@ -95,10 +95,10 @@ def compute_layer_statistics(layers):
         
         # Count clipped values
         stats[name]['Count'] = np.size(layer_flat)
-        stats[name]['Nlo'] = np.sum(layer_flat == 0)
-        stats[name]['Nhi'] = np.sum(layer_flat == 255)
-        stats[name]['p0'] = stats[name]['Nlo'] / stats[name]['Count']
-        stats[name]['p100'] = stats[name]['Nhi'] / stats[name]['Count']
+        stats[name]['count0'] = np.sum(layer_flat == 0)
+        stats[name]['count255'] = np.sum(layer_flat == 255)
+        stats[name]['p0'] = stats[name]['count0'] / stats[name]['Count']
+        stats[name]['p100'] = stats[name]['count255'] / stats[name]['Count']
     
     return stats
 
@@ -183,14 +183,14 @@ def print_layer_statistics(stats):
         print(f"{name:<6} {s['max']:>6d} {s['mean']:>8.1f} "
               f"{s['median']:>8.1f} {s['std']:>8.1f}")
     
-    print(f"\n{'Layer':<6} {'Nlo':>8} {'p0':>9} {'p10':>8} {'p25':>8} {'p50':>8} "
-          f"{'p75':>8} {'p90':>8}  {'p100':>9} {'Nhi':>8}")
+    print(f"\n{'Layer':<6} {'count0':>8} {'p0':>9} {'p10':>8} {'p25':>8} {'p50':>8} "
+          f"{'p75':>8} {'p90':>8}  {'p100':>9} {'count255':>8}")
     print(f"{'-'*50}")
     
     for name in ['B', 'Gb', 'Gr', 'R']:
         s = stats[name]
-        print(f"{name:<6} {s['Nlo']:>8d} {s['p0']:>9.3f} {s['p10']:>8.1f} {s['p25']:>8.1f} {s['p50']:>8.1f} "
-              f"{s['p75']:>8.1f} {s['p90']:>8.1f} {s['p100']:>9.3f} {s['Nhi']:>8d}")
+        print(f"{name:<6} {s['count0']:>8d} {s['p0']:>9.3f} {s['p10']:>8.1f} {s['p25']:>8.1f} {s['p50']:>8.1f} "
+              f"{s['p75']:>8.1f} {s['p90']:>8.1f} {s['p100']:>9.3f} {s['count255']:>8d}")
 
 
 def plot_bayer_layers(bayer_array, output_file=None, imagename=''):
@@ -260,7 +260,8 @@ def plot_bayer_layers(bayer_array, output_file=None, imagename=''):
 def main():
     """Load test file and display Bayer layers interactively."""
     
-    fname = "cfg5_sbggr1_raw_00.npy"
+    #fname = "cfg5_sbggr1_raw_00.npy"
+    fname = "cfg5_sbggr1_raw_00checkerB.npy"
 
     # Find mock_camera directory
     test_dir = Path(__file__).parent
@@ -322,7 +323,7 @@ def main():
     for name, layer in layers.items():
         print(f"  {name:2s} (BGGR['{name}']): {layer.shape}, "
               f"min={layer.min():5d}, max={layer.max():5d}, "
-              f"mean={layer.mean():7.1f}")
+              f"mean={layer.mean():7.1f},  type={layer.dtype}")
     
     if 1:
         # Display plot
