@@ -27,6 +27,11 @@ NROWS = 5
 NCOLS = 7
 IMG_DIR = Path(__file__).parent.parent / "images"
 
+# Pixels to expand each grid cell beyond its nominal boundary before running
+# refine_patch.  Allows the refined boundary to move outward past the grid
+# line (needed when the patch grid is slightly rotated relative to the image).
+EXPAND = 20
+
 
 # ---------------------------------------------------------------------------
 # Grid detection
@@ -158,7 +163,10 @@ def _trim_one_edge(
         axis:        0 to scan rows (top/bottom edge); 1 for cols (left/right).
         from_end:    True = scan inward from the far edge (bottom / right).
         interior:    3-element float array, median BGR of the clean interior.
-        color_thresh: Per-channel tolerance for "matches interior" (0–255).
+        color_thresh: Euclidean distance threshold in BGR colour space.
+                      A strip is accepted when its mean colour is within
+                      this distance of the interior reference (0–441,
+                      where 441 = √(255²×3) is the maximum possible).
         max_trim:    Maximum pixels to trim from this edge.
 
     Returns:
@@ -170,53 +178,131 @@ def _trim_one_edge(
         idx = (n - 1 - i) if from_end else i
         strip = patch[idx, :] if axis == 0 else patch[:, idx]
         mean_color = strip.astype(float).mean(axis=0)
-        if np.abs(mean_color - interior).max() < color_thresh:
+        if float(np.linalg.norm(mean_color - interior)) < color_thresh:
             return i
     return limit
 
 
 def refine_patch(
     patch: np.ndarray,
-    color_thresh: float = 30.0,
+    n_sigma: float = 3.0,
+    min_thresh: float = 15.0,
     max_trim: int = 60,
 ) -> tuple[int, int, int, int]:
     """
     Compute per-edge trim amounts to remove boundary blending noise.
 
-    Derives a reference interior colour from the central 50% of the patch,
-    then trims each edge until the outermost strip matches that interior
-    within color_thresh on all BGR channels.
+    Each edge gets its own interior reference colour and an adaptive
+    acceptance threshold derived from that same reference strip.  The
+    threshold is n_sigma × (L2 norm of per-channel std), floored at
+    min_thresh.  This automatically scales to the colour variability of
+    each individual patch: a noisy or gradient patch tolerates more
+    deviation before declaring a strip "outside", while a flat uniform
+    patch demands a much tighter match.
+
+    Reference strip geometry (REF_THICK × (edge_length − 2×REF_LAT)):
+        top    reference: rows  [H//4 : H//4+THICK],  cols [LAT : W-LAT]
+        bottom reference: rows  [3H//4-THICK : 3H//4], cols [LAT : W-LAT]
+        left   reference: cols  [W//4 : W//4+THICK],  rows [LAT : H-LAT]
+        right  reference: cols  [3W//4-THICK : 3W//4], rows [LAT : H-LAT]
 
     Args:
-        patch:       HxWx3 BGR image of the rough cell region.
-        color_thresh: Per-channel tolerance (0–255) for "clean" detection.
+        patch:       HxWx3 BGR image of the (possibly expanded) cell region.
+        n_sigma:     Threshold multiplier applied to the reference std
+                     (default 3.0).  Increase to accept more boundary
+                     variation; decrease for tighter fits.
+        min_thresh:  Floor on the adaptive threshold (default 15.0).
+                     Prevents near-zero thresholds on extremely uniform
+                     reference patches from making the scan over-sensitive.
         max_trim:    Maximum pixels trimmed per edge.
 
     Returns:
         Tuple (top, bottom, left, right) — pixels to drop from each edge.
     """
     H, W = patch.shape[:2]
-    if H < 16 or W < 16:
+    if H < 32 or W < 32:
         return 0, 0, 0, 0
 
-    # Median of central quarter as a noise-robust interior reference.
-    cy1, cy2 = H // 4, 3 * H // 4
-    cx1, cx2 = W // 4, 3 * W // 4
-    interior = np.median(
-        patch[cy1:cy2, cx1:cx2].reshape(-1, 3).astype(float), axis=0
-    )
+    REF_THICK = 10   # reference strip thickness, perpendicular to the edge
+    REF_LAT   = 5    # lateral trim at each end, parallel to the edge
 
-    kw = dict(interior=interior, color_thresh=color_thresh, max_trim=max_trim)
-    top    = _trim_one_edge(patch, axis=0, from_end=False, **kw)
-    bottom = _trim_one_edge(patch, axis=0, from_end=True,  **kw)
-    left   = _trim_one_edge(patch, axis=1, from_end=False, **kw)
-    right  = _trim_one_edge(patch, axis=1, from_end=True,  **kw)
+    def _ref_h(row_start: int) -> tuple[np.ndarray, float]:
+        """Median BGR and adaptive threshold for a horizontal reference strip."""
+        r1 = max(0, row_start)
+        r2 = min(H, row_start + REF_THICK)
+        c1, c2 = REF_LAT, W - REF_LAT
+        pixels = patch[r1:r2, c1:c2].reshape(-1, 3).astype(float)
+        interior = np.median(pixels, axis=0)
+        thresh = max(min_thresh,
+                     n_sigma * float(np.linalg.norm(pixels.std(axis=0))))
+        return interior, thresh
+
+    def _ref_v(col_start: int) -> tuple[np.ndarray, float]:
+        """Median BGR and adaptive threshold for a vertical reference strip."""
+        c1 = max(0, col_start)
+        c2 = min(W, col_start + REF_THICK)
+        r1, r2 = REF_LAT, H - REF_LAT
+        pixels = patch[r1:r2, c1:c2].reshape(-1, 3).astype(float)
+        interior = np.median(pixels, axis=0)
+        thresh = max(min_thresh,
+                     n_sigma * float(np.linalg.norm(pixels.std(axis=0))))
+        return interior, thresh
+
+    inset_h = H // 4
+    inset_w = W // 4
+
+    int_top, thr_top = _ref_h(inset_h)
+    int_bot, thr_bot = _ref_h(H - inset_h - REF_THICK)
+    int_lft, thr_lft = _ref_v(inset_w)
+    int_rgt, thr_rgt = _ref_v(W - inset_w - REF_THICK)
+
+    top    = _trim_one_edge(patch, axis=0, from_end=False,
+                            interior=int_top, color_thresh=thr_top,
+                            max_trim=max_trim)
+    bottom = _trim_one_edge(patch, axis=0, from_end=True,
+                            interior=int_bot, color_thresh=thr_bot,
+                            max_trim=max_trim)
+    left   = _trim_one_edge(patch, axis=1, from_end=False,
+                            interior=int_lft, color_thresh=thr_lft,
+                            max_trim=max_trim)
+    right  = _trim_one_edge(patch, axis=1, from_end=True,
+                            interior=int_rgt, color_thresh=thr_rgt,
+                            max_trim=max_trim)
     return top, bottom, left, right
 
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+def _rects_overlap(a: "Rect", b: "Rect") -> bool:
+    """Return True if two axis-aligned rects share any pixel area."""
+    return (a.x < b.x2() and a.x2() > b.x and
+            a.y < b.y2() and a.y2() > b.y)
+
+
+def _check_overlaps(rects: list["Rect"]) -> int:
+    """
+    Check all rect pairs for overlap and print any that intersect.
+
+    Args:
+        rects: List of Rect instances to check.
+
+    Returns:
+        Number of overlapping pairs found.
+    """
+    count = 0
+    for i in range(len(rects)):
+        for j in range(i + 1, len(rects)):
+            if _rects_overlap(rects[i], rects[j]):
+                a, b = rects[i], rects[j]
+                ox = min(a.x2(), b.x2()) - max(a.x, b.x)
+                oy = min(a.y2(), b.y2()) - max(a.y, b.y)
+                print(f"  OVERLAP: {a.name} ∩ {b.name}  "
+                      f"({ox}×{oy} px)")
+                count += 1
+    return count
+
 
 def _bgr_to_hex(bgr_pixels: np.ndarray) -> str:
     """
@@ -250,6 +336,11 @@ def main() -> None:
         '-b', '--buffer_pixels', type=int, default=0,
         help='Extra inward buffer (pixels) applied after noise trimming',
     )
+    parser.add_argument(
+        '-s', '--sigma', type=float, default=3.0,
+        help='Adaptive threshold multiplier: threshold = sigma × std of '
+             'reference strip (default 3.0)',
+    )
     args = parser.parse_args()
 
     img_path = IMG_DIR / args.image_name
@@ -257,31 +348,50 @@ def main() -> None:
     if img is None:
         sys.exit(f"Error: cannot read {img_path}")
 
-    buf = args.buffer_pixels
+    buf     = args.buffer_pixels
+    n_sigma = args.sigma
     row_bounds, col_bounds = compute_grid(img)
 
+    H_img, W_img = img.shape[:2]
     rects: list[Rect] = []
     for ri in range(NROWS):
         for ci in range(NCOLS):
             y1 = row_bounds[ri];     y2 = row_bounds[ri + 1]
             x1 = col_bounds[ci];     x2 = col_bounds[ci + 1]
 
-            patch = img[y1:y2, x1:x2]
-            top, bot, left, right = refine_patch(patch)
+            # Expand the analysis window beyond the grid cell boundary so
+            # that refine_patch can place the refined edge on either side of
+            # the grid line (needed when the card is slightly rotated).
+            ey1 = max(0,     y1 - EXPAND)
+            ey2 = min(H_img, y2 + EXPAND)
+            ex1 = max(0,     x1 - EXPAND)
+            ex2 = min(W_img, x2 + EXPAND)
 
-            # Apply trim + buffer to all four sides.
-            rx = x1 + left  + buf
-            ry = y1 + top   + buf
-            rw = (x2 - right - buf) - rx
-            rh = (y2 - bot   - buf) - ry
+            patch = img[ey1:ey2, ex1:ex2]
+            top, bot, left, right = refine_patch(patch, n_sigma=n_sigma)
+
+            # Apply trim + buffer relative to the expanded window origin.
+            rx = ex1 + left  + buf
+            ry = ey1 + top   + buf
+            rw = (ex2 - right - buf) - rx
+            rh = (ey2 - bot   - buf) - ry
 
             if rw <= 0 or rh <= 0:
                 continue
 
             color = _bgr_to_hex(img[ry:ry + rh, rx:rx + rw])
             # Name encodes 1-based row and col as zero-padded 2-digit pairs.
-            name  = f"{ri + 1:02d}{ci + 1:02d}"
+            name  = f"{ri + 1:d}{ci + 1:d}"
             rects.append(Rect(rx, ry, rw, rh, name=name, color=color))
+
+    # Check for overlapping rects (expected to occur at shared boundaries
+    # when adjacent patches are similar in colour and both expand outward).
+    print(f"\nOverlap check ({len(rects)} rects):")
+    n_overlaps = _check_overlaps(rects)
+    if n_overlaps == 0:
+        print("  No overlaps.")
+    else:
+        print(f"  {n_overlaps} overlapping pair(s) found.")
 
     # ------------------------------------------------------------------
     # Plot
