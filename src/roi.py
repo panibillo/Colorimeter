@@ -22,7 +22,7 @@ import db_manager as cdb
 import logging_manager as log
 import matplotlib.pyplot as plt
 
-from color_cam import ColorCam
+from bayer_cam import BayerCam
 
 class Rect:
     """
@@ -282,7 +282,7 @@ def register_colorcard(cardid: int, cardname: str, bayer_array: np.ndarray) -> b
         # ==========================================
         # STEP 1: Extract best channel and normalize
         # ==========================================
-        channels = ColorCam.extract_bayer_layers(bayer_array)
+        channels = BayerCam.extract_bayer_layers(bayer_array)
         log.debug(f"Extracted Bayer channels: {list(channels.keys())}")
 
         # Pick channel with highest contrast (std dev)

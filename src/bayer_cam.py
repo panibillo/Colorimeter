@@ -31,7 +31,7 @@ except ImportError:
     from mock_Picamera2 import Picamera2, libcamera
 
 
-class ColorCam:
+class BayerCam:
     """
     Dual-stream camera interface for RGB + Bayer raw capture.
     
@@ -47,6 +47,11 @@ class ColorCam:
     """
     
     # Configuration for full-resolution dual-stream capture (Config 6)
+    CONFIG_5 = {
+        "size":    (1640, 1232),
+        "format":  "SBGGR10",
+        "comment": "Half resolution dual-stream RGB + Bayer",
+    }
     CONFIG_6 = {
         "size":    (3280, 2464),
         "format":  "SBGGR10",
@@ -64,6 +69,7 @@ class ColorCam:
         self.config_size = None
         self.exposure_us = self.DEFAULT_EXPOSURE_US
         self.analog_gain = self.DEFAULT_ANALOG_GAIN
+        self.config = self.CONFIG_5
     
     def setup_camera(self) -> None:
         """
@@ -87,8 +93,8 @@ class ColorCam:
             log.info("Initializing camera (Config 6: 3280×2464 dual-stream)")
             self.camera = Picamera2()
             
-            cfg = self.CONFIG_6
-            size = cfg["size"]
+            # cfg = self.CONFIG_6
+            size = self.config["size"]
             
             # Configure dual-stream: RGB main + Bayer raw
             log.debug(f"Configuring dual-stream: {size[0]}×{size[1]} RGB888 + SBGGR10")
@@ -99,7 +105,7 @@ class ColorCam:
                 },
                 raw={
                     "size":   size,
-                    "format": cfg["format"],
+                    "format": self.config["format"],
                 },
                 buffer_count=1,
             )
@@ -168,7 +174,7 @@ class ColorCam:
             request.release()
 
             # Unpack CSI-2 bytes → uint16 pixel values (0–1023).
-            bayer = ColorCam.unpack_raw10(raw_bytes, self.config_size[0])
+            bayer = BayerCam.unpack_raw10(raw_bytes, self.config_size[0])
 
             log.debug(f"Frame captured: RGB {rgb.shape} {rgb.dtype}, "
                       f"Bayer {bayer.shape} {bayer.dtype} max={bayer.max()}")
@@ -197,26 +203,6 @@ class ColorCam:
                 self.camera.set_controls({"ExposureTime": exposure_us})
             except Exception as e:
                 err.handle(e, f"Setting exposure to {exposure_us}µs", recoverable=True)
-    
-    def set_analog_gain(self, gain: float) -> None:
-        """
-        Set camera analog gain and apply to camera.
-        
-        Args:
-            gain: Analog gain multiplier (typically 1.0-16.0)
-        
-        Side effects:
-            - Updates self.analog_gain
-            - Applies setting to camera if initialized
-            - Logs the change
-        """
-        self.analog_gain = gain
-        log.debug(f"Setting analog gain to {gain}")
-        if self.camera is not None:
-            try:
-                self.camera.set_controls({"AnalogueGain": gain})
-            except Exception as e:
-                err.handle(e, f"Setting analog gain to {gain}", recoverable=True)
     
     def stop(self) -> None:
         """
@@ -387,7 +373,7 @@ if __name__ == "__main__":
     print(f"  min   : {int(raw_bytes.min())}")
     print(f"  max   : {int(raw_bytes.max())}")
 
-    bayer = ColorCam.unpack_raw10(raw_bytes, CAPTURE_SIZE[0])
+    bayer = BayerCam.unpack_raw10(raw_bytes, CAPTURE_SIZE[0])
 
     print()
     print("--- bayer (after unpack_raw10)  format={RAWFORMAT} ---")
@@ -401,7 +387,7 @@ if __name__ == "__main__":
     else:
         print("  OK: all values in 0–1023 range")
 
-    layers = ColorCam.extract_bayer_layers(bayer)
+    layers = BayerCam.extract_bayer_layers(bayer)
 
     print()
     print("--- Bayer layers ---")
