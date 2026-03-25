@@ -258,15 +258,156 @@ metadata contents, and `scp`/`rsync` retrieval instructions.
 
 ---
 
-## Status as of 2026-03-19
+## 2026-03-19  Rect refactor; find_rects.py
+
+**Files modified:** `src/rect.py`, `test/test_rect.py`
+**Files added:** `dev/find_rects.py`
+
+**`Rect` class** — replaced `row: int = 0, col: int = 0` with a single
+`name: str = ''` attribute. Updated `__str__` to `(name=N, x=X, y=Y, w=W, h=H, color=C)`
+and `__repr__` to `Rect(x, y, w, h, name='...', color='...')`.  All 17 unit
+tests in `test/test_rect.py` pass after corresponding updates.
+
+**`find_rects.py`** — new dev tool that discovers a 5×7 grid of colored
+patches in a JPEG:
+- Sobel edge detection on grayscale; outer 20 px suppressed to avoid border artefacts
+- `_find_dividers()`: non-max suppression peak finder for horizontal and
+  vertical grid lines
+- `compute_grid()`: returns `(row_bounds, col_bounds)` lists of length 6 and 8
+- `refine_patch()`: scans each cell boundary inward, comparing strip mean to
+  the interior median, and returns `(top, bottom, left, right)` trim amounts
+- `--buffer_pixels / -b`: additional inward margin after noise trimming
+- Output: annotated `<stem>_found.png` saved to `../images/`; all Rect strings
+  printed. Each patch named `f"{row+1:02d}{col+1:02d}"`.
+
+---
+
+## 2026-03-19 → 2026-03-22  camtest5.py — Long-Exposure Investigation
+
+**Files modified:** `dev/camtest5.py`
+**Files added:** `dev/camtest6.py`, `dev/CAMTEST5_GUIDE.md`
+
+### Background
+
+`camtest4.py` was working but auto-exposure was unreliable for longer
+exposures. A series of targeted fixes were applied iteratively over several
+sessions.
+
+### Fix 1 — Atomic capture to fix oscillation
+
+`capture_array()` and a separate `capture_metadata()` call return different
+frames, causing the reported `ExposureTime` to lag behind the actual image
+brightness. Replaced with `capture_request()` for atomic metadata + pixels.
+
+### Fix 2 — Proportional settle time
+
+Fixed 1-second sleeps between exposure changes fail when the new exposure
+exceeds 1 second: `capture_array()` returns the buffered old frame before the
+new exposure completes. Changed to `initial_wait = max(2.0, frame_secs + 1.0)`.
+
+### Fix 3 — Bayer for auto-exposure (replaces RGB888)
+
+The ISP applies a gamma curve to the RGB888 output (`effective γ ≈ 0.55–0.65`),
+making pixel values grow as `exposure^(1/γ)` rather than linearly. This
+caused the linear auto-exposure recommendation to systematically undershoot.
+Switched to raw Bayer (linear with exposure) so a single scale factor
+`rec_us = applied × (target/mean)` converges in 1–2 steps. Added
+`--relax / -r` CLI flag (default 1.0) for optional overrelaxation if ISP
+output is used instead.
+
+### Fix 4 — GPIO busy on restart
+
+`lgpio.error: 'GPIO busy'` appeared when the previous run was suspended with
+Ctrl-Z (process did not exit → GPIO pins were not released). Fixed by:
+- `_init_leds()` retries once after closing `GpioDevice.pin_factory` on
+  "GPIO busy" exception
+- Added SIGTSTP handler: runs `leds.all_off() / leds.close() / picam2.stop()`
+  then re-raises the signal with the default handler so the process actually
+  suspends
+
+### Fix 5 — VERSION and diagnostics
+
+Added `VERSION = "1.x"` constant (incremented with each fix). Printed at
+session header, per-color header, and each auto-exposure iteration line.
+Added accept/reject tag showing whether the camera adopted the set exposure.
+
+### FrameDurationLimits attempts (all failed — wrong diagnosis)
+
+Three attempts were made to push ExposureTime beyond ~1.24 s by manipulating
+`FrameDurationLimits`:
+
+| Version | Approach | Result |
+|---|---|---|
+| v1.0 | `set_controls(FrameDurationLimits=(1000, 9000000))` before `start()` | Silently overridden at startup |
+| v1.1 | `(MIN, MAX)` in `create_still_configuration(controls=...)` AND re-asserted in every `set_controls()` | Still applied=1,238,746 µs, REJECTED |
+| v1.2 | Changed to `(exposure_us, exposure_us)` to pin exact frame duration; added per-frame wall-clock timing and `FrameDuration` metadata print | Same result — hardware limit |
+
+### camtest6.py — Minimal diagnostic
+
+Wrote `camtest6.py` as the simplest possible test: one 4-second exposure under
+the White LED, no auto-exposure logic, maximum debug output. Key additions
+over camtest5: `sensor_modes` dump before configure; `camera_controls` before
+and after `start()`; wall-clock timing on every dummy frame and on
+`capture_request()`; `FrameDuration` from metadata.
+
+### Root cause: hardware exposure ceiling
+
+`sensor_modes` output confirmed the IMX219 hardware maximum exposure:
+
+| Mode | Max exposure |
+|---|---|
+| 640×480 SRGGB10 | 619,382 µs (0.62 s) |
+| 1640×1232 SRGGB10 | **1,238,765 µs (1.24 s)** |
+| 1920×1080 SRGGB10 | **1,238,765 µs (1.24 s)** |
+| 3280×2464 SRGGB10 | **1,238,765 µs (1.24 s)** |
+| All SRGGB8 modes | same ceilings |
+
+The `FrameDurationLimits` configuration object correctly received
+`(4,000,000, 4,000,000)` but the driver silently clamped it to 1,238,841 µs.
+No software change can extend beyond this. `MAX_EXPOSURE_US = 9_000_000` in
+camtest5 is unreachable and should be corrected to ≤ 1,238,000 µs.
+
+### Bayer packing bug discovered
+
+`camtest6` output showed `bayer_dtype: uint8, bayer_max: 255, bayer_shape: 1232×3296`.
+The raw stream was returning MIPI CSI-2 **packed bytes**, not unpacked 16-bit
+pixel values. The correct format string is `"SBGGR10"` (without `_CSI2P`);
+Picamera2 returns this as `dtype=uint16, shape=(1232, 1640), max≈1023`.
+This was confirmed in commit 5 (2026-03-10) using `test_bayer_display.py` but
+was inadvertently re-introduced as `SBGGR10_CSI2P` or equivalent when
+camtest5 was written. All prior auto-exposure Bayer channel means from
+camtest5 were artifacts of striding through packed bytes, not true pixel means.
+
+---
+
+## Status as of 2026-03-22
 
 ### Committed and working
-- Dual-stream RGB + Bayer capture (Config 5, 1640×1232, SBGGR10)
+- Dual-stream RGB + Bayer capture (Config 5, 1640×1232)
 - Auto-exposure with SNR-guided channel selection and convergence loop
-- 5-color LED GPIO control with safety fallback
-- Systematic multi-color bracketed image capture tool
+- 5-color LED GPIO control with safety fallback and SIGTSTP handler
+- Systematic multi-color bracketed image capture tool (`camtest5.py`)
 - Desktop mock camera (`mock_Picamera2.py`) for offline algorithm development
 - Full project documentation and architecture
+- `Rect` class (name field); `find_rects.py` patch-grid detector
+
+### camtest5 v1.3 simplification — commit `b5c083d` (2026-03-22)
+
+Applied now that the hardware ceiling is understood:
+- `MAX_EXPOSURE_US` corrected from 9,000,000 to **1,200,000 µs**
+- `FrameDurationLimits` removed from `create_still_configuration(controls=...)`
+  and from `_set_exposure_and_settle()` — the workaround had no effect and
+  the hardware cannot be pushed past 1,238,765 µs regardless
+- `_set_exposure_and_settle()` simplified to a single `set_controls({"ExposureTime": ...})`
+- Frame-timing `print` statements removed from `_set_exposure_and_settle()`
+  (were diagnostic; no longer needed now that the limit is understood)
+- `camtest6.py`: same `FrameDurationLimits` removal; note added that
+  TARGET_EXPOSURE_US = 4 s is unreachable; script retained as diagnostic reference
+
+Prior commits in this investigation:
+- `805a9b0` — camtest5 v1.2 (FrameDurationLimits pinned, frame timing added) + camtest6 diagnostic
+- `4b6454a` — earlier exposure fixes (Bayer AE, proportional settle, atomic capture)
+- `b5c083d` — **this commit**: simplification after root cause confirmed
 
 ### In development (not committed or incomplete)
 - `roi.py` — ROI detection, calibration card grid recognition, gap interpolation

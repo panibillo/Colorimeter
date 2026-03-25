@@ -885,6 +885,8 @@ def main() -> int:
     Returns:
         0 on success, 1 on error or user interrupt
     """
+    exp_csv = Path("cam5exp.csv")
+
     parser = argparse.ArgumentParser(
         description="Colorimeter POC: multi-color LED image capture.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -938,6 +940,12 @@ def main() -> int:
              "1.0 = linear, exact for raw Bayer data. "
              ">1 may help if ISP-processed streams are used instead.",
     )
+    parser.add_argument(
+        "-u", "--use_saved_exposures",
+        action="store_true",
+        help="Skip auto-exposure; use per-color exposures from cam5exp.csv. "
+             "Falls back to 500 ms per color if the file does not exist.",
+    )
     args = parser.parse_args()
 
     test_name  = args.test_name
@@ -947,8 +955,9 @@ def main() -> int:
     jpeg_only  = args.jpeg_only
     fixed_exposure_us = (int(args.exposure_ms * 1000)
                          if args.exposure_ms is not None else None)
-    save_exposures = args.save_exposures
-    over_relax     = args.relax
+    save_exposures      = args.save_exposures
+    over_relax          = args.relax
+    use_saved_exposures = args.use_saved_exposures
 
     colors      = ["White"] if white_only else LED_ORDER
     n_exposures = 1 + len(over_pcts) + len(under_pcts)
@@ -979,11 +988,13 @@ def main() -> int:
     if fixed_exposure_us is not None:
         print(f"  Exposure    : fixed {fixed_exposure_us / 1000:.1f} ms "
               f"(auto-expose skipped)")
+    elif use_saved_exposures:
+        print(f"  Exposure    : saved values from {exp_csv} "
+              f"(auto-expose skipped; fallback 500 ms)")
     else:
         print(f"  Relax ω     : {over_relax:.2g}")
 
     # Load per-color initial exposures from CSV if it exists
-    exp_csv = Path("cam5exp.csv")
     csv_existed = exp_csv.exists()
     saved_exposures: dict[str, int] = load_exposures_csv(exp_csv) if csv_existed else {}
     if csv_existed:
@@ -1028,10 +1039,16 @@ def main() -> int:
             print(f"Color: {color}    (camtest5 v{VERSION})")
             print(f"{'─'*52}")
             initial_us = saved_exposures.get(color, INITIAL_EXPOSURE_US)
+            # -u: use saved exposure as a fixed value; fall back to 500 ms
+            # if this color has no saved entry.  -e overrides -u.
+            if use_saved_exposures and fixed_exposure_us is None:
+                color_fixed_us = saved_exposures.get(color, 500_000)
+            else:
+                color_fixed_us = fixed_exposure_us
             results, nominal_us = capture_color(
                 picam2, leds, out_dir, test_name,
                 color, over_pcts, under_pcts, jpeg_only,
-                fixed_exposure_us, initial_us, over_relax,
+                color_fixed_us, initial_us, over_relax,
             )
             all_results[color] = results
             nominal_exposures[color] = nominal_us
@@ -1039,7 +1056,8 @@ def main() -> int:
         # Save exposures if file was absent or -s flag given.
         # Skipped when -e is active: a fixed override is not a measured
         # auto-exposure and should not overwrite saved values.
-        if fixed_exposure_us is None and (not csv_existed or save_exposures):
+        if (fixed_exposure_us is None and not use_saved_exposures
+                and (not csv_existed or save_exposures)):
             save_exposures_csv(exp_csv, nominal_exposures)
 
         # Session summary

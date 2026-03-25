@@ -162,12 +162,16 @@ class ColorCam:
         try:
             log.debug("Capturing frame (RGB + Bayer)...")
             request = self.camera.capture_request()
-            rgb = request.make_array("main")  # uint8 BGR (H×W×3)
-            bayer = request.make_array("raw")  # uint16 SBGGR10 (H×W)
-            metadata = request.get_metadata()
+            rgb       = request.make_array("main")   # uint8 BGR (H×W×3)
+            raw_bytes = request.make_array("raw")    # uint8 packed CSI-2 bytes
+            metadata  = request.get_metadata()
             request.release()
-            
-            log.debug(f"Frame captured: RGB {rgb.shape} {rgb.dtype}, Bayer {bayer.shape} {bayer.dtype}")
+
+            # Unpack CSI-2 bytes → uint16 pixel values (0–1023).
+            bayer = ColorCam.unpack_raw10(raw_bytes, self.config_size[0])
+
+            log.debug(f"Frame captured: RGB {rgb.shape} {rgb.dtype}, "
+                      f"Bayer {bayer.shape} {bayer.dtype} max={bayer.max()}")
             return rgb, bayer, metadata
         
         except Exception as e:
@@ -237,6 +241,40 @@ class ColorCam:
         self.stop()
     
     @staticmethod
+    def unpack_raw10(raw_bytes: np.ndarray, pixel_width: int) -> np.ndarray:
+        """
+        Unpack a MIPI CSI-2 raw10 byte array into a uint16 pixel array.
+
+        Picamera2's make_array("raw") returns packed bytes for SBGGR10 streams:
+        each 10-bit pixel occupies 2 bytes (little-endian uint16), but the row
+        width is padded by Unicam to an alignment boundary, producing extra
+        columns.  This method reinterprets the bytes as uint16 and trims the
+        padding so the result is a true (H, pixel_width) array of 10-bit values
+        in the range 0–1023.
+
+        Args:
+            raw_bytes:   uint8 array returned by make_array("raw"),
+                         shape (H, W_packed).
+            pixel_width: True pixel width of the image (e.g. 1640), used to
+                         trim padding columns introduced by Unicam alignment.
+
+        Returns:
+            uint16 array, shape (H, pixel_width), values 0–1023.
+
+        Example:
+            >>> raw_bytes = request.make_array("raw")   # uint8 (1232, 3296)
+            >>> bayer = ColorCam.unpack_raw10(raw_bytes, 1640)
+            >>> bayer.shape
+            (1232, 1640)
+            >>> bayer.dtype
+            dtype('uint16')
+            >>> bayer.max() <= 1023
+            True
+        """
+        print(f"unpack_raw10() {type(raw_bytes)}, raw.shape={raw_bytes.shape}, pixel_width={pixel_width}")
+        return raw_bytes.view(np.uint16)[:, :pixel_width]
+
+    @staticmethod
     def extract_bayer_layers(bayer_array: np.ndarray) -> Dict[str, np.ndarray]:
         """
         Extract the four color layers from BGGR Bayer pattern.
@@ -263,6 +301,7 @@ class ColorCam:
             >>> layers['R'].shape
             (240, 320)
         """
+
         layers = {
             'B':  bayer_array[0::2, 0::2],    # Blue: even rows, even cols
             'Gb': bayer_array[0::2, 1::2],    # Green (blue row): even rows, odd cols
@@ -273,13 +312,112 @@ class ColorCam:
 
 
 if __name__ == "__main__":
-    # Simple test: initialize and verify camera interface
-    log.info("Testing ColorCam initialization...")
+    """
+    Test: capture one frame at 1640×1232, unpack Bayer, report layer ranges.
+
+    Uses natural lighting — no LEDs required.  Verifies that unpack_raw10()
+    produces uint16 values in the expected 0–1023 range and that
+    extract_bayer_layers() correctly separates the four BGGR sub-arrays.
+
+    Run from the src/ directory:
+        python color_cam.py
+    or from the project root:
+        python src/color_cam.py
+    """
+    import sys
+    import time as _time
+
+    RAWFORMAT = "SBGGR10"
+    CAPTURE_SIZE   = (1640, 1232)
+    EXPOSURE_US    = 50_000        # 50 ms; adjust for ambient lighting
+    ANALOGUE_GAIN  = 1.0
+    SETTLE_SECS    = 3.0
+
+    print("=" * 56)
+    print("ColorCam.unpack_raw10 / extract_bayer_layers test")
+    print("=" * 56)
+    print(f"  Size      : {CAPTURE_SIZE[0]} x {CAPTURE_SIZE[1]}")
+    print(f"  Exposure  : {EXPOSURE_US:,} µs  ({EXPOSURE_US/1000:.0f} ms)")
+    print(f"  Lighting  : natural (no LEDs)")
+    print()
+
+    time.sleep(2)
     try:
-        cam = ColorCam()
-        log.info(f"✓ ColorCam instance created")
-        log.debug(f"  Config 6 size: {cam.CONFIG_6['size']}")
-        log.debug(f"  Default exposure: {cam.DEFAULT_EXPOSURE_US} µs")
-        log.debug(f"  Default gain: {cam.DEFAULT_ANALOG_GAIN}")
-    except Exception as e:
-        err.handle(e, "ColorCam test", recoverable=False)
+        picam2 = Picamera2()
+    except Exception as exc:
+        sys.exit(f"Cannot open camera: {exc}")
+    time.sleep(2)
+
+    config = picam2.create_still_configuration(
+        main={"size": CAPTURE_SIZE, "format": "RGB888"},
+        raw={"size": CAPTURE_SIZE, "format": RAWFORMAT},
+        buffer_count=1,
+    )
+    picam2.configure(config)
+    picam2.set_controls({
+        "AeEnable":           False,
+        "ExposureTime":       EXPOSURE_US,
+        "AnalogueGain":       ANALOGUE_GAIN,
+        "AwbEnable":          False,
+        "ColourGains":        (1.0, 1.0),
+        "NoiseReductionMode": libcamera.controls.draft.NoiseReductionModeEnum.Off,
+        "Sharpness":          0.0,
+        "Contrast":           1.0,
+        "Saturation":         1.0,
+    })
+
+    print(f"Starting camera, settling {SETTLE_SECS:.0f} s ...")
+    picam2.start()
+    _time.sleep(SETTLE_SECS)
+
+    request   = picam2.capture_request()
+    raw_bytes = request.make_array("raw")
+    meta = request.get_metadata()
+    request.release()
+    picam2.stop()
+    picam2.close()
+
+    # for raw_bytes, fmt, unpacker in ((raw1_bytes, "SBGGR10", ColorCam.unpack_raw10),
+    #                                  (raw10_bytes, "SBGGR10_CSI2P",  ColorCam.unpack_raw10_CSI2P)):
+
+    print()
+    print(f"--- raw_bytes (before unpack) format={RAWFORMAT} ---")
+    print(f"  dtype : {raw_bytes.dtype}")
+    print(f"  shape : {raw_bytes.shape}")
+    print(f"  min   : {int(raw_bytes.min())}")
+    print(f"  max   : {int(raw_bytes.max())}")
+
+    bayer = ColorCam.unpack_raw10(raw_bytes, CAPTURE_SIZE[0])
+
+    print()
+    print("--- bayer (after unpack_raw10)  format={RAWFORMAT} ---")
+    print(f"  dtype : {bayer.dtype}")
+    print(f"  shape : {bayer.shape}")
+    print(f"  min   : {int(bayer.min())}")
+    print(f"  max   : {int(bayer.max())}")
+    print(f"  mean  : {bayer.mean():.1f}")
+    if bayer.max() > 1023:
+        print("  WARNING: values exceed 1023 — unpack may be incorrect")
+    else:
+        print("  OK: all values in 0–1023 range")
+
+    layers = ColorCam.extract_bayer_layers(bayer)
+
+    print()
+    print("--- Bayer layers ---")
+    print(f"  {'Layer':<5}  {'shape':<14}  {'min':>5}  {'#min':>6}  "
+        f"{'max':>5}  {'#max':>6}  {'mean':>7}")
+    print(f"  {'-'*5}  {'-'*14}  {'-'*5}  {'-'*6}  {'-'*5}  {'-'*6}  {'-'*7}")
+    for name, arr in layers.items():
+        mn, mx = int(arr.min()), int(arr.max())
+        print(f"  {name:<5}  {str(arr.shape):<14}  "
+            f"{mn:>5}  {int(np.count_nonzero(arr == mn)):>6}  "
+            f"{mx:>5}  {int(np.count_nonzero(arr == mx)):>6}  "
+            f"{arr.mean():>7.1f}")
+
+    print()
+    print("--- frame metadata ---")
+    for k in ("ExposureTime", "AnalogueGain", "FrameDuration",
+              "ColourGains", "SensorBlackLevels"):
+        if k in meta:
+            print(f"  {k}: {meta[k]}")

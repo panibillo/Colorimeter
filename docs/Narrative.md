@@ -78,15 +78,82 @@ subdirectory ready to `rsync` back to a desktop machine for analysis.
 
 ---
 
-## Status and Next Steps (as of 2026-03-19)
+## 2026-03-19  Rect Class Refactor; Grid-Patch Finder
+
+Replaced the `row` and `col` integer attributes on the `Rect` class with a
+single `name: str` field, making the class general-purpose rather than grid-
+specific. Updated `test/test_rect.py` to match (all 17 tests pass).
+
+Created `dev/find_rects.py`: detects a 5×7 grid of colored patches in a JPEG
+using Sobel edge projection and non-max suppression, trims each cell boundary
+inward past edge-blending noise, applies an optional pixel buffer, and names
+each patch by its 1-based `(row, col)` position encoded as `"RRCC"`. Plots
+results over the image and prints all Rect strings.
+
+---
+
+## 2026-03-19 → 2026-03-22  camtest5 — Long-Exposure Investigation
+
+Rewrote the capture script as `camtest5.py` and spent several sessions trying
+to achieve exposures longer than ~1.24 seconds under the White LED. The full
+investigation is recorded below; the outcome changed the project's constraints.
+
+**Changes made to camtest5:**
+- Switched auto-exposure from RGB888 ISP output to raw Bayer (linear, no
+  gamma), eliminating the need for overrelaxation
+- Fixed auto-exposure oscillation by using `capture_request()` for atomic
+  metadata + pixel data
+- Added proportional settle time (`frame_duration + 1 s`) for long exposures
+- Added `LedController` GPIO-busy retry (handles Ctrl-Z from previous run)
+- Added SIGTSTP handler so Ctrl-Z triggers clean GPIO/camera shutdown
+- Added `VERSION` constant; printed at session header, per-color header, and
+  auto-exposure output
+- Added `--relax / -r` CLI flag for overrelaxation exponent (default 1.0)
+- Multiple iterations of `FrameDurationLimits` strategies (v1.0, v1.1, v1.2)
+
+**Root cause found (2026-03-22):**
+`camtest6.py` was written as a minimal diagnostic — just one 4-second exposure
+under the White LED with maximum debug output including `sensor_modes` and
+`camera_controls` before and after start. The output revealed:
+
+- `ExposureTime: (75, 1,238,765, 20000)` — the hardware ceiling is **1.24 s**
+- `FrameDurationLimits: (23894, 1,238,841, ...)` — same ceiling
+- **All eight sensor modes** have `exposure_limits` max of 619,382 µs or
+  1,238,765 µs. No mode supports exposures longer than 1.24 s.
+- The `FrameDurationLimits` configuration object correctly received
+  `(4,000,000, 4,000,000)` but the hardware silently clamped it to its max.
+  This was always a hardware constraint, not a software configuration bug.
+- The Bayer array from `make_array("raw")` is packed CSI-2 uint8 bytes
+  (`dtype=uint8, max=255`), not unpacked uint16 pixels. All prior Bayer
+  channel means in camtest5 were operating on packed bytes, not pixel values.
+  The correct fix is to use `"SBGGR10"` (without `_CSI2P`) as the raw format,
+  which Picamera2 will unpack to uint16. This was confirmed in commit 5
+  (2026-03-10) but was inadvertently undone when camtest5 was written.
+
+**Design consequence:** The colorimeter must operate within a maximum exposure
+of ~1.238 s. LED drive current or optics must deliver adequate signal within
+this limit. `MAX_EXPOSURE_US` in camtest5 should be set to ≤ 1,238,000 µs.
+
+---
+
+## Status and Next Steps (as of 2026-03-22)
 
 **Complete:**
 - Dual-stream RGB + Bayer capture on RPi (Config 5, 1640×1232)
 - Automatic exposure with SNR-guided channel selection
 - 5-color LED lighting control
-- Systematic per-color bracketed image capture (`camtest4.py`)
+- Systematic per-color bracketed image capture (`camtest5.py`)
 - Desktop mock for offline development
 - Project architecture and documentation
+- `Rect` class with `name` field; `find_rects.py` patch-grid detector
+- Hardware exposure ceiling confirmed: 1,238,765 µs (~1.24 s) across all modes
+- Bayer format issue identified: must use `"SBGGR10"` (not `"SBGGR10_CSI2P"`)
+  in raw stream to get unpacked uint16 pixel values
+
+**camtest5 v1.3 simplification** (commit `b5c083d`):
+- `MAX_EXPOSURE_US` corrected to 1,200,000 µs
+- `FrameDurationLimits` workaround code removed from `build_camera()` and
+  `_set_exposure_and_settle()` — it could never extend past the hardware max
 
 **In progress / not yet started:**
 - ROI detection and calibration card grid recognition (`roi.py`)
