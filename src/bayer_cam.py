@@ -1,14 +1,21 @@
 #!/usr/bin/env python3
 """
-ColorCam - Dual-stream color camera capture and processing.
+BayerCam - Dual-stream camera interface: configuration, capture, and file I/O.
 
-Provides interface to capture RGB + Bayer raw data from the camera,
-with support for configuration 6 (full resolution dual-stream).
+Provides a base class for capturing RGB + raw Bayer data from a Pi Camera v2
+(IMX219).  Intended to be used directly or inherited by higher-level classes
+that add LED control or auto-exposure.
 
-Methods included:
-  - setup_camera(): Initialize and configure camera for dual-stream capture
-  - capture_frame(): Capture a single frame (RGB + raw Bayer)
-  - extract_bayer_layers(): Decompose BGGR Bayer pattern into 4 color layers
+Methods:
+  - setup_camera()       Configure and start dual-stream RGB + Bayer capture
+  - capture_frame()      Capture one frame; returns (rgb, bayer, metadata)
+  - set_exposure()       Set exposure time
+  - set_analog_gain()    Set analogue gain
+  - stop()               Stop and release camera
+  - unpack_raw10()       Unpack CSI-2 packed bytes → uint16 pixel array
+  - extract_bayer_layers() Split BGGR mosaic into {B, Gb, Gr, R} sub-arrays
+  - save_frame()         Save RGB JPG + Bayer NPY + metadata TXT to disk
+  - load_bayer()         Load a Bayer NPY file, return uint16 array
 
 License: SPDX-MIT
 Copyright: William C Olsen
@@ -16,7 +23,7 @@ Copyright: William C Olsen
 
 import time
 from pathlib import Path
-from typing import Dict, Tuple
+from typing import Dict, Tuple, Union
 
 import numpy as np
 
@@ -35,7 +42,7 @@ class BayerCam:
     """
     Dual-stream camera interface for RGB + Bayer raw capture.
     
-    Configuration 6: Full resolution (3280×2464)
+    Supports Config 5 (1640×1232, default) and Config 6 (3280×2464):
       - Main stream: RGB888 for display and processing
       - Raw stream: SBGGR10 (10-bit Bayer) for color analysis
     
@@ -46,12 +53,13 @@ class BayerCam:
         analog_gain: Current analog gain factor
     """
     
-    # Configuration for full-resolution dual-stream capture (Config 6)
+    # Configuration for half-resolution dual-stream capture (Config 5)
     CONFIG_5 = {
         "size":    (1640, 1232),
         "format":  "SBGGR10",
         "comment": "Half resolution dual-stream RGB + Bayer",
     }
+    # Configuration for full-resolution dual-stream capture (Config 6)
     CONFIG_6 = {
         "size":    (3280, 2464),
         "format":  "SBGGR10",
@@ -64,7 +72,7 @@ class BayerCam:
     DEFAULT_WB_GAINS = (1.0, 1.0)  # (Red, Blue)
     
     def __init__(self):
-        """Initialize ColorCam with camera object (not yet configured)."""
+        """Initialize BayerCam with camera object (not yet configured)."""
         self.camera = None
         self.config_size = None
         self.exposure_us = self.DEFAULT_EXPOSURE_US
@@ -73,7 +81,7 @@ class BayerCam:
     
     def setup_camera(self) -> None:
         """
-        Initialize and configure camera for dual-stream capture (Config 6).
+        Initialize and configure camera for dual-stream capture.
         
         Creates Picamera2 instance, configures RGB main stream + Bayer raw stream,
         applies control settings, and starts the camera. Camera must be started
@@ -85,12 +93,12 @@ class BayerCam:
             - Logs initialization steps
         
         Example:
-            >>> cam = ColorCam()
+            >>> cam = BayerCam()
             >>> cam.setup_camera()
             >>> rgb, bayer, meta = cam.capture_frame()
         """
         try:
-            log.info("Initializing camera (Config 6: 3280×2464 dual-stream)")
+            log.info(f"Initializing camera ({self.config['size'][0]}×{self.config['size'][1]} dual-stream)")
             self.camera = Picamera2()
             
             # cfg = self.CONFIG_6
@@ -147,7 +155,7 @@ class BayerCam:
                 - metadata: dict with capture metadata (e.g., exposure, gain)
         
         Example:
-            >>> cam = ColorCam()
+            >>> cam = BayerCam()
             >>> cam.setup_camera()
             >>> rgb, bayer, meta = cam.capture_frame()
             >>> rgb.shape
@@ -204,6 +212,26 @@ class BayerCam:
             except Exception as e:
                 err.handle(e, f"Setting exposure to {exposure_us}µs", recoverable=True)
     
+    def set_analog_gain(self, gain: float) -> None:
+        """
+        Set camera analogue gain and apply to camera.
+
+        Args:
+            gain: Analogue gain factor (1.0 = unity)
+
+        Side effects:
+            - Updates self.analog_gain
+            - Applies setting to camera if initialized
+            - Logs the change
+        """
+        self.analog_gain = gain
+        log.debug(f"Setting analogue gain to {gain}")
+        if self.camera is not None:
+            try:
+                self.camera.set_controls({"AnalogueGain": gain})
+            except Exception as e:
+                err.handle(e, f"Setting analogue gain to {gain}", recoverable=True)
+
     def stop(self) -> None:
         """
         Stop and close camera, releasing resources.
@@ -249,7 +277,7 @@ class BayerCam:
 
         Example:
             >>> raw_bytes = request.make_array("raw")   # uint8 (1232, 3296)
-            >>> bayer = ColorCam.unpack_raw10(raw_bytes, 1640)
+            >>> bayer = BayerCam.unpack_raw10(raw_bytes, 1640)
             >>> bayer.shape
             (1232, 1640)
             >>> bayer.dtype
@@ -257,7 +285,6 @@ class BayerCam:
             >>> bayer.max() <= 1023
             True
         """
-        print(f"unpack_raw10() {type(raw_bytes)}, raw.shape={raw_bytes.shape}, pixel_width={pixel_width}")
         return raw_bytes.view(np.uint16)[:, :pixel_width]
 
     @staticmethod
@@ -281,7 +308,7 @@ class BayerCam:
         
         Example:
             >>> bayer = np.random.randint(0, 1024, (480, 640), dtype=np.uint16)
-            >>> layers = ColorCam.extract_bayer_layers(bayer)
+            >>> layers = BayerCam.extract_bayer_layers(bayer)
             >>> layers['B'].shape
             (240, 320)
             >>> layers['R'].shape
@@ -296,114 +323,110 @@ class BayerCam:
         }
         return layers
 
+    @staticmethod
+    def save_frame(
+        out_dir:   Union[str, Path],
+        stem:      str,
+        rgb:       np.ndarray,
+        bayer:     np.ndarray,
+        meta:      Dict,
+        jpeg_only: bool = False,
+    ) -> Dict[str, Path]:
+        """
+        Save a captured frame to disk as JPG + NPY + TXT.
 
-if __name__ == "__main__":
-    """
-    Test: capture one frame at 1640×1232, unpack Bayer, report layer ranges.
+        Writes three files into out_dir (which must already exist):
+            {stem}.jpg   — RGB image (JPEG, BGR channel order from cv2)
+            {stem}.npy   — Bayer array (uint16, BGGR, 10-bit values 0–1023)
+            {stem}.txt   — Metadata: image stats + Picamera2 metadata block
 
-    Uses natural lighting — no LEDs required.  Verifies that unpack_raw10()
-    produces uint16 values in the expected 0–1023 range and that
-    extract_bayer_layers() correctly separates the four BGGR sub-arrays.
+        Args:
+            out_dir:   Directory to write files into (must already exist)
+            stem:      Base filename without extension (e.g. "run1_White_50ms")
+            rgb:       uint8 array (H, W, 3), BGR channel order
+            bayer:     uint16 array (H, W), BGGR Bayer values
+            meta:      Picamera2 metadata dict from capture_frame()
+            jpeg_only: If True, skip the .npy file (default False)
 
-    Run from the src/ directory:
-        python color_cam.py
-    or from the project root:
-        python src/color_cam.py
-    """
-    import sys
-    import time as _time
+        Returns:
+            Dict mapping extension to Path for each file written,
+            e.g. {"jpg": Path(...), "npy": Path(...), "txt": Path(...)}
 
-    RAWFORMAT = "SBGGR10"
-    CAPTURE_SIZE   = (1640, 1232)
-    EXPOSURE_US    = 50_000        # 50 ms; adjust for ambient lighting
-    ANALOGUE_GAIN  = 1.0
-    SETTLE_SECS    = 3.0
+        Raises:
+            ImportError: If cv2 is not available
+            OSError: If any file write fails
+        """
+        try:
+            import cv2
+        except ImportError:
+            raise ImportError("cv2 is required for save_frame(); install opencv-python")
 
-    print("=" * 56)
-    print("ColorCam.unpack_raw10 / extract_bayer_layers test")
-    print("=" * 56)
-    print(f"  Size      : {CAPTURE_SIZE[0]} x {CAPTURE_SIZE[1]}")
-    print(f"  Exposure  : {EXPOSURE_US:,} µs  ({EXPOSURE_US/1000:.0f} ms)")
-    print(f"  Lighting  : natural (no LEDs)")
-    print()
+        out_dir = Path(out_dir)
+        paths: Dict[str, Path] = {}
 
-    time.sleep(2)
-    try:
-        picam2 = Picamera2()
-    except Exception as exc:
-        sys.exit(f"Cannot open camera: {exc}")
-    time.sleep(2)
+        jpg_path = out_dir / f"{stem}.jpg"
+        cv2.imwrite(str(jpg_path), rgb)
+        paths["jpg"] = jpg_path
+        log.debug(f"Saved RGB:   {jpg_path.name}")
 
-    config = picam2.create_still_configuration(
-        main={"size": CAPTURE_SIZE, "format": "RGB888"},
-        raw={"size": CAPTURE_SIZE, "format": RAWFORMAT},
-        buffer_count=1,
-    )
-    picam2.configure(config)
-    picam2.set_controls({
-        "AeEnable":           False,
-        "ExposureTime":       EXPOSURE_US,
-        "AnalogueGain":       ANALOGUE_GAIN,
-        "AwbEnable":          False,
-        "ColourGains":        (1.0, 1.0),
-        "NoiseReductionMode": libcamera.controls.draft.NoiseReductionModeEnum.Off,
-        "Sharpness":          0.0,
-        "Contrast":           1.0,
-        "Saturation":         1.0,
-    })
+        if not jpeg_only:
+            npy_path = out_dir / f"{stem}.npy"
+            np.save(str(npy_path), bayer)
+            paths["npy"] = npy_path
+            log.debug(f"Saved Bayer: {npy_path.name}")
 
-    print(f"Starting camera, settling {SETTLE_SECS:.0f} s ...")
-    picam2.start()
-    _time.sleep(SETTLE_SECS)
+        txt_path = out_dir / f"{stem}.txt"
+        lines = [
+            f"image_width: {rgb.shape[1]}",
+            f"image_height: {rgb.shape[0]}",
+            f"bgr_mean_B: {rgb[:, :, 0].mean():.3f}",
+            f"bgr_mean_G: {rgb[:, :, 1].mean():.3f}",
+            f"bgr_mean_R: {rgb[:, :, 2].mean():.3f}",
+            f"bgr_std_B:  {rgb[:, :, 0].std():.3f}",
+            f"bgr_std_G:  {rgb[:, :, 1].std():.3f}",
+            f"bgr_std_R:  {rgb[:, :, 2].std():.3f}",
+            f"bayer_dtype: {bayer.dtype}",
+            f"bayer_shape: {bayer.shape[0]}x{bayer.shape[1]}",
+            f"bayer_min: {int(bayer.min())}",
+            f"bayer_max: {int(bayer.max())}",
+            f"bayer_mean: {bayer.mean():.3f}",
+            "--- picamera2_metadata ---",
+        ]
+        for key, val in meta.items():
+            lines.append(f"{key}: {val}")
+        txt_path.write_text("\n".join(lines) + "\n")
+        paths["txt"] = txt_path
+        log.debug(f"Saved meta:  {txt_path.name}")
 
-    request   = picam2.capture_request()
-    raw_bytes = request.make_array("raw")
-    meta = request.get_metadata()
-    request.release()
-    picam2.stop()
-    picam2.close()
+        return paths
 
-    # for raw_bytes, fmt, unpacker in ((raw1_bytes, "SBGGR10", ColorCam.unpack_raw10),
-    #                                  (raw10_bytes, "SBGGR10_CSI2P",  ColorCam.unpack_raw10_CSI2P)):
+    @staticmethod
+    def load_bayer(npy_path: Union[str, Path]) -> np.ndarray:
+        """
+        Load a saved Bayer array from a .npy file.
 
-    print()
-    print(f"--- raw_bytes (before unpack) format={RAWFORMAT} ---")
-    print(f"  dtype : {raw_bytes.dtype}")
-    print(f"  shape : {raw_bytes.shape}")
-    print(f"  min   : {int(raw_bytes.min())}")
-    print(f"  max   : {int(raw_bytes.max())}")
+        Args:
+            npy_path: Path to a .npy file written by save_frame()
 
-    bayer = BayerCam.unpack_raw10(raw_bytes, CAPTURE_SIZE[0])
+        Returns:
+            uint16 array, shape (H, W), BGGR Bayer values 0–1023
 
-    print()
-    print("--- bayer (after unpack_raw10)  format={RAWFORMAT} ---")
-    print(f"  dtype : {bayer.dtype}")
-    print(f"  shape : {bayer.shape}")
-    print(f"  min   : {int(bayer.min())}")
-    print(f"  max   : {int(bayer.max())}")
-    print(f"  mean  : {bayer.mean():.1f}")
-    if bayer.max() > 1023:
-        print("  WARNING: values exceed 1023 — unpack may be incorrect")
-    else:
-        print("  OK: all values in 0–1023 range")
+        Raises:
+            FileNotFoundError: If npy_path does not exist
+            ValueError: If the loaded array is not uint16
 
-    layers = BayerCam.extract_bayer_layers(bayer)
-
-    print()
-    print("--- Bayer layers ---")
-    print(f"  {'Layer':<5}  {'shape':<14}  {'min':>5}  {'#min':>6}  "
-        f"{'max':>5}  {'#max':>6}  {'mean':>7}")
-    print(f"  {'-'*5}  {'-'*14}  {'-'*5}  {'-'*6}  {'-'*5}  {'-'*6}  {'-'*7}")
-    for name, arr in layers.items():
-        mn, mx = int(arr.min()), int(arr.max())
-        print(f"  {name:<5}  {str(arr.shape):<14}  "
-            f"{mn:>5}  {int(np.count_nonzero(arr == mn)):>6}  "
-            f"{mx:>5}  {int(np.count_nonzero(arr == mx)):>6}  "
-            f"{arr.mean():>7.1f}")
-
-    print()
-    print("--- frame metadata ---")
-    for k in ("ExposureTime", "AnalogueGain", "FrameDuration",
-              "ColourGains", "SensorBlackLevels"):
-        if k in meta:
-            print(f"  {k}: {meta[k]}")
+        Example:
+            >>> bayer = BayerCam.load_bayer("run1_White_50ms.npy")
+            >>> bayer.dtype
+            dtype('uint16')
+        """
+        npy_path = Path(npy_path)
+        if not npy_path.exists():
+            raise FileNotFoundError(f"Bayer file not found: {npy_path}")
+        arr = np.load(str(npy_path))
+        if arr.dtype != np.uint16:
+            raise ValueError(
+                f"Expected uint16 Bayer array, got {arr.dtype} in {npy_path.name}"
+            )
+        log.debug(f"Loaded Bayer: {npy_path.name}  shape={arr.shape} max={arr.max()}")
+        return arr
