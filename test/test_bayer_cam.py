@@ -39,6 +39,8 @@ SETTLE_SECS  = 3.0
 
 def main():
     print("=" * 56)
+    print(f'Running {__file__}')
+    print("=" * 56)
     print("BayerCam.unpack_raw10 / extract_bayer_layers test")
     print("=" * 56)
     print(f"  Size      : {CAPTURE_SIZE[0]} x {CAPTURE_SIZE[1]}")

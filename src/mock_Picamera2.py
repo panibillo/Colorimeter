@@ -27,14 +27,24 @@ from types import SimpleNamespace as sns
 # Mock libcamera enums
 libcamera = sns(controls=sns(draft=sns(NoiseReductionModeEnum=sns(Off=0))))
 
+# Very clear white light image of original calibration card, jpeg only.
+# MOCKIMAGEFILE = "/home/bill/proj/eclipse-workspace1/Colorimeter/images/cfg3_rgb888_02-f135.jpg"
 
-def _get_mock_camera_dir():
-    """Find the mock_camera directory relative to this file."""
-    this_file = Path(__file__)
-    mock_dir = this_file.parent.parent / "mock_camera"
-    if not mock_dir.exists():
-        print(f"⚠  Mock camera directory not found: {mock_dir}")
-    return mock_dir
+# crappy white light image of paint chip card, jpeg, npa, & txt files.
+MOCKIMAGEFILE = "/home/bill/proj/eclipse-workspace1/Colorimeter/images/l1_t11/t11_White_960ms_under"
+
+
+
+def _mock_stem() -> Path:
+    """
+    Return the MOCKIMAGEFILE path as a stem (no extension).
+
+    Both MOCKIMAGEFILE styles are supported:
+      - Stem (no suffix):  used as-is, e.g. ".../t11_White_960ms_under"
+      - .jpg path:         suffix stripped, e.g. ".../cfg3_rgb888_02-f135"
+    """
+    p = Path(MOCKIMAGEFILE)
+    return p.with_suffix("") if p.suffix else p
 
 
 class MockRequest:
@@ -106,7 +116,7 @@ class Picamera2:
         self.main_array = None
         self.raw_array = None
         self.metadata = {}
-        self.mock_dir = _get_mock_camera_dir()
+        self.mock_stem = _mock_stem()
     
     def create_still_configuration(self, main=None, raw=None, **kwargs):
         """
@@ -141,13 +151,16 @@ class Picamera2:
         
         # Determine which config (1-6) based on size and format
         self.current_config_key = self._infer_config_key(size, fmt)
-        
+
+        # Dual-stream when a non-empty "raw" dict was passed to configure()
+        self.is_raw_config = bool(config.get("raw"))
+
         if self.current_config_key:
-            basename, is_raw = self.CONFIG_MAP[self.current_config_key]
+            basename, _ = self.CONFIG_MAP[self.current_config_key]
             self.current_basename = basename
-            self.is_raw_config = is_raw
             print(f"[mock] Configured as config {self.current_config_key}: "
-                  f"{size} {fmt} → {basename}")
+                  f"{size} {fmt} → {basename}"
+                  f"{'  +raw' if self.is_raw_config else ''}")
         else:
             print(f"⚠  Could not infer config from size={size}, format={fmt}")
     
@@ -205,43 +218,50 @@ class Picamera2:
     
     def _load_images_and_metadata(self):
         """
-        Load image data and metadata from mock_camera directory.
+        Load image data and metadata from MOCKIMAGEFILE.
+
+        Uses self.mock_stem (MOCKIMAGEFILE with any extension stripped) to
+        locate files.  Two layouts are supported:
+
+        Stem layout (e.g. MOCKIMAGEFILE = ".../t11_White_960ms_under"):
+            <stem>.jpg   → RGB main stream
+            <stem>.npy   → Bayer raw stream (uint16, 10-bit; optional)
+            <stem>.txt   → metadata (optional)
+
+        JPEG-only layout (e.g. MOCKIMAGEFILE = ".../cfg3_rgb888_02-f135.jpg"):
+            <stem>.jpg   → RGB main stream
+            No .npy present; a minimal synthetic Bayer array is generated
+            so dual-stream callers don't crash.
+
         Populates self.main_array, self.raw_array, self.metadata.
         """
-        if not self.current_basename:
-            raise RuntimeError("No configuration set; call configure() first")
-        
-        if not self.mock_dir.exists():
-            raise FileNotFoundError(f"Mock camera directory not found: {self.mock_dir}")
-        
-        try:
-            if self.is_raw_config:
-                # Dual-stream: load RGB and Bayer
-                rgb_file = self.mock_dir / f"{self.current_basename}_rgb_00.jpg"
-                raw_file = self.mock_dir / f"{self.current_basename}_raw_00.npy"
-                meta_file = self.mock_dir / f"{self.current_basename}_raw_00.txt"
-                
-                self.main_array = self._load_jpg(rgb_file)
-                self.raw_array = np.load(raw_file)
-                self.metadata = self._load_metadata(meta_file)
-                
-                print(f"[mock] Loaded dual-stream:")
-                print(f"  RGB: {rgb_file.name} → shape {self.main_array.shape}, dtype {self.main_array.dtype}")
-                print(f"  Raw: {raw_file.name} → shape {self.raw_array.shape}, dtype {self.raw_array.dtype}")
-            else:
-                # Single-stream: load RGB only
-                rgb_file = self.mock_dir / f"{self.current_basename}_00.jpg"
-                meta_file = self.mock_dir / f"{self.current_basename}_00.txt"
-                
-                self.main_array = self._load_jpg(rgb_file)
-                self.metadata = self._load_metadata(meta_file)
-                
-                print(f"[mock] Loaded single-stream:")
-                print(f"  RGB: {rgb_file.name} → shape {self.main_array.shape}, dtype {self.main_array.dtype}")
-        
-        except FileNotFoundError as e:
-            print(f"⚠  File not found: {e}")
-            raise
+        stem = self.mock_stem
+        jpg_file  = stem.with_suffix(".jpg")
+        npy_file  = stem.with_suffix(".npy")
+        txt_file  = stem.with_suffix(".txt")
+
+        if not jpg_file.exists():
+            raise FileNotFoundError(f"Mock image not found: {jpg_file}")
+
+        self.main_array = self._load_jpg(jpg_file)
+        print(f"[mock] Loaded RGB: {jpg_file.name} "
+              f"→ shape {self.main_array.shape}, dtype {self.main_array.dtype}")
+
+        if npy_file.exists():
+            self.raw_array = np.load(str(npy_file))
+            print(f"[mock] Loaded Bayer: {npy_file.name} "
+                  f"→ shape {self.raw_array.shape}, dtype {self.raw_array.dtype}")
+        else:
+            # Synthesize a minimal Bayer array from the RGB image so that
+            # dual-stream callers receive valid data even with a JPEG-only mock.
+            h, w = self.main_array.shape[:2]
+            self.raw_array = np.zeros((h, w), dtype=np.uint16)
+            print(f"[mock] No .npy found — synthesized zero Bayer array "
+                  f"({h}×{w})")
+
+        self.metadata = self._load_metadata(txt_file) if txt_file.exists() else {}
+        if not txt_file.exists():
+            print(f"[mock] No .txt found — using empty metadata")
     
     def _load_jpg(self, fpath):
         """

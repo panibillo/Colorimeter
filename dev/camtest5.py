@@ -15,12 +15,17 @@ Output per color per exposure (up to 3 files):
 
 Usage:
     python camtest5.py <test_name> [--over PCT ...] [--under PCT ...]
-                       [-w] [-j]
+                       [-w | -l N] [-j]
 
 Options:
     -w / --white_only      Capture White LED only (skip Red, Green, Blue, Violet)
+    -l / --lightboard N    Lighting board version: 1 = 5-color sequence (default),
+                           3 = B / G+V / B+G+V / B / G / V sequence.
+                           Incompatible with -w.
     -j / --jpeg_only       Save JPEG only (skip .npy Bayer file)
-    -e / --exposure_ms MS  Use fixed exposure in ms; skip auto-exposure routine
+    -e / --exposure_ms MS  Use fixed exposure in ms; skip auto-exposure routine.
+                           For -l 3: exposure applies to 1 LED; divided by 2
+                           for 2 LEDs, divided by 3 for 3 LEDs.
     -s / --save_exposures  Write converged exposures to cam5exp.csv
                            (also written automatically when cam5exp.csv is absent)
 
@@ -37,6 +42,8 @@ Examples:
     python camtest5.py test1  -e 250
     python camtest5.py test1  -w -e 500 --over 50 --under 50
     python camtest5.py test1  -s
+    python camtest5.py test1  -l 3
+    python camtest5.py test1  -l 3 -e 300
 """
 
 import argparse
@@ -52,26 +59,9 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 import numpy as np
 
-try:
-    from picamera2 import Picamera2
-    import libcamera
-    PLATFORM = "rpi"
-except ImportError:
-    print("picamera2 not available — loading mock_Picamera2 (desktop)")
-    from mock_Picamera2 import Picamera2, libcamera
-    PLATFORM = "desktop"
-
-try:
-    from gpiozero import LED as GpioLED, Device as GpioDevice
-    GPIO_AVAILABLE = True
-except ImportError:
-    GPIO_AVAILABLE = False
-
-try:
-    import cv2
-    CV2_AVAILABLE = True
-except ImportError:
-    CV2_AVAILABLE = False
+# picamera2, gpiozero, and cv2 are imported inside main() after argument
+# parsing so that --help and argument errors exit cleanly without triggering
+# slow or unavailable hardware imports.
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -99,122 +89,12 @@ MAX_EXPOSURE_US     = 1_200_000  # Hardware ceiling ~1,238,765 µs
 MIN_EXPOSURE_US     = 1_000      # 1 ms floor
 EXPOSURE_TOLERANCE  = 0.01       # Converge when change < 1 %
 
-# LED GPIO pin numbers, matching blink.py
-LED_PINS = {
-    "White":  22,
-    "Red":     5,
-    "Green":   6,
-    "Blue":   26,
-    "Violet": 27,
-}
-
-# Capture order
-LED_ORDER = ["White", "Red", "Green", "Blue", "Violet"]
-
-
-# ---------------------------------------------------------------------------
-# LED controller
-# ---------------------------------------------------------------------------
-
-class LedController:
-    """
-    Controls the 5-color LED lighting board via gpiozero.
-
-    All LEDs are initialized to OFF and driven individually.
-    Falls back to a console-logging stub when gpiozero is unavailable,
-    so the rest of the code runs unchanged on a desktop.
-    """
-
-    def __init__(self) -> None:
-        """
-        Initialize all LED GPIO pins and ensure they start OFF.
-
-        If any pin reports 'GPIO busy' (left claimed by a previous run that
-        did not clean up), the gpiozero pin factory is closed to release
-        stale lgpio handles and the initialization is retried once.
-
-        Raises:
-            RuntimeError: If any GPIO pin fails to initialize after retry
-        """
-        self._leds: dict = {}
-        if GPIO_AVAILABLE:
-            self._init_leds()
-            print("  LED controller ready (GPIO)")
-        else:
-            print("  LED controller ready (stub — no GPIO detected)")
-
-    def _init_leds(self) -> None:
-        """Claim all LED pins, retrying once if any pin reports GPIO busy."""
-        try:
-            for name, pin in LED_PINS.items():
-                led = GpioLED(pin)
-                led.off()
-                self._leds[name] = led
-        except Exception as exc:
-            if "GPIO busy" not in str(exc):
-                raise
-            # A previous run left one or more pins claimed without cleanup.
-            # Close the gpiozero pin factory (which releases the lgpio
-            # chip handle and all its claims) then retry.
-            print("  WARNING: GPIO busy — closing pin factory and retrying "
-                  "(previous run may not have exited cleanly)")
-            try:
-                GpioDevice.pin_factory.close()
-                for led in self._leds.values():
-                    led.close()
-            except Exception:
-                pass
-            self._leds.clear()
-            for name, pin in LED_PINS.items():
-                led = GpioLED(pin)
-                led.off()
-                self._leds[name] = led
-
-    def on(self, color: str) -> None:
-        """
-        Turn on the named LED.
-
-        Args:
-            color: One of "White", "Red", "Green", "Blue", "Violet"
-
-        Raises:
-            KeyError: If color is not a recognized LED name
-        """
-        if color not in LED_PINS:
-            raise KeyError(f"Unknown LED color: {color!r}")
-        if GPIO_AVAILABLE:
-            self._leds[color].on()
-            print(f"{color} LED ON")
-        else:
-            print(f"    [stub] {color} LED ON")
-
-    def off(self, color: str) -> None:
-        """
-        Turn off the named LED.
-
-        Args:
-            color: One of "White", "Red", "Green", "Blue", "Violet"
-        """
-        if GPIO_AVAILABLE:
-            self._leds[color].off()
-            print(f"{color} LED OFF")
-        else:
-            print(f"    [stub] {color} LED OFF")
-
-    def all_off(self) -> None:
-        """Turn off all LEDs unconditionally."""
-        if GPIO_AVAILABLE:
-            for led in self._leds.values():
-                led.off()
-        else:
-            print("    [stub] All LEDs OFF")
-
-    def close(self) -> None:
-        """Turn off all LEDs and release GPIO resources."""
-        self.all_off()
-        if GPIO_AVAILABLE:
-            for led in self._leds.values():
-                led.close()
+from lighting import (
+    LedController,
+    LED_PINS,
+    LED_ORDER,
+    LIGHTBOARD_3_SEQUENCE,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -870,6 +750,148 @@ def capture_color(
     return results, nominal_us
 
 
+def _scale_exposure_for_leds(fixed_us: int, n_leds: int) -> int:
+    """
+    Scale a 1-LED baseline exposure for n_leds simultaneous LEDs.
+
+    The fixed exposure (-e) is the baseline for 1 LED.  Each additional
+    LED divides the exposure proportionally (equal contribution assumed):
+
+        1 LED  →     fixed_us
+        2 LEDs → fixed_us / 2
+        3 LEDs → fixed_us / 3
+
+    Args:
+        fixed_us: Fixed exposure for 1 LED (µs)
+        n_leds:   Number of LEDs in this step (1–3)
+
+    Returns:
+        Scaled exposure in microseconds, clamped to [MIN_EXPOSURE_US,
+        MAX_EXPOSURE_US]
+
+    Example:
+        >>> _scale_exposure_for_leds(300_000, 1)
+        300000
+        >>> _scale_exposure_for_leds(300_000, 3)
+        100000
+    """
+    scaled = fixed_us // n_leds
+    return max(MIN_EXPOSURE_US, min(MAX_EXPOSURE_US, scaled))
+
+
+def capture_combo(
+    picam2,
+    leds: LedController,
+    out_dir: Path,
+    test_name: str,
+    label: str,
+    led_names: list[str],
+    over_pcts: list[float],
+    under_pcts: list[float],
+    jpeg_only: bool = False,
+    fixed_exposure_us: int | None = None,
+    initial_exposure_us: int = INITIAL_EXPOSURE_US,
+    over_relax: float = 1.0,
+) -> tuple[list[dict[str, Path]], int]:
+    """
+    Capture a bracketed image set with one or more LEDs on simultaneously.
+
+    Mirrors capture_color but accepts a list of LED names and a filename
+    label.  When fixed_exposure_us is provided it is treated as the
+    1-LED baseline: the actual exposure is divided by n_leds via
+    _scale_exposure_for_leds so brighter (more-LED) steps receive
+    proportionally shorter exposures.
+
+    Args:
+        picam2:            Picamera2 instance (started)
+        leds:              LedController instance (all LEDs off on entry)
+        out_dir:           Directory to save files into
+        test_name:         Test session identifier
+        label:             Filename identifier for this step (e.g. "BGV")
+        led_names:         LED color names to turn on (e.g. ["Blue", "Green"])
+        over_pcts:         Over-exposure bracket percentages (e.g. [50.0])
+        under_pcts:        Under-exposure bracket percentages (e.g. [50.0])
+        jpeg_only:         If True, skip .npy Bayer file (default False)
+        fixed_exposure_us: 1-LED baseline exposure (µs); divided by n_leds.
+                           None → run auto-exposure convergence loop.
+        initial_exposure_us: Starting point for auto-exposure loop (µs).
+                           Ignored when fixed_exposure_us is set.
+        over_relax:        Overrelaxation exponent passed to converge_exposure.
+
+    Returns:
+        Tuple of:
+            results:    List of save-result dicts (one per exposure)
+            nominal_us: Applied nominal exposure in microseconds
+
+    Raises:
+        KeyError: If any name in led_names is not a recognized LED name
+    """
+    led_str    = " + ".join(led_names)
+    results: list[dict[str, Path]] = []
+    nominal_us = initial_exposure_us
+
+    try:
+        print(f"  Turning on {led_str} ({len(led_names)} LED(s), 0.5 s warm-up)...")
+        for name in led_names:
+            leds.on(name)
+        time.sleep(0.5)
+
+        if fixed_exposure_us is not None:
+            nominal_us = _scale_exposure_for_leds(
+                fixed_exposure_us, len(led_names)
+            )
+            print(f"    Fixed exposure ({fixed_exposure_us:,} µs ÷ "
+                  f"{len(led_names)} LED(s) = {nominal_us:,} µs / "
+                  f"{nominal_us / 1000:.1f} ms) — auto-expose skipped")
+            _set_exposure_and_settle(picam2, nominal_us)
+        else:
+            _set_exposure_and_settle(picam2, initial_exposure_us)
+            nominal_us = converge_exposure(
+                picam2, initial_exposure_us, over_relax
+            )
+
+        print(f"    Capturing nominal ({nominal_us:,} µs / "
+              f"{nominal_us / 1000:.1f} ms)...")
+        _set_exposure_and_settle(picam2, nominal_us)
+        bgr, bayer, meta = _capture_dual_stream(picam2)
+        results.append(
+            save_capture(out_dir, test_name, label, nominal_us,
+                         bgr, bayer, meta, None, jpeg_only)
+        )
+
+        for pct in sorted(over_pcts):
+            exp_us = int(
+                min(nominal_us * (1.0 + pct / 100.0), MAX_EXPOSURE_US)
+            )
+            print(f"    Capturing over +{pct:.0f}% ({exp_us:,} µs / "
+                  f"{exp_us / 1000:.1f} ms)...")
+            _set_exposure_and_settle(picam2, exp_us)
+            bgr, bayer, meta = _capture_dual_stream(picam2)
+            results.append(
+                save_capture(out_dir, test_name, label, exp_us,
+                             bgr, bayer, meta, True, jpeg_only)
+            )
+
+        for pct in sorted(under_pcts):
+            exp_us = int(
+                max(nominal_us * (1.0 - pct / 100.0), MIN_EXPOSURE_US)
+            )
+            print(f"    Capturing under -{pct:.0f}% ({exp_us:,} µs / "
+                  f"{exp_us / 1000:.1f} ms)...")
+            _set_exposure_and_settle(picam2, exp_us)
+            bgr, bayer, meta = _capture_dual_stream(picam2)
+            results.append(
+                save_capture(out_dir, test_name, label, exp_us,
+                             bgr, bayer, meta, False, jpeg_only)
+            )
+
+    finally:
+        leds.all_off()
+        print(f"  {led_str} LEDs OFF")
+
+    return results, nominal_us
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -896,6 +918,8 @@ def main() -> int:
             "  python camtest5.py vial_A --over 50 100 --under 50\n"
             "  python camtest5.py test1  --over 25 50 75 --under 25 50\n"
             "  python camtest5.py test1  -w -j\n"
+            "  python camtest5.py test1  -l 3\n"
+            "  python camtest5.py test1  -l 3 -e 300\n"
         ),
     )
     parser.add_argument(
@@ -912,10 +936,18 @@ def main() -> int:
         type=float, nargs="+", default=[], metavar="PCT",
         help="Under-exposure bracket percentages (e.g. --under 50)",
     )
-    parser.add_argument(
+    mode_group = parser.add_mutually_exclusive_group()
+    mode_group.add_argument(
         "-w", "--white_only",
         action="store_true",
         help="Capture White LED only (skip Red, Green, Blue, Violet)",
+    )
+    mode_group.add_argument(
+        "-l", "--lightboard",
+        type=int, default=1, metavar="N",
+        help="Lighting board version: 1 = 5-color sequence (default), "
+             "3 = B / G+V / B+G+V / B / G / V sequence. "
+             "Incompatible with -w.",
     )
     parser.add_argument(
         "-j", "--jpeg_only",
@@ -948,10 +980,32 @@ def main() -> int:
     )
     args = parser.parse_args()
 
+    # Hardware imports deferred until after argument parsing so that --help
+    # and argument errors exit without loading slow or unavailable libraries.
+    global Picamera2, libcamera, PLATFORM
+    global cv2, CV2_AVAILABLE
+
+    try:
+        from picamera2 import Picamera2
+        import libcamera
+        PLATFORM = "rpi"
+    except ImportError:
+        print("picamera2 not available — loading mock_Picamera2 (desktop)")
+        from mock_Picamera2 import Picamera2, libcamera, MOCKIMAGEFILE
+        print(f"  Using MOCKIMAGEFILE: {MOCKIMAGEFILE}")
+        PLATFORM = "desktop"
+
+    try:
+        import cv2
+        CV2_AVAILABLE = True
+    except ImportError:
+        CV2_AVAILABLE = False
+
     test_name  = args.test_name
     over_pcts  = sorted(args.over)
     under_pcts = sorted(args.under)
     white_only = args.white_only
+    lightboard = args.lightboard
     jpeg_only  = args.jpeg_only
     fixed_exposure_us = (int(args.exposure_ms * 1000)
                          if args.exposure_ms is not None else None)
@@ -959,7 +1013,12 @@ def main() -> int:
     over_relax          = args.relax
     use_saved_exposures = args.use_saved_exposures
 
-    colors      = ["White"] if white_only else LED_ORDER
+    if white_only:
+        colors = ["White"]
+    elif lightboard == 3:
+        colors = [label for label, _ in LIGHTBOARD_3_SEQUENCE]
+    else:
+        colors = LED_ORDER
     n_exposures = 1 + len(over_pcts) + len(under_pcts)
     n_captures  = len(colors) * n_exposures
     files_per   = 2 if jpeg_only else 3   # jpg + txt, or jpg + npy + txt
@@ -983,11 +1042,18 @@ def main() -> int:
     print(f"  Files       : {n_files}  ({n_captures} captures × {files_per} file types)")
     if white_only:
         print(f"  Mode        : white LED only")
+    elif lightboard == 3:
+        print(f"  Mode        : lightboard 3  "
+              f"(B / G+V / B+G+V / B / G / V)")
     if jpeg_only:
         print(f"  Mode        : JPEG only (no .npy)")
     if fixed_exposure_us is not None:
         print(f"  Exposure    : fixed {fixed_exposure_us / 1000:.1f} ms "
-              f"(auto-expose skipped)")
+              f"(auto-expose skipped)", end="")
+        if lightboard == 3:
+            print(f"; 1-LED baseline — divided by n_leds per step")
+        else:
+            print()
     elif use_saved_exposures:
         print(f"  Exposure    : saved values from {exp_csv} "
               f"(auto-expose skipped; fallback 500 ms)")
@@ -1034,29 +1100,44 @@ def main() -> int:
         all_results: dict[str, list] = {}
         nominal_exposures: dict[str, int] = {}   # Collected for CSV save
 
-        for color in colors:
-            print(f"\n{'─'*52}")
-            print(f"Color: {color}    (camtest5 v{VERSION})")
-            print(f"{'─'*52}")
-            initial_us = saved_exposures.get(color, INITIAL_EXPOSURE_US)
-            # -u: use saved exposure as a fixed value; fall back to 500 ms
-            # if this color has no saved entry.  -e overrides -u.
-            if use_saved_exposures and fixed_exposure_us is None:
-                color_fixed_us = saved_exposures.get(color, 500_000)
-            else:
-                color_fixed_us = fixed_exposure_us
-            results, nominal_us = capture_color(
-                picam2, leds, out_dir, test_name,
-                color, over_pcts, under_pcts, jpeg_only,
-                color_fixed_us, initial_us, over_relax,
-            )
-            all_results[color] = results
-            nominal_exposures[color] = nominal_us
+        if lightboard == 3:
+            for label, led_names in LIGHTBOARD_3_SEQUENCE:
+                print(f"\n{'─'*52}")
+                print(f"Step: {label}  ({' + '.join(led_names)})"
+                      f"    (camtest5 v{VERSION})")
+                print(f"{'─'*52}")
+                results, nominal_us = capture_combo(
+                    picam2, leds, out_dir, test_name,
+                    label, led_names, over_pcts, under_pcts, jpeg_only,
+                    fixed_exposure_us, INITIAL_EXPOSURE_US, over_relax,
+                )
+                all_results[label] = results
+                nominal_exposures[label] = nominal_us
+        else:
+            for color in colors:
+                print(f"\n{'─'*52}")
+                print(f"Color: {color}    (camtest5 v{VERSION})")
+                print(f"{'─'*52}")
+                initial_us = saved_exposures.get(color, INITIAL_EXPOSURE_US)
+                # -u: use saved exposure as a fixed value; fall back to 500 ms
+                # if this color has no saved entry.  -e overrides -u.
+                if use_saved_exposures and fixed_exposure_us is None:
+                    color_fixed_us = saved_exposures.get(color, 500_000)
+                else:
+                    color_fixed_us = fixed_exposure_us
+                results, nominal_us = capture_color(
+                    picam2, leds, out_dir, test_name,
+                    color, over_pcts, under_pcts, jpeg_only,
+                    color_fixed_us, initial_us, over_relax,
+                )
+                all_results[color] = results
+                nominal_exposures[color] = nominal_us
 
         # Save exposures if file was absent or -s flag given.
-        # Skipped when -e is active: a fixed override is not a measured
-        # auto-exposure and should not overwrite saved values.
-        if (fixed_exposure_us is None and not use_saved_exposures
+        # Skipped for lightboard 3 (combo labels don't match CSV color keys),
+        # and when -e is active (fixed override is not a measured value).
+        if (lightboard != 3
+                and fixed_exposure_us is None and not use_saved_exposures
                 and (not csv_existed or save_exposures)):
             save_exposures_csv(exp_csv, nominal_exposures)
 
