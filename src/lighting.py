@@ -34,12 +34,11 @@ LED_ORDER = ["White", "Red", "Green", "Blue", "Violet"]
 # Lightboard 3 capture sequence: (label, [led_names]).
 # Blue appears twice; labels B1/B2 distinguish the two steps.
 LIGHTBOARD_3_SEQUENCE = [
-    ("B1",  ["Blue"]),
-    ("GV",  ["Green", "Violet"]),
-    ("BGV", ["Blue", "Green", "Violet"]),
-    ("B2",  ["Blue"]),
-    ("G",   ["Green"]),
+    ("B",  ["Blue"]),
     ("V",   ["Violet"]),
+    ("G",   ["Green"]),
+    ("BG",  ["Green", "Violet"]),
+    ("BGV", ["Blue", "Green", "Violet"]),
 ]
 
 
