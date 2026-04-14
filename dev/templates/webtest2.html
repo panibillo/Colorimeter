@@ -1,0 +1,406 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Colorimeter — Lighting Study</title>
+<style>
+  body { font-family: monospace; font-size: 14px; margin: 0; background: #f4f4f4; }
+  h2   { margin: 0 0 10px 0; font-size: 16px; }
+  h3   { margin: 10px 0 4px 0; font-size: 14px; color: #444; }
+
+  /* Nav */
+  #nav { display: flex; background: #2c3e50; padding: 6px 10px; gap: 4px; }
+  #nav a {
+    color: #ccc; text-decoration: none; padding: 6px 18px;
+    border-radius: 4px 4px 0 0; border: 1px solid transparent;
+  }
+  #nav a.active { background: #f4f4f4; color: #2c3e50; border-color: #aaa; }
+  #nav a:hover:not(.active) { background: #3d5166; color: #fff; }
+
+  /* Status bar */
+  #status {
+    padding: 6px 14px; font-size: 13px; min-height: 24px;
+    background: #e8f4e8; border-bottom: 1px solid #ccc;
+  }
+  #status.error { background: #fde8e8; }
+
+  /* Content */
+  #content { padding: 14px 18px; max-width: 960px; }
+
+  /* Forms */
+  table  { border-collapse: collapse; margin-bottom: 10px; }
+  td, th { padding: 4px 10px; border: 1px solid #ccc; }
+  th     { background: #dde; text-align: left; }
+  input[type=text], input[type=number] {
+    font-family: monospace; font-size: 13px; padding: 2px 4px;
+  }
+  input[type=number]         { width: 90px; }
+  input[type=number].wide    { width: 130px; }
+  input[type=text].short     { width: 80px; }
+  input[type=text].medium    { width: 180px; }
+  input[type=text].long      { width: 320px; }
+  select { font-family: monospace; font-size: 13px; }
+
+  /* Buttons */
+  .btn {
+    padding: 6px 14px; border: 1px solid #888; border-radius: 3px;
+    cursor: pointer; font-family: monospace; font-size: 13px;
+    background: #eee;
+  }
+  .btn:hover  { background: #ddd; }
+  .btn.primary { background: #3498db; color: #fff; border-color: #2980b9; }
+  .btn.primary:hover { background: #2980b9; }
+  .btn.success { background: #27ae60; color: #fff; border-color: #1e8449; }
+  .btn.success:hover { background: #1e8449; }
+  .btn.danger  { background: #e74c3c; color: #fff; border-color: #c0392b; }
+  .btn.small   { padding: 3px 8px; font-size: 12px; }
+
+  /* LED buttons */
+  .led-row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap;
+             margin-bottom: 10px; }
+  .led-btn {
+    padding: 10px 20px; border-radius: 5px; border: 2px solid #888;
+    cursor: pointer; font-family: monospace; font-size: 14px; font-weight: bold;
+    min-width: 80px; text-align: center;
+  }
+  .led-btn.off  { background: #ccc; color: #666; }
+  .led-btn.on   { color: #ff8; border-color: #333; }
+  .led-White.on  { background: #fff; color: #000; border-color: #333; }
+  .led-Red.on    { background: #c0392b; }
+  .led-Green.on  { background: #27ae60; }
+  .led-Blue.on   { background: #2980b9; }
+  .led-Violet.on { background: #ce8bea; }
+
+  /* Stats table */
+  .stats td  { text-align: right; font-size: 12px; }
+  .stats td:first-child, .stats td:nth-child(2) { text-align: left; }
+  .stats th  { font-size: 12px; }
+  .ch-B  { color: #2b6cef; font-weight: bold; }
+  .ch-Gb { color: #08d295; font-weight: bold; }
+  .ch-Gr { color: #51c52e; font-weight: bold; }
+  .ch-R  { color: #f12b15; font-weight: bold; }
+
+  /* Layout helpers */
+  .row { display: flex; gap: 10px; align-items: center; margin-bottom: 6px; }
+  .label { min-width: 130px; color: #555; }
+  .label.wide { min-width: 160px; }
+  fieldset { border: 1px solid #ccc; border-radius: 4px; padding: 8px 12px;
+             margin-bottom: 12px; }
+  legend { font-weight: bold; padding: 0 6px; }
+  .two-col { display: flex; gap: 24px; flex-wrap: wrap; }
+  .two-col > * { flex: 1 1 300px; }
+  .plots img { border: 1px solid #ccc; border-radius: 3px; max-width: 100%; }
+  .disabled { opacity: 0.4; pointer-events: none; }
+  .cb-row { display: flex; gap: 20px; align-items: center; margin-bottom: 8px; }
+  .cb-label { display: flex; gap: 6px; align-items: center; }
+  small { color: #888; font-size: 11px; }
+</style>
+</head>
+<body>
+
+<!-- Nav -->
+<div id="nav">
+  <a href="/?section=camera" {% if state.section=='camera' %}class="active"{% endif %}>Camera</a>
+  <a href="/?section=lights" {% if state.section=='lights' %}class="active"{% endif %}>Lights</a>
+  <a href="/?section=rects"  {% if state.section=='rects'  %}class="active"{% endif %}>Rects</a>
+  <a href="/?section=settings" {% if state.section=='settings' %}class="active"{% endif %}>Settings</a>
+</div>
+
+<!-- Status bar -->
+<div id="status" {% if state.last_error %}class="error"{% endif %}>
+  {% if state.last_error %}
+    &#9888;  {{ state.last_error }}
+  {% elif state.last_msg %}
+    &#10003;  {{ state.last_msg }}
+  {% else %}
+    &nbsp;
+  {% endif %}
+</div>
+
+<div id="content">
+
+{# ================================================================ CAMERA #}
+{% if state.section == 'camera' %}
+<h2>Camera</h2>
+
+<div class="two-col">
+
+{# --- Left column: controls --- #}
+<div>
+
+  <fieldset>
+    <legend>Capture</legend>
+
+    {# Autofocus (IMX708 only) #}
+    {% if has_autofocus %}
+    <div class="row" style="margin-bottom:10px">
+      <form method="post" action="/autofocus">
+        <button type="submit" class="btn">Autofocus</button>
+      </form>
+      {% if state.last_result and state.last_result.lens_position is not none %}
+        <small>lens pos: {{ "%.3f"|format(state.last_result.lens_position) }} diopters</small>
+      {% endif %}
+    </div>
+    {% endif %}
+
+    <form method="post" action="/capture">
+      <div class="row">
+        <span class="label">Exposure (ms)</span>
+        <input type="number" name="exposure_ms" class="wide"
+               value="{{ state.exposure_ms }}" min="1" max="120000" step="1">
+      </div>
+      <div class="row">
+        <span class="label">Active LEDs</span>
+        <span>{% set active = state.led_state.items()|selectattr('1')|map(attribute='0')|list %}
+              {% if active %}{{ active|join(', ') }}{% else %}none{% endif %}</span>
+      </div>
+      <div class="row" style="margin-top:8px">
+        <button type="submit" class="btn primary">Capture</button>
+      </div>
+    </form>
+  </fieldset>
+
+  <fieldset>
+    <legend>Upload</legend>
+    <form method="post" action="/upload">
+
+      {# Checkboxes #}
+      <div class="cb-row" style="margin-bottom:10px">
+        <label class="cb-label">
+          <input type="checkbox" name="upload_jpg"
+                 {% if cfg.upload_jpg %}checked{% endif %}> JPG
+        </label>
+        <label class="cb-label">
+          <input type="checkbox" name="upload_npy"
+                 {% if cfg.upload_npy %}checked{% endif %}> NPY
+        </label>
+        <label class="cb-label">
+          <input type="checkbox" name="upload_data"
+                 {% if cfg.upload_data %}checked{% endif %}> Data
+        </label>
+      </div>
+
+      {# Data fields #}
+      <div class="row">
+        <span class="label">Title</span>
+        <input type="text" name="title" class="long"
+               value="{{ cfg.data.title }}">
+      </div>
+      <div class="row">
+        <span class="label">Image basename</span>
+        <input type="text" name="basename" class="medium"
+               value="{{ cfg.data.basename }}">
+      </div>
+      <div class="row">
+        <span class="label">LED description</span>
+        <input type="text" name="led_desc" class="medium"
+               value="{{ cfg.data.led_desc }}">
+        <small>first char → filename</small>
+      </div>
+      <div class="row">
+        <span class="label">Geometry</span>
+        <input type="text" name="geometry" class="medium"
+               value="{{ cfg.data.geometry }}">
+        <small>first word → filename</small>
+      </div>
+      <div class="row">
+        <span class="label">Target</span>
+        <input type="text" name="target" class="medium"
+               value="{{ cfg.data.target }}">
+        <small>first 2 chars → filename</small>
+      </div>
+
+      <h3 style="margin-top:10px">Circuit</h3>
+      <table>
+        <tr>
+          <td><span class="label">Vcc (V)</span></td>
+          <td><input type="text" name="vcc"   class="short" value="{{ cfg.data.vcc }}"></td>
+          <td><span class="label">Vled (V)</span></td>
+          <td><input type="text" name="vled"  class="short" value="{{ cfg.data.vled }}"></td>
+        </tr>
+        <tr>
+          <td><span class="label">Vr (V)</span></td>
+          <td><input type="text" name="vr"    class="short" value="{{ cfg.data.vr }}"></td>
+          <td><span class="label">mA</span></td>
+          <td><input type="text" name="ma"    class="short" value="{{ cfg.data.ma }}"></td>
+        </tr>
+        <tr>
+          <td><span class="label">R (&#937;)</span></td>
+          <td><input type="text" name="r_ohm" class="short" value="{{ cfg.data.r_ohm }}"></td>
+          <td colspan="2"></td>
+        </tr>
+      </table>
+
+      <div class="row" style="margin-top:8px">
+        <button type="submit" class="btn success"
+                {% if not state.last_result %}disabled title="Capture first"{% endif %}>
+          Upload
+        </button>
+        <small>seq: {{ cfg.sequence }}</small>
+        <small>host: {{ cfg.sftp_host }}</small>
+      </div>
+    </form>
+  </fieldset>
+
+</div>{# end left col #}
+
+{# --- Right column: results --- #}
+<div>
+{% if state.last_result %}
+{% set r = state.last_result %}
+  <fieldset>
+    <legend>Last capture — {{ r.timestamp }}</legend>
+    <table class="stats">
+      <tr><td>Exposure requested</td><td>{{ "%.1f"|format(r.exposure_ms) }} ms</td></tr>
+      <tr><td>Exposure actual</td>   <td>{{ "%.1f"|format(r.actual_ms) }} ms</td></tr>
+      <tr><td>Frame duration</td>    <td>{{ r.frame_dur_us }} µs</td></tr>
+      <tr><td>Analog gain</td>       <td>{{ "%.2f"|format(r.analog_gain) }}</td></tr>
+      {% if r.lens_position is not none %}
+      <tr><td>Lens position</td>     <td>{{ "%.3f"|format(r.lens_position) }} diopters</td></tr>
+      {% endif %}
+      <tr><td>LEDs</td>              <td>{{ r.leds|join(', ') if r.leds else 'none' }}</td></tr>
+    </table>
+  </fieldset>
+
+  {# Per-rect statistics #}
+  {% for rs in r.rect_stats %}
+  <fieldset>
+    <legend>{{ rs.name }}</legend>
+    <table class="stats">
+      <tr>
+        <th>Ch</th>
+        <th>total</th><th>min_v</th><th>max_v</th>
+        <th>min_n</th><th>max_n</th><th>mean</th>
+        <th>p0</th><th>p10</th><th>p25</th><th>p50</th>
+        <th>p75</th><th>p90</th><th>p100</th>
+      </tr>
+      {% for ch in ['B','Gb','Gr','R'] %}
+      {% set s = rs.channels[ch] %}
+      <tr>
+        <td class="ch-{{ ch }}">{{ ch }}</td>
+        <td>{{ s.total }}</td>
+        <td>{{ s.min_val }}</td><td>{{ s.max_val }}</td>
+        <td>{{ s.min_count }}</td><td>{{ s.max_count }}</td>
+        <td>{{ "%.1f"|format(s.mean) }}</td>
+        <td>{{ s.p0 }}</td><td>{{ s.p10 }}</td><td>{{ s.p25 }}</td>
+        <td>{{ s.p50 }}</td><td>{{ s.p75 }}</td><td>{{ s.p90 }}</td>
+        <td>{{ s.p100 }}</td>
+      </tr>
+      {% endfor %}
+    </table>
+  </fieldset>
+  {% endfor %}
+
+  <div class="plots">
+    <div>Channel histograms (20 bins)</div>
+    <img src="/plot/hist" alt="Bayer channel histograms">
+  </div>
+
+{% else %}
+  <p style="color:#999; margin-top:30px">No capture yet — press Capture.</p>
+{% endif %}
+</div>{# end right col #}
+
+</div>{# end two-col #}
+
+
+{# ================================================================ LIGHTS #}
+{% elif state.section == 'lights' %}
+<h2>Lights</h2>
+<p style="color:#666; margin:0 0 10px 0">Click a button to toggle that LED.</p>
+
+<div class="led-row">
+  {% for color in led_order %}
+  {% set is_on = state.led_state[color] %}
+  <form method="post" action="/leds">
+    <input type="hidden" name="action" value="toggle">
+    <input type="hidden" name="color"  value="{{ color }}">
+    <button type="submit"
+            class="led-btn led-{{ color }} {{ 'on' if is_on else 'off' }}">
+      {{ color[0] }} — {{ color }}<br>
+      <small>{{ 'ON' if is_on else 'off' }}</small>
+    </button>
+  </form>
+  {% endfor %}
+</div>
+
+<form method="post" action="/leds" style="margin-top:6px">
+  <input type="hidden" name="action" value="all_off">
+  <button type="submit" class="btn danger">All Off</button>
+</form>
+
+
+{# ================================================================ RECTS #}
+{% elif state.section == 'rects' %}
+<h2>Rectangles</h2>
+<p style="color:#666; margin:0 0 10px 0">
+  Coordinates are (left, top, width, height) in pixels of the Bayer array.
+  Camera: {{ image_w }}&times;{{ image_h }}.
+</p>
+
+<form method="post" action="/rects">
+  <table>
+    <tr><th>Name</th><th>Left</th><th>Top</th><th>Width</th><th>Height</th><th></th></tr>
+    {% for i, r in cfg.rects|enumerate %}
+    <tr>
+      <td><input type="text"   name="rect_name_{{ i }}"   value="{{ r.name }}"
+                 class="medium"></td>
+      <td><input type="number" name="rect_left_{{ i }}"   value="{{ r.left   }}" min="0"></td>
+      <td><input type="number" name="rect_top_{{ i }}"    value="{{ r.top    }}" min="0"></td>
+      <td><input type="number" name="rect_width_{{ i }}"  value="{{ r.width  }}" min="1"></td>
+      <td><input type="number" name="rect_height_{{ i }}" value="{{ r.height }}" min="1"></td>
+      <td>
+        {% if cfg.rects|length > 1 %}
+        <button type="submit" formaction="/del_rect/{{ i }}"
+                class="btn small danger">&#10005;</button>
+        {% endif %}
+      </td>
+    </tr>
+    {% endfor %}
+  </table>
+  <div class="row">
+    <button type="submit" class="btn small">Update rects</button>
+    <button type="submit" formaction="/add_rect" class="btn small">+ Add rect</button>
+  </div>
+</form>
+
+
+{# ============================================================== SETTINGS #}
+{% elif state.section == 'settings' %}
+<h2>Settings</h2>
+
+<form method="post" action="/settings">
+  <fieldset>
+    <legend>Upload destination</legend>
+    <div class="row">
+      <span class="label wide">SSH host alias</span>
+      <input type="text" name="sftp_host"   class="medium" value="{{ cfg.sftp_host }}">
+      <small>from ~/.ssh/config</small>
+    </div>
+    <div class="row">
+      <span class="label wide">Remote directory</span>
+      <input type="text" name="sftp_remote" class="long"   value="{{ cfg.sftp_remote }}">
+    </div>
+    <div class="row" style="margin-top:8px">
+      <button type="submit" class="btn primary">Save</button>
+    </div>
+  </fieldset>
+</form>
+
+<fieldset>
+  <legend>Info</legend>
+  <table class="stats">
+    <tr><td>Camera</td>      <td>{{ cam_desc }}</td></tr>
+    <tr><td>Config</td>      <td>{{ image_w }}&times;{{ image_h }}</td></tr>
+    <tr><td>Sequence</td>    <td>{{ cfg.sequence }}</td></tr>
+    <tr><td>Config file</td> <td style="font-size:11px">{{ config_path }}</td></tr>
+    <tr><td>Failure log</td> <td style="font-size:11px">{{ fail_log }}</td></tr>
+  </table>
+</fieldset>
+
+{% endif %}
+
+</div><!-- /content -->
+</body>
+</html>

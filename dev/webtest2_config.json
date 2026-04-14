@@ -1,0 +1,30 @@
+{
+  "sequence": 0,
+  "rects": [
+    {
+      "name": "full",
+      "left": 0,
+      "top": 0,
+      "width": 1640,
+      "height": 1232
+    }
+  ],
+  "camera_settings": {},
+  "data": {
+    "title": "",
+    "basename": "img",
+    "led_desc": "",
+    "geometry": "",
+    "target": "",
+    "vcc": "",
+    "vled": "",
+    "vr": "",
+    "ma": "",
+    "r_ohm": ""
+  },
+  "upload_jpg": true,
+  "upload_npy": true,
+  "upload_data": true,
+  "sftp_host": "sunny",
+  "sftp_remote": "picam/"
+}
