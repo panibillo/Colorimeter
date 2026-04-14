@@ -94,6 +94,9 @@ class BayerCam:
         config_size:       (width, height) of the active config
         exposure_us:       Current exposure time in microseconds
         analog_gain:       Current analog gain factor
+        lens_position:     Current lens position in diopters (float), or None.
+                           Updated by autofocus_once() and by capture_frame()
+                           on IMX708.  Always None on IMX219.
     """
 
     # Default control settings (model-independent)
@@ -133,10 +136,11 @@ class BayerCam:
         model-specific parameters (resolutions, max exposure, Bayer pattern).
         Camera is not opened or configured here; call setup_camera() next.
         """
-        self.camera     = None
-        self.config_size = None
-        self.exposure_us = self.DEFAULT_EXPOSURE_US
-        self.analog_gain = self.DEFAULT_ANALOG_GAIN
+        self.camera        = None
+        self.config_size   = None
+        self.exposure_us   = self.DEFAULT_EXPOSURE_US
+        self.analog_gain   = self.DEFAULT_ANALOG_GAIN
+        self.lens_position = None   # diopters; set by autofocus_once() / capture_frame()
 
         # Detect camera model and apply profile
         model   = BayerCam.detect_model()
@@ -275,6 +279,12 @@ class BayerCam:
             # Unpack CSI-2 bytes → uint16 pixel values (0–1023).
             bayer = BayerCam.unpack_raw10(raw_bytes, self.config_size[0])
 
+            # Keep lens_position in sync with what the hardware reports.
+            if self.has_autofocus:
+                lp = metadata.get("LensPosition")
+                if lp is not None:
+                    self.lens_position = float(lp)
+
             log.debug(f"Frame captured: RGB {rgb.shape} {rgb.dtype}, "
                       f"Bayer {bayer.shape} {bayer.dtype} max={bayer.max()}")
             return rgb, bayer, metadata
@@ -342,7 +352,8 @@ class BayerCam:
             "AfMode":       libcamera.controls.AfModeEnum.Manual,
             "LensPosition": lens_pos,
         })
-        return lens_pos
+        self.lens_position = float(lens_pos)
+        return self.lens_position
 
     def set_exposure(self, exposure_us: int) -> None:
         """
@@ -500,12 +511,13 @@ class BayerCam:
 
     @staticmethod
     def save_frame(
-        out_dir:   Union[str, Path],
-        stem:      str,
-        rgb:       np.ndarray,
-        bayer:     np.ndarray,
-        meta:      Dict,
-        jpeg_only: bool = False,
+        out_dir:       Union[str, Path],
+        stem:          str,
+        rgb:           np.ndarray,
+        bayer:         np.ndarray,
+        meta:          Dict,
+        jpeg_only:     bool = False,
+        lens_position: "float | None" = None,
     ) -> Dict[str, Path]:
         """
         Save a captured frame to disk as JPG + NPY + TXT.
@@ -516,12 +528,14 @@ class BayerCam:
             {stem}.txt   — Metadata: image stats + Picamera2 metadata block
 
         Args:
-            out_dir:   Directory to write files into (must already exist)
-            stem:      Base filename without extension (e.g. "run1_White_50ms")
-            rgb:       uint8 array (H, W, 3), BGR channel order
-            bayer:     uint16 array (H, W), BGGR Bayer values
-            meta:      Picamera2 metadata dict from capture_frame()
-            jpeg_only: If True, skip the .npy file (default False)
+            out_dir:       Directory to write files into (must already exist)
+            stem:          Base filename without extension (e.g. "run1_White_50ms")
+            rgb:           uint8 array (H, W, 3), BGR channel order
+            bayer:         uint16 array (H, W), BGGR Bayer values
+            meta:          Picamera2 metadata dict from capture_frame()
+            jpeg_only:     If True, skip the .npy file (default False)
+            lens_position: Lens position in diopters (IMX708 only); written to
+                           the .txt file when provided (default None)
 
         Returns:
             Dict mapping extension to Path for each file written,
@@ -565,8 +579,10 @@ class BayerCam:
             f"bayer_min: {int(bayer.min())}",
             f"bayer_max: {int(bayer.max())}",
             f"bayer_mean: {bayer.mean():.3f}",
-            "--- picamera2_metadata ---",
         ]
+        if lens_position is not None:
+            lines.append(f"lens_position: {lens_position:.4f}")
+        lines.append("--- picamera2_metadata ---")
         for key, val in meta.items():
             lines.append(f"{key}: {val}")
         txt_path.write_text("\n".join(lines) + "\n")
