@@ -2,18 +2,21 @@
 """
 BayerCam - Dual-stream camera interface: configuration, capture, and file I/O.
 
-Provides a base class for capturing RGB + raw Bayer data from a Pi Camera v2
-(IMX219).  Intended to be used directly or inherited by higher-level classes
-that add LED control or auto-exposure.
+Supports Raspberry Pi Camera Module 2 (IMX219) and Module 3 (IMX708).
+The attached camera model is detected automatically at init time via
+Picamera2.global_camera_info(), and CONFIG_5/CONFIG_6 sizes, maximum
+exposure, Bayer pattern, and autofocus availability are set accordingly.
 
 Methods:
   - setup_camera()       Configure and start dual-stream RGB + Bayer capture
   - capture_frame()      Capture one frame; returns (rgb, bayer, metadata)
+  - autofocus_once()     Trigger AF sweep, lock focus, return LensPosition (IMX708 only)
   - set_exposure()       Set exposure time
   - set_analog_gain()    Set analogue gain
   - stop()               Stop and release camera
+  - detect_model()       Query Picamera2 for the attached camera model string
   - unpack_raw10()       Unpack CSI-2 packed bytes → uint16 pixel array
-  - extract_bayer_layers() Split BGGR mosaic into {B, Gb, Gr, R} sub-arrays
+  - extract_bayer_layers() Split Bayer mosaic into {B, Gb, Gr, R} sub-arrays
   - save_frame()         Save RGB JPG + Bayer NPY + metadata TXT to disk
   - load_bayer()         Load a Bayer NPY file, return uint16 array
 
@@ -38,74 +41,157 @@ except ImportError:
     from mock_Picamera2 import Picamera2, libcamera
 
 
+# ---------------------------------------------------------------------------
+# Per-model sensor profiles
+# ---------------------------------------------------------------------------
+
+# Known camera models and their sensor-specific parameters.
+# Model strings match the lowercase value returned by Picamera2.global_camera_info().
+_CAMERA_PROFILES = {
+    "imx219": {                         # Raspberry Pi Camera Module 2
+        "full_size":       (3280, 2464),
+        "half_size":       (1640, 1232),
+        "bayer_format":    "SBGGR10",   # 10-bit unpacked, BGGR pattern
+        "bayer_pattern":   "BGGR",
+        "max_exposure_us": 1_200_000,   # hardware cap ~1,238,765 µs; margin left
+        "has_autofocus":   False,
+        "description":     "Camera Module 2 (IMX219)",
+    },
+    "imx708": {                         # Raspberry Pi Camera Module 3
+        "full_size":       (4608, 2592),
+        "half_size":       (2304, 1296),
+        "bayer_format":    "SRGGB10_CSI2P",  # 10-bit packed CSI-2, RGGB pattern
+        "bayer_pattern":   "RGGB",
+        "max_exposure_us": 112_000_000, # 112 seconds maximum
+        "has_autofocus":   True,
+        "description":     "Camera Module 3 (IMX708)",
+    },
+}
+_FALLBACK_PROFILE = "imx219"
+
+
 class BayerCam:
     """
     Dual-stream camera interface for RGB + Bayer raw capture.
-    
-    Supports Config 5 (1640×1232, default) and Config 6 (3280×2464):
-      - Main stream: RGB888 for display and processing
-      - Raw stream: SBGGR10 (10-bit Bayer) for color analysis
-    
+
+    Supports Camera Module 2 (IMX219) and Module 3 (IMX708).  The attached
+    model is detected automatically; CONFIG_5 (half-resolution) and CONFIG_6
+    (full-resolution) sizes are set accordingly.
+
+    IMX219: CONFIG_5 = 1640×1232,  CONFIG_6 = 3280×2464,  BGGR pattern
+    IMX708: CONFIG_5 = 2304×1296,  CONFIG_6 = 4608×2592,  RGGB pattern
+
     Attributes:
-        camera: Picamera2 instance (None if not initialized)
-        config_size: Tuple (width, height) of capture resolution
-        exposure_us: Current exposure time in microseconds
-        analog_gain: Current analog gain factor
+        camera:            Picamera2 instance (None if not initialized)
+        model:             Detected camera model string, e.g. "imx219"
+        model_description: Human-readable model label
+        has_autofocus:     True for IMX708 (Module 3); False for IMX219
+        bayer_pattern:     "BGGR" or "RGGB" — pass to extract_bayer_layers()
+        MAX_EXPOSURE_US:   Hardware exposure ceiling for the detected sensor
+        CONFIG_5:          Half-resolution config dict
+        CONFIG_6:          Full-resolution config dict
+        config:            Active config dict (default CONFIG_5)
+        config_size:       (width, height) of the active config
+        exposure_us:       Current exposure time in microseconds
+        analog_gain:       Current analog gain factor
     """
-    
-    # Configuration for half-resolution dual-stream capture (Config 5)
-    CONFIG_5 = {
-        "size":    (1640, 1232),
-        "format":  "SBGGR10",
-        "comment": "Half resolution dual-stream RGB + Bayer",
-    }
-    # Configuration for full-resolution dual-stream capture (Config 6)
-    CONFIG_6 = {
-        "size":    (3280, 2464),
-        "format":  "SBGGR10",
-        "comment": "Full resolution dual-stream RGB + Bayer",
-    }
-    
-    # Default control settings
+
+    # Default control settings (model-independent)
     DEFAULT_EXPOSURE_US = 100_000
     DEFAULT_ANALOG_GAIN = 1.0
     DEFAULT_WB_GAINS = (1.0, 1.0)  # (Red, Blue)
-    
+
+    @staticmethod
+    def detect_model() -> str:
+        """
+        Query Picamera2 for the attached camera model string.
+
+        Calls Picamera2.global_camera_info() (a class method that does not
+        require the camera to be opened) and returns the lowercase model
+        name from the first camera listed.
+
+        Returns:
+            Lowercase model string, e.g. "imx219" or "imx708".
+            Falls back to _FALLBACK_PROFILE ("imx219") if the call fails
+            or returns no cameras.
+        """
+        try:
+            fn = getattr(Picamera2, "global_camera_info", None)
+            if fn is not None:
+                info = fn()
+                if info:
+                    model = info[0].get("Model", "").lower()
+                    if model:
+                        return model
+        except Exception:
+            pass
+        return _FALLBACK_PROFILE
+
     def __init__(self):
-        """Initialize BayerCam with camera object (not yet configured)."""
-        self.camera = None
+        """
+        Initialize BayerCam: detect the attached camera model and set
+        model-specific parameters (resolutions, max exposure, Bayer pattern).
+        Camera is not opened or configured here; call setup_camera() next.
+        """
+        self.camera     = None
         self.config_size = None
         self.exposure_us = self.DEFAULT_EXPOSURE_US
         self.analog_gain = self.DEFAULT_ANALOG_GAIN
-        self.config = self.CONFIG_5
+
+        # Detect camera model and apply profile
+        model   = BayerCam.detect_model()
+        profile = _CAMERA_PROFILES.get(model, _CAMERA_PROFILES[_FALLBACK_PROFILE])
+
+        self.model             = model
+        self.model_description = profile["description"]
+        self.has_autofocus     = profile["has_autofocus"]
+        self.bayer_pattern     = profile["bayer_pattern"]
+        self.MAX_EXPOSURE_US   = profile["max_exposure_us"]
+
+        fmt = profile["bayer_format"]
+        self.CONFIG_5 = {
+            "size":    profile["half_size"],
+            "format":  fmt,
+            "comment": (f"Half resolution dual-stream RGB + Bayer "
+                        f"({profile['half_size'][0]}×{profile['half_size'][1]})"),
+        }
+        self.CONFIG_6 = {
+            "size":    profile["full_size"],
+            "format":  fmt,
+            "comment": (f"Full resolution dual-stream RGB + Bayer "
+                        f"({profile['full_size'][0]}×{profile['full_size'][1]})"),
+        }
+        self.config = self.CONFIG_5   # Default to half-resolution
     
     def setup_camera(self) -> None:
         """
         Initialize and configure camera for dual-stream capture.
-        
+
         Creates Picamera2 instance, configures RGB main stream + Bayer raw stream,
-        applies control settings, and starts the camera. Camera must be started
-        before capture_frame() can be called.
-        
+        applies control settings, and starts the camera.  On Camera Module 3
+        (IMX708), autofocus is explicitly set to Manual so it does not interfere
+        with captures.  Camera must be started before capture_frame() can be called.
+
         Side effects:
             - Creates and starts camera object (self.camera)
-            - Sets self.config_size to (3280, 2464)
+            - Sets self.config_size to the active config size
             - Logs initialization steps
-        
+
         Example:
             >>> cam = BayerCam()
             >>> cam.setup_camera()
             >>> rgb, bayer, meta = cam.capture_frame()
         """
         try:
-            log.info(f"Initializing camera ({self.config['size'][0]}×{self.config['size'][1]} dual-stream)")
-            self.camera = Picamera2()
-            
-            # cfg = self.CONFIG_6
             size = self.config["size"]
-            
+            log.info(f"Initializing {self.model_description} "
+                     f"({size[0]}×{size[1]} dual-stream, "
+                     f"pattern={self.bayer_pattern})")
+            self.camera = Picamera2()
+
             # Configure dual-stream: RGB main + Bayer raw
-            log.debug(f"Configuring dual-stream: {size[0]}×{size[1]} RGB888 + SBGGR10")
+            log.debug(f"Configuring dual-stream: {size[0]}×{size[1]} RGB888 "
+                      f"+ {self.config['format']}")
             config = self.camera.create_still_configuration(
                 main={
                     "size":   size,
@@ -118,10 +204,11 @@ class BayerCam:
                 buffer_count=1,
             )
             self.camera.configure(config)
-            
+
             # Apply control settings
-            log.debug(f"Applying camera controls: exposure={self.exposure_us}µs, gain={self.analog_gain}")
-            self.camera.set_controls({
+            log.debug(f"Applying camera controls: exposure={self.exposure_us}µs, "
+                      f"gain={self.analog_gain}")
+            controls = {
                 "AeEnable":       False,
                 "ExposureTime":   self.exposure_us,
                 "AnalogueGain":   self.analog_gain,
@@ -131,7 +218,11 @@ class BayerCam:
                 "Sharpness":      0.0,
                 "Contrast":       1.0,
                 "Saturation":     1.0,
-            })
+            }
+            if self.has_autofocus:
+                # Disable autofocus on Module 3 — fixed focus needed for colorimetry
+                controls["AfMode"] = libcamera.controls.AfModeEnum.Manual
+            self.camera.set_controls(controls)
             
             self.camera.start()
             self.config_size = size
@@ -192,6 +283,67 @@ class BayerCam:
             err.handle(e, "Frame capture", recoverable=True)
             raise
     
+    def autofocus_once(self, timeout_s: float = 5.0) -> float:
+        """
+        Trigger a single autofocus sweep, wait for completion, then lock focus.
+
+        Switches the IMX708 to Auto AfMode, starts a focus sweep, polls
+        AfState until scanning completes or timeout_s elapses, then returns
+        to Manual mode locked at the settled lens position.
+
+        Only valid on cameras with has_autofocus == True (IMX708).
+        Camera must be started (setup_camera() called) before calling this.
+
+        Args:
+            timeout_s: Maximum seconds to wait for AF to settle (default 5.0).
+
+        Returns:
+            LensPosition at which focus was locked (diopters; 0.0 = infinity).
+
+        Raises:
+            RuntimeError: If camera is not initialized.
+            RuntimeError: If camera does not support autofocus.
+
+        Example:
+            >>> cam = BayerCam()
+            >>> cam.setup_camera()
+            >>> pos = cam.autofocus_once()
+            >>> print(f"Focused at lens position {pos:.2f}")
+        """
+        if self.camera is None:
+            raise RuntimeError("Camera not initialized. Call setup_camera() first.")
+        if not self.has_autofocus:
+            raise RuntimeError(
+                f"Camera {self.model_description} does not support autofocus."
+            )
+
+        log.info("Starting autofocus sweep...")
+        self.camera.set_controls({
+            "AfMode":    libcamera.controls.AfModeEnum.Auto,
+            "AfTrigger": libcamera.controls.AfTriggerEnum.Start,
+        })
+
+        deadline = time.monotonic() + timeout_s
+        meta = {}
+        while time.monotonic() < deadline:
+            time.sleep(0.1)
+            meta = self.camera.capture_metadata()
+            af_state = meta.get("AfState", 1)
+            if af_state != 1:   # 1 = Scanning; 0 = Idle, 2 = Focused, 3 = Failed
+                break
+
+        af_state   = meta.get("AfState", -1)
+        lens_pos   = meta.get("LensPosition", 1.0)
+        af_outcome = {0: "idle", 2: "focused", 3: "failed"}.get(af_state, f"state={af_state}")
+        log.info(f"Autofocus complete: {af_outcome}, LensPosition={lens_pos:.3f}")
+
+        # Lock focus at the settled position
+        self.camera.set_controls({
+            "AfMode":       libcamera.controls.AfModeEnum.Manual,
+            "LensPosition": lens_pos,
+        })
+        return lens_pos
+
     def set_exposure(self, exposure_us: int) -> None:
         """
         Set camera exposure time and apply to camera.
@@ -288,40 +440,63 @@ class BayerCam:
         return raw_bytes.view(np.uint16)[:, :pixel_width]
 
     @staticmethod
-    def extract_bayer_layers(bayer_array: np.ndarray) -> Dict[str, np.ndarray]:
+    def extract_bayer_layers(
+        bayer_array: np.ndarray,
+        pattern: str = "BGGR",
+    ) -> Dict[str, np.ndarray]:
         """
-        Extract the four color layers from BGGR Bayer pattern.
-        
-        Bayer mosaic layout in a (H, W) array:
-            - even rows, even cols   → B  (Blue)
-            - even rows, odd cols    → Gb (Green in blue row)
-            - odd rows, even cols    → Gr (Green in red row)
-            - odd rows, odd cols     → R  (Red)
-        
+        Extract the four color layers from a Bayer mosaic array.
+
+        Supports BGGR (Camera Module 2, IMX219) and RGGB (Camera Module 3,
+        IMX708).  Pass cam.bayer_pattern when calling on a BayerCam instance
+        so the correct layout is used automatically.
+
+        BGGR layout (IMX219):
+            - even rows, even cols → B   (Blue)
+            - even rows, odd cols  → Gb  (Green in blue row)
+            - odd rows,  even cols → Gr  (Green in red row)
+            - odd rows,  odd cols  → R   (Red)
+
+        RGGB layout (IMX708):
+            - even rows, even cols → R   (Red)
+            - even rows, odd cols  → Gr  (Green in red row)
+            - odd rows,  even cols → Gb  (Green in blue row)
+            - odd rows,  odd cols  → B   (Blue)
+
         Args:
             bayer_array: numpy array, shape (H, W), dtype uint16
-                         Raw Bayer sensor data, BGGR pattern
-        
+            pattern:     "BGGR" (default) or "RGGB"
+
         Returns:
-            dict with keys {'B', 'Gb', 'Gr', 'R'}, each containing
-            the extracted color layer as (H//2, W//2) array
-        
+            dict with keys {'B', 'Gb', 'Gr', 'R'}, each a (H//2, W//2) array
+
+        Raises:
+            ValueError: If pattern is not "BGGR" or "RGGB"
+
         Example:
             >>> bayer = np.random.randint(0, 1024, (480, 640), dtype=np.uint16)
-            >>> layers = BayerCam.extract_bayer_layers(bayer)
+            >>> layers = BayerCam.extract_bayer_layers(bayer, "BGGR")
             >>> layers['B'].shape
             (240, 320)
-            >>> layers['R'].shape
-            (240, 320)
         """
-
-        layers = {
-            'B':  bayer_array[0::2, 0::2],    # Blue: even rows, even cols
-            'Gb': bayer_array[0::2, 1::2],    # Green (blue row): even rows, odd cols
-            'Gr': bayer_array[1::2, 0::2],    # Green (red row): odd rows, even cols
-            'R':  bayer_array[1::2, 1::2],    # Red: odd rows, odd cols
-        }
-        return layers
+        if pattern == "BGGR":
+            return {
+                'B':  bayer_array[0::2, 0::2],
+                'Gb': bayer_array[0::2, 1::2],
+                'Gr': bayer_array[1::2, 0::2],
+                'R':  bayer_array[1::2, 1::2],
+            }
+        elif pattern == "RGGB":
+            return {
+                'R':  bayer_array[0::2, 0::2],
+                'Gr': bayer_array[0::2, 1::2],
+                'Gb': bayer_array[1::2, 0::2],
+                'B':  bayer_array[1::2, 1::2],
+            }
+        else:
+            raise ValueError(
+                f"Unknown Bayer pattern {pattern!r}. Use 'BGGR' or 'RGGB'."
+            )
 
     @staticmethod
     def save_frame(

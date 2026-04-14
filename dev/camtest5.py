@@ -67,13 +67,15 @@ import numpy as np
 # Constants
 # ---------------------------------------------------------------------------
 
-VERSION    = "1.3"     # increment each time a fix is applied
+VERSION    = "1.4"     # increment each time a fix is applied
 
-RAW_FORMAT = "SBGGR10"
-
-# Camera config 5: dual-stream RGB + Bayer, medium resolution
-CAMERA_SIZE    = (1640, 1232)
-CAMERA_COMMENT = "Config 5: Medium dual-stream RGB + Bayer (1640x1232)"
+# Camera parameters — set to IMX219 defaults; overridden in main() after
+# the camera model is detected via Picamera2.global_camera_info().
+RAW_FORMAT     = "SBGGR10"          # format string for create_still_configuration
+CAMERA_SIZE    = (1640, 1232)       # Config 5 half-resolution
+CAMERA_COMMENT = "Config 5: Camera Module 2 (IMX219) 1640×1232 dual-stream"
+BAYER_PATTERN  = "BGGR"            # passed to extract_bayer_layers
+HAS_AUTOFOCUS  = False              # True for IMX708 (Camera Module 3)
 
 # Starting exposure before auto-expose loop
 INITIAL_EXPOSURE_US = 100_000   # 100 ms
@@ -81,11 +83,11 @@ ANALOGUE_GAIN       = 1.0
 WB_GAINS_RB         = (1.0, 1.0)   # Neutral (R-gain, B-gain)
 
 # Auto-exposure parameters
-# IMX219 hardware maximum is 1,238,765 µs across all modes and resolutions.
-# Using 1,200,000 as the ceiling leaves a small margin below the hard cap.
 TARGET_FRACTION     = 0.70     # Target 70 % of full-scale
 BAYER_MAX           = 1023     # 10-bit raw pixel maximum (2^10 - 1)
-MAX_EXPOSURE_US     = 1_200_000  # Hardware ceiling ~1,238,765 µs
+# MAX_EXPOSURE_US is set per-sensor in main() after model detection.
+# Default matches IMX219 hardware cap (~1,238,765 µs; margin left).
+MAX_EXPOSURE_US     = 1_200_000
 MIN_EXPOSURE_US     = 1_000      # 1 ms floor
 EXPOSURE_TOLERANCE  = 0.01       # Converge when change < 1 %
 
@@ -103,14 +105,17 @@ from lighting import (
 
 def build_camera() -> "Picamera2":
     """
-    Create and configure Picamera2 for Config 5 (dual-stream, 1640x1232).
+    Create and configure Picamera2 for Config 5 dual-stream capture.
+
+    Uses the module-level CAMERA_SIZE, RAW_FORMAT, and HAS_AUTOFOCUS, which
+    are set in main() based on the detected camera model (IMX219 or IMX708).
 
     Camera is set up with:
     - Auto-exposure and AWB disabled (manual control)
     - Fixed analogue gain and neutral colour gains
     - Noise reduction and sharpening disabled (preserve raw signal)
     - Initial exposure INITIAL_EXPOSURE_US
-    - Raw stream in SBGGR10 (unpacked uint16, range 0–1023)
+    - On Camera Module 3 (IMX708): autofocus set to Manual
 
     Returns:
         Picamera2 instance (started, ready for capture)
@@ -125,7 +130,7 @@ def build_camera() -> "Picamera2":
         buffer_count=1,
     )
     picam2.configure(config)
-    picam2.set_controls({
+    controls = {
         "AeEnable":           False,
         "ExposureTime":       INITIAL_EXPOSURE_US,
         "AnalogueGain":       ANALOGUE_GAIN,
@@ -135,7 +140,10 @@ def build_camera() -> "Picamera2":
         "Sharpness":          0.0,
         "Contrast":           1.0,
         "Saturation":         1.0,
-    })
+    }
+    if HAS_AUTOFOCUS:
+        controls["AfMode"] = libcamera.controls.AfModeEnum.Manual
+    picam2.set_controls(controls)
     picam2.start()
     time.sleep(3.0)     # Allow sensor to stabilize after start
     return picam2
@@ -984,6 +992,8 @@ def main() -> int:
     # and argument errors exit without loading slow or unavailable libraries.
     global Picamera2, libcamera, PLATFORM
     global cv2, CV2_AVAILABLE
+    global CAMERA_SIZE, CAMERA_COMMENT, RAW_FORMAT, BAYER_PATTERN
+    global MAX_EXPOSURE_US, HAS_AUTOFOCUS
 
     try:
         from picamera2 import Picamera2
@@ -1000,6 +1010,31 @@ def main() -> int:
         CV2_AVAILABLE = True
     except ImportError:
         CV2_AVAILABLE = False
+
+    # Detect the camera model and apply model-specific parameters.
+    # global_camera_info() is a class method that does not open the camera.
+    _cam_model = "imx219"   # default
+    try:
+        _info = Picamera2.global_camera_info()
+        if _info:
+            _cam_model = _info[0].get("Model", "imx219").lower()
+    except Exception:
+        pass
+
+    if _cam_model == "imx708":                  # Camera Module 3
+        CAMERA_SIZE    = (2304, 1296)
+        CAMERA_COMMENT = "Config 5: Camera Module 3 (IMX708) 2304×1296 dual-stream"
+        RAW_FORMAT     = "SRGGB10_CSI2P"
+        BAYER_PATTERN  = "RGGB"
+        MAX_EXPOSURE_US = 112_000_000           # 112 seconds
+        HAS_AUTOFOCUS   = True
+    else:                                        # Camera Module 2 (IMX219, default)
+        CAMERA_SIZE    = (1640, 1232)
+        CAMERA_COMMENT = "Config 5: Camera Module 2 (IMX219) 1640×1232 dual-stream"
+        RAW_FORMAT     = "SBGGR10"
+        BAYER_PATTERN  = "BGGR"
+        MAX_EXPOSURE_US = 1_200_000             # ~1.2 seconds
+        HAS_AUTOFOCUS   = False
 
     test_name  = args.test_name
     over_pcts  = sorted(args.over)
@@ -1029,6 +1064,9 @@ def main() -> int:
     print(f"  Test name   : {test_name}")
     print(f"  Platform    : {PLATFORM}")
     print(f"  Camera      : {CAMERA_COMMENT}")
+    print(f"  Bayer       : {BAYER_PATTERN}  "
+          f"autofocus={'yes (disabled)' if HAS_AUTOFOCUS else 'no'}  "
+          f"max_exp={MAX_EXPOSURE_US // 1000} ms")
     print(f"  Colors      : {', '.join(colors)}")
     print(f"  Exposures   : 1 nominal", end="")
     if over_pcts:

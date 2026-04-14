@@ -212,7 +212,20 @@ def _enumerate_filter(iterable):
 def index():
     sec = request.args.get("section", state["section"])
     state["section"] = sec
-    return render_template("index.html", state=state, led_order=LED_ORDER)
+    return render_template("index.html", state=state, led_order=LED_ORDER,
+                           has_autofocus=cam.has_autofocus)
+
+
+@app.route("/autofocus", methods=["POST"])
+def autofocus():
+    state["last_error"] = None
+    state["last_msg"]   = None
+    try:
+        pos = cam.autofocus_once()
+        state["last_msg"] = f"Autofocus complete — lens position {pos:.3f}"
+    except Exception as exc:
+        state["last_error"] = str(exc)
+    return redirect(url_for("index", section="camera"))
 
 
 @app.route("/capture", methods=["POST"])

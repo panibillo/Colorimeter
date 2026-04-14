@@ -59,20 +59,20 @@
     min-width: 80px; text-align: center;
   }
   .led-btn.off  { background: #ccc; color: #666; }
-  .led-btn.on   { color: #fff; border-color: #333; }
-  .led-White.on  { background: #bbb; color: #000; border-color: #333; }
+  .led-btn.on   { color: #ff8; border-color: #333; }
+  .led-White.on  { background: #fff; color: #000; border-color: #333; }
   .led-Red.on    { background: #c0392b; }
   .led-Green.on  { background: #27ae60; }
   .led-Blue.on   { background: #2980b9; }
-  .led-Violet.on { background: #8e44ad; }
+  .led-Violet.on { background: #ce8bea; }
 
   /* Stats table */
   .stats td { text-align: right; }
   .stats td:first-child { text-align: left; font-weight: bold; }
-  .ch-B  { color: #2980b9; }
-  .ch-Gb { color: #27ae60; }
-  .ch-Gr { color: #1e8449; }
-  .ch-R  { color: #c0392b; }
+  .ch-B  { color: #2b6cef; }
+  .ch-Gb { color: #08d295; }
+  .ch-Gr { color: #51c52e; }
+  .ch-R  { color: #f12b15; }
 
   /* Plots */
   .plots { display: flex; gap: 16px; flex-wrap: wrap; margin-top: 10px; }
@@ -146,6 +146,15 @@
     <button type="submit" class="btn">Collect suite (all LEDs)</button>
   </form>
 </fieldset>
+
+{% if has_autofocus %}
+<fieldset>
+  <legend>Focus (IMX708)</legend>
+  <form method="post" action="/autofocus">
+    <button type="submit" class="btn">Autofocus</button>
+  </form>
+</fieldset>
+{% endif %}
 
 <fieldset>
   <legend>Target Rects</legend>

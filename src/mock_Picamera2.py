@@ -19,7 +19,6 @@ Usage:
         from mock_Picamera2 import Picamera2
 """
 
-import os
 import numpy as np
 from pathlib import Path
 from types import SimpleNamespace as sns
@@ -105,6 +104,21 @@ class Picamera2:
         "6": ("cfg6_sbggr1", True),
     }
     
+    @classmethod
+    def global_camera_info(cls):
+        """
+        Return mock camera info list, simulating Picamera2.global_camera_info().
+
+        Returns a single-item list describing an IMX219 (Camera Module 2).
+        Change the Model value here to test IMX708 (Camera Module 3) paths.
+
+        Returns:
+            List of dicts, one per camera, with keys Id, Model, Location,
+            Rotation, Num — the same structure as the real Picamera2.
+        """
+        return [{"Id": "mock", "Model": "imx219", "Location": 2,
+                 "Rotation": 180, "Num": 0}]
+
     def __init__(self):
         """Initialize mock camera."""
         self.started = False
@@ -182,12 +196,17 @@ class Picamera2:
                 return "2"
             elif size == (3280, 2464):
                 return "3"
-        elif fmt == "SBGGR10_CSI2P":
+        elif fmt in ("SBGGR10", "SBGGR10_CSI2P"):    # IMX219 BGGR formats
             if size == (640, 480):
                 return "4"
             elif size == (1640, 1232):
                 return "5"
             elif size == (3280, 2464):
+                return "6"
+        elif fmt in ("SRGGB10", "SRGGB10_CSI2P"):    # IMX708 RGGB formats
+            if size == (2304, 1296):
+                return "5"
+            elif size == (4608, 2592):
                 return "6"
         return None
     
