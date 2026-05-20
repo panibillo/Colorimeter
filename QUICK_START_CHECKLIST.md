@@ -12,7 +12,7 @@
 
 ### 1. Create mock_camera Directory
 ```bash
-cd /home/bill/eclipse-workspace1/Colorimeter
+cd /home/bill/Projects/Colorimeter
 mkdir -p mock_camera
 ```
 
@@ -93,7 +93,7 @@ ls -la mock_camera/
 ### 4. Test the Mock Module
 ```python
 import sys
-sys.path.insert(0, '/home/bill/eclipse-workspace1/Colorimeter/src')
+sys.path.insert(0, '/home/bill/Projects/Colorimeter/src')
 
 from mock_Picamera2 import Picamera2
 
@@ -150,7 +150,7 @@ Then the rest of the code works unchanged on both RPi and desktop!
 ## Troubleshooting
 
 ### "Mock camera directory not found"
-→ Ensure `mock_camera/` exists in `/home/bill/eclipse-workspace1/Colorimeter/`
+→ Ensure `mock_camera/` exists in `/home/bill/Projects/Colorimeter/`
 
 ### "cfg1_rgb888_00.jpg [Errno 2] No such file or directory"
 → You haven't populated the mock_camera directory yet. See Step 2 above.

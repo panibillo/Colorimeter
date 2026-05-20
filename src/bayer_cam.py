@@ -7,6 +7,9 @@ The attached camera model is detected automatically at init time via
 Picamera2.global_camera_info(), and CONFIG_5/CONFIG_6 sizes, maximum
 exposure, Bayer pattern, and autofocus availability are set accordingly.
 
+Camera details (including spectral response curves!)
+https://www.raspberrypi.com/documentation/accessories/camera.html#camera-module-3
+
 Methods:
   - setup_camera()       Configure and start dual-stream RGB + Bayer capture
   - capture_frame()      Capture one frame; returns (rgb, bayer, metadata)

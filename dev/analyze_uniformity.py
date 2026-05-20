@@ -22,7 +22,7 @@ from pathlib import Path
 
 # Allow importing sibling modules from the dev/ directory
 sys.path.insert(0, str(Path(__file__).parent))
-from analyze_SNR import measure_bayer_noise
+from analyze_SNR import gaussian_smooth_bayer, poly_smooth_bayer
 
 # ---------------------------------------------------------------------------
 # Camera detection
@@ -219,12 +219,14 @@ def symmetric_sum(layer: np.ndarray) -> np.ndarray:
     return orig + rot180 + flip_v + flip_h
 
 
-def plot_contour(smoothed_layers: dict, img_shape: tuple, pattern: str, stem: str):
+def plot_contour(smoothed_layers: dict, img_shape: tuple, pattern: str, stem: str,
+                 method: str = ""):
     """Figure 3: contour map of simulated 4-corner symmetric illumination (smoothed)."""
     H, W = img_shape
+    method_label = f"{method}-smoothed  |  " if method else ""
     fig, axes = _setup_fig(
         f"4-corner symmetric illumination (contour) — {stem}  ({W}×{H} px, {pattern})\n"
-        f"Gaussian-smoothed  |  original + 180° rot + horiz mirror + vert mirror"
+        f"{method_label}original + 180° rot + horiz mirror + vert mirror"
     )
 
     for idx, name in enumerate(LAYER_ORDER):
@@ -255,12 +257,49 @@ def plot_contour(smoothed_layers: dict, img_shape: tuple, pattern: str, stem: st
 # Main
 # ---------------------------------------------------------------------------
 
+PICAM_DIR = Path("/home/upload/picam")
+
+
+def resolve_npy_path(arg) -> Path:
+    """
+    Resolve a .npy file path from a command-line argument.
+
+    Rules:
+      - No argument   → most recent .npy in PICAM_DIR
+      - Numeric string (e.g. '14') → file in PICAM_DIR whose name ends in '14.npy'
+      - Anything else → treat as a direct file path
+    """
+    if arg is None:
+        candidates = sorted(PICAM_DIR.glob("*.npy"), key=lambda p: p.stat().st_mtime)
+        if not candidates:
+            print(f"Error: no .npy files found in {PICAM_DIR}")
+            sys.exit(1)
+        path = candidates[-1]
+        print(f"Using most recent: {path.name}")
+        return path
+
+    if arg.isdigit():
+        matches = [p for p in PICAM_DIR.glob("*.npy") if p.stem.endswith(arg)]
+        if not matches:
+            print(f"Error: no .npy file ending in '{arg}' found in {PICAM_DIR}")
+            sys.exit(1)
+        if len(matches) > 1:
+            print(f"Warning: multiple matches for '{arg}', using most recent:")
+            matches = sorted(matches, key=lambda p: p.stat().st_mtime)
+            for m in matches:
+                print(f"  {m.name}")
+        return matches[-1]
+
+    return Path(arg)
+
+
 def main():
-    if len(sys.argv) != 2:
-        print(f"Usage: {sys.argv[0]} <image.npy>")
+    arg = sys.argv[1] if len(sys.argv) > 1 else None
+    if len(sys.argv) > 2:
+        print(f"Usage: {sys.argv[0]} [<image.npy> | <number> | (blank for latest)]")
         sys.exit(1)
 
-    npy_path = Path(sys.argv[1])
+    npy_path = resolve_npy_path(arg)
     if not npy_path.exists():
         print(f"Error: file not found: {npy_path}")
         sys.exit(1)
@@ -281,27 +320,32 @@ def main():
     for name, arr in layers.items():
         print(f"  {name}: shape={arr.shape}  mean={arr.mean():.1f}  max={arr.max()}")
 
-    # Noise / SNR analysis and Gaussian smoothing via analyze_SNR
-    smoothed_layers, info = measure_bayer_noise(bayer)
+    # Gaussian smooth — SNR analysis
+    gauss_layers, gauss_info = gaussian_smooth_bayer(bayer)
 
-    print("\n--- SNR analysis ---")
-    print(f"  image_size  : {info['image_size']}")
-    print(f"  rect        : {info['rect']}")
-    print(f"  kernel_size : {info['kernel_size']}")
-    print(f"  sigma       : {info['sigma']}")
-    print(f"  black_level : {info['black_level']}")
+    print("\n--- SNR analysis (Gaussian smooth) ---")
+    print(f"  image_size  : {gauss_info['image_size']}")
+    print(f"  kernel_size : {gauss_info['kernel_size']}")
+    print(f"  sigma       : {gauss_info['sigma']}")
+    print(f"  black_level : {gauss_info['black_level']}")
     print(f"  {'Chan':>4}  {'mean':>8}  {'signal':>8}  {'noise_std':>10}  {'rel_noise':>10}  {'SNR':>8}")
-    for ch, m in info['channels'].items():
+    for ch, m in gauss_info['channels'].items():
         print(f"  {ch:>4}  {m['mean']:8.1f}  {m['signal']:8.1f}  "
               f"{m['noise_stdev']:10.3f}  {m['relative_noise']:10.6f}  {m['snr']:8.2f}")
 
-    # # Remap G1/G2 keys from measure_bayer_noise to Gb/Gr used by LAYER_ORDER
-    # smoothed_layers = {
-    #     'B':  smoothed_raw['B'],
-    #     'Gb': smoothed_raw['G1'],
-    #     'Gr': smoothed_raw['G2'],
-    #     'R':  smoothed_raw['R'],
-    # }
+    # Polynomial smooth — surface fit for contour plots
+    poly_layers, poly_info = poly_smooth_bayer(bayer, poly_degree=4)
+
+    print("\n--- SNR analysis (poly smooth, degree 4) ---")
+    print(f"  poly_degree       : {poly_info['poly_degree']}")
+    print(f"  fit_downsampled   : {poly_info['poly_fit_downsampled']}")
+    if poly_info['poly_fit_downsampled']:
+        print(f"  fit_grid (w×h)    : {poly_info['poly_fit_grid']}")
+    print(f"  black_level       : {poly_info['black_level']}")
+    print(f"  {'Chan':>4}  {'mean':>8}  {'signal':>8}  {'noise_std':>10}  {'rel_noise':>10}  {'SNR':>8}")
+    for ch, m in poly_info['channels'].items():
+        print(f"  {ch:>4}  {m['mean']:8.1f}  {m['signal']:8.1f}  "
+              f"{m['noise_stdev']:10.3f}  {m['relative_noise']:10.6f}  {m['snr']:8.2f}")
 
     stem     = npy_path.stem
     out_dir  = Path("/home/bill/R")
@@ -313,7 +357,7 @@ def main():
     plot_v_strips(layers, (H, W), pattern, stem)
     plt.savefig(out_dir / f"{stem}_vbalance.png", dpi=150, bbox_inches='tight')
 
-    plot_contour(smoothed_layers, (H, W), pattern, stem)
+    plot_contour(poly_layers, (H, W), pattern, stem, method="poly")
     plt.savefig(out_dir / f"{stem}_contours.png", dpi=150, bbox_inches='tight')
 
     print(f"\nSaved plots to {out_dir}/")

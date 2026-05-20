@@ -61,16 +61,26 @@ _CONFIG_DEFAULTS = {
     "camera_settings": {},
     # Data fields persisted across restarts
     "data": {
-        "title":     "",
-        "basename":  "img",
-        "led_desc":  "",
-        "geometry":  "",
-        "target":    "",
-        "vcc":       "",
-        "vled":      "",
-        "vr":        "",
-        "ma":        "",
-        "r_ohm":     "",
+        "title":       "",
+        "basename":    "img",
+        "led_desc":    "",
+        "geometry":    "",
+        "target":      "",
+        "vcc":         "",
+        "vled":        "",
+        "vr":          "",
+        "ma":          "",
+        "r_ohm":       "",
+        "remarks":     "",
+        "focal_mm":    "",
+        "box_dim_x":   "",
+        "box_dim_y":   "",
+        "box_lining":  "",
+        "light_x":     "",
+        "light_y":     "",
+        "light_z":     "",
+        "light_ax":    "",
+        "light_ay":    "",
     },
     # Upload checkboxes
     "upload_jpg":  True,
@@ -78,7 +88,7 @@ _CONFIG_DEFAULTS = {
     "upload_data": True,
     # Upload destination
     "sftp_host":   "sunny",
-    "sftp_remote": "/home/bill/colorimeter/uploads/",
+    "sftp_remote": "picam/", # /home/upload/picam
 }
 
 
@@ -326,11 +336,16 @@ def _assemble_txt(result: dict, filenames: dict) -> str:
         f"timestamp:     {result['timestamp']}",
         f"title:         {d['title']}",
         f"basename:      {d['basename']}",
+        f"remarks:       {d['remarks']}",
         "",
         "--- setup ---",
         f"led_desc:      {d['led_desc']}",
         f"geometry:      {d['geometry']}",
         f"target:        {d['target']}",
+        f"focal_mm:      {d['focal_mm']}",
+        f"box_dim:       ({d['box_dim_x']}, {d['box_dim_y']})",
+        f"box_lining:    {d['box_lining']}",
+        f"light_coords:  ({d['light_x']}, {d['light_y']}, {d['light_z']}, {d['light_ax']}, {d['light_ay']})",
         f"vcc:           {d['vcc']}",
         f"vled:          {d['vled']}",
         f"vr:            {d['vr']}",
@@ -458,6 +473,7 @@ def _do_upload() -> dict:
                 conn.put(BytesIO(data) if isinstance(data, bytes) else BytesIO(data),
                          remote=remote_path)
                 uploaded.append(filenames[ext])
+                print(f"Uploaded to /home/upload/{remote_path}")
         sftp_ok = True
     except Exception as e:
         error = str(e)
@@ -522,11 +538,19 @@ def index():
     )
 
 
+def _read_data_fields():
+    """Read all data fields from the current request form into cfg['data']."""
+    for key in cfg["data"]:
+        val = request.form.get(key, cfg["data"][key])
+        cfg["data"][key] = val
+
+
 @app.route("/capture", methods=["POST"])
 def capture():
     state["last_error"] = None
     state["last_msg"]   = None
     try:
+        _read_data_fields()
         exp_ms = float(request.form.get("exposure_ms", state["exposure_ms"]))
         state["exposure_ms"] = exp_ms
         # Persist exposure per camera model
@@ -548,9 +572,7 @@ def upload():
     cfg["upload_npy"]  = "upload_npy"  in request.form
     cfg["upload_data"] = "upload_data" in request.form
     # Read data fields
-    for key in cfg["data"]:
-        val = request.form.get(key, cfg["data"][key])
-        cfg["data"][key] = val
+    _read_data_fields()
     try:
         info = _do_upload()
         if info["sftp_ok"]:
@@ -606,6 +628,31 @@ def settings():
     _save_config(cfg)
     state["last_msg"] = "Settings saved."
     return redirect(url_for("index", section="settings"))
+
+
+@app.route("/terminate", methods=["POST"])
+def terminate():
+    """Clean up hardware and exit the Flask process."""
+    _cleanup()
+    os.kill(os.getpid(), signal.SIGTERM)
+    return "Terminating…", 200   # response may not reach browser
+
+
+def _is_mock() -> bool:
+    """True when running without real GPIO (desktop/stub mode)."""
+    return not (hasattr(leds, "_leds") and leds._leds)
+
+
+@app.route("/shutdown", methods=["POST"])
+def shutdown():
+    """Clean up hardware and power off the Raspberry Pi."""
+    _cleanup()
+    if _is_mock():
+        logging.warning("Shutdown requested but running in stub/mock mode — skipped.")
+        state["last_msg"] = "Shutdown skipped (mock mode — no real GPIO)."
+        return redirect(url_for("index", section="settings"))
+    os.system("sudo shutdown -h now")
+    return "Shutting down…", 200
 
 
 @app.route("/rects", methods=["POST"])

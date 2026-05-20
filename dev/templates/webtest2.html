@@ -129,22 +129,24 @@
 {# --- Left column: controls --- #}
 <div>
 
-  <fieldset>
-    <legend>Capture</legend>
-
-    {# Autofocus (IMX708 only) #}
-    {% if has_autofocus %}
-    <div class="row" style="margin-bottom:10px">
-      <form method="post" action="/autofocus">
-        <button type="submit" class="btn">Autofocus</button>
-      </form>
-      {% if state.last_result and state.last_result.lens_position is not none %}
-        <small>lens pos: {{ "%.3f"|format(state.last_result.lens_position) }} diopters</small>
-      {% endif %}
-    </div>
+  {# Autofocus (IMX708 only) — own form, independent of the main form #}
+  {% if has_autofocus %}
+  <div class="row" style="margin-bottom:10px">
+    <form method="post" action="/autofocus">
+      <button type="submit" class="btn">Autofocus</button>
+    </form>
+    {% if state.last_result and state.last_result.lens_position is not none %}
+      <small>lens pos: {{ "%.3f"|format(state.last_result.lens_position) }} diopters</small>
     {% endif %}
+  </div>
+  {% endif %}
 
-    <form method="post" action="/capture">
+  {# Single form wrapping both Capture and Upload so all fields are
+     submitted on either button press, preserving user-entered values. #}
+  <form method="post">
+
+    <fieldset>
+      <legend>Capture</legend>
       <div class="row">
         <span class="label">Exposure (ms)</span>
         <input type="number" name="exposure_ms" class="wide"
@@ -156,14 +158,12 @@
               {% if active %}{{ active|join(', ') }}{% else %}none{% endif %}</span>
       </div>
       <div class="row" style="margin-top:8px">
-        <button type="submit" class="btn primary">Capture</button>
+        <button type="submit" formaction="/capture" class="btn primary">Capture</button>
       </div>
-    </form>
-  </fieldset>
+    </fieldset>
 
-  <fieldset>
-    <legend>Upload</legend>
-    <form method="post" action="/upload">
+    <fieldset>
+      <legend>Upload</legend>
 
       {# Checkboxes #}
       <div class="cb-row" style="margin-bottom:10px">
@@ -210,6 +210,46 @@
                value="{{ cfg.data.target }}">
         <small>first 2 chars → filename</small>
       </div>
+      <div class="row">
+        <span class="label">Remarks</span>
+        <input type="text" name="remarks" class="long"
+               value="{{ cfg.data.remarks }}">
+      </div>
+      <div class="row">
+        <span class="label">Focal length (mm)</span>
+        <input type="number" name="focal_mm" class="short"
+               value="{{ cfg.data.focal_mm }}" min="0" step="any">
+      </div>
+      <div class="row">
+        <span class="label">Box dimensions</span>
+        <input type="number" name="box_dim_x" class="short"
+               value="{{ cfg.data.box_dim_x }}" min="0" placeholder="X">
+        <span style="color:#888">&times;</span>
+        <input type="number" name="box_dim_y" class="short"
+               value="{{ cfg.data.box_dim_y }}" min="0" placeholder="Y">
+        <small>mm</small>
+      </div>
+      <div class="row">
+        <span class="label">Box lining</span>
+        <input type="text" name="box_lining" class="medium"
+               value="{{ cfg.data.box_lining }}">
+      </div>
+      <div class="row" style="align-items:flex-start">
+        <span class="label" style="padding-top:4px">Light coords</span>
+        <span>
+          <input type="number" name="light_x"  class="short"
+                 value="{{ cfg.data.light_x  }}" placeholder="x">
+          <input type="number" name="light_y"  class="short"
+                 value="{{ cfg.data.light_y  }}" placeholder="y">
+          <input type="number" name="light_z"  class="short"
+                 value="{{ cfg.data.light_z  }}" placeholder="z">
+          <input type="number" name="light_ax" class="short"
+                 value="{{ cfg.data.light_ax }}" placeholder="ax">
+          <input type="number" name="light_ay" class="short"
+                 value="{{ cfg.data.light_ay }}" placeholder="ay">
+          <br><small style="margin-left:2px">x, y, z, ax, ay</small>
+        </span>
+      </div>
 
       <h3 style="margin-top:10px">Circuit</h3>
       <table>
@@ -233,15 +273,16 @@
       </table>
 
       <div class="row" style="margin-top:8px">
-        <button type="submit" class="btn success"
+        <button type="submit" formaction="/upload" class="btn success"
                 {% if not state.last_result %}disabled title="Capture first"{% endif %}>
           Upload
         </button>
         <small>seq: {{ cfg.sequence }}</small>
         <small>host: {{ cfg.sftp_host }}</small>
       </div>
-    </form>
-  </fieldset>
+    </fieldset>
+
+  </form>
 
 </div>{# end left col #}
 
@@ -387,6 +428,20 @@
     </div>
   </fieldset>
 </form>
+
+<fieldset>
+  <legend>System</legend>
+  <div class="row" style="gap:16px; margin-top:4px">
+    <form method="post" action="/terminate"
+          onsubmit="return confirm('Terminate the server process?')">
+      <button type="submit" class="btn danger">Terminate script</button>
+    </form>
+    <form method="post" action="/shutdown"
+          onsubmit="return confirm('Shut down the Raspberry Pi?')">
+      <button type="submit" class="btn danger">Shutdown RPi</button>
+    </form>
+  </div>
+</fieldset>
 
 <fieldset>
   <legend>Info</legend>

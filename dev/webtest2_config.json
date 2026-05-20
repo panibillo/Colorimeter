@@ -1,5 +1,5 @@
 {
-  "sequence": 0,
+  "sequence": 1,
   "rects": [
     {
       "name": "full",
@@ -9,18 +9,32 @@
       "height": 1232
     }
   ],
-  "camera_settings": {},
+  "camera_settings": {
+    "imx219": {
+      "exposure_ms": 100.0
+    }
+  },
   "data": {
-    "title": "",
-    "basename": "img",
-    "led_desc": "",
-    "geometry": "",
-    "target": "",
-    "vcc": "",
-    "vled": "",
-    "vr": "",
-    "ma": "",
-    "r_ohm": ""
+    "title": "Test series 5.1",
+    "basename": "TstB",
+    "led_desc": "Green",
+    "geometry": "K72",
+    "target": "Yp Yellow Plain",
+    "vcc": "5.000",
+    "vled": "2.65",
+    "vr": "2.35",
+    "ma": "0.16",
+    "r_ohm": "155",
+    "remarks": "Aim lights toward opposite side",
+    "focal_mm": "72",
+    "box_dim_x": "77",
+    "box_dim_y": "100",
+    "box_lining": "Black",
+    "light_x": "9",
+    "light_y": "15",
+    "light_z": "3",
+    "light_ax": "50",
+    "light_ay": "0"
   },
   "upload_jpg": true,
   "upload_npy": true,
