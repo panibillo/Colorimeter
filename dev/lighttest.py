@@ -22,7 +22,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
-from lighting import LedController, LED_PINS
+from lighting_lightboard1 import LedController, LED_PINS
 
 # Map single-letter shorthand to LED names
 _LETTER = {

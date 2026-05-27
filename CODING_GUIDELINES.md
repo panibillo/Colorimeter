@@ -7,6 +7,9 @@
 - **Development platform**: Desktop (Linux/macOS/Windows) with mock libraries
 - **Test platform**: Desktop with mock_Picamera2 and other hardware mocks
 - **Real hardware**: Only on RPi; desktop uses mock implementations
+- **Deprecated libraries and methods**
+  - Detect and warn when deprecated libraries or methods are found in the code.
+  - Do not use deprecated libraries or methods without first warning and getting permission.
 
 ## Code Style
 
@@ -130,6 +133,87 @@ Details about internal design
 
 Code example showing typical use
 ```
+
+## GPIO and Hardware Library Guidelines
+
+### Rule 1 — Always abstract hardware access
+
+Never call a GPIO library directly from application or UI code.
+Wrap every hardware resource in a class with a stable public interface.
+
+**Do this:**
+```python
+class Backlight:
+    def set_percent(self, pct: float) -> None:
+        """Set backlight brightness 0.0–100.0."""
+        self._pwm.value = pct / 100.0
+```
+
+**Not this:**
+```python
+# Application code calling the library directly — do not do this
+from gpiozero import PWMOutputDevice
+_bl = PWMOutputDevice(13)
+_bl.value = 0.75
+```
+
+The abstraction class is the only place that imports a hardware library.
+This makes the backend swappable and keeps application code portable.
+
+### Rule 2 — Use the approved library for each purpose
+
+| Purpose               | Use              | Do not use                        |
+|-----------------------|------------------|-----------------------------------|
+| General GPIO          | `gpiozero`       | `RPi.GPIO`, direct `/sys/class/gpio` |
+| PWM outputs           | `gpiozero`       | `pigpio`, `RPi.GPIO` software PWM |
+| Hardware PWM (buzzer) | `lgpio`          | `pigpio` / `pigpiod`              |
+| SPI                   | `spidev`         | —                                 |
+| I2C                   | `smbus2`         | —                                 |
+
+### Rule 3 — No daemon dependencies
+
+Do not introduce any library that requires a background daemon
+(e.g. `pigpiod`). Install instructions must work with a plain
+`pip install` or `apt install` into a standard Bookworm environment
+with no pre-conditions beyond enabling SPI and I2C in `raspi-config`.
+
+### Rule 4 — No tight Raspberry Pi-only APIs in shared modules
+
+Modules under `colorimeter/` must not import anything that prevents the
+code from being imported on a non-Pi host (e.g. a developer laptop
+running tests). Use the abstraction layer to inject hardware; keep
+business logic and data processing hardware-free.
+
+Pattern for testability:
+```python
+class LEDBank:
+    def __init__(self, backend=None):
+        if backend is None:
+            from .backends.gpiozero_backend import GpiozeroLEDBackend
+            backend = GpiozeroLEDBackend()
+        self._backend = backend
+
+    def set_channel(self, channel: int, on: bool) -> None:
+        self._backend.set_channel(channel, on)
+```
+
+In tests, pass a mock backend. On hardware, let it default.
+
+### Rule 5 — PWM: start with gpiozero, escalate if testing shows need
+
+`gpiozero.PWMOutputDevice` uses software PWM by default. For backlight
+dimming this is sufficient. For the passive buzzer (audio frequencies),
+hardware PWM via `lgpio` is required for clean tones. Do not assume
+software PWM is acceptable for new PWM uses — test audible or
+timing-sensitive outputs before shipping.
+
+### Installation baseline (Bookworm)
+
+```bash
+sudo apt install -y python3-gpiozero python3-spidev python3-smbus2 python3-lgpio
+```
+
+No daemon setup steps. No `sudo systemctl enable` required.
 
 ## Configuration and Import Patterns
 

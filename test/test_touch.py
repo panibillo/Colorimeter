@@ -14,11 +14,15 @@ Usage:
 """
 
 import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
+
 import time
 
 from ili9341 import ILI9341
 from tsc2007 import TSC2007
 from geometry import Rect
+from utils import install_exit_signals
 
 
 def test_calibrate(d: ILI9341, t: TSC2007):
@@ -135,6 +139,7 @@ def usage():
     sys.exit(1)
 
 if __name__ == "__main__":
+    install_exit_signals()
     if len(sys.argv) < 2:
         usage()
     cmd = sys.argv[1].lower()

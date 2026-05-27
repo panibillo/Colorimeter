@@ -1,228 +1,349 @@
+#!/usr/bin/env python3
 """
 led_control.py  —  LED channel control for Colorimeter prototype
 ----------------------------------------------------------------
 Hardware:
-  Channels 1-8 : 74HC595 shift register via SPI1
-                 QA=ch1 ... QH=ch8
-                 SPI1 MOSI = GPIO20 (pin 38)
-                 SPI1 SCLK = GPIO21 (pin 40)
-                 RCLK      = GPIO24 (pin 18)  -- manual latch
-  Channel  9   : GPIO7  (pin 26) direct output
-  Channel 10   : GPIO25 (pin 22) direct output
+  Channels 3-10 : 74HC595 shift register via SPI1
+                  ch3(blue)=QA ... ch10(white)=QH
+                  SPI1 MOSI = GPIO20 (pin 38)
+                  SPI1 SCLK = GPIO21 (pin 40)
+                  RCLK      = GPIO24 (pin 18) -- manual latch
+  Channel  1    : GPIO25 (pin 22) direct -- violet    410 nm
+  Channel  2    : GPIO7  (pin 26) direct -- royal_blue 455 nm
+
+  Note: GPIO7 = SPI0_CE1. Requires dtoverlay=spi0-1cs in
+  /boot/firmware/config.txt so the kernel only claims CE0 (GPIO8),
+  leaving GPIO7 free for general use.
+
+Channels 1-10 are ordered by increasing wavelength:
+
+  Ch  Name         nm    Hardware
+   1  violet       410   GPIO25 (direct)
+   2  royal_blue   455   GPIO7  (direct)
+   3  blue         475   shift reg bit 7
+   4  cyan         500   shift reg bit 6
+   5  green        525   shift reg bit 5
+   6  amber        590   shift reg bit 4
+   7  red_orange   615   shift reg bit 3
+   8  red          625   shift reg bit 2
+   9  photo_red    660   shift reg bit 1
+  10  white         —    shift reg bit 0
 
 Usage as a test script:
   python3 led_control.py <start> <end> <duration>
-  python3 led_control.py 1 5 2.0    # light channels 1-5 for 2 seconds
-  python3 led_control.py 9 10 1.0   # light channels 9-10 for 1 second
-  python3 led_control.py 1 10 0.5   # walk all channels, 0.5s each
+  python3 led_control.py 1 10 0.5        # walk all, 0.5 s each
+  python3 led_control.py blue red 1.0    # walk by name
+  python3 led_control.py 1 2 1.0         # direct-GPIO channels only
 """
 
-import spidev
-import RPi.GPIO as GPIO
-import time
 import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
-# ── Pin assignments ───────────────────────────────────────────
-_RCLK_PIN   = 24    # BCM — 74HC595 latch (manual GPIO)
+import spidev
+from gpiozero import DigitalOutputDevice
+import time
+
+from utils import install_exit_signals
+
+# ── Hardware pin assignments ──────────────────────────────────
+_RCLK_PIN    = 24       # BCM — 74HC595 register clock (latch)
 _DIRECT_PINS = {
-    9:  7,    # BCM GPIO7
-    10: 25,   # BCM GPIO25
+    1: 25,   # violet     410 nm
+    2:  7,   # royal_blue 455 nm
 }
 
-# ── Module-level state ────────────────────────────────────────
-_spi  = None
-_initialised = False
 
-
-# ── Initialisation and cleanup ────────────────────────────────
-
-def init():
-    """Initialise SPI1 and GPIO.  Call once before any other function."""
-    global _spi, _initialised
-    if _initialised:
-        return
-
-    GPIO.setmode(GPIO.BCM)
-    GPIO.setwarnings(False)
-
-    # RCLK latch pin
-    GPIO.setup(_RCLK_PIN, GPIO.OUT, initial=GPIO.LOW)
-
-    # Direct-GPIO MOSFET channels
-    for ch, pin in _DIRECT_PINS.items():
-        GPIO.setup(pin, GPIO.OUT, initial=GPIO.LOW)
-
-    # SPI1 for shift register
-    _spi = spidev.SpiDev()
-    _spi.open(1, 0)
-    _spi.no_cs       = True
-    _spi.max_speed_hz = 500_000
-    _spi.mode        = 0
-
-    # Ensure all shift-register outputs start off
-    _shift_out(0x00)
-
-    _initialised = True
-
-
-def cleanup():
-    """Turn off all LEDs and release hardware resources."""
-    global _spi, _initialised
-    if not _initialised:
-        return
-    all_off()
-    _spi.close()
-    _spi = None
-    GPIO.cleanup()
-    _initialised = False
-
-
-# ── Low-level primitives ──────────────────────────────────────
-
-def _shift_out(byte_val):
-    """Write one byte to the 74HC595 and pulse RCLK to latch outputs."""
-    _spi.writebytes([byte_val & 0xFF])
-    GPIO.output(_RCLK_PIN, GPIO.HIGH)
-    GPIO.output(_RCLK_PIN, GPIO.LOW)
-
-
-def _channels_to_byte(channels):
+class LEDBank:
     """
-    Convert a collection of channel numbers (1-8) to a shift-register byte.
-    Channel 1 = QA = bit 7 (MSB sent first).
-    Channel 8 = QH = bit 0.
+    Controls 10 LED channels (1-10) ordered by wavelength.
+
+    Channels 1-2 are driven directly from GPIO pins.
+    Channels 3-10 are driven through a 74HC595 shift register
+    on SPI1.  All channels are off on construction.
+
+    Supports channel selection by number (int 1-10) or name (str).
+    Use as a context manager for automatic resource cleanup.
+
+    Example:
+        >>> with LEDBank() as leds:
+        ...     leds.set_channel('green', True)
+        ...     time.sleep(1.0)
     """
-    byte_val = 0
-    for ch in channels:
-        if 1 <= ch <= 8:
-            byte_val |= (1 << (8 - ch))
-    return byte_val
 
+    # (name, wavelength_nm)  index 0 = channel 1
+    _LED_DEFS = [
+        ('violet',      410),   # ch  1 — GPIO25
+        ('royal_blue',  455),   # ch  2 — GPIO7
+        ('blue',        475),   # ch  3 — shift reg bit 7
+        ('cyan',        500),   # ch  4 — shift reg bit 6
+        ('green',       525),   # ch  5 — shift reg bit 5
+        ('amber',       590),   # ch  6 — shift reg bit 4
+        ('red_orange',  615),   # ch  7 — shift reg bit 3
+        ('red',         625),   # ch  8 — shift reg bit 2
+        ('photo_red',   660),   # ch  9 — shift reg bit 1
+        ('white',      None),   # ch 10 — shift reg bit 0
+    ]
 
-# ── Public API ────────────────────────────────────────────────
+    _NAME_TO_CH = {
+        name: i + 1 for i, (name, _) in enumerate(_LED_DEFS)
+    }
 
-def set_channels(channels, state):
-    """
-    Set one or more LED channels on or off.
+    def __init__(self):
+        """
+        Initialise SPI1, RCLK latch, and direct GPIO outputs.
 
-    Parameters
-    ----------
-    channels : int or iterable of int
-        Channel number(s) 1-10.
-    state : bool
-        True = on, False = off.
-    """
-    if isinstance(channels, int):
-        channels = [channels]
-    channels = list(channels)
+        Raises:
+            RuntimeError: If SPI1 cannot be opened or a GPIO pin
+                is already claimed (check spi0-1cs overlay).
+        """
+        self._rclk = DigitalOutputDevice(
+            _RCLK_PIN, initial_value=False
+        )
+        self._direct = {
+            ch: DigitalOutputDevice(pin, initial_value=False)
+            for ch, pin in _DIRECT_PINS.items()
+        }
+        self._spi = spidev.SpiDev()
+        self._spi.open(1, 0)
+        self._spi.no_cs        = True
+        self._spi.max_speed_hz = 500_000
+        self._spi.mode         = 0
+        self._sr_byte          = 0x00
+        self._write_sr(0x00)    # ensure all SR outputs start off
 
-    # Separate shift-register (1-8) and direct-GPIO (9-10) channels
-    sr_channels  = [ch for ch in channels if 1 <= ch <= 8]
-    dir_channels = [ch for ch in channels if ch in _DIRECT_PINS]
+    def close(self) -> None:
+        """
+        Turn off all LEDs and release all hardware resources.
 
-    if sr_channels:
-        # Read-modify-write: get current byte, set/clear requested bits
-        # We track state in a module variable rather than reading back from HW
-        current = _get_sr_state()
-        for ch in sr_channels:
-            if state:
-                current |= (1 << (8 - ch))
+        Safe to call more than once.
+        """
+        self.all_off()
+        self._spi.close()
+        self._rclk.close()
+        for dev in self._direct.values():
+            dev.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_):
+        self.close()
+
+    # ── Channel resolution ────────────────────────────────────
+
+    def _resolve(self, channel) -> int:
+        """
+        Return the integer channel number for an int or name.
+
+        Args:
+            channel: int 1-10, or str color name (case-insensitive).
+
+        Returns:
+            Integer channel number 1-10.
+
+        Raises:
+            ValueError: If the name is unknown or int is out of range.
+        """
+        if isinstance(channel, str):
+            ch = self._NAME_TO_CH.get(channel.lower())
+            if ch is None:
+                names = list(self._NAME_TO_CH)
+                raise ValueError(
+                    f"Unknown LED name {channel!r}. "
+                    f"Valid names: {names}"
+                )
+            return ch
+        if not 1 <= channel <= 10:
+            raise ValueError(f"Channel must be 1-10, got {channel}")
+        return channel
+
+    def label(self, channel) -> str:
+        """
+        Return a human-readable label for a channel.
+
+        Args:
+            channel: int 1-10 or str color name.
+
+        Returns:
+            String like 'ch 5 (green, 525 nm)' or 'ch 10 (white)'.
+
+        Example:
+            >>> leds.label(5)
+            'ch 5 (green, 525 nm)'
+            >>> leds.label('white')
+            'ch 10 (white)'
+        """
+        ch = self._resolve(channel)
+        name, wl = self._LED_DEFS[ch - 1]
+        wl_str = f"{wl} nm" if wl is not None else "broadband"
+        return f"ch {ch} ({name}, {wl_str})"
+
+    # ── Low-level SPI ─────────────────────────────────────────
+
+    def _write_sr(self, byte_val: int) -> None:
+        """Write one byte to the 74HC595 and pulse RCLK to latch."""
+        self._spi.writebytes([byte_val & 0xFF])
+        self._rclk.on()
+        self._rclk.off()
+
+    # ── Public API ────────────────────────────────────────────
+
+    def set_channel(self, channel, on: bool) -> None:
+        """
+        Set one LED channel on or off.
+
+        Args:
+            channel: int 1-10 or str color name.
+            on: True to turn on, False to turn off.
+
+        Raises:
+            ValueError: If channel is unknown or out of range.
+
+        Example:
+            >>> leds.set_channel('green', True)
+            >>> leds.set_channel(5, False)
+        """
+        ch = self._resolve(channel)
+        if ch in self._direct:
+            if on:
+                self._direct[ch].on()
             else:
-                current &= ~(1 << (8 - ch))
-        _shift_out(current)
-        _sr_state[0] = current
+                self._direct[ch].off()
+        else:
+            # ch 3 → bit 7 ... ch 10 → bit 0
+            bit = 10 - ch
+            if on:
+                self._sr_byte |=  (1 << bit)
+            else:
+                self._sr_byte &= ~(1 << bit)
+            self._write_sr(self._sr_byte)
 
-    for ch in dir_channels:
-        GPIO.output(_DIRECT_PINS[ch], GPIO.HIGH if state else GPIO.LOW)
+    def all_off(self) -> None:
+        """
+        Turn off all 10 LED channels.
 
+        Example:
+            >>> leds.all_off()
+        """
+        self._sr_byte = 0x00
+        self._write_sr(0x00)
+        for dev in self._direct.values():
+            dev.off()
 
-def all_off():
-    """Turn off all 10 LED channels."""
-    _shift_out(0x00)
-    _sr_state[0] = 0x00
-    for pin in _DIRECT_PINS.values():
-        GPIO.output(pin, GPIO.LOW)
+    def all_on(self) -> None:
+        """
+        Turn on all 10 LED channels simultaneously.
 
+        Example:
+            >>> leds.all_on()
+        """
+        self._sr_byte = 0xFF
+        self._write_sr(0xFF)
+        for dev in self._direct.values():
+            dev.on()
 
-def all_on():
-    """Turn on all 10 LED channels."""
-    _shift_out(0xFF)
-    _sr_state[0] = 0xFF
-    for pin in _DIRECT_PINS.values():
-        GPIO.output(pin, GPIO.HIGH)
+    def pulse(self, channel, duration: float) -> None:
+        """
+        Turn one channel on for a fixed duration, then off.
 
+        Args:
+            channel: int 1-10 or str color name.
+            duration: On-time in seconds.
 
-def pulse_channel(channel, duration):
-    """Turn one channel on for duration seconds, then off."""
-    set_channels(channel, True)
-    time.sleep(duration)
-    set_channels(channel, False)
-
-
-def walk_channels(start, end, duration):
-    """
-    Light each channel from start to end in sequence.
-    Each channel is on for duration seconds before moving to the next.
-    All channels off at completion.
-
-    Parameters
-    ----------
-    start    : int  first channel (1-10)
-    end      : int  last channel  (1-10, inclusive)
-    duration : float  seconds per channel
-    """
-    start = max(1, min(10, start))
-    end   = max(1, min(10, end))
-    step  = 1 if end >= start else -1
-
-    all_off()
-    for ch in range(start, end + step, step):
-        print(f"  Channel {ch:2d}  on")
-        set_channels(ch, True)
+        Example:
+            >>> leds.pulse('red', 0.5)
+        """
+        self.set_channel(channel, True)
         time.sleep(duration)
-        set_channels(ch, False)
-        print(f"  Channel {ch:2d}  off")
-    all_off()
+        self.set_channel(channel, False)
 
+    def walk(self, start, end, duration: float) -> None:
+        """
+        Light each channel from start to end in sequence.
 
-# Internal shift-register state tracker (list so it is mutable in closures)
-_sr_state = [0x00]
+        Each channel is on for duration seconds before advancing
+        to the next.  Prints label when turned on and off.
+        All channels are off on entry and on return.
 
-def _get_sr_state():
-    return _sr_state[0]
+        Args:
+            start: First channel, int 1-10 or str color name.
+            end: Last channel inclusive, int 1-10 or str name.
+            duration: Seconds each channel stays on.
+
+        Example:
+            >>> leds.walk(1, 10, 0.5)          # all channels
+            >>> leds.walk('blue', 'red', 1.0)   # by name
+        """
+        start_ch = self._resolve(start)
+        end_ch   = self._resolve(end)
+        step     = 1 if end_ch >= start_ch else -1
+        self.all_off()
+        for ch in range(start_ch, end_ch + step, step):
+            lbl = self.label(ch)
+            print(f"  {lbl}  on", end = '...  ')
+            self.set_channel(ch, True)
+            time.sleep(duration)
+            self.set_channel(ch, False)
+            print(f"off")
+        self.all_off()
 
 
 # ── Command-line entry point ──────────────────────────────────
 
 def _usage():
-    print("Usage: python3 led_control.py <start> <end> <duration_seconds>")
-    print("  start, end : channel numbers 1-10 inclusive")
-    print("  duration   : seconds each channel stays on (float)")
-    print("Example: python3 led_control.py 1 5 1.0")
+    print(
+        "Usage: python3 led_control.py <start> <end> <duration_s>\n"
+        "  start, end : channel 1-10 or color name\n"
+        "  duration   : seconds each channel stays on\n"
+        "Examples:\n"
+        "  python3 led_control.py 1 10 0.5\n"
+        "  python3 led_control.py blue red 1.0"
+    )
     sys.exit(1)
 
 
+def _parse_ch(s: str):
+    """Return int if s is a digit string, else leave as str for LEDBank."""
+    try:
+        return int(s)
+    except ValueError:
+        return s
+
+
 if __name__ == "__main__":
+    install_exit_signals()
+
     if len(sys.argv) != 4:
         _usage()
 
+    raw_start, raw_end, raw_dur = sys.argv[1], sys.argv[2], sys.argv[3]
+
     try:
-        start    = int(sys.argv[1])
-        end      = int(sys.argv[2])
-        duration = float(sys.argv[3])
+        duration = float(raw_dur)
     except ValueError:
+        print(f"Error: duration must be a number, got {raw_dur!r}")
         _usage()
 
-    if not (1 <= start <= 10 and 1 <= end <= 10 and duration > 0):
-        print("Error: channels must be 1-10, duration must be > 0")
+    if duration <= 0:
+        print("Error: duration must be > 0")
         _usage()
 
-    print(f"LED walk: channels {start} to {end}, {duration}s each")
-    init()
+    start = _parse_ch(raw_start)
+    end   = _parse_ch(raw_end)
+
     try:
-        walk_channels(start, end, duration)
-    except KeyboardInterrupt:
-        print("\nInterrupted.")
-    finally:
-        cleanup()
-        print("Done.")
+        with LEDBank() as leds:
+            try:
+                print(
+                    f"LED walk: {leds.label(start)}"
+                    f" → {leds.label(end)}, {duration} s each"
+                )
+                leds.walk(start, end, duration)
+            except KeyboardInterrupt:
+                print("\nInterrupted.")
+    except ValueError as e:
+        print(f"Error: {e}")
+        sys.exit(1)
+
+    print("Done.")

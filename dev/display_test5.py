@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
 display_test.py  —  Adafruit 1651 proof-of-life test
+Controlled by an RPi Zero W, or Rpi Zero W 2.
 -----------------------------------------------------
 Tests ILI9341 display, TSC2007 touch, TSIRQ interrupt, and backlight PWM.
 
@@ -14,7 +15,7 @@ Hardware (from as-built pin map):
   I2C SDA    GPIO2   pin 3    -> TSC2007
   I2C SCL    GPIO3   pin 5    -> TSC2007
   TSIRQ      GPIO4   pin 7    <- TSC2007 active-low interrupt
-  Backlight  GPIO13  pin 33      hardware PWM1 via pigpio
+  Backlight  GPIO13  pin 33      software PWM via gpiozero PWMOutputDevice
 
 Design notes:
   - Landscape orientation: W=320, H=240. MADCTL=0x28 (BGR, MV set for
@@ -45,21 +46,21 @@ Usage:
 import sys
 import time
 import struct
+import subprocess
 import spidev
-import RPi.GPIO as GPIO
+from gpiozero import DigitalOutputDevice, DigitalInputDevice, PWMOutputDevice
 import smbus2
-import pigpio
 from PIL import Image, ImageDraw, ImageFont
 
 # ── Pin assignments ───────────────────────────────────────────────────────────
 DC_PIN    = 6       # TFT Data/Command
 RST_PIN   = 17      # ILI9341 hardware reset, RPi pin 11 -> J1-Pin14
 TSIRQ_PIN = 4       # TSC2007 interrupt, active-low
-BL_PIN    = 13      # backlight hardware PWM1
+# BL_PIN    = 13      # backlight, software PWM via gpiozero
 
 SPI_BUS   = 0
 SPI_DEV   = 0
-SPI_HZ    = 8_000_000   # confirmed reliable on this board
+SPI_HZ    = 2_000_000   # reduced from 8 MHz — SPI noise at 8 MHz kills TSC2007
 
 I2C_BUS   = 1
 TSC_ADDR  = 0x48
@@ -96,18 +97,21 @@ _MADCTL  = 0x36
 _COLMOD  = 0x3A
 
 # ── Module globals ────────────────────────────────────────────────────────────
-_spi = None
-_pi  = None
+_spi       = None
+_backlight = None
+_dc_pin    = None
+_rst_pin   = None
+_tsirq_pin = None
 
 
 # ── ILI9341 low-level interface ───────────────────────────────────────────────
 
 def _cmd(c):
-    GPIO.output(DC_PIN, GPIO.LOW)
+    _dc_pin.off()
     _spi.writebytes([c])
 
 def _data(d):
-    GPIO.output(DC_PIN, GPIO.HIGH)
+    _dc_pin.on()
     if isinstance(d, int):
         _spi.writebytes([d])
     else:
@@ -133,11 +137,10 @@ def _init_display():
     no X or Y mirroring. If display appears upside-down change to 0xE8.
     """
     # Hardware reset pulse
-    GPIO.setup(RST_PIN, GPIO.OUT, initial=GPIO.HIGH)
     time.sleep(0.01)
-    GPIO.output(RST_PIN, GPIO.LOW)
+    _rst_pin.off()
     time.sleep(0.02)                # hold reset low 20 ms
-    GPIO.output(RST_PIN, GPIO.HIGH)
+    _rst_pin.on()
     time.sleep(0.15)                # 150 ms recovery — do not shorten
 
     _cmd(_SLPOUT);  time.sleep(0.15)    # 150 ms — do not shorten
@@ -157,7 +160,7 @@ def fill_screen(color):
     time.sleep(0.02)                    # settle before
     _set_window(0, 0, W - 1, H - 1)
     pixel = bytes([color >> 8, color & 0xFF])
-    GPIO.output(DC_PIN, GPIO.HIGH)
+    _dc_pin.on()
     total = W * H;  sent = 0
     while sent < total:
         n = min(512, total - sent)
@@ -170,7 +173,7 @@ def fill_rect(x, y, w, h, color):
         return
     _set_window(x, y, x + w - 1, y + h - 1)
     pixel = bytes([color >> 8, color & 0xFF])
-    GPIO.output(DC_PIN, GPIO.HIGH)
+    _dc_pin.on()
     total = w * h;  sent = 0
     while sent < total:
         n = min(512, total - sent)
@@ -183,7 +186,7 @@ def blit_image(img, x=0, y=0):
     iw, ih = img.size
     _set_window(x, y, x + iw - 1, y + ih - 1)
     pixels = img.tobytes()
-    GPIO.output(DC_PIN, GPIO.HIGH)
+    _dc_pin.on()
     buf = bytearray(iw * ih * 2)
     for i in range(0, len(pixels), 3):
         c = rgb565(pixels[i], pixels[i+1], pixels[i+2])
@@ -239,9 +242,21 @@ def draw_text(text, x, y, fg=WHITE, bg=BLACK, size=16):
 
 # ── Backlight ─────────────────────────────────────────────────────────────────
 
-def set_backlight(percent):
-    """Set backlight brightness 0-100 % via hardware PWM on GPIO13."""
-    _pi.hardware_PWM(BL_PIN, 2000, int(max(0, min(100, percent)) * 10000))
+def set_backlight(percent: float) -> None:
+    """
+    Set backlight brightness 0-100 % via software PWM on GPIO13.
+
+    Uses gpiozero PWMOutputDevice (software PWM, 1 kHz).  Per Rule 5,
+    software PWM is sufficient for backlight dimming; escalate to lgpio
+    hardware PWM only if flicker is observed.
+
+    Args:
+        percent: Brightness 0.0 (off) to 100.0 (full on).
+    """
+    if _backlight is None:
+        print("  set_backlight: WARNING — backlight device not initialised")
+        return
+    _backlight.value = max(0.0, min(1.0, percent / 100.0))
 
 
 # ── TSC2007 touch ─────────────────────────────────────────────────────────────
@@ -301,54 +316,289 @@ def raw_to_pixels(rx, ry):
     return px, py
 
 
+# ── I2C bus helpers ──────────────────────────────────────────────────────────
+#
+# SPI bursts at 8 MHz can capacitively couple onto SDA/SCL and interrupt a
+# TSC2007 transaction mid-byte.  The slave then holds SDA low waiting for
+# clock pulses that never come, and the BCM2835 I2C master refuses to start
+# a new transaction (bus appears busy).  Simply reopening /dev/i2c-1 does
+# not help — the hardware controller is still stuck.
+#
+# Prevention: close the SMBus handle *before* every SPI burst, reopen after
+# a 500 ms settle.  No open handle during SPI = no corrupted transaction.
+#
+# Recovery: if the bus gets stuck, _i2c_recover() closes all open handles
+# (critical — modprobe -r hangs if /dev/i2c-1 is open), then reloads the
+# BCM2835 I2C kernel modules via modprobe to fully reset the hardware
+# controller.  i2cdetect alone cannot clear a controller stuck in "bus busy"
+# state.  Requires passwordless sudo for modprobe.
+
+def _i2c_open() -> smbus2.SMBus:
+    """
+    Settle after SPI activity then open the I2C bus.
+
+    The 500 ms settle is required: SPI bursts at 8 MHz can capacitively
+    couple onto SDA/SCL.  Opening immediately after SPI risks catching
+    a mid-glitch bus state.
+
+    After settling, checks GPIO2/3 state and probes the TSC2007 via
+    i2cget (I2C_SMBUS path) before opening smbus2.  This exposes whether
+    the bus is physically stuck vs whether smbus2's i2c_rdwr path is
+    the problem.
+    """
+    print("  _i2c_open: settling 500 ms after SPI...")
+    time.sleep(0.5)
+
+    print("  _i2c_open: checking bus line states...")
+    for pin, label in ((2, 'SDA'), (3, 'SCL')):
+        try:
+            r = subprocess.run(
+                ['pinctrl', 'get', str(pin)],
+                capture_output=True, text=True, timeout=3
+            )
+            print(f"    GPIO{pin} ({label}): {r.stdout.strip()}")
+        except Exception as exc:
+            print(f"    GPIO{pin} ({label}): pinctrl failed: {exc}")
+
+    print(f"  _i2c_open: probing TSC2007 via i2cget (I2C_SMBUS path)...")
+    try:
+        r = subprocess.run(
+            ['i2cget', '-y', str(I2C_BUS), hex(TSC_ADDR)],
+            capture_output=True, text=True, timeout=5
+        )
+        if r.returncode == 0:
+            print(f"    i2cget OK → {r.stdout.strip()}")
+        else:
+            print(f"    i2cget FAILED (rc={r.returncode}): {r.stderr.strip()}")
+            print("    WARNING: bus may be stuck — i2c_rdwr reads will likely fail")
+    except subprocess.TimeoutExpired:
+        print("    i2cget TIMED OUT — bus is hung")
+    except Exception as exc:
+        print(f"    i2cget error: {exc}")
+
+    try:
+        bus = smbus2.SMBus(I2C_BUS)
+        print(f"  _i2c_open: /dev/i2c-{I2C_BUS} opened OK")
+        return bus
+    except OSError as exc:
+        print(f"  _i2c_open: FAILED to open I2C bus {I2C_BUS}: {exc}")
+        raise
+
+
+def _i2c_recover(bus) -> smbus2.SMBus | None:
+    """
+    Attempt recovery of a stuck I2C bus.
+
+    Strategy: close the open handle, then use i2cget in a loop.
+    i2cget uses the I2C_SMBUS ioctl path which includes its own error
+    recovery and will not hang the way modprobe -r does when the
+    BCM2835 hardware controller is in an error state.
+
+    Each i2cget attempt sends a read transaction and clocks SCL,
+    which may release a TSC2007 that is stuck mid-byte.  9 iterations
+    mirrors the I2C spec's 9-clock bus-clear sequence.
+
+    Returns a fresh SMBus on success, None if still unresponsive.
+    """
+    if bus is not None:
+        try:
+            bus.close()
+            print("  _i2c_recover: bus handle closed")
+        except OSError as exc:
+            print(f"  _i2c_recover: close error (ignoring): {exc}")
+    time.sleep(0.3)
+
+    print("  _i2c_recover: checking bus line states...")
+    for pin in (2, 3):
+        try:
+            r = subprocess.run(
+                ['pinctrl', 'get', str(pin)],
+                capture_output=True, text=True, timeout=3
+            )
+            print(f"    GPIO{pin}: {r.stdout.strip()}")
+        except Exception as exc:
+            print(f"    GPIO{pin}: pinctrl failed: {exc}")
+
+    print("  _i2c_recover: sending up to 9 i2cget probes (I2C_SMBUS path)...")
+    for attempt in range(1, 10):
+        try:
+            r = subprocess.run(
+                ['i2cget', '-y', str(I2C_BUS), hex(TSC_ADDR)],
+                capture_output=True, text=True, timeout=5
+            )
+            if r.returncode == 0:
+                print(f"  _i2c_recover: i2cget OK on attempt {attempt}"
+                      f" → {r.stdout.strip()}")
+                break
+            print(f"  _i2c_recover: attempt {attempt} failed"
+                  f" (rc={r.returncode}): {r.stderr.strip()}")
+        except subprocess.TimeoutExpired:
+            print(f"  _i2c_recover: attempt {attempt} timed out — bus hung")
+            break
+        except Exception as exc:
+            print(f"  _i2c_recover: attempt {attempt} error: {exc}")
+        time.sleep(0.1)
+
+    time.sleep(0.5)
+    try:
+        bus = smbus2.SMBus(I2C_BUS)
+        _tsc_read(bus, _CMD_Z1)
+        print("  _i2c_recover: I2C recovery succeeded.")
+        return bus
+    except OSError as exc:
+        print(f"  _i2c_recover: I2C still unresponsive: {exc}")
+        try:
+            bus.close()
+        except OSError:
+            pass
+        return None
+
+
+# ── Diagnostic helper ────────────────────────────────────────────────────────
+
+def _tsc_probe(label: str) -> bool:
+    """
+    Probe TSC2007 via i2cget (I2C_SMBUS path) and print result.
+
+    Used at multiple points during startup to identify which hardware
+    operation kills TSC2007 I2C responsiveness.  Returns True if the
+    device responded, False otherwise.
+
+    Args:
+        label: Short description of when this probe is being run.
+    """
+    try:
+        r = subprocess.run(
+            ['i2cget', '-y', str(I2C_BUS), hex(TSC_ADDR)],
+            capture_output=True, text=True, timeout=5
+        )
+        if r.returncode == 0:
+            print(f"  TSC2007 [{label}]: OK → {r.stdout.strip()}")
+            return True
+        print(f"  TSC2007 [{label}]: FAILED — {r.stderr.strip()}")
+        return False
+    except subprocess.TimeoutExpired:
+        print(f"  TSC2007 [{label}]: TIMED OUT — bus hung")
+        return False
+    except Exception as exc:
+        print(f"  TSC2007 [{label}]: probe error: {exc}")
+        return False
+
+
 # ── Hardware setup and teardown ───────────────────────────────────────────────
 
 def setup():
     """
     Initialise all hardware. Order is critical:
-      1. GPIO mode and pin setup
-      2. pigpio daemon connection
-      3. Backlight ON  — must come before display init; screen is black without it
-      4. SPI open
-      5. ILI9341 hardware reset and init sequence
+      1. GPIO pin setup (DC, RST, TSIRQ)
+      2. Backlight PWM ON — must come before display init; screen is black
+         without it
+      3. SPI open
+      4. ILI9341 hardware reset and init sequence
+
+    Raises:
+        RuntimeError: If any hardware resource cannot be claimed.
+        OSError: If SPI cannot be opened.
     """
-    global _spi, _pi
+    global _spi, _backlight, _dc_pin, _rst_pin, _tsirq_pin
 
-    GPIO.setmode(GPIO.BCM)
-    GPIO.setwarnings(False)
-    GPIO.setup(DC_PIN,    GPIO.OUT, initial=GPIO.HIGH)
-    GPIO.setup(TSIRQ_PIN, GPIO.IN,  pull_up_down=GPIO.PUD_UP)
-    # RST_PIN is set up inside _init_display() with initial=HIGH
+    print("setup: initialising GPIO output pins...")
+    try:
+        _dc_pin = DigitalOutputDevice(DC_PIN, initial_value=True)
+        print(f"  DC    GPIO{DC_PIN}    OK")
+    except Exception as exc:
+        print(f"  DC    GPIO{DC_PIN}    FAILED: {exc}")
+        raise
 
-    _pi = pigpio.pi()
-    if not _pi.connected:
-        print("ERROR: pigpio daemon not running.")
-        print("       Run: sudo systemctl start pigpiod")
-        sys.exit(1)
+    try:
+        _rst_pin = DigitalOutputDevice(RST_PIN, initial_value=True)
+        print(f"  RST   GPIO{RST_PIN}   OK")
+    except Exception as exc:
+        print(f"  RST   GPIO{RST_PIN}   FAILED: {exc}")
+        raise
 
-    set_backlight(80)       # backlight ON before display init
-    time.sleep(0.10)        # 100 ms — confirmed necessary from screentest.py
+    try:
+        _tsirq_pin = DigitalInputDevice(TSIRQ_PIN, pull_up=True)
+        print(f"  TSIRQ GPIO{TSIRQ_PIN}    OK (pull_up=True)")
+    except Exception as exc:
+        print(f"  TSIRQ GPIO{TSIRQ_PIN}    FAILED: {exc}")
+        raise
 
-    _spi = spidev.SpiDev()
-    _spi.open(SPI_BUS, SPI_DEV)
-    _spi.max_speed_hz = SPI_HZ
-    _spi.mode = 0
+    print(f"setup: initialising backlight PWM on GPIO{BL_PIN}...")
+    try:
+        _backlight = PWMOutputDevice(BL_PIN, frequency=1000, initial_value=0)
+        print(f"  BL    GPIO{BL_PIN}   OK (software PWM 1 kHz)")
+    except Exception as exc:
+        print(f"  BL    GPIO{BL_PIN}   FAILED: {exc}")
+        raise
 
-    _init_display()
-    print(f"Display initialised. {W}x{H} landscape, SPI {SPI_HZ//1_000_000} MHz.")
+    set_backlight(80)           # backlight ON before display init
+    time.sleep(0.10)            # 100 ms — confirmed necessary from screentest.py
+    print("  backlight 80% OK")
+
+    print(f"setup: opening SPI{SPI_BUS}.{SPI_DEV} @ {SPI_HZ//1_000_000} MHz...")
+    try:
+        _spi = spidev.SpiDev()
+        _spi.open(SPI_BUS, SPI_DEV)
+        _spi.max_speed_hz = SPI_HZ
+        _spi.mode = 0
+        print(f"  SPI{SPI_BUS}.{SPI_DEV} OK")
+    except Exception as exc:
+        print(f"  SPI{SPI_BUS}.{SPI_DEV} FAILED: {exc}")
+        raise
+
+    _tsc_probe("before display init")
+
+    print("setup: running ILI9341 hardware reset and init...")
+    try:
+        _init_display()
+        print(f"  ILI9341 OK — {W}x{H} landscape")
+    except Exception as exc:
+        print(f"  ILI9341 init FAILED: {exc}")
+        raise
+
+    _tsc_probe("after display init")
+
+    print("setup complete.")
 
 def teardown():
     """Clear screen, backlight off, release all hardware resources."""
+    print("teardown: clearing screen...")
     try:
-        fill_screen(BLACK)
-    except Exception:
-        pass
-    set_backlight(0)
-    if _spi:
-        _spi.close()
-    _pi.stop()
-    GPIO.cleanup()
-    print("Done.")
+        if _spi is not None:
+            fill_screen(BLACK)
+    except Exception as exc:
+        print(f"  fill_screen failed (ignoring): {exc}")
+
+    print("teardown: backlight off...")
+    try:
+        set_backlight(0)
+    except Exception as exc:
+        print(f"  set_backlight(0) failed (ignoring): {exc}")
+
+    print("teardown: closing SPI...")
+    try:
+        if _spi is not None:
+            _spi.close()
+            print("  SPI closed")
+    except Exception as exc:
+        print(f"  SPI close failed (ignoring): {exc}")
+
+    print("teardown: closing GPIO devices...")
+    for label, dev in [
+        ("backlight", _backlight),
+        ("DC",        _dc_pin),
+        ("RST",       _rst_pin),
+        ("TSIRQ",     _tsirq_pin),
+    ]:
+        if dev is not None:
+            try:
+                dev.close()
+                print(f"  {label} closed")
+            except Exception as exc:
+                print(f"  {label} close failed (ignoring): {exc}")
+
+    print("teardown complete.")
 
 
 # ── Tests ─────────────────────────────────────────────────────────────────────
@@ -447,16 +697,20 @@ def test_touch():
     """
     print("\n── test_touch (30 s) ────────────────────")
     print("  Touch the screen. Note raw min/max values for calibration.\n")
+    _tsc_probe("before fill_screen")
     fill_screen(BLACK)
     draw_text("Touch the screen", 80, 105, fg=CYAN, bg=BLACK, size=20)
-
-    # Pause after SPI display writes before opening I2C.
-    # Rapid SPI at 8 MHz can glitch SDA/SCL and lock the I2C bus (errno 5).
-    time.sleep(0.2)
-    bus     = smbus2.SMBus(I2C_BUS)
-    THRESH  = 200
+    _tsc_probe("after fill_screen+draw_text")
+    try:
+        bus = _i2c_open()
+    except OSError as exc:
+        print(f"  Cannot open I2C bus: {exc}")
+        print("  Is /dev/i2c-1 present?  Run: ls /dev/i2c*")
+        print("  If missing, reboot to restore kernel I2C modules.")
+        return
+    THRESH   = 200
     deadline = time.monotonic() + 30
-    last    = (None, None)
+    last     = (None, None)
 
     try:
         while time.monotonic() < deadline:
@@ -464,18 +718,27 @@ def test_touch():
                 rx, ry, z1 = read_touch_raw(bus)
             except OSError as e:
                 print(f"  I2C error: {e}")
-                time.sleep(0.1)
+                bus = _i2c_recover(bus)
+                if bus is None:
+                    print("  I2C unrecoverable — aborting touch test.")
+                    return
                 continue
             if z1 > THRESH:
                 px, py = raw_to_pixels(rx, ry)
                 print(f"  raw=({rx:4d},{ry:4d})  z1={z1:4d}"
                       f"  pixel=({px:3d},{py:3d})")
                 if (px, py) != last:
-                    fill_rect(max(0, px - 3), max(0, py - 3), 7, 7, YELLOW)
+                    # Close I2C before SPI burst to prevent bus glitch.
+                    bus.close()
+                    fill_rect(
+                        max(0, px - 3), max(0, py - 3), 7, 7, YELLOW
+                    )
+                    bus  = _i2c_open()
                     last = (px, py)
             time.sleep(0.05)
     finally:
-        bus.close()
+        if bus is not None:
+            bus.close()
     print("  touch test complete.")
 
 
@@ -490,22 +753,33 @@ def test_tsirq():
     fill_screen(BLACK)
     draw_text("Waiting for TSIRQ...", 40, 95,  fg=MAGENTA, bg=BLACK, size=18)
     draw_text("Tap screen",           95, 125, fg=WHITE,   bg=BLACK, size=16)
-
-    # Pause after SPI writes before opening I2C
-    time.sleep(0.2)
-    bus      = smbus2.SMBus(I2C_BUS)
+    try:
+        bus = _i2c_open()
+    except OSError as exc:
+        print(f"  Cannot open I2C bus: {exc}")
+        print("  If /dev/i2c-1 is missing, reboot to restore kernel I2C modules.")
+        return
     deadline = time.monotonic() + 30
     hit      = 0
 
     try:
         while time.monotonic() < deadline:
-            if GPIO.input(TSIRQ_PIN) == GPIO.LOW:
+            if _tsirq_pin.value == 0:
                 hit += 1
                 try:
                     rx, ry, z1 = read_touch_raw(bus)
                     px, py     = raw_to_pixels(rx, ry)
+                except OSError as e:
+                    print(f"  I2C error after TSIRQ: {e}")
+                    bus = _i2c_recover(bus)
+                    if bus is None:
+                        print("  I2C unrecoverable — aborting tsirq test.")
+                        return
+                else:
                     print(f"  TSIRQ #{hit:3d}  raw=({rx:4d},{ry:4d})"
                           f"  z1={z1:4d}  pixel=({px:3d},{py:3d})")
+                    # Close I2C before the SPI burst that redraws the screen.
+                    bus.close()
                     fill_screen(BLACK)
                     draw_text(f"TSIRQ #{hit}",
                               90, 70,  fg=GREEN,  bg=BLACK, size=28)
@@ -513,16 +787,16 @@ def test_tsirq():
                               75, 110, fg=WHITE,  bg=BLACK, size=20)
                     draw_text(f"z1 = {z1}",
                               110, 143, fg=YELLOW, bg=BLACK, size=16)
-                except OSError as e:
-                    print(f"  I2C error after TSIRQ: {e}")
+                    bus = _i2c_open()
                 # Wait for finger lift
-                while GPIO.input(TSIRQ_PIN) == GPIO.LOW:
+                while _tsirq_pin.value == 0:
                     time.sleep(0.02)
                 time.sleep(0.05)    # debounce
             else:
                 time.sleep(0.02)
     finally:
-        bus.close()
+        if bus is not None:
+            bus.close()
 
     if hit == 0:
         print("  No TSIRQ events detected.")

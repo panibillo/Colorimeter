@@ -11,7 +11,7 @@ Hardware connections (from as-built pin map):
   SPI0 CE0   GPIO8   pin 24   (hardware-managed chip select)
   DC         GPIO6   pin 31   (Data/Command select)
   RST        GPIO17  pin 11   (hardware reset)
-  Backlight  GPIO13  pin 33   (hardware PWM1 via pigpio)
+  Backlight  GPIO13  pin 33   (wire to 3.3 V for always-on; not driven here)
 
 Usage:
     from ili9341 import ILI9341
@@ -31,8 +31,7 @@ Or as a context manager:
 import time
 import struct
 import spidev
-import RPi.GPIO as GPIO
-import pigpio
+from gpiozero import DigitalOutputDevice
 from PIL import Image, ImageDraw, ImageFont
 
 from geometry import Rect
@@ -73,7 +72,6 @@ class ILI9341:
     ----------
     dc_pin      : BCM GPIO for Data/Command (default 6)
     rst_pin     : BCM GPIO for hardware reset (default 17)
-    bl_pin      : BCM GPIO for backlight PWM (default 13)
     spi_bus     : SPI bus number (default 0)
     spi_device  : SPI device/CE number (default 0)
     orientation : MADCTL byte — use MADCTL_LANDSCAPE_180 or MADCTL_LANDSCAPE_0
@@ -102,7 +100,6 @@ class ILI9341:
         self,
         dc_pin:      int   = 6,
         rst_pin:     int   = 17,
-        bl_pin:      int   = 13,
         spi_bus:     int   = 0,
         spi_device:  int   = 0,
         orientation: int   = MADCTL_LANDSCAPE_180,
@@ -110,14 +107,14 @@ class ILI9341:
     ):
         self._dc          = dc_pin
         self._rst         = rst_pin
-        self._bl          = bl_pin
         self._spi_bus     = spi_bus
         self._spi_dev     = spi_device
         self._orientation = orientation
         self._font_path   = font_path or self._default_font_path()
 
         self._spi         = None
-        self._pi          = None
+        self._dc_dev      = None
+        self._rst_dev     = None
         self._font_cache  = {}      # {size: ImageFont}
         self._model       = _detect_model()
         self._initialised = False
@@ -155,27 +152,15 @@ class ILI9341:
 
     def init(self):
         """
-        Initialise GPIO, pigpio, SPI, and the ILI9341.
+        Initialise GPIO, SPI, and the ILI9341.
         Must be called before any drawing method.
-        Backlight is turned on before display init — required for visibility.
         """
         if self._initialised:
             return
 
-        GPIO.setmode(GPIO.BCM)
-        GPIO.setwarnings(False)
-        GPIO.setup(self._dc,  GPIO.OUT, initial=GPIO.HIGH)
-        GPIO.setup(self._rst, GPIO.OUT, initial=GPIO.HIGH)
-
-        # pigpio for hardware PWM backlight
-        self._pi = pigpio.pi()
-        if not self._pi.connected:
-            raise RuntimeError(
-                "pigpio daemon not running. Run: sudo systemctl start pigpiod")
-
-        # Backlight on BEFORE display init
-        self.set_backlight(80)
-        time.sleep(0.10)    # confirmed necessary — see screentest.py
+        self._dc_dev  = DigitalOutputDevice(self._dc,  initial_value=True)
+        self._rst_dev = DigitalOutputDevice(self._rst, initial_value=True)
+        time.sleep(0.10)    # 100 ms settle before display init
 
         # SPI
         self._spi = spidev.SpiDev()
@@ -193,36 +178,31 @@ class ILI9341:
         self._initialised = True
 
     def cleanup(self):
-        """Turn off backlight, clear screen, release all hardware resources."""
+        """Clear screen and release all hardware resources."""
         if not self._initialised:
             return
         try:
             self.fill_screen(self.BLACK)
         except Exception:
             pass
-        self.set_backlight(0)
         if self._spi:
             self._spi.close()
-        if self._pi:
-            self._pi.stop()
-        GPIO.cleanup()
+        for dev in (self._dc_dev, self._rst_dev):
+            if dev is not None:
+                try:
+                    dev.close()
+                except Exception:
+                    pass
         self._initialised = False
-
-    # ── Backlight ─────────────────────────────────────────────────────────────
-
-    def set_backlight(self, percent: float):
-        """Set backlight brightness 0–100 %."""
-        duty = int(max(0.0, min(100.0, percent)) * 10000)
-        self._pi.hardware_PWM(self._bl, 2000, duty)
 
     # ── Low-level SPI ─────────────────────────────────────────────────────────
 
     def _cmd(self, c: int):
-        GPIO.output(self._dc, GPIO.LOW)
+        self._dc_dev.off()
         self._spi.writebytes([c])
 
     def _data(self, d):
-        GPIO.output(self._dc, GPIO.HIGH)
+        self._dc_dev.on()
         if isinstance(d, int):
             self._spi.writebytes([d])
         else:
@@ -235,11 +215,11 @@ class ILI9341:
 
     def _hw_reset(self):
         """Issue a hardware reset pulse to the ILI9341."""
-        GPIO.output(self._rst, GPIO.HIGH)
+        self._rst_dev.on()
         time.sleep(self._t_rst_pre)
-        GPIO.output(self._rst, GPIO.LOW)
+        self._rst_dev.off()
         time.sleep(self._t_rst_low)
-        GPIO.output(self._rst, GPIO.HIGH)
+        self._rst_dev.on()
         time.sleep(self._t_rst_recov)
 
     def _set_window(self, x0: int, y0: int, x1: int, y1: int):
@@ -249,7 +229,7 @@ class ILI9341:
 
     def _flood(self, pixel: bytes, count: int):
         """Flood count pixels with the given 2-byte RGB565 pixel value."""
-        GPIO.output(self._dc, GPIO.HIGH)
+        self._dc_dev.on()
         sent = 0
         while sent < count:
             n = min(self._spi_chunk, count - sent)
@@ -372,7 +352,7 @@ class ILI9341:
 
         self._set_window(x0, y0, x1, y1)
         pixels = img.tobytes()
-        GPIO.output(self._dc, GPIO.HIGH)
+        self._dc_dev.on()
         buf = bytearray(len(pixels) // 3 * 2)
         for i in range(0, len(pixels), 3):
             c       = self.rgb(pixels[i], pixels[i+1], pixels[i+2])

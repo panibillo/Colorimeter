@@ -63,3 +63,55 @@ Testing is split between RPi and desktop:
 - **Desktop mock libraries**: Mock Picamera2 and cv2 to isolate hardware dependencies
 - **Unit tests**: Verify analysis algorithms and workflows
 - **Transfer**: Use `scp` to move files between systems
+
+## Python Library Architecture
+
+### Design Principle: Hardware Abstraction
+
+All hardware access is organized into thin abstraction classes that hide
+the underlying library backend. Application code calls the abstraction;
+only the abstraction knows which library is being used.
+
+```
+Application code
+      │
+      ▼
+Abstraction class  (e.g. Backlight, LEDBank, Buzzer)
+      │
+      ▼
+Backend library    (gpiozero / lgpio / spidev / smbus2)
+```
+
+This separation allows the backend to be swapped — for portability,
+Bookworm compatibility, or future microcontroller offload — without
+touching application logic.
+
+### Approved Libraries
+
+| Purpose                  | Library       | Notes                                      |
+|--------------------------|---------------|--------------------------------------------|
+| General GPIO             | `gpiozero`    | Bookworm-native; replaces `RPi.GPIO`       |
+| PWM (backlight, etc.)    | `gpiozero`    | `PWMOutputDevice`; test before assuming sufficient |
+| Hardware PWM (buzzer)    | `lgpio`       | No daemon required; Bookworm-native        |
+| SPI (display, 74HC595)   | `spidev`      | Retain as-is                               |
+| I2C (TSC2007 touch)      | `smbus2`      | Retain as-is                               |
+
+### Removed Dependencies
+
+`pigpio` / `pigpiod` have been removed from this project.
+
+Rationale:
+- Requires a root-owned system daemon (`pigpiod`) to be running before
+  any script starts, creating fragile boot ordering and install friction
+- Not recommended for Raspberry Pi OS Bookworm
+- Daemon-based architecture is an unnecessary onboarding burden for
+  FOSS users
+
+### Future Architecture Note
+
+For a v2 design, consider offloading all timing-critical I/O (PWM, ADC
+reads, LED sequencing) to an RP2040-class microcontroller, communicating
+with the Pi over UART or USB. This eliminates Linux GPIO timing
+constraints entirely and is the direction the broader Pi ecosystem is
+moving. The abstraction layer described above makes this migration
+straightforward: only the backend of each abstraction class changes.

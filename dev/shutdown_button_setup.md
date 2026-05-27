@@ -144,9 +144,12 @@ When the camera, I2C, SPI, and ILI9341 display are active, you will need to:
 
 1. **Fill in the stub functions** in `shutdown_button.py`:
    - `teardown_camera()` — stop picamera2 and close the camera object
+   - `teardown_LED()` — turn of LEDs
    - `teardown_display()` — blank the ILI9341 and deinit its SPI bus
    - `teardown_spi()` — close any remaining SPI handles
    - `teardown_i2c()` — close smbus2 / CircuitPython I2C objects
+   - `teardown_GPIO()` — release GPIO
+
 
 2. **Update `After=`** in the service file if those peripherals have their own
    services (e.g. a camera streaming service), so the shutdown script starts

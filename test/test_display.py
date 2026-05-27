@@ -10,16 +10,19 @@ Usage:
   python3 test_display.py lines      # draw_line
   python3 test_display.py text       # draw_text at various sizes and alignments
   python3 test_display.py image      # draw_image with a synthetic Pillow image
-  python3 test_display.py backlight  # backlight ramp
   python3 test_display.py all        # run all tests in sequence
 """
 
 import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
+
 import time
 from PIL import Image, ImageDraw as PIDraw
 
 from ili9341 import ILI9341
 from geometry import Rect
+from utils import install_exit_signals
 
 
 def test_fill(d: ILI9341):
@@ -130,31 +133,12 @@ def test_image(d: ILI9341):
     print("  image complete.")
 
 
-def test_backlight(d: ILI9341):
-    print("\n── backlight ────────────────────────────")
-    d.fill_screen(d.WHITE)
-    d.draw_text("Backlight ramp",
-                Rect(0, 95, d.WIDTH, 50),
-                color=d.BLACK, bg=d.WHITE, size=20, align="center")
-    print("  0 → 100 %")
-    for pct in range(0, 101, 5):
-        d.set_backlight(pct)
-        time.sleep(0.06)
-    print("  100 → 0 %")
-    for pct in range(100, -1, -5):
-        d.set_backlight(pct)
-        time.sleep(0.06)
-    d.set_backlight(80)
-    print("  backlight complete.")
-
-
 TESTS = {
     "fill":      test_fill,
     "rects":     test_rects,
     "lines":     test_lines,
     "text":      test_text,
     "image":     test_image,
-    "backlight": test_backlight,
 }
 
 def usage():
@@ -162,6 +146,7 @@ def usage():
     sys.exit(1)
 
 if __name__ == "__main__":
+    install_exit_signals()
     if len(sys.argv) < 2:
         usage()
     cmd = sys.argv[1].lower()

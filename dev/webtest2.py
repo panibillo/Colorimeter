@@ -36,7 +36,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 import numpy as np
 from flask import Flask, redirect, render_template, request, url_for
 
-from lighting import LedController, LED_ORDER, LED_PINS
+from lighting_lightboard1 import LedController, LED_ORDER, LED_PINS
 from bayer_cam import BayerCam
 
 # ---------------------------------------------------------------------------

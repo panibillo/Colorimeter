@@ -91,7 +91,7 @@ MAX_EXPOSURE_US     = 1_200_000
 MIN_EXPOSURE_US     = 1_000      # 1 ms floor
 EXPOSURE_TOLERANCE  = 0.01       # Converge when change < 1 %
 
-from lighting import (
+from lighting_lightboard1 import (
     LedController,
     LED_PINS,
     LED_ORDER,
