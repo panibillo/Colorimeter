@@ -1,100 +1,39 @@
 #!/usr/bin/env python3
 """
-Live camera test for BayerCam.unpack_raw10() and extract_bayer_layers().
+test_bayer_cam.py  —  BayerCam live capture test
+-------------------------------------------------
+Captures one frame using BayerCam (auto-detects IMX219 or IMX708),
+unpacks the Bayer raw data, and reports statistics for each of the four
+color sub-arrays.  Illumination is controlled via the cal8 LED board.
 
-Captures one frame at 1640×1232 using natural lighting (no LEDs), unpacks
-the raw Bayer data, and reports the value range and statistics for each of
-the four BGGR sub-arrays.
-
-Run from the project root:
-    python test/test_bayer_cam.py
-or from the test/ directory:
-    python test_bayer_cam.py
+Usage:
+  python3 test/test_bayer_cam.py natural       # no LEDs (ambient light)
+  python3 test/test_bayer_cam.py white         # ch 10 (white), default exposure
+  python3 test/test_bayer_cam.py green 200     # ch 5 (green), 200 ms
+  python3 test/test_bayer_cam.py 8 100         # ch 8 (red), 100 ms
+  python3 test/test_bayer_cam.py walk          # walk all 10 channels, one capture each
 """
 
 import sys
-import time
 from pathlib import Path
-
-import numpy as np
-
-# Allow import from src/ regardless of working directory
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
+import time
+import numpy as np
+
 from bayer_cam import BayerCam
-
-try:
-    from picamera2 import Picamera2
-    import libcamera
-except ImportError:
-    from mock_Picamera2 import Picamera2, libcamera
+from lighting_cal8 import LEDBank
+from utils import install_exit_signals
 
 
-RAWFORMAT    = "SBGGR10"
-CAPTURE_SIZE = (1640, 1232)
-EXPOSURE_US  = 50_000        # 50 ms; adjust for ambient lighting
-ANALOGUE_GAIN = 1.0
-SETTLE_SECS  = 3.0
+DEFAULT_EXPOSURE_MS = 50     # ms — enough for a lit scene with the cal8 board
 
 
-def main():
-    print("=" * 56)
-    print(f'Running {__file__}')
-    print("=" * 56)
-    print("BayerCam.unpack_raw10 / extract_bayer_layers test")
-    print("=" * 56)
-    print(f"  Size      : {CAPTURE_SIZE[0]} x {CAPTURE_SIZE[1]}")
-    print(f"  Exposure  : {EXPOSURE_US:,} µs  ({EXPOSURE_US/1000:.0f} ms)")
-    print(f"  Lighting  : natural (no LEDs)")
+def _report(cam: BayerCam, rgb: np.ndarray, bayer: np.ndarray,
+            meta: dict, label: str) -> None:
+    """Print bayer unpack verification and per-layer statistics."""
     print()
-
-    time.sleep(2)
-    try:
-        picam2 = Picamera2()
-    except Exception as exc:
-        sys.exit(f"Cannot open camera: {exc}")
-    time.sleep(2)
-
-    config = picam2.create_still_configuration(
-        main={"size": CAPTURE_SIZE, "format": "RGB888"},
-        raw={"size": CAPTURE_SIZE, "format": RAWFORMAT},
-        buffer_count=1,
-    )
-    picam2.configure(config)
-    picam2.set_controls({
-        "AeEnable":           False,
-        "ExposureTime":       EXPOSURE_US,
-        "AnalogueGain":       ANALOGUE_GAIN,
-        "AwbEnable":          False,
-        "ColourGains":        (1.0, 1.0),
-        "NoiseReductionMode": libcamera.controls.draft.NoiseReductionModeEnum.Off,
-        "Sharpness":          0.0,
-        "Contrast":           1.0,
-        "Saturation":         1.0,
-    })
-
-    print(f"Starting camera, settling {SETTLE_SECS:.0f} s ...")
-    picam2.start()
-    time.sleep(SETTLE_SECS)
-
-    request   = picam2.capture_request()
-    raw_bytes = request.make_array("raw")
-    meta      = request.get_metadata()
-    request.release()
-    picam2.stop()
-    picam2.close()
-
-    print()
-    print(f"--- raw_bytes (before unpack) format={RAWFORMAT} ---")
-    print(f"  dtype : {raw_bytes.dtype}")
-    print(f"  shape : {raw_bytes.shape}")
-    print(f"  min   : {int(raw_bytes.min())}")
-    print(f"  max   : {int(raw_bytes.max())}")
-
-    bayer = BayerCam.unpack_raw10(raw_bytes, CAPTURE_SIZE[0])
-
-    print()
-    print(f"--- bayer (after unpack_raw10)  format={RAWFORMAT} ---")
+    print(f"--- raw bayer array ({label}) ---")
     print(f"  dtype : {bayer.dtype}")
     print(f"  shape : {bayer.shape}")
     print(f"  min   : {int(bayer.min())}")
@@ -105,10 +44,10 @@ def main():
     else:
         print("  OK: all values in 0–1023 range")
 
-    layers = BayerCam.extract_bayer_layers(bayer)
+    layers = BayerCam.extract_bayer_layers(bayer, cam.bayer_pattern)
 
     print()
-    print("--- Bayer layers ---")
+    print(f"--- Bayer layers (pattern={cam.bayer_pattern}) ---")
     print(f"  {'Layer':<5}  {'shape':<14}  {'min':>5}  {'#min':>6}  "
           f"{'max':>5}  {'#max':>6}  {'mean':>7}")
     print(f"  {'-'*5}  {'-'*14}  {'-'*5}  {'-'*6}  {'-'*5}  {'-'*6}  {'-'*7}")
@@ -119,6 +58,11 @@ def main():
               f"{mx:>5}  {int(np.count_nonzero(arr == mx)):>6}  "
               f"{arr.mean():>7.1f}")
 
+    bgr_m = rgb.astype(float).mean(axis=(0, 1))
+    print()
+    print(f"--- RGB888 means ---")
+    print(f"  B={bgr_m[0]:.1f}  G={bgr_m[1]:.1f}  R={bgr_m[2]:.1f}")
+
     print()
     print("--- frame metadata ---")
     for k in ("ExposureTime", "AnalogueGain", "FrameDuration",
@@ -127,5 +71,97 @@ def main():
             print(f"  {k}: {meta[k]}")
 
 
+def test_natural(cam: BayerCam, exposure_ms: float) -> None:
+    """Capture under ambient light (no LEDs)."""
+    print(f"\n── natural light  ({exposure_ms:.0f} ms) ──────────────────────────")
+    rgb, bayer, meta = cam.capture_frame()
+    _report(cam, rgb, bayer, meta, "natural")
+    print("  natural complete.")
+
+
+def test_channel(cam: BayerCam, leds: LEDBank,
+                 channel, exposure_ms: float) -> None:
+    """Capture under one LED channel."""
+    label = leds.label(channel)
+    print(f"\n── {label}  ({exposure_ms:.0f} ms) ──────────────────────────")
+    leds.set_channel(channel, True)
+    time.sleep(0.2)
+    rgb, bayer, meta = cam.capture_frame()
+    leds.set_channel(channel, False)
+    _report(cam, rgb, bayer, meta, label)
+    print(f"  {label} complete.")
+
+
+def test_walk(cam: BayerCam, leds: LEDBank, exposure_ms: float) -> None:
+    """Capture one frame per LED channel (channels 1–10)."""
+    print(f"\n── walk all channels  ({exposure_ms:.0f} ms each) ──────────────")
+    for ch in range(1, 11):
+        test_channel(cam, leds, ch, exposure_ms)
+        time.sleep(0.1)
+    print("  walk complete.")
+
+
+TESTS = {
+    "natural":  test_natural,
+    "walk":     test_walk,
+}
+
+def usage():
+    print(__doc__)
+    sys.exit(1)
+
+
 if __name__ == "__main__":
-    main()
+    install_exit_signals()
+
+    if len(sys.argv) < 2:
+        usage()
+
+    cmd = sys.argv[1].lower()
+    exposure_ms = float(sys.argv[2]) if len(sys.argv) > 2 else DEFAULT_EXPOSURE_MS
+    exposure_us = int(exposure_ms * 1000)
+
+    print("=" * 56)
+    print(f"test_bayer_cam  —  {cmd}")
+    print("=" * 56)
+
+    cam = BayerCam()
+    cam.set_exposure(exposure_us)
+    cam.setup_camera()
+
+    size = cam.config_size
+    print(f"  Camera  : {cam.model_description}")
+    print(f"  Pattern : {cam.bayer_pattern}")
+    print(f"  Size    : {size[0]}×{size[1]}")
+    print(f"  Exposure: {exposure_ms:.0f} ms")
+
+    try:
+        with LEDBank() as leds:
+            leds.all_off()
+
+            focus_pos = cam.focus(leds=leds)
+            if cam.has_autofocus:
+                print(f"  Focus   : {focus_pos:.4f} diopters")
+
+            try:
+                if cmd == "natural":
+                    test_natural(cam, exposure_ms)
+                elif cmd == "walk":
+                    test_walk(cam, leds, exposure_ms)
+                elif cmd == "all":
+                    test_natural(cam, exposure_ms)
+                    time.sleep(0.3)
+                    test_walk(cam, leds, exposure_ms)
+                else:
+                    # treat as a channel name or number
+                    try:
+                        ch = int(cmd)
+                    except ValueError:
+                        ch = cmd
+                    test_channel(cam, leds, ch, exposure_ms)
+            except KeyboardInterrupt:
+                print("\nInterrupted.")
+            finally:
+                leds.all_off()
+    finally:
+        cam.stop()

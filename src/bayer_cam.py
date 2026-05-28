@@ -20,6 +20,8 @@ Methods:
   - detect_model()       Query Picamera2 for the attached camera model string
   - unpack_raw10()       Unpack CSI-2 packed bytes → uint16 pixel array
   - extract_bayer_layers() Split Bayer mosaic into {B, Gb, Gr, R} sub-arrays
+  - focus()              Restore saved focus or run AF sweep; save result (IMX708)
+  - save_focus_cal()     Write current lens_position to focus_cal.json
   - save_frame()         Save RGB JPG + Bayer NPY + metadata TXT to disk
   - load_bayer()         Load a Bayer NPY file, return uint16 array
 
@@ -27,6 +29,7 @@ License: SPDX-MIT
 Copyright: William C Olsen
 """
 
+import json
 import time
 from pathlib import Path
 from typing import Dict, Tuple, Union
@@ -42,6 +45,11 @@ try:
 except ImportError:
     # Desktop testing with mock camera
     from mock_Picamera2 import Picamera2, libcamera
+
+
+_DEFAULT_FOCUS_CAL_PATH = (
+    Path.home() / "pi" / "Colorimeter" / "config" / "focus_cal.json"
+)
 
 
 # ---------------------------------------------------------------------------
@@ -133,17 +141,25 @@ class BayerCam:
             pass
         return _FALLBACK_PROFILE
 
-    def __init__(self):
+    def __init__(
+        self,
+        focus_cal_path: Union[str, Path] = _DEFAULT_FOCUS_CAL_PATH,
+    ):
         """
         Initialize BayerCam: detect the attached camera model and set
         model-specific parameters (resolutions, max exposure, Bayer pattern).
         Camera is not opened or configured here; call setup_camera() next.
+
+        Args:
+            focus_cal_path: Path to the focus calibration JSON file.
+                            Default: ~/pi/Colorimeter/config/focus_cal.json
         """
-        self.camera        = None
-        self.config_size   = None
-        self.exposure_us   = self.DEFAULT_EXPOSURE_US
-        self.analog_gain   = self.DEFAULT_ANALOG_GAIN
-        self.lens_position = None   # diopters; set by autofocus_once() / capture_frame()
+        self.camera           = None
+        self.config_size      = None
+        self.exposure_us      = self.DEFAULT_EXPOSURE_US
+        self.analog_gain      = self.DEFAULT_ANALOG_GAIN
+        self.lens_position    = None   # diopters; set by focus() / autofocus_once()
+        self._focus_cal_path  = Path(focus_cal_path)
 
         # Detect camera model and apply profile
         model   = BayerCam.detect_model()
@@ -357,6 +373,100 @@ class BayerCam:
         })
         self.lens_position = float(lens_pos)
         return self.lens_position
+
+    # ── Focus save / restore ──────────────────────────────────────────────────
+
+    def _load_focus_cal(self) -> "float | None":
+        """Return saved lens_position from JSON, or None if absent/unreadable."""
+        try:
+            with open(self._focus_cal_path) as f:
+                data = json.load(f)
+            return float(data["lens_position"])
+        except (OSError, KeyError, ValueError, json.JSONDecodeError):
+            return None
+
+    def save_focus_cal(self) -> None:
+        """
+        Write the current lens_position to the focus calibration JSON file.
+
+        Creates the config directory if it does not exist.  Does nothing if
+        lens_position is None (no successful focus has been performed yet).
+        """
+        if self.lens_position is None:
+            return
+        self._focus_cal_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(self._focus_cal_path, "w") as f:
+            json.dump(
+                {"lens_position": self.lens_position, "model": self.model},
+                f, indent=2,
+            )
+        log.info(f"Focus cal saved: {self.lens_position:.4f} diopters → "
+                 f"{self._focus_cal_path}")
+
+    def focus(self, force: bool = False, leds=None) -> float:
+        """
+        Focus the camera, using a saved position when available.
+
+        On IMX219 (no autofocus): no-op, returns 0.0.
+
+        On IMX708:
+          - If force=False and focus_cal.json exists: restore the saved
+            LensPosition instantly (no sweep, no LED needed).
+          - If force=True, or no saved file: turn on white LED (ch 10) if
+            leds is provided, run autofocus_once(), turn LED off, then
+            save the result to focus_cal.json for next time.
+
+        Must be called after setup_camera().
+
+        Args:
+            force: If True, always run the full AF sweep and overwrite
+                   any saved position.  Default False.
+            leds:  Optional object with set_channel(channel, on: bool).
+                   When provided, ch 10 (white) is turned on for the AF
+                   sweep and off immediately after (guaranteed via
+                   try/finally).  Not used when restoring a saved position.
+                   No import of lighting_cal8 is required here.
+
+        Returns:
+            Lens position in diopters (0.0 on IMX219).
+
+        Example:
+            >>> cam = BayerCam()
+            >>> cam.setup_camera()
+            >>> with LEDBank() as leds:
+            ...     pos = cam.focus(leds=leds)
+            >>> print(f"Focus: {pos:.4f} diopters")
+        """
+        print(f"bayer_cam::BayerCam.focus({force}):  Auto?={self.has_autofocus}")
+        if not self.has_autofocus:
+            return 0.0
+
+        if self.camera is None:
+            raise RuntimeError("Camera not initialized. Call setup_camera() first.")
+
+        if not force:
+            saved = self._load_focus_cal()
+            if saved is not None:
+                log.info(f"Focus: restoring saved position "
+                         f"{saved:.4f} diopters")
+                self.camera.set_controls({
+                    "AfMode":       libcamera.controls.AfModeEnum.Manual,
+                    "LensPosition": saved,
+                })
+                self.lens_position = saved
+                time.sleep(0.3)   # allow VCM to settle
+                return saved
+
+        log.info("Focus: running AF sweep ...")
+        if leds is not None:
+            leds.set_channel('white', True)
+        try:
+            pos = self.autofocus_once()
+        finally:
+            if leds is not None:
+                leds.set_channel('white', False)
+        self.save_focus_cal()
+        return pos
 
     def set_exposure(self, exposure_us: int) -> None:
         """
@@ -593,6 +703,91 @@ class BayerCam:
         log.debug(f"Saved meta:  {txt_path.name}")
 
         return paths
+
+    @staticmethod
+    def to_display_image(
+        rgb_bgr: np.ndarray,
+        w: int = 320,
+        h: int = 240,
+    ):
+        """
+        Downsample a full BGR camera frame to a PIL RGB Image sized for ILI9341.
+
+        Converts BGR → RGB, then LANCZOS-resizes to (w, h) so the result can
+        be passed directly to ILI9341.draw_image().
+
+        Args:
+            rgb_bgr: uint8 array (H, W, 3), BGR channel order from capture_frame()
+            w:       target display width in pixels  (default 320)
+            h:       target display height in pixels (default 240)
+
+        Returns:
+            PIL Image, mode "RGB", size (w, h)
+
+        Example:
+            >>> rgb, bayer, meta = cam.capture_frame()
+            >>> img = BayerCam.to_display_image(rgb)
+            >>> d.draw_image(img, 0, 0)
+        """
+        from PIL import Image
+        pil = Image.fromarray(rgb_bgr[:, :, ::-1])   # BGR → RGB
+        return pil.resize((w, h), Image.LANCZOS)
+
+    @staticmethod
+    def to_display_layer(
+        layer: np.ndarray,
+        w: int = 320,
+        h: int = 240,
+    ):
+        """
+        Scale a Bayer channel (10-bit uint16) to a PIL RGB Image for ILI9341.
+
+        Maps the absolute 10-bit ADC range (0–1023) to 8-bit (0–255) by
+        dividing by 4 — preserving absolute intensity so different captures
+        and different channels can be compared directly.  Does NOT stretch
+        min/max, so a dim scene appears dim and a bright scene appears bright.
+
+        Args:
+            layer: uint16 array (H//2, W//2) — one channel from extract_bayer_layers()
+            w:     target display width  (default 320)
+            h:     target display height (default 240)
+
+        Returns:
+            PIL Image, mode "RGB", size (w, h)
+
+        Example:
+            >>> layers = BayerCam.extract_bayer_layers(bayer, cam.bayer_pattern)
+            >>> img = BayerCam.to_display_layer(layers['B'])
+            >>> d.draw_image(img, 0, 0)
+        """
+        from PIL import Image
+        scaled = (layer >> 2).clip(0, 255).astype(np.uint8)  # 10-bit → 8-bit, fixed scale
+        return Image.fromarray(scaled, mode="L").resize((w, h), Image.LANCZOS).convert("RGB")
+
+    @staticmethod
+    def crop_rgb(rgb_bgr: np.ndarray, rect) -> np.ndarray:
+        """
+        Extract a rectangular region of interest from a BGR camera frame.
+
+        Args:
+            rgb_bgr: uint8 array (H, W, 3), BGR channel order from capture_frame()
+            rect:    geometry.Rect with attributes x, y, w, h (pixel coordinates)
+
+        Returns:
+            uint8 array (rect.h, rect.w, 3), BGR, clipped to array bounds
+
+        Example:
+            >>> from geometry import Rect
+            >>> roi = BayerCam.crop_rgb(rgb, Rect(100, 80, 200, 150))
+            >>> img = BayerCam.to_display_image(roi)
+            >>> d.draw_image(img, 0, 0)
+        """
+        H, W = rgb_bgr.shape[:2]
+        x1 = max(0, rect.x)
+        y1 = max(0, rect.y)
+        x2 = min(W, rect.x + rect.w)
+        y2 = min(H, rect.y + rect.h)
+        return rgb_bgr[y1:y2, x1:x2]
 
     @staticmethod
     def load_bayer(npy_path: Union[str, Path]) -> np.ndarray:

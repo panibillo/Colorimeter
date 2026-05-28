@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-led_control.py  —  LED channel control for Colorimeter prototype
-----------------------------------------------------------------
+lighting_cal8.py  —  LED channel control for Colorimeter cal8 PCB
+------------------------------------------------------------------
 Hardware:
   Channels 3-10 : 74HC595 shift register via SPI1
                   ch3(blue)=QA ... ch10(white)=QH
@@ -30,16 +30,13 @@ Channels 1-10 are ordered by increasing wavelength:
   10  white         —    shift reg bit 0
 
 Usage as a test script:
-  python3 led_control.py <start> <end> <duration>
-  python3 led_control.py 1 10 0.5        # walk all, 0.5 s each
-  python3 led_control.py blue red 1.0    # walk by name
-  python3 led_control.py 1 2 1.0         # direct-GPIO channels only
+  python3 lighting_cal8.py <start> <end> <duration>
+  python3 lighting_cal8.py 1 10 0.5       # walk all, 0.5 s each
+  python3 lighting_cal8.py blue red 1.0   # walk by name
+  python3 lighting_cal8.py 1 2 1.0        # direct-GPIO channels only
 """
 
 import sys
-from pathlib import Path
-sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
-
 import spidev
 from gpiozero import DigitalOutputDevice
 import time
@@ -293,12 +290,12 @@ class LEDBank:
 
 def _usage():
     print(
-        "Usage: python3 led_control.py <start> <end> <duration_s>\n"
+        "Usage: python3 lighting_cal8.py <start> <end> <duration_s>\n"
         "  start, end : channel 1-10 or color name\n"
         "  duration   : seconds each channel stays on\n"
         "Examples:\n"
-        "  python3 led_control.py 1 10 0.5\n"
-        "  python3 led_control.py blue red 1.0"
+        "  python3 lighting_cal8.py 1 10 0.5\n"
+        "  python3 lighting_cal8.py blue red 1.0"
     )
     sys.exit(1)
 
