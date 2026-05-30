@@ -52,6 +52,16 @@ _DEFAULT_FOCUS_CAL_PATH = (
 )
 
 
+def Info(layer, msg):
+    print(msg)
+    try:
+        print(f"  {type(layer)} {layer.size} : {np.min(layer)} - {np.mean(layer)} - {np.max(layer)}")
+    except:
+        print(f"  {type(layer)}")
+        for m in dir(layer):
+            if not m.startswith('__'):
+                print (f"    {m}")
+
 # ---------------------------------------------------------------------------
 # Per-model sensor profiles
 # ---------------------------------------------------------------------------
@@ -71,8 +81,8 @@ _CAMERA_PROFILES = {
     "imx708": {                         # Raspberry Pi Camera Module 3
         "full_size":       (4608, 2592),
         "half_size":       (2304, 1296),
-        "bayer_format":    "SRGGB10_CSI2P",  # 10-bit packed CSI-2, RGGB pattern
-        "bayer_pattern":   "RGGB",
+        "bayer_format":    "SBGGR10_CSI2P",  # 10-bit packed CSI-2; hardware delivers BGGR
+        "bayer_pattern":   "BGGR",
         "max_exposure_us": 112_000_000, # 112 seconds maximum
         "has_autofocus":   True,
         "description":     "Camera Module 3 (IMX708)",
@@ -295,8 +305,14 @@ class BayerCam:
             metadata  = request.get_metadata()
             request.release()
 
-            # Unpack CSI-2 bytes → uint16 pixel values (0–1023).
-            bayer = BayerCam.unpack_raw10(raw_bytes, self.config_size[0])
+            Info(raw_bytes, f"capture_frame: raw_bytes [{self.config['format']}]")
+
+            # Unpack raw bytes → uint16 pixel values (0–1023).
+            bayer = BayerCam.unpack_raw10(
+                raw_bytes, self.config_size[0], self.config["format"]  # type: ignore[index]
+            )
+
+            Info(bayer, f"capture_frame: bayer after unpack_raw10 config_size={self.config_size}")
 
             # Keep lens_position in sync with what the hardware reports.
             if self.has_autofocus:
@@ -531,37 +547,55 @@ class BayerCam:
         self.stop()
     
     @staticmethod
-    def unpack_raw10(raw_bytes: np.ndarray, pixel_width: int) -> np.ndarray:
+    def unpack_raw10(raw_bytes: np.ndarray, pixel_width: int,
+                     fmt: str = "SBGGR10") -> np.ndarray:
         """
-        Unpack a MIPI CSI-2 raw10 byte array into a uint16 pixel array.
+        Unpack a raw10 byte array from make_array("raw") into uint16 pixels.
 
-        Picamera2's make_array("raw") returns packed bytes for SBGGR10 streams:
-        each 10-bit pixel occupies 2 bytes (little-endian uint16), but the row
-        width is padded by Unicam to an alignment boundary, producing extra
-        columns.  This method reinterprets the bytes as uint16 and trims the
-        padding so the result is a true (H, pixel_width) array of 10-bit values
-        in the range 0–1023.
+        Two sub-formats are handled:
+
+        Unpacked (SBGGR10, SRGGB10, …):
+            Each 10-bit pixel is stored as a 16-bit little-endian word (2 bytes).
+            Unicam may pad rows to an alignment boundary; pixel_width trims that.
+            Values are in the range 0–1023.
+            Used by IMX219 (Module 2).
+
+        CSI-2 packed (*_CSI2P):
+            4 pixels are packed into 5 bytes.  Bytes 0–3 are the 8 MSBs of
+            pixels 0–3; byte 4 packs the 2 LSBs of all four pixels:
+                b4[1:0]  = pixel 0 LSBs
+                b4[3:2]  = pixel 1 LSBs
+                b4[5:4]  = pixel 2 LSBs
+                b4[7:6]  = pixel 3 LSBs
+            pixel_width must be a multiple of 4.
+            Values are in the range 0–1023.
+            Used by IMX708 (Module 3, SBGGR10_CSI2P).
 
         Args:
             raw_bytes:   uint8 array returned by make_array("raw"),
-                         shape (H, W_packed).
-            pixel_width: True pixel width of the image (e.g. 1640), used to
-                         trim padding columns introduced by Unicam alignment.
+                         shape (H, W_bytes).
+            pixel_width: True pixel width of the image, used to trim row padding
+                         (unpacked) or to slice the correct packed byte count.
+            fmt:         Format string from the camera config, e.g.
+                         "SBGGR10" or "SBGGR10_CSI2P".  Default "SBGGR10".
 
         Returns:
             uint16 array, shape (H, pixel_width), values 0–1023.
-
-        Example:
-            >>> raw_bytes = request.make_array("raw")   # uint8 (1232, 3296)
-            >>> bayer = BayerCam.unpack_raw10(raw_bytes, 1640)
-            >>> bayer.shape
-            (1232, 1640)
-            >>> bayer.dtype
-            dtype('uint16')
-            >>> bayer.max() <= 1023
-            True
         """
-        return raw_bytes.view(np.uint16)[:, :pixel_width]
+        if "CSI2P" in fmt:
+            h = raw_bytes.shape[0]
+            row_bytes = pixel_width * 5 // 4          # exact packed bytes per row
+            b = raw_bytes[:, :row_bytes].reshape(h, pixel_width // 4, 5)
+            out = np.empty((h, pixel_width), dtype=np.uint16)
+            lsb = b[:, :, 4].astype(np.uint16)
+            out[:, 0::4] = (b[:, :, 0].astype(np.uint16) << 2) | (lsb & 0x03)
+            out[:, 1::4] = (b[:, :, 1].astype(np.uint16) << 2) | ((lsb >> 2) & 0x03)
+            out[:, 2::4] = (b[:, :, 2].astype(np.uint16) << 2) | ((lsb >> 4) & 0x03)
+            out[:, 3::4] = (b[:, :, 3].astype(np.uint16) << 2) | ((lsb >> 6) & 0x03)
+            return out
+        else:
+            # Unpacked: each pixel stored as a 16-bit little-endian word
+            return raw_bytes.view(np.uint16)[:, :pixel_width]
 
     @staticmethod
     def extract_bayer_layers(
@@ -731,7 +765,8 @@ class BayerCam:
         """
         from PIL import Image
         pil = Image.fromarray(rgb_bgr[:, :, ::-1])   # BGR → RGB
-        return pil.resize((w, h), Image.LANCZOS)
+        return pil.resize((w, h), Image.Resampling.LANCZOS)
+        
 
     @staticmethod
     def to_display_layer(
@@ -761,8 +796,11 @@ class BayerCam:
             >>> d.draw_image(img, 0, 0)
         """
         from PIL import Image
+        Info(layer, 'to_display_layer: layer (input)')
         scaled = (layer >> 2).clip(0, 255).astype(np.uint8)  # 10-bit → 8-bit, fixed scale
-        return Image.fromarray(scaled, mode="L").resize((w, h), Image.LANCZOS).convert("RGB")
+        Info(scaled, 'to_display_layer: scaled (after >> 2)')
+        rv = Image.fromarray(scaled, mode="L").resize((w, h), Image.Resampling.LANCZOS).convert("RGB")
+        return rv
 
     @staticmethod
     def crop_rgb(rgb_bgr: np.ndarray, rect) -> np.ndarray:
