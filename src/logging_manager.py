@@ -16,7 +16,7 @@ from datetime import datetime
 # Configuration
 LOG_FILE = "src/colorimeter.log"
 ENABLE_FILE = True
-LOG_LEVEL = "DEBUG"  # DEBUG, INFO, WARNING, ERROR
+LOG_LEVEL = "WARNING"  # DEBUG, INFO, WARNING, ERROR
 
 LEVELS = {
     "DEBUG": 0,

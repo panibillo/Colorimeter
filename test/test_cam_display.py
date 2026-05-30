@@ -11,11 +11,12 @@ Tests:
   roi       — a fixed crop rect extracted and shown on display
 
 Usage:
+  python3 test/test_cam_display.py choice [color] [exposure] [image size] 
   python3 test/test_cam_display.py preview           # white LED, default exposure
   python3 test/test_cam_display.py preview green 200 # green LED, 200 ms
   python3 test/test_cam_display.py layers white 100  # white LED, 100 ms
-  python3 test/test_cam_display.py roi white 500
-  python3 test/test_cam_display.py all white 200
+  python3 test/test_cam_display.py roi white 500 
+  python3 test/test_cam_display.py all white 200 full # Full resolution instead of Half
 """
 
 import sys
@@ -75,19 +76,20 @@ def test_layers(d: ILI9341, cam: BayerCam, leds: LEDBank,
     for name, arr in layers.items():
         img = BayerCam.to_display_layer(arr, d.WIDTH, d.HEIGHT)
         d.draw_image(img, 0, 0)
-        time.sleep(IMAGE_DISPLAY_DURATION)
+        time.sleep(1.0)
+        # Write image info across top of screen: covers part of the image
         d.draw_text(f"Layer {name}  max={arr.max()}",
                     Rect(0, 0, d.WIDTH, 20),
                     color=d.YELLOW, size=12, align="left")
         print(f"  {name}: shape={arr.shape}  min={arr.min()}  max={arr.max()}"
               f"  mean={arr.mean():.1f}")
-        time.sleep(2.0)
+        time.sleep(IMAGE_DISPLAY_DURATION)
     print("  layers complete.")
 
 
 def test_roi(d: ILI9341, cam: BayerCam, leds: LEDBank,
              channel, exposure_ms: float) -> None:
-    """Crop _ROI from the frame, scale to display, and show."""
+    """Show full frame with ROI outlined, then show the cropped ROI."""
     print(f"\n── roi ({_ROI.x},{_ROI.y}  {_ROI.w}×{_ROI.h}) ────────────────────")
     rgb, bayer, meta = _capture(cam, leds, channel, exposure_ms)
 
@@ -96,22 +98,44 @@ def test_roi(d: ILI9341, cam: BayerCam, leds: LEDBank,
         print("  ERROR: ROI is empty — adjust _ROI coordinates.")
         return
 
-    img = BayerCam.to_display_image(crop, d.WIDTH, d.HEIGHT)
-    d.draw_image(img, 0, 0)
-    time.sleep(IMAGE_DISPLAY_DURATION)
+    # ── Step 1: full frame with ROI rectangle overlaid ────────────────
+    cam_w, cam_h = cam.config_size or (cam.config["size"])
+    disp_roi = Rect(
+        x = int(_ROI.x * d.WIDTH  / cam_w),
+        y = int(_ROI.y * d.HEIGHT / cam_h),
+        w = max(1, int(_ROI.w * d.WIDTH  / cam_w)),
+        h = max(1, int(_ROI.h * d.HEIGHT / cam_h)),
+    )
+    full_img = BayerCam.to_display_image(rgb, d.WIDTH, d.HEIGHT)
+    d.draw_image(full_img, 0, 0)
+    d.draw_rect(disp_roi, d.YELLOW)
+    d.draw_text(f"ROI {_ROI.w}×{_ROI.h} @ ({_ROI.x},{_ROI.y})",
+                Rect(0, 0, d.WIDTH, 20),
+                color=d.YELLOW, size=12, align="left")
+    print(f"  full frame shown, display ROI: ({disp_roi.x},{disp_roi.y})"
+          f"  {disp_roi.w}×{disp_roi.h}")
+    time.sleep(3)
+
+    # ── Step 2: cropped ROI scaled to fill the display ─────────────────
+    roi_img = BayerCam.to_display_image(crop, d.WIDTH, d.HEIGHT)
+    d.draw_image(roi_img, 0, 0)
     d.draw_text(f"ROI {_ROI.w}×{_ROI.h}",
                 Rect(0, 0, d.WIDTH, 20),
                 color=d.CYAN, size=12, align="left")
     print(f"  crop shape: {crop.shape}")
+    time.sleep(IMAGE_DISPLAY_DURATION)
     print("  roi complete.")
 
 
 
 TESTS = {
+    "image": test_preview,
     "preview": test_preview,
     "layers":  test_layers,
     "roi":     test_roi,
 }
+ATESTS = {k[0]:v for k,v in TESTS.items()}
+
 
 
 def usage():
@@ -126,9 +150,15 @@ if __name__ == "__main__":
         usage()
 
     cmd = sys.argv[1].lower()
-    if cmd not in TESTS and cmd != "all":
+    if cmd[0] not in ATESTS and cmd != "all":
         print(f"Unknown test: '{cmd}'")
         usage()
+    
+    size_str = 'half'
+    if (len(sys.argv) >= 3 and 
+        sys.argv[2].lower in ('full','f')):
+            size_str = 'full'
+            
 
     # optional: channel (name or int), exposure_ms
     raw_ch  = sys.argv[2] if len(sys.argv) > 2 else DEFAULT_CHANNEL
@@ -141,6 +171,7 @@ if __name__ == "__main__":
         channel = raw_ch
 
     cam = BayerCam()
+    cam.config = cam.CONFIG_6 if size_str == "full" else cam.CONFIG_5
     cam.set_exposure(exp_us)
     cam.setup_camera()
 

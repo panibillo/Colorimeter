@@ -1,5 +1,5 @@
 # Lab Colorimetric Strip Analyzer — Software Specification
-## Version 0.1 Draft  |  Status: For Review
+## Version 0.2 Draft  |  Status: For Review
 
 ---
 
@@ -44,7 +44,8 @@ The instrument performs the following sequence, which may run concurrently for u
 
 **Practical concurrency:** While up to 4 simultaneous tests are architecturally supported, 2 simultaneous tests is the expected working maximum for a single operator.
 
-**Phase interleaving:** Each phase of each test has an allowable time window, and there are time windows in each phase that will require user attention and action.  Simultaneous tests must be timed so that 'attention windows' do not overlap.  Attention windows are defined in one of the config files - probably the screen YAML definitions because in an attention window a particular screen wants to be shown.  The test 'Start' button can only be active when non-overlapping attention windows are feasible.  
+**Phase interleaving:** Each phase of each test has an allowable time window, and there are time windows in each phase that phase must have focus for user attention and action.  Simultaneous tests must be timed so that *focus windows* will not be scheduled concurrently.  Attention windows are defined in one of the config files (probably the screen YAML definitions because 'in focus' will apply to particular screens).  The test 'Start' button can only be active when the new test's focus windows will not conflict with currently running tests' focus windows. 
+
 ---
 
 ## 4. Data Model
@@ -59,10 +60,10 @@ Each test record contains:
 - **Environmental:** ambient temperature readings at each phase
 - **Phase log:** Phase name, scheduled start, actual start, actual end, status (complete / incomplete / skipped)
 - **Image records:** Per LED color per phase: image file path or embedded sub-array, exposure settings, camera model, capture timestamp, processing data.
-- **Bayer metadata:** Sets of Bayer layer fragments stored as NumPy arrays, written to accompanying `.npy` files with path references.  
-   - __Critical: .npy binary files are not stable for long term storage of calibration data.__
+- **Bayer metadata:** Sets of Bayer layer fragments (NumPy arrays), stored in accompanying __HDF5__ file -- one file per test. (Numpy .npy binary files are not archival.)
 - **Analysis results:** Per LED color: mean, standard deviation, and other statistical measures per Bayer channel; final computed result value; result status (in-range / out-of-range / error)
 - **Completion status:** complete / incomplete / error
+- Accompanying __HDF5__ file could hold the entire test record with images.
 
 ### 4.2 Operational Log
 
@@ -82,6 +83,13 @@ The operational log is stored separately from test results (different SQLite tab
 - SQLite is the on-device persistent store. Write-ahead logging (WAL mode) should be enabled to reduce contention between concurrent readers and writers. __This needs study__
 - Results are uploaded by UDP when a receiver address is configured.
 - Whole photographs may be stored on-device or referenced by path; storage policy (embed vs. reference) is configurable.
+
+### 4.4 Archival storage of results
+
+- On board SQLite db stores all metadata from all tests, plus a reference to a __MDF5__ file for each test.
+- Server side SQLite db mirrors the onboard db. 
+- __MDF5__ 
+
 
 ---
 
@@ -107,23 +115,23 @@ The operational log is stored separately from test results (different SQLite tab
 
 ```
 ┌─────────────────────────────────────────────────────────┐
-│                    Application Core                      │
+│                    Application Core                     │
 │                                                         │
 │  ┌────────────────┐  ┌───────────┐  ┌────────────────┐  │
 │  │ Analysis engine│  │Config &   │  │ Instrument I/O │  │
-│  │ (tests A–D)    │  │data store │  │ (camera, LEDs, │  │
+│  │ (tests A–B)    │  │data store │  │ (camera, LEDs, │  │
 │  │                │  │(SQLite)   │  │  sensors)      │  │
 │  └────────────────┘  └───────────┘  └────────────────┘  │
 │                                                         │
-│              Shared state bus (pub/sub)                  │
+│              Shared state bus (pub/sub)                 │
 └──────────────┬──────────────────────┬───────────────────┘
                │                      │
-  ┌────────────▼──────┐    ┌───────────▼──────────┐
-  │ Touchscreen       │    │ Web interface         │
-  │ interface         │    │ (Flask)               │
-  │                   │◄──►│                       │
-  │ Screen manager    │sync│ Routes / views        │
-  │ Widget library    │    │ HTML templates        │
+  ┌────────────▼──────┐    ┌──────────▼───────────┐
+  │ Touchscreen       │    │ Web interface        │
+  │ interface         │    │ (Flask)              │
+  │                   │◄──►│                      │
+  │ Screen manager    │sync│ Routes / views       │
+  │ Widget library    │    │ HTML templates       │
   └───────────────────┘    └──────────────────────┘
 ```
 
@@ -138,7 +146,22 @@ Each module exposes a defined interface. No module imports directly from an inte
 - This means any subscriber (touchscreen renderer, Flask view) can reconstruct current state by reading SQLite on startup — resilient to restarts.
 - If migration to two processes is needed, replace the in-process pub/sub with a Unix domain socket or a named pipe carrying the same event schema. The SQLite layer remains unchanged.
 
-**Input ownership rule:** Last write wins. Each interface publishes its edits to the shared bus; the other interface updates on receipt. The currently displayed test/screen is controlled locally on each interface independently — the touchscreen displays whatever test the physical user has selected; the web page displays whatever the browser user has selected. There is no display lock across interfaces.
+**State awareness in on-device display screens when > 1 test is running**
+
+- 1 test at a time holds the focus and owns most of the screen.
+- Other tests have some kind of countdown indicator on the screen that gives the user awareness of the other upcoming tasks.
+
+**State awareness in web screens when > 1 test is running**
+
+- Each test has its own tab.
+- Each tab displays its own timers
+- Each tab also displays an awarness timer for other running tests.
+
+**Input ownership rule:** 
+- Last write wins. Each interface publishes its edits to the shared bus; the other interface updates on receipt. 
+- User is responsible to use one interface at a time. 
+  - ¿Possibly give user ability to lock out other interface?
+- The currently displayed test/screen is controlled locally on each interface independently — the touchscreen displays whatever test the physical user has selected; the web page displays whatever the browser user has selected. There is no display lock across interfaces.
 
 ### 5.4 Screen and Widget Definition Format
 
@@ -162,6 +185,24 @@ The touchscreen renderer must:
 - Accept a display backend as a dependency-injected parameter at startup.
 
 This allows a future HDMI backend to be substituted with no changes to the rendering logic.
+
+### 5.6 Data Upload 
+
+- RPi Zero 2W (Colorimeter)
+  - Bundles captured images and metadata into a single **HDF5 file** per upload session
+  - POSTs the HDF5 file to the desktop receiver via HTTP multipart upload
+  - On confirmed receipt (HTTP 200), updates its local **SQLite database** with metadata and a reference to the archived HDF5 file
+  - Retains a local copy of all HDF5 files in a dated archive directory
+  - Uploads run when HDF5s are ready, and run in the background at lower priority than running tests or user interactions.
+
+-Desktop Receiver (`colorimeter_receiver.py`)
+  - A small **Flask HTTP server** (port 5001) that runs on the desktop — any OS
+  - Accepts HDF5 uploads at `POST /upload`; exposes `GET /status` for heartbeat checks
+  - Unpacks each HDF5 file, extracts per-sample metadata, and upserts records into a local **SQLite database**
+  - Unpacking and upserts are security consious.
+  - Archives the HDF5 file into a `~/ColorimeterData/YYYY-MM/` directory
+  - Requires only `pip install flask h5py` 
+  — OS-level higher security configuration of port is optional
 
 ---
 
@@ -193,12 +234,15 @@ These colors appear in the header background when that slot is in focus. They ar
 
 **Keyboard fallback:** Because resistive touch input is not fully reliable, the USB keyboard must be capable of driving all navigation and data entry:
 - Tab / Shift-Tab: cycle widget focus; focused widget is visually highlighted.
-- Enter / Space: activate focused button.
-- Arrow keys: navigate selector widgets.
-- Alphanumeric keys: fill focused data entry fields.
+- Enter: activate focused button.
+- Up,Down  Arrow keys: TBD.
+- Alphanumeric keys, Left-Right Arrows, Backspace, Delete: fill focused data entry fields.
 - Backspace: delete character in data entry fields.
 
 **Image display:** Full or cropped photographs are downsampled to screen resolution using OpenCV or picamera2 before display. The renderer treats images as pre-scaled pixel arrays.
+- In some contexts, ROI rectangles may be drawn over the images, and labeled by rect_id.
+- In some contexts, ROI rectangles may be edited (adjust sides while superimposed on image)
+
 
 ### 6.2 Widget Library (Touchscreen)
 
@@ -206,9 +250,9 @@ All widgets are composed from rectangles and text (single font family, multiple 
 
 | Widget | Description |
 |---|---|
-| Rectangle | Colored border + fill; optional animated fill (progress indicator) |
+| Rectangle | Colored border, optional fill; optional animated fill (progress indicator) |
 | Text label | Static text; color; optional animated property |
-| Button | Label + color; changes appearance on press; disabled state; triggers beep on activation |
+| Button | Label + color; changes appearance on press; disabled state; may trigger beep on activation |
 | Data entry / display box | Editable or read-only value field; activates numpad or keyboard on focus |
 | Countdown / countup timer | Numeric display; configurable warning thresholds; audible alert when over-long |
 | Status bar | Composite: back/menu left, datetime center, next right |
@@ -336,16 +380,15 @@ The following items require further decision before architecture is finalized:
 | # | Question | Notes |
 |---|---|---|
 | OQ-1 | Flask authentication method | HTTP Basic Auth vs. session token vs. no auth (LAN-only trust) |
-| OQ-2 | Image storage policy | Embed Bayer arrays as BLOBs vs. write `.npy` files + path reference |
+| OQ-2 | Image storage policy | **HDF5** each significant image or layer part |
 | OQ-3 | Localization format | YAML resource files vs. GNU gettext `.po` |
 | OQ-4 | Web CSS framework | Bootstrap vs. Pico CSS vs. custom (must be lightweight, offline-capable) |
-| OQ-5 | Numpad overlay behavior | Modal overlay vs. inline replacement of body area |
-| OQ-6 | Maximum concurrent tests | Hard cap at 2 for now, or leave at 4 with scheduling warning? |
-| OQ-7 | On-device config editing | Which parameters (if any) are editable on the touchscreen? |
-| OQ-8 | RTL language support | Defer or design in from the start? |
-| OQ-9 | UDP upload protocol | Message format, retry policy, receiver discovery |
-| OQ-10 | Past results browser scope | How many records? Filter/sort options? Export? |
+| OQ-5 | Numpad overlay behavior | **Modal overlay** - not inline replacement of body area |
+| OQ-6 | Maximum concurrent tests | **Hard cap at 2 for now**, or leave at 4 with scheduling warning? |
+| OQ-7 | On-device config editing | **LAN router ip when booting**  Which parameters (if any) are editable on the touchscreen? |
+| OQ-8 | RTL language support | **Design in from the start** or defer?|
+| OQ-9 | Past results browser scope | How many records? Filter/sort options? Export? |
 
 ---
 
-*End of specification v0.1*
+*End of specification v0.2*

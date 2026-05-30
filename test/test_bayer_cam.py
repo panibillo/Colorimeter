@@ -7,11 +7,20 @@ unpacks the Bayer raw data, and reports statistics for each of the four
 color sub-arrays.  Illumination is controlled via the cal8 LED board.
 
 Usage:
-  python3 test/test_bayer_cam.py natural       # no LEDs (ambient light)
-  python3 test/test_bayer_cam.py white         # ch 10 (white), default exposure
-  python3 test/test_bayer_cam.py green 200     # ch 5 (green), 200 ms
-  python3 test/test_bayer_cam.py 8 100         # ch 8 (red), 100 ms
-  python3 test/test_bayer_cam.py walk          # walk all 10 channels, one capture each
+  python3 test/test_bayer_cam.py <channel> [half|full] [exposure_ms]
+
+  channel     : natural | white | walk | all | <color-name> | <ch-number>
+  half | full : sensor resolution (default: half)
+  exposure_ms : exposure in milliseconds (default: 50)
+
+Examples:
+  python3 test/test_bayer_cam.py natural            # ambient, half-res
+  python3 test/test_bayer_cam.py white              # white LED, half-res
+  python3 test/test_bayer_cam.py white full         # white LED, full-res
+  python3 test/test_bayer_cam.py green 200          # green LED, half-res, 200 ms
+  python3 test/test_bayer_cam.py green full 200     # green LED, full-res, 200 ms
+  python3 test/test_bayer_cam.py 8 100              # ch 8, half-res, 100 ms
+  python3 test/test_bayer_cam.py walk full          # walk all channels, full-res
 """
 
 import sys
@@ -118,14 +127,22 @@ if __name__ == "__main__":
         usage()
 
     cmd = sys.argv[1].lower()
-    exposure_ms = float(sys.argv[2]) if len(sys.argv) > 2 else DEFAULT_EXPOSURE_MS
+
+    # Optional size flag ('half' or 'full') followed by optional exposure_ms.
+    remaining = sys.argv[2:]
+    size_str = "half"
+    if remaining and remaining[0] in ("half", "full"):
+        size_str = remaining[0]
+        remaining = remaining[1:]
+    exposure_ms = float(remaining[0]) if remaining else DEFAULT_EXPOSURE_MS
     exposure_us = int(exposure_ms * 1000)
 
     print("=" * 56)
-    print(f"test_bayer_cam  —  {cmd}")
+    print(f"test_bayer_cam  —  {cmd}  [{size_str}]")
     print("=" * 56)
 
     cam = BayerCam()
+    cam.config = cam.CONFIG_6 if size_str == "full" else cam.CONFIG_5
     cam.set_exposure(exposure_us)
     cam.setup_camera()
 

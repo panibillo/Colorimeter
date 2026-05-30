@@ -52,16 +52,6 @@ _DEFAULT_FOCUS_CAL_PATH = (
 )
 
 
-def Info(layer, msg):
-    print(msg)
-    try:
-        print(f"  {type(layer)} {layer.size} : {np.min(layer)} - {np.mean(layer)} - {np.max(layer)}")
-    except:
-        print(f"  {type(layer)}")
-        for m in dir(layer):
-            if not m.startswith('__'):
-                print (f"    {m}")
-
 # ---------------------------------------------------------------------------
 # Per-model sensor profiles
 # ---------------------------------------------------------------------------
@@ -305,14 +295,18 @@ class BayerCam:
             metadata  = request.get_metadata()
             request.release()
 
-            Info(raw_bytes, f"capture_frame: raw_bytes [{self.config['format']}]")
+            log.info(f"raw_bytes [{self.config['format']}]  dtype={raw_bytes.dtype}"  # type: ignore[index]
+                     f"  shape={raw_bytes.shape}  min={int(raw_bytes.min())}"
+                     f"  mean={raw_bytes.mean():.1f}  max={int(raw_bytes.max())}")
 
             # Unpack raw bytes → uint16 pixel values (0–1023).
             bayer = BayerCam.unpack_raw10(
                 raw_bytes, self.config_size[0], self.config["format"]  # type: ignore[index]
             )
 
-            Info(bayer, f"capture_frame: bayer after unpack_raw10 config_size={self.config_size}")
+            log.info(f"bayer after unpack  config_size={self.config_size}  dtype={bayer.dtype}"
+                     f"  shape={bayer.shape}  min={int(bayer.min())}"
+                     f"  mean={bayer.mean():.1f}  max={int(bayer.max())}")
 
             # Keep lens_position in sync with what the hardware reports.
             if self.has_autofocus:
@@ -796,9 +790,11 @@ class BayerCam:
             >>> d.draw_image(img, 0, 0)
         """
         from PIL import Image
-        Info(layer, 'to_display_layer: layer (input)')
+        log.info(f"to_display_layer: input  dtype={layer.dtype}  shape={layer.shape}"
+                 f"  min={int(layer.min())}  mean={layer.mean():.1f}  max={int(layer.max())}")
         scaled = (layer >> 2).clip(0, 255).astype(np.uint8)  # 10-bit → 8-bit, fixed scale
-        Info(scaled, 'to_display_layer: scaled (after >> 2)')
+        log.info(f"to_display_layer: scaled  dtype={scaled.dtype}  shape={scaled.shape}"
+                 f"  min={int(scaled.min())}  mean={scaled.mean():.1f}  max={int(scaled.max())}")
         rv = Image.fromarray(scaled, mode="L").resize((w, h), Image.Resampling.LANCZOS).convert("RGB")
         return rv
 
