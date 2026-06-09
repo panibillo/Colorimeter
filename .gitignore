@@ -1,0 +1,13 @@
+**.pyc
+**.sqlite
+**.csv
+**.txt
+**.jpg
+**.npy
+**.prof
+.project
+.pydevproject
+.venv/
+.settings/
+**.log
+docs/.~lock.*

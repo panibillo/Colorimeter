@@ -239,92 +239,268 @@ CREATE TABLE measurements (
 
 ---
 
-## Desktop Receiver (complete implementation)
+## Security Controls
+
+The HTTP POST architecture supports layered defenses appropriate for a LAN instrument. The table below summarizes all controls. Full OS-specific firewall setup instructions are in `colorimeter_upload_security_addendum.md`.
+
+| # | Control | Where | Effect |
+|---|---|---|---|
+| 1 | Custom port (`HTTP_POST_PORT = 51051`) + OS firewall restricted to RPi IP | Desktop OS | Port invisible to all LAN devices except the RPi |
+| 2 | Receiver binds to LAN IP only | `colorimeter_receiver.py` | Not reachable via loopback or VPN adapters |
+| 3 | IP allowlist in receiver | `colorimeter_receiver.py` | HTTP 403 returned to any non-RPi source before body is read |
+| 4 | HMAC-SHA256 shared secret | Both scripts | Forged requests rejected even if IP is spoofed |
+| 5 | Filename sanitization + path confinement | `colorimeter_receiver.py` | Prevents path traversal attacks |
+| 6 | Dedicated low-privilege OS user | Desktop OS | Compromise limited to archive directory |
+| 7 | File size cap (`MAX_CONTENT_LENGTH`) | `colorimeter_receiver.py` | Prevents disk exhaustion from oversized uploads |
+| 8 | Optional TLS (self-signed cert) | Both scripts | Encrypts traffic in transit |
+
+**Minimum for a home-lab deployment:** Controls 1–5 and 7 (firewall + IP allowlist + HMAC + filename check + size cap). Controls 6 and 8 add meaningful hardening for shared-network or multi-user environments.
+
+**Setup prerequisite:** Assign the RPi a static DHCP lease in your router before applying any IP-based controls.
+
+**Generating the HMAC secret (once, on any machine):**
+
+```bash
+python3 -c "import secrets; print(secrets.token_hex(32))"
+# Store in COLORIMETER_SECRET environment variable on both devices
+```
+
+The scripts below incorporate all controls. Configuration values are collected at the top of each file. TLS is shown as an optional block clearly marked.
+
+---
+
+## Desktop Receiver (security-hardened)
 
 ```python
 # colorimeter_receiver.py
 # pip install flask h5py
-from flask import Flask, request, jsonify
-import h5py, sqlite3, pathlib, datetime, hashlib
+#
+# ENVIRONMENT VARIABLE REQUIRED:
+#   COLORIMETER_SECRET — shared HMAC secret; generate with:
+#   python3 -c "import secrets; print(secrets.token_hex(32))"
 
-ARCHIVE = pathlib.Path.home() / "ColorimeterData"
-DB_PATH = ARCHIVE / "colorimeter.db"
-HTTP_POST_PORT = 51051
+import datetime
+import hashlib
+import hmac
+import logging
+import os
+import pathlib
+import re
+import sqlite3
+
+from flask import Flask, abort, jsonify, request
+
+# ── CONFIG ──────────────────────────────────────────────────────────────────
+DESKTOP_LAN_IP   = "192.168.1.50"    # this desktop's LAN IP — bind here only
+RPI_IP           = "192.168.1.101"   # RPi's static LAN IP — only source accepted
+HTTP_POST_PORT   = 51051             # custom port (see security addendum for firewall rules)
+MAX_UPLOAD_MB    = 500
+ARCHIVE          = pathlib.Path.home() / "ColorimeterData"
+# ARCHIVE        = pathlib.Path("C:/ColorimeterData")   # Windows — uncomment
+
+# TLS — optional (Control 8). Set USE_TLS = True and provide cert/key paths.
+USE_TLS          = False
+TLS_CERT         = pathlib.Path("cert.pem")
+TLS_KEY          = pathlib.Path("key.pem")
+# ────────────────────────────────────────────────────────────────────────────
+
+DB_PATH       = ARCHIVE / "colorimeter.db"
+SAFE_FILENAME = re.compile(r'^[a-zA-Z0-9_\-]+\.h5$')
+SECRET        = os.environ.get("COLORIMETER_SECRET", "").encode()
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 app = Flask(__name__)
+app.config["MAX_CONTENT_LENGTH"] = MAX_UPLOAD_MB * 1024 * 1024
+
 
 def init_db():
     ARCHIVE.mkdir(parents=True, exist_ok=True)
     con = sqlite3.connect(DB_PATH)
     con.executescript("""
         CREATE TABLE IF NOT EXISTS hdf5_files (
-            id INTEGER PRIMARY KEY, filename TEXT, sha256 TEXT,
-            received_at TEXT, sample_count INTEGER);
+            id           INTEGER PRIMARY KEY,
+            filename     TEXT,
+            sha256       TEXT,
+            received_at  TEXT,
+            sample_count INTEGER
+        );
         CREATE TABLE IF NOT EXISTS measurements (
-            id INTEGER PRIMARY KEY, hdf5_id INTEGER, sample_id TEXT,
-            timestamp TEXT, metadata TEXT,
-            FOREIGN KEY(hdf5_id) REFERENCES hdf5_files(id));
+            id        INTEGER PRIMARY KEY,
+            hdf5_id   INTEGER REFERENCES hdf5_files(id),
+            sample_id TEXT,
+            timestamp TEXT,
+            metadata  TEXT
+        );
     """)
     con.commit()
     con.close()
 
+
+@app.before_request
+def restrict_to_rpi():
+    if request.remote_addr != RPI_IP:
+        app.logger.warning("Rejected connection from %s", request.remote_addr)
+        abort(403)
+
+
+@app.before_request
+def verify_hmac():
+    if not SECRET:
+        app.logger.error("COLORIMETER_SECRET not set — refusing all requests")
+        abort(500)
+    auth     = request.headers.get("X-Colorimeter-Auth", "")
+    filename = request.headers.get("X-Filename", "")
+    expected = hmac.new(SECRET, filename.encode(), hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(auth, f"HMAC-SHA256 {expected}"):
+        app.logger.warning("HMAC verification failed from %s", request.remote_addr)
+        abort(401)
+
+
+@app.errorhandler(413)
+def too_large(e):
+    return jsonify(error="upload exceeds size limit"), 413
+
+
 @app.route("/upload", methods=["POST"])
 def upload():
+    import h5py
+
     f = request.files.get("hdf5")
     if not f:
-        return jsonify(error="no file"), 400
+        return jsonify(error="no file field named 'hdf5'"), 400
 
-    month = datetime.date.today().strftime("%Y-%m")
+    raw_name  = f.filename or ""
+    safe_name = pathlib.Path(raw_name).name
+    if not SAFE_FILENAME.match(safe_name):
+        app.logger.warning("Rejected unsafe filename: %r", raw_name)
+        return jsonify(error="invalid filename"), 400
+
+    month    = datetime.date.today().strftime("%Y-%m")
     dest_dir = ARCHIVE / month
     dest_dir.mkdir(parents=True, exist_ok=True)
-    dest = dest_dir / f.filename
-    f.save(dest)
+    dest     = (dest_dir / safe_name).resolve()
 
+    if not str(dest).startswith(str(ARCHIVE.resolve())):
+        app.logger.error("Path traversal blocked: %s", dest)
+        return jsonify(error="invalid filename"), 400
+
+    f.save(dest)
     sha = hashlib.file_digest(open(dest, "rb"), "sha256").hexdigest()
 
     con = sqlite3.connect(DB_PATH)
-    with h5py.File(dest, "r") as h5:
-        samples = list(h5.keys())
-        cur = con.execute(
-            "INSERT INTO hdf5_files(filename,sha256,received_at,sample_count) VALUES(?,?,?,?)",
-            (str(dest), sha, datetime.datetime.now().isoformat(), len(samples)))
-        fid = cur.lastrowid
-        for s in samples:
-            meta = dict(h5[s].attrs)
-            con.execute(
-                "INSERT INTO measurements(hdf5_id,sample_id,timestamp,metadata) VALUES(?,?,?,?)",
-                (fid, s, meta.get("timestamp", ""), str(meta)))
-    con.commit()
-    con.close()
-    return jsonify(ok=True, samples=len(samples))
+    try:
+        with h5py.File(dest, "r") as h5:
+            samples = list(h5.keys())
+            cur = con.execute(
+                "INSERT INTO hdf5_files(filename,sha256,received_at,sample_count)"
+                " VALUES(?,?,?,?)",
+                (str(dest), sha, datetime.datetime.now().isoformat(), len(samples)))
+            fid = cur.lastrowid
+            for s in samples:
+                meta = dict(h5[s].attrs)
+                con.execute(
+                    "INSERT INTO measurements(hdf5_id,sample_id,timestamp,metadata)"
+                    " VALUES(?,?,?,?)",
+                    (fid, s, meta.get("timestamp", ""), str(meta)))
+        con.commit()
+    except Exception as exc:
+        dest.unlink(missing_ok=True)
+        app.logger.error("HDF5 processing failed: %s", exc)
+        return jsonify(error="HDF5 processing failed"), 422
+    finally:
+        con.close()
+
+    app.logger.info("Received %s — %d samples — sha256 %s", safe_name, len(samples), sha[:12])
+    return jsonify(ok=True, samples=len(samples), sha256=sha)
+
 
 @app.route("/status")
 def status():
     return jsonify(ok=True)
 
+
 if __name__ == "__main__":
+    if not SECRET:
+        raise RuntimeError(
+            "COLORIMETER_SECRET environment variable is not set.\n"
+            "Generate one with:  python3 -c \"import secrets; print(secrets.token_hex(32))\"\n"
+            "Then export it before starting the receiver.")
     init_db()
-    app.run(host="0.0.0.0", port=HTTP_POST_PORT)
+    ssl_ctx = (str(TLS_CERT), str(TLS_KEY)) if USE_TLS else None
+    app.run(host=DESKTOP_LAN_IP, port=HTTP_POST_PORT, ssl_context=ssl_ctx)
 ```
 
 ---
 
-## RPi Uploader (minimal)
+## RPi Uploader (security-hardened)
 
 ```python
 # upload_worker.py (runs on RPi)
-import requests, pathlib
-HTTP_POST_PORT = 51051
+#
+# ENVIRONMENT VARIABLE REQUIRED:
+#   COLORIMETER_SECRET — same shared secret as on the desktop
 
-def upload_hdf5(h5_path: pathlib.Path, desktop_ip: str, port: int = HTTP_POST_PORT):
-    url = f"http://{desktop_ip}:{port}/upload"
-    with open(h5_path, "rb") as f:
-        r = requests.post(
+import hashlib
+import hmac
+import logging
+import os
+import pathlib
+
+import requests
+
+# ── CONFIG ──────────────────────────────────────────────────────────────────
+DESKTOP_IP     = "192.168.1.50"    # desktop's LAN IP (or "colorimeter-desktop.local"
+                                   #   if mDNS is configured)
+HTTP_POST_PORT = 51051
+TIMEOUT_SEC    = 120               # generous — large HDF5 files over Wi-Fi
+
+# TLS — must match the receiver. Set USE_TLS = True and point to the copy of
+# the desktop's self-signed cert copied to the RPi (see Control 8 in addendum).
+USE_TLS        = False
+DESKTOP_CERT   = pathlib.Path("/opt/colorimeter/desktop_cert.pem")
+# ────────────────────────────────────────────────────────────────────────────
+
+SECRET = os.environ.get("COLORIMETER_SECRET", "").encode()
+log    = logging.getLogger(__name__)
+
+
+def _make_auth_header(filename: str) -> str:
+    if not SECRET:
+        raise RuntimeError("COLORIMETER_SECRET environment variable is not set on the RPi.")
+    sig = hmac.new(SECRET, filename.encode(), hashlib.sha256).hexdigest()
+    return f"HMAC-SHA256 {sig}"
+
+
+def upload_hdf5(h5_path: pathlib.Path) -> dict:
+    """Upload a single HDF5 bundle to the desktop receiver.
+
+    Returns the parsed JSON response on success.
+    Raises requests.HTTPError on a non-2xx response.
+    Raises requests.RequestException on network failure.
+    """
+    scheme   = "https" if USE_TLS else "http"
+    url      = f"{scheme}://{DESKTOP_IP}:{HTTP_POST_PORT}/upload"
+    filename = h5_path.name
+
+    headers = {
+        "X-Colorimeter-Auth": _make_auth_header(filename),
+        "X-Filename":          filename,
+    }
+    tls_verify = str(DESKTOP_CERT) if USE_TLS else True
+
+    log.info("Uploading %s to %s", filename, url)
+    with open(h5_path, "rb") as fh:
+        response = requests.post(
             url,
-            files={"hdf5": (h5_path.name, f, "application/x-hdf5")},
-            timeout=120   # generous timeout for large files
+            headers=headers,
+            files={"hdf5": (filename, fh, "application/x-hdf5")},
+            timeout=TIMEOUT_SEC,
+            verify=tls_verify,
         )
-    r.raise_for_status()
-    return r.json()
+    response.raise_for_status()
+    result = response.json()
+    log.info("Upload confirmed: %s — %d samples", filename, result.get("samples", -1))
+    return result
 ```
 
 ---

@@ -1,56 +1,92 @@
 """
 widgets.py  —  UI widget library for Colorimeter display
 ---------------------------------------------------------
-Provides Screen and widget classes that sit above the ILI9341 and TSC2007
-drivers.  Widgets own a Rect (position and size), can draw themselves, and
-can answer hit_test(x, y) for touch interaction.
+Provides Screen, Area, and widget classes that sit above the ILI9341 and
+TSC2007 drivers.  Widgets own a Rect (position and size), can draw themselves,
+and can answer hit_test(x, y) for touch interaction.
 
-Screen manages a collection of widgets and a background colour or image.
-Calling screen.render(display) does a full redraw of background + all widgets.
-The application switches views by calling render() on a different Screen.
+New in this revision
+--------------------
+Every Widget now has:
+    name      : str  — identifier for logging and future YAML/web binding
+    enabled   : bool — False = greyed out, touch ignored
+    focusable : bool — True = can receive keyboard focus (set by subclasses)
+    focused   : bool — True = currently has keyboard focus
 
-Widget hierarchy:
+Area is a new Widget subclass that owns child widgets, draws its own
+background, and routes touch events to its children.  Use it to create
+reusable screen zones (header, body, status bar).
+
+Button.focusable is always True.
+TextBox.focusable is True when editable=True.
+
+Widget hierarchy
+----------------
   Widget (base)
+    Area           — background fill + ordered children + touch routing
     Label          — static text
-    Button         — coloured rectangle with text, fires a callback on tap
-    TextBox        — displays a string value, updated by application code
-    RectWidget     — draws a rectangle outline or fill over the display
-    DraggableRect  — RectWidget with corner-drag and body-drag (STUB)
-    PickList       — scrollable list of text options (STUB)
+    TextBox        — updatable text; optional editable mode
+    Button         — coloured rect + text; enabled/focused states; on_press
+    RectWidget     — rect outline or fill
+      DraggableRect — corner/body drag  (STUB)
+    PickList       — scrollable selector  (STUB)
     Keyboard       — on-screen text entry (STUB)
 
-Stubs have __init__ and draw() defined; interactive methods raise
-NotImplementedError so that imports do not break when they are added later.
-
-Usage:
+Usage
+-----
     from ili9341 import ILI9341
     from tsc2007 import TSC2007
-    from widgets import Screen, Button, Label, TextBox
+    from widgets import Area, Button, Label, TextBox
     from geometry import Rect
 
+    W, H = 320, 240
     with ILI9341() as display, TSC2007() as touch:
-        screen = Screen(bg_color=display.DKGRAY)
-        screen.add(Label(Rect(10, 10, 200, 30), "Temperature",
-                         color=display.CYAN, size=20))
-        temp = TextBox(Rect(10, 50, 200, 40), "---",
-                       color=display.WHITE, size=32)
-        screen.add(temp)
-        screen.render(display)
+        status = Area(Rect(0, 215, W, 25), bg_color=display.DKGRAY, name="status")
+        status.add(Button(Rect(2, 217, 58, 21), "MENU", name="menu",
+                          on_press=lambda: go_menu()))
+        clock = status.add(TextBox(Rect(110, 217, 100, 21), "00:00:00",
+                                   name="clock", align="center"))
+        status.draw(display)
 
         while True:
-            temp.set_value(f"{read_sensor():.2f} °C")
-            temp.draw(display)
-
+            clock.set_value(current_time())
+            clock.draw(display)
             pos = touch.position()
             if pos:
-                screen.handle_touch(*pos)
+                status.handle_touch(*pos)
+
+Run this file directly to execute the self-test (no hardware required):
+    python3 src/widgets.py
 """
 
 from __future__ import annotations
+
+import logging
 from typing import Callable, List, Optional
+
 from PIL import Image
 
 from geometry import Rect
+
+log = logging.getLogger(__name__)
+
+_click_sound: Optional[Callable] = None
+
+
+def set_button_sound(fn: Optional[Callable]) -> None:
+    """Register a callable invoked on every Button press.  Pass None to silence."""
+    global _click_sound
+    _click_sound = fn
+
+
+# ── Colour helpers ────────────────────────────────────────────────────────────
+
+def _darken(color565: int, factor: float = 0.5) -> int:
+    """Return an RGB565 colour dimmed by factor (0.0 = black, 1.0 = unchanged)."""
+    r = (color565 >> 11) & 0x1F
+    g = (color565 >>  5) & 0x3F
+    b =  color565        & 0x1F
+    return (int(r * factor) << 11) | (int(g * factor) << 5) | int(b * factor)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -61,28 +97,62 @@ class Widget:
     """
     Abstract base class for all display widgets.
 
-    Every widget has a Rect defining its position and size on screen.
-    Subclasses must implement draw(display).
+    Parameters
+    ----------
+    rect : Rect   position and size on screen
+    name : str    optional identifier used in log messages and future YAML binding
+
+    Attributes set by subclasses
+    ----------------------------
+    focusable : True for interactive widgets (Button, editable TextBox)
     """
 
-    def __init__(self, rect: Rect):
-        self.rect    = rect
-        self.visible = True
+    def __init__(self, rect: Rect, name: str = ""):
+        self.rect             = rect
+        self.name             = name
+        self.visible          = True
+        self.enabled          = True
+        self.focusable        = False
+        self.focused          = False
+        self.on_focus_change: Optional[Callable] = None   # called with bool on focus change
+        log.debug("created %s %r", type(self).__name__, name or "(unnamed)")
 
-    def draw(self, display):
+    def draw(self, display) -> None:
         raise NotImplementedError(f"{type(self).__name__}.draw() not implemented")
 
+    def invalidate(self) -> None:
+        """Clear any cached display state so the next draw() unconditionally redraws."""
+
     def hit_test(self, px: int, py: int) -> bool:
-        """Return True if (px, py) falls within this widget's rect."""
+        """True if (px, py) is within this widget's rect and the widget is visible."""
         return self.visible and self.rect.contains(px, py)
 
-    def handle_touch(self, px: int, py: int) -> bool:
+    def handle_touch(self, px: int, py: int, display=None) -> bool:
         """
-        Called by Screen when a touch lands on this widget.
+        Called by Area/Screen when a touch lands on this widget.
+        display is passed so widgets can redraw themselves (e.g. press flash).
         Returns True if the widget consumed the event.
-        Base implementation does nothing.
         """
         return False
+
+    def set_focused(self, focused: bool, display=None) -> None:
+        """
+        Set keyboard focus state.  Pass display to redraw the focus indicator
+        immediately; otherwise the change takes effect on the next draw() call.
+        """
+        if self.focused == focused:
+            return
+        self.focused = focused
+        action = "focused" if focused else "unfocused"
+        log.info("%s %r: %s", type(self).__name__, self.name or "?", action)
+        if callable(self.on_focus_change):
+            self.on_focus_change(focused)
+        if display is not None:
+            self.draw(display)
+
+    def __repr__(self) -> str:
+        return (f"{type(self).__name__}(name={self.name!r}, "
+                f"rect={self.rect!r}, visible={self.visible}, enabled={self.enabled})")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -91,19 +161,17 @@ class Widget:
 
 class Screen:
     """
-    A complete display view: background + ordered list of widgets.
+    A complete display view: background + ordered list of widgets (or Areas).
 
-    The application creates one Screen per view (e.g. one per active test)
-    and calls render() to switch to it.  Widgets draw in the order they were
-    added; later widgets appear on top.
+    The application creates one Screen per logical view and calls render() to
+    switch to it.  Widgets draw in the order they were added; later widgets
+    appear on top.
 
     Parameters
     ----------
-    bg_color    : RGB565 background colour (default ILI9341.BLACK = 0)
-    bg_image    : optional Pillow Image drawn as background before widgets.
-                  Must already be sized to the display.  If provided,
-                  bg_color is ignored.
-    name        : optional string identifier for debugging
+    bg_color : RGB565 background (used when no bg_image is given)
+    bg_image : optional Pillow Image drawn as background before widgets
+    name     : optional identifier for logging
     """
 
     def __init__(
@@ -118,19 +186,20 @@ class Screen:
         self._widgets: List[Widget] = []
 
     def add(self, widget: Widget) -> Widget:
-        """Add a widget to this screen. Returns the widget for chaining."""
+        """Add a widget or Area. Returns the widget for chaining."""
         self._widgets.append(widget)
+        log.debug("Screen %r: added %s %r",
+                  self.name or "?", type(widget).__name__, widget.name or "?")
         return widget
 
-    def remove(self, widget: Widget):
-        """Remove a widget from this screen."""
+    def remove(self, widget: Widget) -> None:
         self._widgets.remove(widget)
 
-    def render(self, display):
-        """
-        Full redraw: background first, then all visible widgets in order.
-        Call this when switching to this screen.
-        """
+    def render(self, display) -> None:
+        """Full redraw: background, then all visible widgets in order."""
+        log.info("Screen %r: render", self.name or "?")
+        for w in self._widgets:
+            w.invalidate()
         if self.bg_image is not None:
             display.draw_image(self.bg_image, 0, 0)
         else:
@@ -139,20 +208,118 @@ class Screen:
             if w.visible:
                 w.draw(display)
 
-    def handle_touch(self, px: int, py: int) -> bool:
+    def handle_touch(self, px: int, py: int, display=None) -> bool:
         """
         Dispatch a touch event to the topmost widget that contains (px, py).
         Returns True if any widget consumed the event.
-        Widgets are tested in reverse order (topmost drawn = first tested).
         """
         for w in reversed(self._widgets):
-            if w.hit_test(px, py):
-                if w.handle_touch(px, py):
+            if w.visible and w.enabled and w.hit_test(px, py):
+                if w.handle_touch(px, py, display):
                     return True
         return False
 
-    def __repr__(self):
+    def focusable_widgets(self) -> List[Widget]:
+        """
+        All focusable, visible, enabled widgets in draw order, recursing into
+        any Areas so that buttons inside a zone are included in tab order.
+        """
+        def _collect(widgets):
+            out = []
+            for w in widgets:
+                if not w.visible or not w.enabled:
+                    continue
+                if isinstance(w, Area):
+                    out.extend(_collect(w.children))
+                elif w.focusable:
+                    out.append(w)
+            return out
+        return _collect(self._widgets)
+
+    def find(self, name: str) -> Optional[Widget]:
+        """
+        Return the first widget with the given name (depth-first through Areas),
+        or None if not found.
+        """
+        def _search(widgets):
+            for w in widgets:
+                if w.name == name:
+                    return w
+                if isinstance(w, Area):
+                    found = _search(w.children)
+                    if found is not None:
+                        return found
+            return None
+        return _search(self._widgets)
+
+    def __repr__(self) -> str:
         return f"Screen(name={self.name!r}, widgets={len(self._widgets)})"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Area
+# ─────────────────────────────────────────────────────────────────────────────
+
+class Area(Widget):
+    """
+    A rectangular region that owns and draws child widgets.
+
+    Area draws its background colour first, then each visible child in the
+    order they were added.  Touch events are routed to children in reverse
+    order (topmost drawn = first hit-tested).
+
+    Use Area to build reusable screen zones: header, body, status bar.
+    Areas can be added to a Screen or nested inside other Areas.
+
+    Parameters
+    ----------
+    rect     : position and size of the zone on screen
+    bg_color : RGB565 fill colour for the zone's background
+    name     : identifier for logging
+    """
+
+    def __init__(self, rect: Rect, bg_color: int = 0, name: str = ""):
+        super().__init__(rect, name=name)
+        self.bg_color  = bg_color
+        self._children: List[Widget] = []
+
+    def add(self, widget: Widget) -> Widget:
+        """Add a child widget. Returns the widget for one-line construction."""
+        self._children.append(widget)
+        log.debug("Area %r: added %s %r",
+                  self.name or "?", type(widget).__name__, widget.name or "?")
+        return widget
+
+    def remove(self, widget: Widget) -> None:
+        self._children.remove(widget)
+
+    @property
+    def children(self) -> List[Widget]:
+        """Read-only view of the child list."""
+        return list(self._children)
+
+    def focusable_children(self) -> List[Widget]:
+        """Focusable, visible, enabled children in draw order."""
+        return [w for w in self._children
+                if w.focusable and w.visible and w.enabled]
+
+    def invalidate(self) -> None:
+        for w in self._children:
+            w.invalidate()
+
+    def draw(self, display) -> None:
+        display.fill_rect(self.rect, self.bg_color)
+        for w in self._children:
+            if w.visible:
+                w.draw(display)
+
+    def handle_touch(self, px: int, py: int, display=None) -> bool:
+        """Route touch to children in reverse draw order (topmost first)."""
+        for w in reversed(self._children):
+            if w.visible and w.enabled and w.hit_test(px, py):
+                if w.handle_touch(px, py, display):
+                    return True
+        return False
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -167,11 +334,12 @@ class Label(Widget):
     ----------
     rect   : position and size on screen
     text   : string to display
-    color  : RGB565 foreground (default WHITE = 0xFFFF)
-    bg     : RGB565 background (default BLACK = 0)
+    color  : RGB565 foreground (default WHITE)
+    bg     : RGB565 background (default BLACK)
     size   : font size in points
     align  : "left" | "center" | "right"
     valign : "top"  | "middle" | "bottom"
+    name   : identifier for logging
     """
 
     def __init__(
@@ -183,8 +351,9 @@ class Label(Widget):
         size:   int  = 16,
         align:  str  = "left",
         valign: str  = "top",
+        name:   str  = "",
     ):
-        super().__init__(rect)
+        super().__init__(rect, name=name)
         self.text   = text
         self.color  = color
         self.bg     = bg
@@ -192,7 +361,7 @@ class Label(Widget):
         self.align  = align
         self.valign = valign
 
-    def draw(self, display):
+    def draw(self, display) -> None:
         display.draw_text(self.text, self.rect,
                           color=self.color, bg=self.bg,
                           size=self.size,
@@ -207,25 +376,52 @@ class TextBox(Widget):
     """
     A text display box whose value can be updated at runtime.
 
-    Unlike Label, TextBox is designed for values that change frequently
-    (sensor readings, elapsed time, etc.).  Call set_value() to update;
-    call draw() to push the new value to the display.
+    TextBox skips redraw when the value has not changed since the last draw,
+    reducing SPI traffic.  Pass force=True to draw() to override this.
 
-    Optionally, set a border_color to draw a rectangle around the box.
+    When editable=True:
+    - focusable is set to True so Tab can land here
+    - touching the widget sets editing=True (draws EDIT_BORDER, accepts chars)
+    - Enter key toggles editing on/off
+    - focus loss always clears editing
+
+    Visual states (priority order)
+    --------------------------------
+    editing  → EDIT_BORDER (bright green), 2 px
+    focused  → FOCUS_BORDER (white), 2 px
+    normal   → border_color (1 px) or nothing
+
+    Parameters
+    ----------
+    rect         : position and size
+    value        : initial string to display
+    color        : RGB565 foreground
+    bg           : RGB565 background
+    size         : font size in points
+    align        : "left" | "center" | "right"
+    valign       : "top"  | "middle" | "bottom"
+    border_color : RGB565 normal border (None = no border)
+    editable     : if True, widget is focusable and accepts character input
+    name         : identifier for logging
     """
+
+    FOCUS_BORDER = 0xFFFF   # white focus ring
+    EDIT_BORDER  = 0x07E0   # bright green — actively editing
 
     def __init__(
         self,
         rect:         Rect,
-        value:        str  = "",
-        color:        int  = 0xFFFF,
-        bg:           int  = 0x0000,
-        size:         int  = 16,
-        align:        str  = "left",
-        valign:       str  = "middle",
-        border_color: int  = None,
+        value:        str      = "",
+        color:        int      = 0xFFFF,
+        bg:           int      = 0x0000,
+        size:         int      = 16,
+        align:        str      = "left",
+        valign:       str      = "middle",
+        border_color: Optional[int] = None,
+        editable:     bool         = False,
+        name:         str      = "",
     ):
-        super().__init__(rect)
+        super().__init__(rect, name=name)
         self.value        = value
         self.color        = color
         self.bg           = bg
@@ -233,26 +429,83 @@ class TextBox(Widget):
         self.align        = align
         self.valign       = valign
         self.border_color = border_color
-        self._last_drawn  = object()    # sentinel — forces first draw
+        self.editable     = editable
+        self.editing      = False   # True while user is typing into this field
+        self.focusable    = editable
+        self._last_drawn  = object()   # sentinel — forces first draw
 
-    def set_value(self, value: str):
+    def invalidate(self) -> None:
+        self._last_drawn = object()
+
+    def set_value(self, value: str) -> None:
         """Update the displayed value. Call draw() to push to screen."""
         self.value = str(value)
 
-    def draw(self, display, force: bool = False):
-        """
-        Draw the text box.  Skips redraw if value has not changed
-        unless force=True.
-        """
-        if not force and self.value == self._last_drawn:
+    def on_update(self, value) -> None:
+        """Pub/sub hook: subscribe this to a bus topic to auto-update the value."""
+        self.set_value(value)
+
+    def set_focused(self, focused: bool, display=None) -> None:
+        """Clear editing when focus leaves; always force-redraw the border."""
+        if not focused:
+            self.editing = False
+        self.invalidate()
+        super().set_focused(focused, display)
+
+    def toggle_editing(self, display=None) -> None:
+        """Toggle editing mode. Called by Enter key."""
+        if not self.editable:
             return
-        self._last_drawn = self.value
+        self.editing = not self.editing
+        log.info("TextBox %r: editing=%s", self.name or "?", self.editing)
+        self.invalidate()
+        if display is not None:
+            self.draw(display, force=True)
+
+    def draw(self, display, force: bool = False) -> None:
+        state = (self.value, self.focused, self.editing)
+        if not force and state == self._last_drawn:
+            return
+        self._last_drawn = state
         display.draw_text(self.value, self.rect,
                           color=self.color, bg=self.bg,
                           size=self.size,
                           align=self.align, valign=self.valign)
-        if self.border_color is not None:
+        if self.editing:
+            display.draw_rect(self.rect, self.EDIT_BORDER, fill=False, thickness=2)
+        elif self.focused:
+            display.draw_rect(self.rect, self.FOCUS_BORDER, fill=False, thickness=2)
+        elif self.border_color is not None:
             display.draw_rect(self.rect, self.border_color)
+
+    def handle_char(self, char: str, display=None) -> None:
+        """Append or delete a character. Only active while editing."""
+        if not self.editing:
+            return
+        if char in ('backspace', 'delete'):
+            self.value = self.value[:-1]
+        elif len(char) == 1 and char.isprintable():
+            self.value += char
+        else:
+            return
+        self.invalidate()
+        if display is not None:
+            self.draw(display, force=True)
+
+    def handle_touch(self, px: int, py: int, display=None) -> bool:
+        if not self.enabled or not self.editable:
+            return False
+        if self.hit_test(px, py):
+            log.info("TextBox %r: editing started", self.name or "?")
+            if _click_sound is not None:
+                _click_sound()
+            if not self.editing:
+                self.editing = True
+                self.invalidate()
+                if display is not None:
+                    self.draw(display, force=True)
+            return True
+        return False
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -263,49 +516,89 @@ class Button(Widget):
     """
     A coloured rectangular button with a text label.
 
+    focusable = True always — buttons can receive keyboard focus (Tab/Enter).
+    When focused, a 2-pixel focus ring is drawn instead of the normal border.
+    When disabled, face colour and text are darkened and touch is ignored.
+
     Parameters
     ----------
-    rect         : position and size
-    label        : button text
-    color        : RGB565 button face colour
-    text_color   : RGB565 text colour
-    border_color : RGB565 border colour (None = no border)
-    size         : font size
-    on_press     : callable invoked when button is tapped
+    rect           : position and size
+    label          : button text
+    color          : RGB565 button face colour
+    text_color     : RGB565 text colour
+    border_color   : RGB565 normal border (None = no border)
+    size           : font size in points
+    on_press       : callable invoked when button is tapped or Enter is pressed
+    disabled_color : RGB565 face when disabled (None = auto-darken color)
+    name           : identifier for logging
     """
+
+    FOCUS_BORDER = 0xFFFF   # white; override per-instance if needed
 
     def __init__(
         self,
-        rect:         Rect,
-        label:        str      = "",
-        color:        int      = 0x001F,    # BLUE
-        text_color:   int      = 0xFFFF,    # WHITE
-        border_color: int      = 0xFFFF,    # WHITE
-        size:         int      = 16,
-        on_press:     Callable = None,
+        rect:           Rect,
+        label:          str      = "",
+        color:          int      = 0x001F,   # BLUE
+        text_color:     int      = 0xFFFF,   # WHITE
+        border_color:   Optional[int]      = None,
+        size:           int                = 16,
+        on_press:       Optional[Callable] = None,
+        disabled_color: Optional[int]      = None,
+        name:           str      = "",
     ):
-        super().__init__(rect)
-        self.label        = label
-        self.color        = color
-        self.text_color   = text_color
-        self.border_color = border_color
-        self.size         = size
-        self.on_press     = on_press
+        super().__init__(rect, name=name)
+        self.label          = label
+        self.color          = color
+        self.text_color     = text_color
+        self.border_color   = border_color
+        self.size           = size
+        self.on_press       = on_press
+        self.disabled_color = disabled_color
+        self.focusable      = True
+        self.pressed        = False
 
-    def draw(self, display):
-        display.fill_rect(self.rect, self.color)
-        if self.border_color is not None:
+    def draw(self, display) -> None:
+        if not self.enabled:
+            face   = (self.disabled_color if self.disabled_color is not None
+                      else _darken(self.color))
+            tcolor = _darken(self.text_color)
+        elif self.pressed:
+            face   = _darken(self.color, 0.65)
+            tcolor = self.text_color
+        else:
+            face   = self.color
+            tcolor = self.text_color
+
+        display.fill_rect(self.rect, face)
+
+        if self.focused and self.enabled and not self.pressed:
+            display.draw_rect(self.rect, self.FOCUS_BORDER, fill=False, thickness=2)
+        elif self.border_color is not None and not self.pressed:
             display.draw_rect(self.rect, self.border_color)
+
         if self.label:
             display.draw_text(self.label, self.rect,
-                              color=self.text_color, bg=self.color,
+                              color=tcolor, bg=face,
                               size=self.size,
                               align="center", valign="middle")
 
-    def handle_touch(self, px: int, py: int) -> bool:
+    def handle_touch(self, px: int, py: int, display=None) -> bool:
+        if not self.enabled:
+            log.debug("Button %r: touch ignored (disabled)", self.name or self.label)
+            return False
         if self.hit_test(px, py):
+            log.info("Button %r: pressed", self.name or self.label or "?")
+            if display is not None:
+                self.pressed = True
+                self.draw(display)
+            if _click_sound is not None:
+                _click_sound()
             if callable(self.on_press):
                 self.on_press()
+            if display is not None:
+                self.pressed = False
+                self.draw(display)
             return True
         return False
 
@@ -325,6 +618,7 @@ class RectWidget(Widget):
     color     : RGB565 colour
     fill      : True = filled, False = outline only
     thickness : outline thickness in pixels (fill=False only)
+    name      : identifier for logging
     """
 
     def __init__(
@@ -333,22 +627,21 @@ class RectWidget(Widget):
         color:     int  = 0xFFFF,
         fill:      bool = False,
         thickness: int  = 1,
+        name:      str  = "",
     ):
-        super().__init__(rect)
+        super().__init__(rect, name=name)
         self.color     = color
         self.fill      = fill
         self.thickness = thickness
 
-    def draw(self, display):
+    def draw(self, display) -> None:
         display.draw_rect(self.rect, self.color,
                           fill=self.fill, thickness=self.thickness)
 
-    def move_to(self, x: int, y: int):
-        """Move the rectangle to a new top-left position."""
+    def move_to(self, x: int, y: int) -> None:
         self.rect = Rect(x, y, self.rect.w, self.rect.h)
 
-    def resize(self, w: int, h: int):
-        """Resize the rectangle."""
+    def resize(self, w: int, h: int) -> None:
         self.rect = Rect(self.rect.x, self.rect.y, w, h)
 
 
@@ -377,25 +670,25 @@ class DraggableRect(RectWidget):
     rect         : initial rectangle
     color        : outline colour
     handle_color : corner handle colour
-    handle_size  : corner handle square size in pixels
     on_change    : callable(rect) invoked whenever the rect changes
+    name         : identifier for logging
     """
 
-    HANDLE = 10     # corner handle size in pixels
+    HANDLE = 10
 
     def __init__(
         self,
         rect:         Rect,
         color:        int      = 0xFFFF,
-        handle_color: int      = 0x07E0,    # GREEN
+        handle_color: int      = 0x07E0,   # GREEN
         on_change:    Callable = None,
+        name:         str      = "",
     ):
-        super().__init__(rect, color=color, fill=False)
+        super().__init__(rect, color=color, fill=False, name=name)
         self.handle_color = handle_color
         self.on_change    = on_change
 
-    def draw(self, display):
-        """Draw rectangle outline and corner handles."""
+    def draw(self, display) -> None:
         display.draw_rect(self.rect, self.color)
         h = self.HANDLE
         for (cx, cy) in self.rect.corners:
@@ -403,13 +696,7 @@ class DraggableRect(RectWidget):
                 Rect(cx - h // 2, cy - h // 2, h, h),
                 self.handle_color)
 
-    def update(self, touch):
-        """
-        Process a drag interaction using the touch driver.
-        touch : TSC2007 instance
-
-        NOT YET IMPLEMENTED.
-        """
+    def update(self, touch) -> None:
         raise NotImplementedError(
             "DraggableRect.update() not yet implemented. "
             "Use touch.track() and rect.with_corner() / rect.moved_by().")
@@ -431,29 +718,43 @@ class PickList(Widget):
     - draw up/down arrow buttons if items exceed visible rows
     - highlight the selected item
     - fire on_select(item, index) callback on tap
+
+    Parameters
+    ----------
+    rect      : position and size
+    items     : list of strings
+    selected  : index of initially selected item
+    color     : RGB565 text colour
+    bg        : RGB565 background
+    sel_color : RGB565 highlight for selected row
+    size      : font size
+    on_select : callable(item, index) invoked on selection
+    name      : identifier for logging
     """
 
     def __init__(
         self,
-        rect:       Rect,
-        items:      List[str]  = None,
-        selected:   int        = 0,
-        color:      int        = 0xFFFF,
-        bg:         int        = 0x0000,
-        sel_color:  int        = 0x001F,
-        size:       int        = 14,
-        on_select:  Callable   = None,
+        rect:      Rect,
+        items:     List[str]  = None,
+        selected:  int        = 0,
+        color:     int        = 0xFFFF,
+        bg:        int        = 0x0000,
+        sel_color: int        = 0x001F,
+        size:      int        = 14,
+        on_select: Callable   = None,
+        name:      str        = "",
     ):
-        super().__init__(rect)
-        self.items      = items or []
-        self.selected   = selected
-        self.color      = color
-        self.bg         = bg
-        self.sel_color  = sel_color
-        self.size       = size
-        self.on_select  = on_select
+        super().__init__(rect, name=name)
+        self.items     = items or []
+        self.selected  = selected
+        self.color     = color
+        self.bg        = bg
+        self.sel_color = sel_color
+        self.size      = size
+        self.on_select = on_select
+        self.focusable = True
 
-    def draw(self, display):
+    def draw(self, display) -> None:
         raise NotImplementedError("PickList.draw() not yet implemented.")
 
     def handle_touch(self, px: int, py: int) -> bool:
@@ -477,7 +778,14 @@ class Keyboard(Widget):
     - fire on_change(buffer) on each keypress
     - fire on_submit(buffer) on Enter/Done
     - support Backspace
-    - optional: shift key for upper/lower case
+
+    Parameters
+    ----------
+    rect      : position and size of keyboard overlay area
+    on_change : callable(buffer) on each keypress
+    on_submit : callable(buffer) on Done/Enter
+    initial   : pre-populated buffer string
+    name      : identifier for logging
     """
 
     def __init__(
@@ -486,18 +794,124 @@ class Keyboard(Widget):
         on_change:  Callable = None,
         on_submit:  Callable = None,
         initial:    str      = "",
+        name:       str      = "",
     ):
-        super().__init__(rect)
-        self.buffer     = initial
-        self.on_change  = on_change
-        self.on_submit  = on_submit
+        super().__init__(rect, name=name)
+        self.buffer    = initial
+        self.on_change = on_change
+        self.on_submit = on_submit
+        self.focusable = True
 
     @property
     def value(self) -> str:
         return self.buffer
 
-    def draw(self, display):
+    def draw(self, display) -> None:
         raise NotImplementedError("Keyboard.draw() not yet implemented.")
 
     def handle_touch(self, px: int, py: int) -> bool:
         raise NotImplementedError("Keyboard.handle_touch() not yet implemented.")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Self-test  (no hardware required)
+# ─────────────────────────────────────────────────────────────────────────────
+
+if __name__ == "__main__":
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(levelname)-8s [%(name)s] %(message)s",
+    )
+
+    class _MockDisplay:
+        """Prints draw calls instead of driving hardware."""
+        def fill_screen(self, color):
+            print(f"    fill_screen #{color:04x}")
+        def fill_rect(self, rect, color):
+            print(f"    fill_rect   ({rect.x},{rect.y} {rect.w}x{rect.h}) #{color:04x}")
+        def draw_rect(self, rect, color, fill=False, thickness=1):
+            mode = "fill" if fill else f"border t={thickness}"
+            print(f"    draw_rect   ({rect.x},{rect.y} {rect.w}x{rect.h}) #{color:04x} {mode}")
+        def draw_text(self, text, rect, **kw):
+            print(f"    draw_text   {text!r:25s} ({rect.x},{rect.y} {rect.w}x{rect.h})"
+                  f"  sz={kw.get('size','?')}")
+
+    disp = _MockDisplay()
+    log.info("=== widgets.py self-test ===")
+
+    # ── Area with Label and Button ────────────────────────────────────────────
+    print("\n── Area.draw() ──")
+    area = Area(Rect(0, 0, 320, 50), bg_color=0x1234, name="header")
+    lbl  = area.add(Label(Rect(8, 5, 200, 24), "New Test",
+                          color=0x0000, bg=0xFFFF, size=22, name="title"))
+    btn  = area.add(Button(Rect(250, 10, 60, 30), "Go",
+                           color=0x03E0, name="go_btn",
+                           on_press=lambda: print("    >>> Go pressed!")))
+    area.draw(disp)
+
+    # ── Button states ─────────────────────────────────────────────────────────
+    print("\n── Button: normal → focused → disabled ──")
+    print("  normal:")
+    btn.draw(disp)
+    print("  focused:")
+    btn.set_focused(True)
+    btn.draw(disp)
+    print("  disabled:")
+    btn.set_focused(False)
+    btn.enabled = False
+    btn.draw(disp)
+    btn.enabled = True
+
+    # ── Touch dispatch ────────────────────────────────────────────────────────
+    print("\n── Area.handle_touch() ──")
+    print(f"  hit btn  (265, 25): consumed={area.handle_touch(265, 25)}")
+    print(f"  hit lbl  ( 10, 10): consumed={area.handle_touch(10, 10)}")
+    print(f"  miss     (400,400): consumed={area.handle_touch(400, 400)}")
+
+    print("\n── Disabled button ignores touch ──")
+    btn.enabled = False
+    print(f"  hit disabled btn:   consumed={area.handle_touch(265, 25)}")
+    btn.enabled = True
+
+    # ── focusable_children ────────────────────────────────────────────────────
+    print("\n── Area.focusable_children() ──")
+    fc = area.focusable_children()
+    print(f"  {[w.name for w in fc]}")   # only 'go_btn'; Label is not focusable
+
+    # ── TextBox: static vs editable ───────────────────────────────────────────
+    print("\n── TextBox: static ──")
+    tb_ro = TextBox(Rect(10, 60, 180, 30), "AB0124",
+                    color=0x0000, bg=0xFFFF, size=22, name="id_field")
+    print(f"  focusable: {tb_ro.focusable}")
+    tb_ro.draw(disp)
+    print("  draw again (same value — should skip):")
+    tb_ro.draw(disp)
+    tb_ro.set_value("XY9999")
+    print("  draw after set_value (changed — renders):")
+    tb_ro.draw(disp)
+
+    print("\n── TextBox: editable ──")
+    tb_ed = TextBox(Rect(10, 100, 180, 30), "William Widgets",
+                    color=0x0000, bg=0xFFFF, size=18, name="user_field",
+                    editable=True)
+    print(f"  focusable: {tb_ed.focusable}")
+    tb_ed.set_focused(True, disp)
+    print("  draw while focused (should show focus ring):")
+    tb_ed.draw(disp, force=True)
+    print("  handle_touch — should start editing:")
+    tb_ed.handle_touch(15, 110, disp)
+    print(f"  editing: {tb_ed.editing}")
+    print("  toggle_editing — should stop editing:")
+    tb_ed.toggle_editing(disp)
+    print(f"  editing: {tb_ed.editing}")
+
+    # ── Screen ────────────────────────────────────────────────────────────────
+    print("\n── Screen.render() ──")
+    screen = Screen(bg_color=0x001F, name="test_screen")
+    screen.add(area)
+    screen.add(tb_ro)
+    screen.render(disp)
+    fw = screen.focusable_widgets()
+    print(f"  focusable top-level widgets: {[w.name for w in fw]}")
+
+    print("\n=== self-test complete ===")

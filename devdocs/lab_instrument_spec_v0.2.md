@@ -18,9 +18,9 @@ This specification is intentionally high-level. It establishes architecture, mod
 | Compute | Raspberry Pi Zero W or Zero W 2 |
 | Display | 240 × 330 px resistive touchscreen, landscape orientation |
 | Camera | Pi Camera Module 2 or 3 |
-| Temperature sensors | Up to 5 × DS18B20 (1-wire bus); component IDs recorded |
-| Illumination | 1–10 LED colors, sequentially addressable |
-| Input | USB keyboard (primary navigation fallback; primary data entry) |
+| Temperature sensors with unique GUIDs | Up to 5 × Analog Devices DS18B20 (1-wire bus) digital temperature sensor; component GUIDs recorded |
+| Illumination | 1 white LED and 1–9 narrow band color LED, all sequentially addressable |
+| Input | USB keyboard or keyboard + mouse (primary navigation fallback; primary data entry) |
 | Physical controls | Optional: a small number of pushbuttons, status LEDs, piezo beeper |
 | Network | Wi-Fi (LAN only) |
 | Optional future output | HDMI monitor (architecture must not preclude this) |
@@ -35,16 +35,20 @@ The instrument performs the following sequence, which may run concurrently for u
 
 1. Accept sample and metadata input from the user.
 2. Record sample temperature via DS18B20.
-3. Guide the user through one or more timed reagent phases (phase durations typically 2-10 minutes; duration may be temperature dependent - a function to be determined; precision requirements on the order of 10-120 seconds).
-4. At each designated measurement phase, illuminate the sample with each LED color sequentially and capture one photograph per color.
-5. Analyze photographs: extract Bayer layer sub-regions, compute color channel statistics.
-6. Display results; store results and metadata to persistent storage.
+3. Guide the user through one or more timed reagent phases (phase durations typically 2-10 minutes; duration may be temperature dependent - a function to be determined; precision requirements on the order of 10-120 seconds). Using onscreen prompts, visible countdown or count-up timers, and sound alerts.
+4. In the measurement phase, illuminate the sample with each LED color sequentially and capture one or more exposures per color.
+5. Analyze photographs: extract Bayer layers, extract regions of interest (ROIs) from each layer, balance each color/layer/roi using current and stored values for black subtraction, white balance, and areal luminesent trend; compute the color/layer/roi statistical description, use those values and stored calibration parameters to compute the result value and result error measure(s).
+6. Display the result value and one or more error measures
+7. Store all results and metadata to persistent storage.
+8. Optionally store Bayer layers to persistent storage.
 
-**Shared physical resources:** Camera + LED array, and 1-wire sensor bus are shared across all active tests. Only one test at a time may use the camera + LED array. Only one test at a time may use the external temperature sensor. A scheduling / resource-lock mechanism is required. Timing precision requirements are loose enough (10–120 s phases) that cooperative scheduling is sufficient; hard real-time is not required. Precise camera exposures are handled by the camera.
+**Shared physical resources:** The Camera, LED array, Display, Touchscreen, and 1-wire sensor bus are shared across all active tests. Only one test at a time may use any of the shared physical resources. A scheduling / resource-lock mechanism is required. Timing precision requirements are loose enough (10–120 s phases) that cooperative scheduling is sufficient; hard real-time is not required. 
+Each phase has a defined required timing precision.
+Precise camera exposures are handled by the camera.
 
 **Practical concurrency:** While up to 4 simultaneous tests are architecturally supported, 2 simultaneous tests is the expected working maximum for a single operator.
 
-**Phase interleaving:** Each phase of each test has an allowable time window, and there are time windows in each phase that phase must have focus for user attention and action.  Simultaneous tests must be timed so that *focus windows* will not be scheduled concurrently.  Attention windows are defined in one of the config files (probably the screen YAML definitions because 'in focus' will apply to particular screens).  The test 'Start' button can only be active when the new test's focus windows will not conflict with currently running tests' focus windows. 
+**Phase interleaving:** Each test has multiple steps that are broken into time windows. Some time windows require user focus for attention and action.  Simultaneous tests must be timed so that *focus windows* will not be scheduled concurrently.  All windows are defined in one of the config files (probably the screen YAML definitions because 'in focus' periods relate to particular screens).  The test 'Start' button can only be active when the new test's projected focus window periods will not conflict with currently running tests' focus window periods. 
 
 ---
 
@@ -56,7 +60,8 @@ Each test record contains:
 
 - **Identity:** Test ID (UUID), test label (A/B/C/D), 
 - **Sample metadata:** Sample ID / name, collection timestamp, operator ID
-- **Hardware identifiers:** instrument serial number, software version, DS18B20 sensor ID(s), LED ids, Reference color tile ids and config vars.
+- **Hardware identifiers:** Test kit lot number, instrument serial number, DS18B20 sensor ID(s), LED ids, Reference color tile ids, Camera identifier.
+- **Software identifiers:** Software version, Calibration identifer(s), and config vars, location of instrument
 - **Environmental:** ambient temperature readings at each phase
 - **Phase log:** Phase name, scheduled start, actual start, actual end, status (complete / incomplete / skipped)
 - **Image records:** Per LED color per phase: image file path or embedded sub-array, exposure settings, camera model, capture timestamp, processing data.
@@ -69,7 +74,7 @@ Each test record contains:
 
 A separate log stream records:
 
-- All major lifecycle events (boot, test start, phase transitions, ¿user interactions?, test complete, shutdown)
+- All major lifecycle events (boot, test start, phase transitions, ¿user interactions?, test complete - time and status, shutdown)
 - All warnings and errors (see Section 9)
 - Periodic environmental snapshots (temperature, Wi-Fi status)
 - Software version and configuration hash at boot
@@ -81,15 +86,15 @@ The operational log is stored separately from test results (different SQLite tab
 - Results are written and committed to the db incrementally as they are generated.
 - The system must be able to open and continue an incomplete test after a power loss.
 - SQLite is the on-device persistent store. Write-ahead logging (WAL mode) should be enabled to reduce contention between concurrent readers and writers. __This needs study__
-- Results are uploaded by UDP when a receiver address is configured.
+- Results are uploaded via HTTP POST when a receiver address is configured.
 - Whole photographs may be stored on-device or referenced by path; storage policy (embed vs. reference) is configurable.
 
 ### 4.4 Archival storage of results
 
-- On board SQLite db stores all metadata from all tests, plus a reference to a __MDF5__ file for each test.
-- Server side SQLite db mirrors the onboard db. 
-- __MDF5__ 
-
+- On board SQLite db stores all metadata from all tests, plus a reference to a __HDF5__ file for each test.
+- Server side SQLite db mirrors the onboard db, synced via HTTP POST upload.
+- __HDF5__ file stores images, color/layer/roi arrays, metadata, results
+   - HDF5 file provides redundant storage of test metadata and results that are also written into the db.
 
 ---
 
@@ -97,13 +102,14 @@ The operational log is stored separately from test results (different SQLite tab
 
 ### 5.1 Process Model — Decision Guidance
 
-**Recommendation: single Python process with threads.**
+**A single Python process with threads.**
 
-*Rationale:* On the RPi Zero W, spawning two processes doubles the Python interpreter overhead and complicates shared state. A single process with:
 - A main thread owning the touchscreen renderer and the event loop
 - A Flask thread (using Flask's built-in threaded server or Waitress)
-- Worker threads for camera capture and LED control (one at a time via a shared lock)
-- A background thread for SQLite writes and UDP upload
+- Worker threads for hardware tasks: Sensor queries, LED control, camera capture.
+- ¿A background thread for image analysis?
+- A background thread for SQLite writes.
+- A background thread for 
 
 ...is simpler to reason about, uses less RAM, and shares Python objects directly without IPC overhead.
 
@@ -196,7 +202,7 @@ This allows a future HDMI backend to be substituted with no changes to the rende
   - Uploads run when HDF5s are ready, and run in the background at lower priority than running tests or user interactions.
 
 -Desktop Receiver (`colorimeter_receiver.py`)
-  - A small **Flask HTTP server** (port 5001) that runs on the desktop — any OS
+  - A small **Flask HTTP server** (port 51051, custom) that runs on the desktop — any OS
   - Accepts HDF5 uploads at `POST /upload`; exposes `GET /status` for heartbeat checks
   - Unpacks each HDF5 file, extracts per-sample metadata, and upserts records into a local **SQLite database**
   - Unpacking and upserts are security consious.
@@ -212,7 +218,7 @@ This allows a future HDMI backend to be substituted with no changes to the rende
 
 **Rendering:** A lightweight custom renderer written from scratch, extending the existing prototype rectangle/font/color module. No external UI framework.
 
-**Orientation:** Landscape (330 px wide × 240 px tall in logical coordinates).
+**Orientation:** Landscape (320 px wide × 240 px tall in logical coordinates).
 
 **Screen structure:** Every screen has three zones:
 - **Header** (fixed height ~30 px): Sample ID, collection time, Test# identifier button (A/B/C/D) with distinct background color per test slot. Large letter identifier (A/B/C/D) in header for focus awareness.
@@ -306,7 +312,7 @@ All widgets are composed from rectangles and text (single font family, multiple 
   - Scrolling selector value lists (e.g., reagent volumes, time steps)
   - Temperature calibration range and warning thresholds
   - Timer warning levels (configurable beep cadence / persistence)
-  - UDP upload receiver address (optional)
+  - HTTP POST receiver address and port (optional; default port 51051)
   - Storage policy (embed images vs. reference by path)
   - Display backend (touchscreen / HDMI) and resolution
   - Locale: date format, decimal separator, UI language
@@ -334,7 +340,7 @@ Errors and warnings are published on the shared state bus and rendered on both i
 | E-TIMER-01 | Warning | Phase timer over-long | Audible alert; escalating cadence per config |
 | E-SCHED-01 | Warning | Resource conflict — wait to start | Display hold message; retry automatically |
 | E-NET-01 | Warning | Cannot connect to Wi-Fi | Results written locally only; display warning |
-| E-NET-02 | Warning | UDP upload error | Retry with backoff; log; display warning |
+| E-NET-02 | Warning | HTTP POST upload error | Retry with backoff; log; display warning |
 | E-BOOT-01 | Critical | Unable to boot | Status LED pattern (hardware fallback) |
 
 ---
