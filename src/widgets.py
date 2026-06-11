@@ -99,22 +99,24 @@ class Widget:
 
     Parameters
     ----------
-    rect : Rect   position and size on screen
-    name : str    optional identifier used in log messages and future YAML binding
+    rect      : Rect   position and size on screen
+    name      : str    optional identifier used in log messages and CSV binding
+    widget_id : int    permanent 3-digit CSV id (100–999); 0 = no id assigned
 
     Attributes set by subclasses
     ----------------------------
     focusable : True for interactive widgets (Button, editable TextBox)
     """
 
-    def __init__(self, rect: Rect, name: str = ""):
+    def __init__(self, rect: Rect, name: str = "", widget_id: int = 0):
         self.rect             = rect
         self.name             = name
+        self.widget_id        = widget_id
         self.visible          = True
         self.enabled          = True
         self.focusable        = False
         self.focused          = False
-        self.on_focus_change: Optional[Callable] = None   # called with bool on focus change
+        self.on_focus_change: Optional[Callable] = None
         log.debug("created %s %r", type(self).__name__, name or "(unnamed)")
 
     def draw(self, display) -> None:
@@ -167,44 +169,113 @@ class Screen:
     switch to it.  Widgets draw in the order they were added; later widgets
     appear on top.
 
+    CSV-loaded screens use tabbed_widgets / untabbed_widgets instead of _widgets.
+    Area-based (legacy) construction still works via add().
+
     Parameters
     ----------
-    bg_color : RGB565 background (used when no bg_image is given)
-    bg_image : optional Pillow Image drawn as background before widgets
-    name     : optional identifier for logging
+    bg_color     : RGB565 background (used when no bg_image is given)
+    bg_image     : optional Pillow Image drawn as background before widgets
+    name         : optional identifier for logging
+    screen_id    : 2-char hardcoded identifier (e.g. 'SE', 'MM')
+    phase        : phase group id; 0 if this screen has no timed phase
+    seq          : ordering within phase (1,2,3…); 0 if not phased
+    duration     : timer duration in seconds; 0 = no time limit
+    modal        : if True navigation is locked while this screen is active
+    beginactions : list of action strings executed when timer starts
+                   ('alarm_on', 'alarm_off', 'start_timer')
+    next_screen_id : screen_id to navigate to on NEXT; '' = no NEXT
     """
 
     def __init__(
         self,
-        bg_color: int          = 0,
-        bg_image: Image.Image  = None,
-        name:     str          = "",
+        bg_color:       int            = 0,
+        bg_image:       Image.Image    = None,
+        name:           str            = "",
+        screen_id:      str            = "",
+        phase:          int            = 0,
+        seq:            int            = 0,
+        duration:       int            = 0,
+        modal:          bool           = False,
+        beginactions:   List[str]      = None,
+        next_screen_id: str            = "",
     ):
-        self.bg_color  = bg_color
-        self.bg_image  = bg_image
-        self.name      = name
-        self._widgets: List[Widget] = []
+        self.bg_color       = bg_color
+        self.bg_image       = bg_image
+        self.name           = name
+        self.screen_id      = screen_id
+        self.phase          = phase
+        self.seq            = seq
+        self.duration       = duration
+        self.modal          = modal
+        self.beginactions   = beginactions if beginactions is not None else []
+        self.next_screen_id = next_screen_id
+
+        # Runtime state
+        self.is_visible:    bool              = False
+        self.is_alive:      bool              = False
+        self._timer_start:  Optional[float]   = None
+        self.on_timeout:    Optional[Callable] = None   # called by ScreenManager.tick() on expiry
+
+        # Widget lists
+        # _widgets      : Area-based legacy construction (add())
+        # tabbed_widgets   : focusable widgets in CSV tab order
+        # untabbed_widgets : non-focusable display widgets from CSV
+        self._widgets:        List[Widget] = []
+        self.tabbed_widgets:  List[Widget] = []
+        self.untabbed_widgets: List[Widget] = []
 
     def add(self, widget: Widget) -> Widget:
-        """Add a widget or Area. Returns the widget for chaining."""
+        """Add a widget or Area (legacy Area-based construction). Returns widget."""
         self._widgets.append(widget)
         log.debug("Screen %r: added %s %r",
                   self.name or "?", type(widget).__name__, widget.name or "?")
         return widget
 
+    def add_tabbed(self, widget: Widget) -> Widget:
+        """Add a focusable widget to the tab order (CSV-loaded screens)."""
+        self.tabbed_widgets.append(widget)
+        return widget
+
+    def add_untabbed(self, widget: Widget) -> Widget:
+        """Add a non-focusable display widget (CSV-loaded screens)."""
+        self.untabbed_widgets.append(widget)
+        return widget
+
     def remove(self, widget: Widget) -> None:
-        self._widgets.remove(widget)
+        for lst in (self._widgets, self.tabbed_widgets, self.untabbed_widgets):
+            if widget in lst:
+                lst.remove(widget)
+                return
+
+    def _all_widgets(self) -> List[Widget]:
+        """All widgets in draw order: legacy _widgets, then untabbed, then tabbed."""
+        return self._widgets + self.untabbed_widgets + self.tabbed_widgets
+
+    def start_timer(self) -> None:
+        """Mark this screen's timer as started.  Sets is_alive."""
+        import time
+        self._timer_start = time.monotonic()
+        self.is_alive = True
+        log.info("Screen %r: timer started (duration=%ds)", self.screen_id or self.name, self.duration)
+
+    def elapsed(self) -> float:
+        """Seconds since start_timer() was called; 0 if not started."""
+        if self._timer_start is None:
+            return 0.0
+        import time
+        return time.monotonic() - self._timer_start
 
     def render(self, display) -> None:
         """Full redraw: background, then all visible widgets in order."""
-        log.info("Screen %r: render", self.name or "?")
-        for w in self._widgets:
+        log.info("Screen %r: render", self.screen_id or self.name or "?")
+        for w in self._all_widgets():
             w.invalidate()
         if self.bg_image is not None:
             display.draw_image(self.bg_image, 0, 0)
         else:
             display.fill_screen(self.bg_color)
-        for w in self._widgets:
+        for w in self._all_widgets():
             if w.visible:
                 w.draw(display)
 
@@ -213,7 +284,7 @@ class Screen:
         Dispatch a touch event to the topmost widget that contains (px, py).
         Returns True if any widget consumed the event.
         """
-        for w in reversed(self._widgets):
+        for w in reversed(self._all_widgets()):
             if w.visible and w.enabled and w.hit_test(px, py):
                 if w.handle_touch(px, py, display):
                     return True
@@ -221,9 +292,15 @@ class Screen:
 
     def focusable_widgets(self) -> List[Widget]:
         """
-        All focusable, visible, enabled widgets in draw order, recursing into
-        any Areas so that buttons inside a zone are included in tab order.
+        Focusable, visible, enabled widgets in tab order.
+
+        If tabbed_widgets is populated (CSV-loaded screen), returns those.
+        Otherwise recurses into Areas (legacy Area-based construction).
         """
+        if self.tabbed_widgets:
+            return [w for w in self.tabbed_widgets
+                    if w.visible and w.enabled and w.focusable]
+
         def _collect(widgets):
             out = []
             for w in widgets:
@@ -238,8 +315,8 @@ class Screen:
 
     def find(self, name: str) -> Optional[Widget]:
         """
-        Return the first widget with the given name (depth-first through Areas),
-        or None if not found.
+        Return the first widget with the given name, searching all widget lists.
+        Recurses into Areas for legacy construction.
         """
         def _search(widgets):
             for w in widgets:
@@ -250,10 +327,18 @@ class Screen:
                     if found is not None:
                         return found
             return None
-        return _search(self._widgets)
+        return _search(self._all_widgets())
+
+    def find_by_id(self, widget_id: int) -> Optional[Widget]:
+        """Return the widget with the given widget_id, or None."""
+        for w in self._all_widgets():
+            if w.widget_id == widget_id:
+                return w
+        return None
 
     def __repr__(self) -> str:
-        return f"Screen(name={self.name!r}, widgets={len(self._widgets)})"
+        return (f"Screen(id={self.screen_id!r}, name={self.name!r}, "
+                f"widgets={len(self._all_widgets())})")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -278,8 +363,8 @@ class Area(Widget):
     name     : identifier for logging
     """
 
-    def __init__(self, rect: Rect, bg_color: int = 0, name: str = ""):
-        super().__init__(rect, name=name)
+    def __init__(self, rect: Rect, bg_color: int = 0, name: str = "", widget_id: int = 0):
+        super().__init__(rect, name=name, widget_id=widget_id)
         self.bg_color  = bg_color
         self._children: List[Widget] = []
 
@@ -344,16 +429,17 @@ class Label(Widget):
 
     def __init__(
         self,
-        rect:   Rect,
-        text:   str  = "",
-        color:  int  = 0xFFFF,
-        bg:     int  = 0x0000,
-        size:   int  = 16,
-        align:  str  = "left",
-        valign: str  = "top",
-        name:   str  = "",
+        rect:      Rect,
+        text:      str  = "",
+        color:     int  = 0xFFFF,
+        bg:        int  = 0x0000,
+        size:      int  = 16,
+        align:     str  = "left",
+        valign:    str  = "top",
+        name:      str  = "",
+        widget_id: int  = 0,
     ):
-        super().__init__(rect, name=name)
+        super().__init__(rect, name=name, widget_id=widget_id)
         self.text   = text
         self.color  = color
         self.bg     = bg
@@ -411,17 +497,18 @@ class TextBox(Widget):
     def __init__(
         self,
         rect:         Rect,
-        value:        str      = "",
-        color:        int      = 0xFFFF,
-        bg:           int      = 0x0000,
-        size:         int      = 16,
-        align:        str      = "left",
-        valign:       str      = "middle",
+        value:        str           = "",
+        color:        int           = 0xFFFF,
+        bg:           int           = 0x0000,
+        size:         int           = 16,
+        align:        str           = "left",
+        valign:       str           = "middle",
         border_color: Optional[int] = None,
-        editable:     bool         = False,
-        name:         str      = "",
+        editable:     bool          = False,
+        name:         str           = "",
+        widget_id:    int           = 0,
     ):
-        super().__init__(rect, name=name)
+        super().__init__(rect, name=name, widget_id=widget_id)
         self.value        = value
         self.color        = color
         self.bg           = bg
@@ -538,16 +625,17 @@ class Button(Widget):
     def __init__(
         self,
         rect:           Rect,
-        label:          str      = "",
-        color:          int      = 0x001F,   # BLUE
-        text_color:     int      = 0xFFFF,   # WHITE
+        label:          str                = "",
+        color:          int                = 0x001F,
+        text_color:     int                = 0xFFFF,
         border_color:   Optional[int]      = None,
         size:           int                = 16,
         on_press:       Optional[Callable] = None,
         disabled_color: Optional[int]      = None,
-        name:           str      = "",
+        name:           str                = "",
+        widget_id:      int                = 0,
     ):
-        super().__init__(rect, name=name)
+        super().__init__(rect, name=name, widget_id=widget_id)
         self.label          = label
         self.color          = color
         self.text_color     = text_color
@@ -628,8 +716,9 @@ class RectWidget(Widget):
         fill:      bool = False,
         thickness: int  = 1,
         name:      str  = "",
+        widget_id: int  = 0,
     ):
-        super().__init__(rect, name=name)
+        super().__init__(rect, name=name, widget_id=widget_id)
         self.color     = color
         self.fill      = fill
         self.thickness = thickness
@@ -819,8 +908,8 @@ class Keyboard(Widget):
 
 if __name__ == "__main__":
     logging.basicConfig(
-        level=logging.INFO,
-        format="%(levelname)-8s [%(name)s] %(message)s",
+        level=logging.DEBUG,
+        format="%(levelname)-8s %(name)s:%(lineno)d  %(message)s",
     )
 
     class _MockDisplay:

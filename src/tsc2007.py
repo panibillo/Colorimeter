@@ -63,6 +63,7 @@ Usage:
     touch.cleanup()
 """
 
+import logging
 import time
 import json
 import os
@@ -71,6 +72,8 @@ from gpiozero import DigitalInputDevice
 
 from geometry import Rect
 from utils import install_exit_signals
+
+log = logging.getLogger(__name__)
 
 
 # ── Default config path ───────────────────────────────────────────────────────
@@ -101,11 +104,22 @@ _Z1_MIN = 10
 # Run calibrate() for panel-specific accurate results.
 #   px = a*rx + b*ry + c
 #   py = d*rx + e*ry + f
+# _DEFAULT_CAL = {
+    # "a":  2.771,  "b": -2.402,  "c":  3790.4,
+    # "d":  5.601,  "e":  1.779,  "f": -8955.7,
+    # "threshold": 1,
+# }
+# DEFAULT_CAL from raw_pts={"TL":(500,3430),"TR":(570,265),"BR":(3460,442),"BL":(3480,3510)}
 _DEFAULT_CAL = {
-    "a":  2.771,  "b": -2.402,  "c":  3790.4,
-    "d":  5.601,  "e":  1.779,  "f": -8955.7,
-    "threshold": 1,
+    "a": 0.0023650832335519894,
+    "b": -0.08809935044981086,
+    "c": 320.9982304260752,
+    "d": 0.06673889777796616,
+    "e": 0.0014760577707607044,
+    "f": -18.432327042692293,
+    "threshold": 3
 }
+
 
 
 def _solve3(M, b):
@@ -220,6 +234,7 @@ class TSC2007:
 
         self._load_cal()
         self._initialised = True
+        log.info("TSC2007 ready on I2C bus %d addr 0x%02X", self._bus_num, self._addr)
 
     def cleanup(self):
         """Close I2C bus and release GPIO."""
@@ -262,20 +277,33 @@ class TSC2007:
 
     # ── Public reading interface ──────────────────────────────────────────────
 
+    # Minimum z1 pressure for a reading to be accepted by read_raw().
+    _Z1_ACCEPT = 40
+    # Maximum wall-clock time (s) read_raw() will spend collecting samples.
+    _READ_TIMEOUT = 0.3
+
     def read_raw(self):
         """
         Return raw (x, y, z1) ADC values from the TSC2007.
-        Ends the sequence with _CMD_END to re-enable PENIRQ.
+
+        Collects up to 3 readings where z1 > _Z1_ACCEPT, stopping early if
+        _READ_TIMEOUT seconds elapse.  Returns the median of each channel
+        across accepted readings.  If no reading passes the z1 threshold,
+        returns the last reading taken regardless.
+
+        Logs elapsed time from the first read to the last accepted reading.
         Returns (0, 0, 0) on I2C error.
         """
         try:
             x  = self._read_channel(_CMD_X)
             y  = self._read_channel(_CMD_Y)
             z1 = self._read_channel(_CMD_Z1)
-            self._read_channel(_CMD_END)
-            return x, y, z1
+            log.info("x=%4d  y=%4d  z1=%3d", x, y, z1)    
         except OSError:
+            log.warning("I2C read failed in read_raw()")
             return 0, 0, 0
+        finally:
+            self._read_channel(_CMD_END)
 
     @property
     def is_touched(self) -> bool:
@@ -296,8 +324,11 @@ class TSC2007:
             return None
         rx, ry, z1 = self.read_raw()
         if z1 < _Z1_MIN:
+            log.debug("position: z1=%d below threshold — ignored", z1)
             return None
-        return self._to_pixels(rx, ry)
+        px, py = self._to_pixels(rx, ry)
+        log.debug("position: raw(%d,%d) z1=%d → px(%d,%d)", rx, ry, z1, px, py)
+        return px, py
 
     def wait_for_touch(self, timeout: float = 0.0):
         """
@@ -367,11 +398,11 @@ class TSC2007:
                 self._cal.update(loaded)
                 if "threshold" in loaded:
                     self._threshold = int(loaded["threshold"])
+                log.info("cal loaded from %s  threshold=%d", self._cal_path, self._threshold)
             else:
-                print("tsc2007: cal file missing affine keys — "
-                      "using defaults. Run calibrate().")
+                log.warning("cal file missing affine keys — using defaults. Run calibrate().")
         except (OSError, json.JSONDecodeError):
-            pass
+            log.info("no cal file found at %s — using defaults", self._cal_path)
 
     def save_cal(self):
         """Save current calibration (affine coefficients + threshold) to JSON."""
@@ -396,7 +427,7 @@ class TSC2007:
 
     # ── Calibration routine ───────────────────────────────────────────────────
 
-    def calibrate(self, display):
+    def calibrate(self, display, save: bool = True):
         """
         Two-phase interactive calibration routine.
 
@@ -411,11 +442,17 @@ class TSC2007:
             Uses TL, TR, BL for an exact 3-point affine solve; verifies
             with BR and prints the residual error.
 
-        Saves calibration to JSON and returns the calibration dict.
-
         Parameters
         ----------
         display : ILI9341 instance
+        save    : if True (default), write calibration to JSON immediately.
+                  Pass False to let the caller validate and save manually.
+
+        Returns
+        -------
+        (cal_dict, err_x, err_y) on success, or None if the affine solve
+        failed (collinear / coincident touch points).
+        err_x, err_y are the BR verification residuals in display pixels.
         """
         W      = display.WIDTH
         H      = display.HEIGHT
@@ -500,6 +537,7 @@ class TSC2007:
                 time.sleep(0.05)
             time.sleep(0.10)
 
+
         # ── Solve affine from TL, TR, BL; verify with BR ──────────────────────
         #
         # px = a*rx + b*ry + c     py = d*rx + e*ry + f
@@ -540,14 +578,16 @@ class TSC2007:
             "d": d, "e": e, "f": f,
             "threshold": threshold,
         }
-        self.save_cal()
 
-        display.fill_screen(display.BLACK)
-        display.draw_text("Calibration saved.",
-                          Rect(0, 100, W, 40),
-                          color=display.GREEN, size=18, align="center")
-        time.sleep(1.5)
-        return self._cal
+        if save:
+            self.save_cal()
+            display.fill_screen(display.BLACK)
+            display.draw_text("Calibration saved.",
+                              Rect(0, 100, W, 40),
+                              color=display.GREEN, size=18, align="center")
+            time.sleep(1.5)
+
+        return self._cal, err_x, err_y
 
     @staticmethod
     def _draw_crosshair(display, cx: int, cy: int, size: int = 15):
