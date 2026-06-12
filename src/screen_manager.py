@@ -1,9 +1,9 @@
 """
-screen_manager.py  —  Active screen and keyboard-focus tracking.
-----------------------------------------------------------------
+screen_manager.py  —  Active screen, keyboard-focus, and alive-screen tracking.
+--------------------------------------------------------------------------------
 ScreenManager owns exactly one active Screen at a time.  It tracks which
-widget holds keyboard focus, routes touch events to the active screen, and
-handles Tab/Enter navigation.
+widget holds keyboard focus, routes touch events to the active screen, handles
+Tab/Enter navigation, and monitors timed screens for timeout.
 
 Typical use
 -----------
@@ -11,6 +11,7 @@ Typical use
     mgr.switch_to(main_screen)
 
     while True:
+        mgr.tick()              # check timed screens for timeout
         if key := read_key():
             mgr.on_key(key)
         if pos := touch.position():
@@ -18,13 +19,18 @@ Typical use
 
 Focus rules
 -----------
-- All focusable, visible, enabled widgets in the active Screen are collected in
-  draw order (Screen.focusable_widgets() recurses into Areas automatically).
+- Focusable widgets in the active Screen are collected via Screen.focusable_widgets().
 - Tab moves forward; Shift-Tab moves backward; both wrap.
-- Enter triggers the focused widget: Button.on_press or TextBox.on_edit_start.
+- Enter triggers the focused widget: Button.on_press or TextBox.toggle_editing.
 - switch_to() renders the new screen and focuses the first focusable widget.
-- If widgets change visible/enabled state, call switch_to() again to rebuild
-  the focus list (reliable over clever).
+
+Alive-screen monitor
+--------------------
+Screens with a non-zero duration are registered with add_alive().  tick() checks
+elapsed time each loop iteration.  On timeout:
+  - screen.is_alive is cleared and the screen is removed from the monitor list
+  - screen.on_timeout(screen) is called if set (AppController wires this for alarms)
+  - non-modal screens take focus (switch_to); modal screens are already active
 
 Run this file directly to execute the self-test (no hardware required):
     python3 src/screen_manager.py
@@ -52,19 +58,53 @@ class ScreenManager:
     """
 
     def __init__(self, display) -> None:
-        self.display     = display
-        self._screen:    Optional[Screen] = None
-        self._focus_idx: int              = -1
-        self._focusables: List[Widget]    = []
+        self.display      = display
+        self._screen:     Optional[Screen] = None
+        self._focus_idx:  int              = -1
+        self._focusables: List[Widget]     = []
+        self.alive_screens: List[Screen]   = []
+
+    # ── Alive-screen monitor ──────────────────────────────────────────────────
+
+    def add_alive(self, screen: Screen) -> None:
+        """Register a timed screen for timeout monitoring."""
+        if screen not in self.alive_screens:
+            self.alive_screens.append(screen)
+
+    def remove_alive(self, screen: Screen) -> None:
+        """Deregister a screen from timeout monitoring."""
+        if screen in self.alive_screens:
+            self.alive_screens.remove(screen)
+
+    def tick(self) -> None:
+        """
+        Check all alive screens for timeout.  Call once per main-loop iteration.
+
+        On timeout:
+        - screen.is_alive cleared; screen removed from alive list
+        - screen.on_timeout(screen) called if set (AppController wires alarms here)
+        - non-modal screens that aren't currently active take focus via switch_to()
+        - modal screens are already active; on_timeout handles the alarm
+        """
+        for screen in list(self.alive_screens):
+            if screen.duration > 0 and screen.elapsed() >= screen.duration:
+                screen.is_alive = False
+                self.alive_screens.remove(screen)
+                log.info("Screen %r timed out after %ds",
+                         screen.screen_id or screen.name, screen.duration)
+                if callable(getattr(screen, 'on_timeout', None)):
+                    screen.on_timeout(screen)
+                if not screen.modal and self._screen is not screen:
+                    self.switch_to(screen)
 
     # ── Screen switching ──────────────────────────────────────────────────────
 
-    def switch_to(self, screen: Screen) -> None:
+    def switch_to(self, screen: Screen, clear_first: bool = True) -> None:
         """Full render of screen; rebuild focus list; focus first widget."""
-        log.info("ScreenManager: switch to Screen %r", screen.name or "?")
+        log.info("ScreenManager: switch to Screen %r (clear_first=%s)", screen.name or "?", clear_first)
         self._screen     = screen
         self._focus_idx  = -1
-        screen.render(self.display)
+        screen.render(self.display, clear_first=clear_first)
         self._focusables = screen.focusable_widgets()
         log.info("ScreenManager: %d focusable widget(s): %s",
                  len(self._focusables),
@@ -172,16 +212,6 @@ class ScreenManager:
                 return True
 
         return False
-
-    # ── Modal overlay stubs ───────────────────────────────────────────────────
-
-    def push_modal(self, area: Area) -> None:
-        """Push a modal overlay Area (not yet implemented)."""
-        raise NotImplementedError("push_modal not yet implemented")
-
-    def pop_modal(self) -> None:
-        """Pop the top modal overlay (not yet implemented)."""
-        raise NotImplementedError("pop_modal not yet implemented")
 
     def __repr__(self) -> str:
         name = self._screen.name if self._screen else "none"

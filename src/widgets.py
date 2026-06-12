@@ -266,15 +266,16 @@ class Screen:
         import time
         return time.monotonic() - self._timer_start
 
-    def render(self, display) -> None:
-        """Full redraw: background, then all visible widgets in order."""
-        log.info("Screen %r: render", self.screen_id or self.name or "?")
+    def render(self, display, clear_first: bool = True) -> None:
+        """Full redraw: background (if clear_first), then all visible widgets in order."""
+        log.info("Screen %r: render (clear_first=%s)", self.screen_id or self.name or "?", clear_first)
         for w in self._all_widgets():
             w.invalidate()
-        if self.bg_image is not None:
-            display.draw_image(self.bg_image, 0, 0)
-        else:
-            display.fill_screen(self.bg_color)
+        if clear_first:
+            if self.bg_image is not None:
+                display.draw_image(self.bg_image, 0, 0)
+            else:
+                display.fill_screen(self.bg_color)
         for w in self._all_widgets():
             if w.visible:
                 w.draw(display)
@@ -451,7 +452,8 @@ class Label(Widget):
         display.draw_text(self.text, self.rect,
                           color=self.color, bg=self.bg,
                           size=self.size,
-                          align=self.align, valign=self.valign)
+                          align=self.align, valign=self.valign,
+                          widget_id=str(self.widget_id) if self.widget_id else "")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -554,16 +556,18 @@ class TextBox(Widget):
         if not force and state == self._last_drawn:
             return
         self._last_drawn = state
+        widget_id_str = str(self.widget_id) if self.widget_id else ""
         display.draw_text(self.value, self.rect,
                           color=self.color, bg=self.bg,
                           size=self.size,
-                          align=self.align, valign=self.valign)
+                          align=self.align, valign=self.valign,
+                          widget_id=widget_id_str)
         if self.editing:
             display.draw_rect(self.rect, self.EDIT_BORDER, fill=False, thickness=2)
         elif self.focused:
             display.draw_rect(self.rect, self.FOCUS_BORDER, fill=False, thickness=2)
         elif self.border_color is not None:
-            display.draw_rect(self.rect, self.border_color)
+            display.draw_rect(self.rect, self.border_color, widget_id=widget_id_str)
 
     def handle_char(self, char: str, display=None) -> None:
         """Append or delete a character. Only active while editing."""
@@ -634,6 +638,7 @@ class Button(Widget):
         disabled_color: Optional[int]      = None,
         name:           str                = "",
         widget_id:      int                = 0,
+        nav_hint:       str                = "",
     ):
         super().__init__(rect, name=name, widget_id=widget_id)
         self.label          = label
@@ -644,6 +649,7 @@ class Button(Widget):
         self.on_press       = on_press
         self.disabled_color = disabled_color
         self.focusable      = True
+        self.nav_hint       = nav_hint
         self.pressed        = False
 
     def draw(self, display) -> None:
@@ -658,7 +664,7 @@ class Button(Widget):
             face   = self.color
             tcolor = self.text_color
 
-        display.fill_rect(self.rect, face)
+        display.fill_rect(self.rect, face, widget_id=str(self.widget_id) if self.widget_id else "")
 
         if self.focused and self.enabled and not self.pressed:
             display.draw_rect(self.rect, self.FOCUS_BORDER, fill=False, thickness=2)
@@ -669,7 +675,8 @@ class Button(Widget):
             display.draw_text(self.label, self.rect,
                               color=tcolor, bg=face,
                               size=self.size,
-                              align="center", valign="middle")
+                              align="center", valign="middle",
+                              widget_id=str(self.widget_id) if self.widget_id else "")
 
     def handle_touch(self, px: int, py: int, display=None) -> bool:
         if not self.enabled:
@@ -725,7 +732,8 @@ class RectWidget(Widget):
 
     def draw(self, display) -> None:
         display.draw_rect(self.rect, self.color,
-                          fill=self.fill, thickness=self.thickness)
+                          fill=self.fill, thickness=self.thickness,
+                          widget_id=str(self.widget_id) if self.widget_id else "")
 
     def move_to(self, x: int, y: int) -> None:
         self.rect = Rect(x, y, self.rect.w, self.rect.h)
