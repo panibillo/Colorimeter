@@ -33,16 +33,17 @@ Usage:
     for progress in runner.run():
         if not progress.transient:
             print(progress.message)
-    print(runner.out_dir, runner.results)
+    print(runner.out_path, runner.results)
 
-Output filenames (saved to config.out_dir/<timestamp>/):
-  camtest8_BOUND_{color}_{e_label}_{ms}ms_{ch}.npy   — lit ROI_BOUND per channel
-  camtest8_BOUND_black_{e_label}_{ms}ms_{ch}.npy     — dark ROI_BOUND per channel
-  camtest8_{color}_e3.jpg                            — focused full-image JPEG at e3
-  camtest8_{color}_metadata.json                     — focus, channel, exposure analysis
+Output: a single HDF5 archive at config.out_dir/<timestamp>.h5, holding the
+ROI crops, per-LED metadata, capture statistics, and the e3 JPEG. Nothing is
+staged on disk first — frames go from the camera into the archive in memory,
+which keeps a ten-LED suite to one file instead of several hundred.
+
+The archive layout is defined by capture_h5.CaptureSuiteWriter, shared with
+the converter that rebuilds an archive from a legacy camtest8 directory.
 """
 
-import json
 import logging
 import time
 from dataclasses import dataclass, field
@@ -53,6 +54,7 @@ from typing import Iterator
 import numpy as np
 
 from bayer_cam import BayerCam
+from capture_h5 import CaptureSuiteWriter
 
 try:
     import libcamera as _libcamera  # type: ignore[import-untyped]
@@ -259,32 +261,73 @@ def _compute_exposures_from_e3(pix_e3: np.ndarray, e3_us: int) -> "tuple[list, l
 
 
 # ---------------------------------------------------------------------------
-# Saving
+# Frame preparation  (in memory — nothing reaches disk except the archive)
 # ---------------------------------------------------------------------------
 
-def _save_roi_bound(
-    out_dir: Path, stem: str, bayer: np.ndarray, pattern: str
-) -> None:
+def _roi_bound_layers(bayer: np.ndarray, pattern: str) -> dict:
     """
-    Crop ROI_BOUND from bayer array, split into 4 channels, save as NPY files.
+    Crop ROI_BOUND from a full bayer frame and split it into 4 channels.
 
-    Writes: {stem}_B.npy, {stem}_Gb.npy, {stem}_Gr.npy, {stem}_R.npy
-    Each channel array has shape (ROI_BOUND_h//2, ROI_BOUND_w//2) = (315, 80).
+    Returns:
+        {ch_name: ndarray}, each of shape
+        (ROI_BOUND_h//2, ROI_BOUND_w//2) = (315, 80).
     """
     x, y, w, h = ROI_BOUND
-    crop   = bayer[y:y + h, x:x + w]
-    layers = BayerCam.extract_bayer_layers(crop, pattern)
-    for ch_name, arr in layers.items():
-        np.save(str(out_dir / f"{stem}_{ch_name}.npy"), arr)
-    log.debug(f"    saved {stem}_{{B,Gb,Gr,R}}.npy")
+    crop = bayer[y:y + h, x:x + w]
+    return BayerCam.extract_bayer_layers(crop, pattern)
 
 
-def _save_led_metadata(out_dir: Path, color: str, data: dict) -> Path:
-    """Write one LED's metadata JSON and return the path written."""
-    path = out_dir / f"{OUT_STEM}_{color}_metadata.json"
-    with open(path, "w") as f:
-        json.dump(data, f, indent=2)
-    return path
+def _encode_jpeg(rgb: np.ndarray) -> bytes:
+    """
+    Encode a BGR frame as JPEG bytes, without going through a file.
+
+    Uses the same cv2 encoder and default quality as BayerCam.save_frame(),
+    so an in-memory JPEG is identical to one that script would have written.
+    """
+    try:
+        import cv2
+    except ImportError:
+        raise ImportError("cv2 is required to encode the e3 JPEG; "
+                          "install opencv-python")
+    ok, buf = cv2.imencode(".jpg", rgb)
+    if not ok:
+        raise RuntimeError("cv2.imencode failed to encode the e3 frame")
+    return buf.tobytes()
+
+
+def _build_capture_info(
+    rgb: np.ndarray, bayer: np.ndarray, meta: dict,
+    lens_position: "float | None" = None,
+) -> dict:
+    """
+    Build the image-statistics record for one frame.
+
+    Mirrors the .txt sidecar BayerCam.save_frame() writes, including its
+    rounding, so an archive written live matches one rebuilt from a legacy
+    capture directory by the converter.
+
+    Returns:
+        {"image_stats": {...}, "picamera2_metadata": {...}}
+    """
+    image_stats = {
+        "image_width":  int(rgb.shape[1]),
+        "image_height": int(rgb.shape[0]),
+        "bgr_mean_B":   round(float(rgb[:, :, 0].mean()), 3),
+        "bgr_mean_G":   round(float(rgb[:, :, 1].mean()), 3),
+        "bgr_mean_R":   round(float(rgb[:, :, 2].mean()), 3),
+        "bgr_std_B":    round(float(rgb[:, :, 0].std()), 3),
+        "bgr_std_G":    round(float(rgb[:, :, 1].std()), 3),
+        "bgr_std_R":    round(float(rgb[:, :, 2].std()), 3),
+        "bayer_dtype":  str(bayer.dtype),
+        "bayer_shape":  f"{bayer.shape[0]}x{bayer.shape[1]}",
+        "bayer_min":    int(bayer.min()),
+        "bayer_max":    int(bayer.max()),
+        "bayer_mean":   round(float(bayer.mean()), 3),
+    }
+    if lens_position is not None:
+        image_stats["lens_position"] = round(float(lens_position), 4)
+
+    return {"image_stats": image_stats, "picamera2_metadata": dict(meta)}
 
 
 # ---------------------------------------------------------------------------
@@ -359,8 +402,13 @@ class CaptureRunner:
         self.config  = config or CaptureConfig()
 
         # Populated as the run proceeds.
-        self.out_dir: "Path | None" = None
+        self.out_path: "Path | None" = None   # the .h5 archive being written
+        self.suite_id: str = ""
         self.results: list = []
+
+        # The archive being written. Unlike the camera and LED bank, this is
+        # created and owned by the runner, so the runner also closes it.
+        self._writer: "CaptureSuiteWriter | None" = None
 
         # Progress bookkeeping.
         self._led_index      = 0
@@ -452,8 +500,9 @@ class CaptureRunner:
 
         The generator switches LEDs on and off as it goes; abandoning it
         (via close(), an exception, or garbage collection) turns off any LED
-        still lit, but leaves the camera and LED bank open for the caller to
-        dispose of.
+        still lit and closes the archive, leaving whatever was captured so
+        far readable. The camera and LED bank are left open for the caller
+        to dispose of.
 
         Yields:
             Progress values. Those with transient=True are repeated updates
@@ -463,6 +512,18 @@ class CaptureRunner:
             yield from self._run()
         finally:
             self._all_off()
+            self._close_writer()
+
+    def _close_writer(self) -> None:
+        """Close the archive if one is open. Never raises."""
+        if self._writer is None:
+            return
+        try:
+            self._writer.close()
+        except Exception:
+            log.exception("CaptureRunner: failed to close %s", self.out_path)
+        finally:
+            self._writer = None
 
     def _all_off(self) -> None:
         """Turn off whichever LED this run switched on. Never raises."""
@@ -491,8 +552,9 @@ class CaptureRunner:
         cam  = self._cam
         leds = self._leds
 
-        self.out_dir = cfg.out_dir / datetime.now().strftime("%Y%m%d_%H%M")
-        self.out_dir.mkdir(parents=True, exist_ok=True)
+        self.suite_id = datetime.now().strftime("%Y%m%d_%H%M")
+        cfg.out_dir.mkdir(parents=True, exist_ok=True)
+        self.out_path = cfg.out_dir / f"{self.suite_id}.h5"
         self.results = []
 
         white_croi  = _channel_roi(ROI_WHITE)
@@ -558,6 +620,10 @@ class CaptureRunner:
         # Phase 2 — Per-LED multi-exposure capture and save
         # ================================================================
         yield self._progress("capture", "Phase 2: per-LED multi-exposure capture")
+
+        # Opened here rather than at the top of the run so a failure during
+        # calibration or focus leaves no empty archive behind.
+        w = self._writer = CaptureSuiteWriter(self.out_path, suite_id=self.suite_id)
 
         for led in range(cfg.led_start, cfg.led_end + 1):
             self._led_index     += 1
@@ -664,7 +730,7 @@ class CaptureRunner:
 
             meta_json: dict = {
                 "camtest8_version": "4",
-                "timestamp": self.out_dir.name,
+                "timestamp": self.suite_id,
                 "led_channel": led,
                 "led_color": color,
                 "led_label": leds.label(led),
@@ -713,6 +779,8 @@ class CaptureRunner:
 
             # ── Lit frames ────────────────────────────────────────────
             yield self._progress("capture", "Lit captures:")
+            e3_frame: "tuple | None" = None
+
             for exp_label, exp_us in zip(EXP_LABELS, exposures_us):
                 log.info(f"  {color} {exp_label}: setting exposure {exp_us}µs "
                          f"({exp_us // 1000}ms)")
@@ -722,20 +790,16 @@ class CaptureRunner:
                 log.info(f"  {color} {exp_label}: applied={applied}µs  "
                          f"delta={applied - exp_us:+d}µs")
 
-                stem = f"{OUT_STEM}_BOUND_{color}_{exp_label}_{exp_us // 1000}ms"
-                _save_roi_bound(self.out_dir, stem, bayer, pattern)
+                w.add_lit(color, exp_label, _roi_bound_layers(bayer, pattern),
+                          exposure_us=exp_us)
 
-                if exp_label == "e3":    # e3 — focused full-image JPEG
-                    jpeg_stem = f"{OUT_STEM}_{color}_e3"
-                    BayerCam.save_frame(
-                        self.out_dir, jpeg_stem, rgb, bayer, meta,
-                        jpeg_only=True, lens_position=cam.lens_position,
-                    )
+                if exp_label == "e3":    # keep the median frame for the JPEG
+                    e3_frame = (rgb, bayer, meta)
 
                 self._captures_done += 1
                 yield self._progress(
                     "capture",
-                    f"    saved {stem}_{{B,Gb,Gr,R}}.npy",
+                    f"    stored lit {exp_label} ({exp_us // 1000}ms)",
                     step=exp_label)
 
             # LED off, then dark frames at the same exposures
@@ -746,17 +810,29 @@ class CaptureRunner:
             for exp_label, exp_us in zip(EXP_LABELS, exposures_us):
                 log.info(f"  {color} dark {exp_label}: exposure {exp_us}µs")
                 _, bayer, _ = _set_and_settle(cam, exp_us)
-                stem = f"{OUT_STEM}_BOUND_black_{exp_label}_{exp_us // 1000}ms"
-                _save_roi_bound(self.out_dir, stem, bayer, pattern)
+
+                # Dark frames depend only on exposure, so an exposure already
+                # captured for an earlier LED is reused rather than restored.
+                stored = w.add_dark(exp_label, _roi_bound_layers(bayer, pattern),
+                                    exposure_us=exp_us)
+                w.link_dark(color, exp_label, exposure_us=exp_us)
 
                 self._captures_done += 1
                 yield self._progress(
                     "capture",
-                    f"    saved {stem}_{{B,Gb,Gr,R}}.npy",
+                    f"    {'stored' if stored else 'reused'} dark {exp_label} "
+                    f"({exp_us // 1000}ms)",
                     step=f"dark {exp_label}")
 
-            path = _save_led_metadata(self.out_dir, color, meta_json)
-            yield self._progress("capture", f"    saved metadata: {path.name}")
+            # ── Per-LED metadata, statistics and JPEG ─────────────────
+            w.add_led(color, meta_json, led_channel=led)
+            if e3_frame is not None:
+                rgb_e3, bayer_e3, meta_e3 = e3_frame
+                w.add_capture_info(color, _build_capture_info(
+                    rgb_e3, bayer_e3, meta_e3, lens_position=cam.lens_position))
+                w.add_jpeg(color, _encode_jpeg(rgb_e3),
+                           filename=f"{OUT_STEM}_{color}_e3.jpg")
+            yield self._progress("capture", f"    stored metadata for {color}")
 
             self.results.append(LedResult(
                 color=color,
@@ -766,10 +842,11 @@ class CaptureRunner:
                 metadata=meta_json,
             ))
 
+        self._close_writer()
         self._current_color = ""
         yield Progress(
             phase="done",
-            message=f"Done. Output: {self.out_dir}",
+            message=f"Done. Output: {self.out_path}",
             led_index=self._led_index,
             led_total=cfg.led_count,
             fraction=1.0,

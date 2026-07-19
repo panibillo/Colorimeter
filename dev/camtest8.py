@@ -7,15 +7,14 @@ arguments, creates the hardware, pumps the runner's generator, and prints
 progress. Keeping it thin means the same capture can be driven from the GUI
 without duplicating any of the logic.
 
-Performs automatic exposure bracketing for each LED color and saves only
+Performs automatic exposure bracketing for each LED color and stores only
 the ROI_BOUND crop (all 4 Bayer channels) for each of 7 exposures, plus
 a focused full-image JPEG at the median exposure (e3).
 
-Output filenames (saved to OUT_DIR/<timestamp>/):
-  camtest8_BOUND_{color}_{e_label}_{ms}ms_{ch}.npy   — lit ROI_BOUND per channel
-  camtest8_BOUND_black_{e_label}_{ms}ms_{ch}.npy     — dark ROI_BOUND per channel
-  camtest8_{color}_e3.jpg                            — focused full-image JPEG at e3
-  camtest8_{color}_metadata.json                     — focus, channel, exposure analysis
+Output: one HDF5 archive per capture set, at OUT_DIR/<timestamp>.h5. Frames
+go from the camera into the archive in memory; no image files are staged on
+disk. Inspect a finished archive with:
+    python3 src/hdf5read.py <path.h5>
 
 Usage:
     python dev/camtest8.py [exposure_ms [led_start [led_end [focus_diopter]]]]
@@ -82,7 +81,7 @@ def _print_summary(runner: CaptureRunner) -> None:
     for result in runner.results:
         vals = "".join(f"  {e // 1000:>6}ms" for e in result.exposures_us)
         print(f"{result.color:<12} {result.target_channel:<4}{vals}")
-    print(f"\nOutput: {runner.out_dir}")
+    print(f"\nOutput: {runner.out_path}")
 
 
 def main() -> None:

@@ -7,9 +7,8 @@ hardware and no picamera2. The fake camera returns frames whose brightness
 scales with the requested exposure, so the exposure-bracketing and e3
 refinement logic is genuinely exercised rather than stubbed out.
 
-The final test closes the loop with step 1: the directory the runner produces
-is fed to dev/build_h5_from_camtest8.py, proving the filenames the runner
-writes are the filenames the converter expects.
+The runner writes a single HDF5 archive with nothing staged on disk, so the
+assertions here read the archive back rather than globbing for files.
 
 Run from the project root:
     python test/test_capture_runner.py
@@ -24,6 +23,7 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 
+import h5py
 import numpy as np
 
 _ROOT = Path(__file__).parent.parent
@@ -90,7 +90,15 @@ class FakeCam:
         bayer = np.clip(self._gain * self._exposure_us * _SCALE,
                         0, 1023).astype(np.uint16)
         rgb = np.zeros((FRAME_H, FRAME_W, 3), dtype=np.uint8)
-        return rgb, bayer, {"ExposureTime": self._exposure_us}
+        # Real picamera2 returns native tuples for multi-valued controls;
+        # the desktop mock returns their string reprs instead. Model the
+        # hardware, since that is what the archive has to represent.
+        meta = {
+            "ExposureTime": self._exposure_us,
+            "ColourGains":  (1.0, 1.0),
+            "SensorBlackLevels": (4096, 4096, 4096, 4096),
+        }
+        return rgb, bayer, meta
 
     def focus(self, force: bool = False, leds=None) -> float:
         self.lens_position = self._af_result
@@ -149,6 +157,15 @@ class RunnerTestCase(unittest.TestCase):
     def run_to_completion(self, runner: CaptureRunner) -> list:
         return list(runner.run())
 
+    def archive(self, runner: CaptureRunner):
+        """Open the archive a completed run produced."""
+        return h5py.File(runner.out_path, "r")
+
+    def led_metadata(self, runner: CaptureRunner, color: str) -> dict:
+        """Read one LED's metadata dict back out of the archive."""
+        with self.archive(runner) as f:
+            return json.loads(f[f"/leds/{color}/led_metadata"][()])
+
 
 # ---------------------------------------------------------------------------
 # A complete single-LED run
@@ -174,32 +191,59 @@ class TestSingleLedRun(RunnerTestCase):
         for earlier, later in zip(fractions, fractions[1:]):
             self.assertLessEqual(earlier, later)
 
-    def test_writes_lit_and_dark_npy_for_every_label_and_channel(self):
-        out = self.runner.out_dir
-        for label in EXP_LABELS:
-            for ch in ("B", "Gb", "Gr", "R"):
-                lit = list(out.glob(f"camtest8_BOUND_amber_{label}_*ms_{ch}.npy"))
-                dark = list(out.glob(f"camtest8_BOUND_black_{label}_*ms_{ch}.npy"))
-                self.assertEqual(len(lit), 1, f"missing lit {label} {ch}")
-                self.assertEqual(len(dark), 1, f"missing dark {label} {ch}")
+    def test_writes_one_archive_and_nothing_else(self):
+        """The whole point of the direct path: no staged image files."""
+        written = list(self.out_root.iterdir())
+        self.assertEqual(written, [self.runner.out_path])
+        self.assertEqual(self.runner.out_path.suffix, ".h5")
+
+    def test_archive_holds_lit_and_dark_for_every_label_and_channel(self):
+        with self.archive(self.runner) as f:
+            for label in EXP_LABELS:
+                for ch in ("B", "Gb", "Gr", "R"):
+                    self.assertIn(f"/leds/amber/lit/{label}/{ch}", f)
+                    self.assertIn(f"/leds/amber/dark/{label}/{ch}", f)
 
     def test_roi_bound_crop_shape(self):
-        arr = np.load(next(self.runner.out_dir.glob(
-            "camtest8_BOUND_amber_e3_*ms_B.npy")))
+        with self.archive(self.runner) as f:
+            arr = f["/leds/amber/lit/e3/B"][()]
         _, _, w, h = capture_runner.ROI_BOUND
         self.assertEqual(arr.shape, (h // 2, w // 2))
 
-    def test_writes_e3_jpeg_only_once(self):
-        jpegs = list(self.runner.out_dir.glob("*.jpg"))
-        self.assertEqual([p.name for p in jpegs], ["camtest8_amber_e3.jpg"])
+    def test_lit_arrays_carry_exposure_attrs(self):
+        meta = self.led_metadata(self.runner, "amber")
+        with self.archive(self.runner) as f:
+            ds = f["/leds/amber/lit/e3/B"]
+            self.assertEqual(ds.attrs["exposure_us"],
+                             meta["computed_exposures"]["e3"]["exposure_us"])
 
-    def test_metadata_json_covers_all_labels(self):
-        meta = json.loads(
-            (self.runner.out_dir / "camtest8_amber_metadata.json").read_text())
+    def test_archive_holds_a_decodable_e3_jpeg(self):
+        import cv2
+        with self.archive(self.runner) as f:
+            blob = f["/leds/amber/jpeg_e3"][()].tobytes()
+        img = cv2.imdecode(np.frombuffer(blob, np.uint8), cv2.IMREAD_COLOR)
+        self.assertIsNotNone(img, "stored e3 JPEG did not decode")
+        self.assertEqual(img.shape, (FRAME_H, FRAME_W, 3))
+
+    def test_capture_info_preserves_native_metadata_types(self):
+        """Tuple-valued controls must survive as sequences, not stringified."""
+        with self.archive(self.runner) as f:
+            info = json.loads(f["/leds/amber/capture_info"][()])
+        self.assertEqual(info["picamera2_metadata"]["ColourGains"], [1.0, 1.0])
+        self.assertEqual(info["image_stats"]["image_width"], FRAME_W)
+        self.assertEqual(info["image_stats"]["bayer_shape"],
+                         f"{FRAME_H}x{FRAME_W}")
+
+    def test_metadata_covers_all_labels(self):
+        meta = self.led_metadata(self.runner, "amber")
         self.assertEqual(sorted(meta["computed_exposures"]), sorted(EXP_LABELS))
         self.assertEqual(sorted(meta["applied_exposures_us"]), sorted(EXP_LABELS))
         self.assertEqual(meta["led_color"], "amber")
         self.assertEqual(meta["focus_mode"], "autofocus")
+
+    def test_suite_id_stamped_on_archive_root(self):
+        with self.archive(self.runner) as f:
+            self.assertEqual(f.attrs["suite_id"], self.runner.suite_id)
 
     def test_result_recorded(self):
         self.assertEqual(len(self.runner.results), 1)
@@ -209,8 +253,7 @@ class TestSingleLedRun(RunnerTestCase):
 
     def test_e3_converges_near_half_saturation(self):
         """The refinement loop must actually drive p50 toward HALF_SAT."""
-        meta = json.loads(
-            (self.runner.out_dir / "camtest8_amber_metadata.json").read_text())
+        meta = self.led_metadata(self.runner, "amber")
         self.assertTrue(meta["e3_refinement"][-1]["converged"],
                         f"e3 never converged: {meta['e3_refinement']}")
 
@@ -249,6 +292,17 @@ class TestLedLifetime(RunnerTestCase):
         gen.close()
         self.assertEqual(self.leds.lit_channels(), set())
 
+    def test_abandoning_generator_leaves_a_readable_archive(self):
+        """A partial run must still close the file, not leave it locked."""
+        runner = self.make_runner(led_start=1, led_end=1)
+        gen = runner.run()
+        for progress in gen:
+            if progress.step == "e0":     # first lit frame is in the archive
+                break
+        gen.close()
+        with h5py.File(runner.out_path, "r") as f:
+            self.assertIn("/leds/amber/lit/e0/B", f)
+
     def test_runner_does_not_stop_the_camera(self):
         """Hardware lifetime belongs to the caller, not the runner."""
         runner = self.make_runner(led_start=1, led_end=1)
@@ -282,8 +336,7 @@ class TestFocus(RunnerTestCase):
     def test_manual_focus_sets_requested_lens_position(self):
         runner = self.make_runner(led_start=1, led_end=1, focus_diopter=5.0)
         self.run_to_completion(runner)
-        meta = json.loads(
-            (runner.out_dir / "camtest8_amber_metadata.json").read_text())
+        meta = self.led_metadata(runner, "amber")
         self.assertEqual(meta["focus_mode"], "manual")
         self.assertEqual(meta["focus_diopters"], 5.0)
         self.assertEqual(self.cam.lens_position, 5.0)
@@ -292,8 +345,7 @@ class TestFocus(RunnerTestCase):
         self.cam = FakeCam(af_result=9.0)      # above MAX_AF_DIOPTER (7.5)
         runner = self.make_runner(led_start=1, led_end=1)
         self.run_to_completion(runner)
-        meta = json.loads(
-            (runner.out_dir / "camtest8_amber_metadata.json").read_text())
+        meta = self.led_metadata(runner, "amber")
         self.assertEqual(meta["focus_mode"], "autofocus_capped")
         self.assertEqual(meta["focus_diopters"], capture_runner.MAX_AF_DIOPTER)
         self.assertEqual(meta["autofocus_raw_diopters"], 9.0)
@@ -304,48 +356,58 @@ class TestFocus(RunnerTestCase):
         runner = self.make_runner(led_start=1, led_end=1, focus_diopter=5.0)
         with self.assertRaises(RuntimeError):
             self.run_to_completion(runner)
-        # The failure must still leave no LED burning.
+        # The failure must still leave no LED burning, and — because focus
+        # precedes Phase 2 — no empty archive either.
         self.assertEqual(self.leds.lit_channels(), set())
+        self.assertEqual(list(self.out_root.iterdir()), [])
 
 
 # ---------------------------------------------------------------------------
-# Multi-LED run and the handoff to the step-1 converter
+# Multi-LED runs and dark-frame sharing
 # ---------------------------------------------------------------------------
 
-class TestMultiLedAndConversion(RunnerTestCase):
+class TestMultiLed(RunnerTestCase):
 
-    def test_two_leds_each_produce_a_result_and_metadata(self):
-        runner = self.make_runner(led_start=1, led_end=2)
-        self.run_to_completion(runner)
-        self.assertEqual([r.color for r in runner.results], ["amber", "blue"])
-        for color in ("amber", "blue"):
-            self.assertTrue(
-                (runner.out_dir / f"camtest8_{color}_metadata.json").exists())
+    def setUp(self):
+        super().setUp()
+        self.runner = self.make_runner(led_start=1, led_end=2)
+        self.run_to_completion(self.runner)
 
-    def test_output_directory_converts_to_hdf5(self):
-        """
-        End-to-end: what the runner writes, the step-1 converter must read.
-
-        This is the check that catches a filename convention drifting apart
-        from the converter's regexes.
-        """
-        import h5py
-        from build_h5_from_camtest8 import build
-
-        runner = self.make_runner(led_start=1, led_end=2)
-        self.run_to_completion(runner)
-
-        output_h5 = self.out_root / "suite.h5"
-        build(runner.out_dir, output_h5)
-
-        with h5py.File(output_h5, "r") as f:
+    def test_each_led_produces_a_result_and_metadata(self):
+        self.assertEqual([r.color for r in self.runner.results],
+                         ["amber", "blue"])
+        with self.archive(self.runner) as f:
             for color in ("amber", "blue"):
-                self.assertIn(f"/leds/{color}", f)
+                self.assertIn(f"/leds/{color}/led_metadata", f)
                 self.assertIn(f"/leds/{color}/jpeg_e3", f)
+
+    def test_identical_exposures_share_one_dark_group(self):
+        """
+        Both LEDs see the same synthetic scene, so they compute the same
+        exposures and must share dark frames rather than storing them twice.
+        """
+        with self.archive(self.runner) as f:
+            dark_groups = sorted(f["/dark"])
+            self.assertEqual(len(dark_groups), len(EXP_LABELS), dark_groups)
+            for label in EXP_LABELS:
+                np.testing.assert_array_equal(
+                    f[f"/leds/amber/dark/{label}/B"][()],
+                    f[f"/leds/blue/dark/{label}/B"][()])
+
+    def test_dark_links_resolve_for_every_led_and_label(self):
+        with self.archive(self.runner) as f:
+            for color in ("amber", "blue"):
                 for label in EXP_LABELS:
-                    for ch in ("B", "Gb", "Gr", "R"):
-                        self.assertIn(f"/leds/{color}/lit/{label}/{ch}", f)
-            self.assertIn("/dark", f)
+                    link = f[f"/leds/{color}/dark"].get(label, getlink=True)
+                    self.assertIsInstance(link, h5py.SoftLink)
+                    self.assertTrue(link.path.startswith("/dark/"))
+
+    def test_progress_reports_reuse_of_shared_darks(self):
+        """The second LED should report reusing darks, not storing them."""
+        progress = self.run_to_completion(self.make_runner(led_start=1, led_end=2))
+        messages = [p.message for p in progress if p.step.startswith("dark")]
+        self.assertTrue(any("stored dark" in m for m in messages), messages)
+        self.assertTrue(any("reused dark" in m for m in messages), messages)
 
 
 if __name__ == "__main__":
