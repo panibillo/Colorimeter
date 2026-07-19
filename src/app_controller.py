@@ -50,9 +50,11 @@ else:
     log_prefix = ""
 
 import widgets
-from widgets import Button, Screen, TextBox
+from widgets import Button, Label, Screen, TextBox
 from screen_manager import ScreenManager
 import csv_to_widgets
+from capture_runner import CaptureConfig
+from capture_session import CaptureSession
 
 # Legacy imports (can be removed after all screens converted to CSV)
 # from proto_screen  import build_screen as _build_measure_screen
@@ -66,8 +68,31 @@ _BL_PIN    = 13
 _POLL_S    = 0.02      # main-loop sleep / touch-poll cadence (seconds)
 
 # Form field keys — defines the data model for the entry screen.
-# Order matches the visual row order; names match widget names in proto_screen1.
+# Order matches the visual row order.
 _FIELD_KEYS = ["id", "user", "test", "collect"]
+
+# Widgets are named by their numeric id from widget_defs.csv, so that is what
+# Screen.find() matches on. The `remarks` column reads like a name ("id_field")
+# but csv_loader does not parse it, and it is not unique — 903 and 904 share
+# "next_btn button" — so ids remain the identity here.
+_SE_FIELD_WIDGETS = {
+    "id":      "112",
+    "user":    "114",
+    "test":    "116",
+    "collect": "118",
+}
+_CLOCK_WIDGET = "902"   # shared status-bar clock, present on every screen
+
+# Widget ids on the Capture screen. Widgets are named by their numeric id in
+# widget_defs.csv, so these are what Screen.find() matches on.
+_CA_START_BTN = "212"   # begins a capture run
+_CA_COUNTER   = "211"   # TextBox: LED progress, e.g. "3/10"
+_CA_STATUS_1  = "213"   # Label: current step
+_CA_STATUS_2  = "214"   # Label: detail / result
+
+# LED channels a capture sweeps. Full sweep is 1–10; see lighting_cal8.
+_CAPTURE_LED_START = 1
+_CAPTURE_LED_END   = 10
 
 
 # ── AppController ─────────────────────────────────────────────────────────────
@@ -94,6 +119,10 @@ class AppController:
         # Active slot guard: 'A', 'B', or None.
         # Only one test runs at a time; Start is blocked while this is set.
         self.active_slot: str | None = None
+
+        # The capture in flight, pumped once per event-loop pass. None when
+        # no capture is running.
+        self._capture: CaptureSession | None = None
 
         # Data model: the values the entry form displays and edits.
         self.record: dict[str, str] = {
@@ -122,6 +151,10 @@ class AppController:
     def cleanup(self) -> None:
         """Silence hardware and release resources.  Safe to call multiple times."""
         log.info("AppController: cleanup")
+        # Cancel first: this turns off any lit LED and closes the archive.
+        if self._capture is not None:
+            self._capture.cancel()
+            self._capture = None
         try:
             if self._disp:
                 self._disp.fill_screen(ILI9341.BLACK)
@@ -196,6 +229,13 @@ class AppController:
                 start_btn.on_press = lambda slot='A': self._start_test(slot)
                 log.info("Wired Start button on screen %r", screen_id)
 
+            # Wire the Capture screen's Start button to begin a capture run
+            if screen_id == "CA":
+                capture_btn = screen.find(_CA_START_BTN)
+                if isinstance(capture_btn, Button):
+                    capture_btn.on_press = self._toggle_capture
+                    log.info("Wired capture button on screen %r", screen_id)
+
             # Wire any button with nav_hint as a NEXT button
             for widget in screen.tabbed_widgets + screen.untabbed_widgets:
                 if isinstance(widget, Button) and widget.nav_hint in ('NO_CLEAR', 'CLEAR_ALL'):
@@ -230,6 +270,94 @@ class AppController:
         self.active_slot = None
         self._navigate_to("SE")
 
+    # ── Capture ───────────────────────────────────────────────────────────────
+
+    def _toggle_capture(self) -> None:
+        """Start a capture, or cancel the one in flight. Wired to CA Start."""
+        if self._capture is not None and self._capture.active:
+            self._capture.cancel()
+            self._set_capture_status("Capture cancelled", "")
+            self._capture = None
+            return
+
+        config = CaptureConfig(led_start=_CAPTURE_LED_START,
+                               led_end=_CAPTURE_LED_END)
+        session = CaptureSession(config)
+        self._set_capture_status("Starting camera...", "")
+
+        if not session.start():
+            self._set_capture_status("Camera failed", str(session.error)[:40])
+            return
+
+        self._capture = session
+        log.info("AppController: capture started → %s", config.out_dir)
+
+    def _pump_capture(self) -> None:
+        """
+        Advance the running capture by one step and repaint its progress.
+
+        Called once per event-loop pass. One step is one camera operation, so
+        the loop keeps servicing touch and the clock between frames instead of
+        blocking for the minutes a full sweep takes.
+        """
+        session = self._capture
+        if session is None or not session.active:
+            return
+
+        progress = session.step()
+
+        if progress is not None:
+            # Transient updates are warmup countdowns; they carry no new step.
+            if not progress.transient:
+                log.debug("capture: %s", progress.message)
+            self._show_progress(progress)
+            return
+
+        # step() returned None: the run just ended, one way or another.
+        if session.error is not None:
+            self._set_capture_status("Capture failed", str(session.error)[:40])
+        elif session.out_path is not None:
+            self._set_capture_status("Capture complete", session.out_path.name)
+        self._capture = None
+
+    def _show_progress(self, progress) -> None:
+        """Repaint the Capture screen from one Progress value."""
+        counter = ""
+        if progress.led_total:
+            counter = f"{progress.led_index}/{progress.led_total}"
+        detail = progress.color or f"{progress.fraction * 100:.0f}%"
+        self._set_capture_status(progress.message[:34], detail, counter)
+
+    def _set_capture_status(self, line1: str, line2: str,
+                            counter: "str | None" = None) -> None:
+        """
+        Write the capture status lines, and optionally the LED counter.
+
+        Only touches the Capture screen, and only when it is the active one —
+        drawing to a screen the user has navigated away from would corrupt
+        whatever is on the display.
+
+        Unchanged text is not redrawn. Progress arrives every event-loop pass
+        during a warmup countdown, and each redraw is an SPI write to the
+        display, so repainting identical text would cost far more than it
+        shows.
+        """
+        screen = self._screens.get("CA")
+        if screen is None or self._mgr is None or self._mgr.active_screen is not screen:
+            return
+
+        for widget_id, text in ((_CA_STATUS_1, line1), (_CA_STATUS_2, line2)):
+            widget = screen.find(widget_id)
+            if isinstance(widget, Label) and widget.text != text:
+                widget.text = text
+                widget.draw(self._disp)
+
+        if counter is not None:
+            box = screen.find(_CA_COUNTER)
+            if isinstance(box, TextBox) and box.value != counter:
+                box.set_value(counter)
+                box.draw(self._disp)
+
     # ── Navigation ────────────────────────────────────────────────────────────
 
     def _navigate_to(self, screen_id: str, clear_first: bool = True) -> None:
@@ -247,7 +375,7 @@ class AppController:
         # Sample Entry (SE): populate fields from record on entry
         if screen_id == "SE":
             for key in _FIELD_KEYS:
-                field = screen.find(f"{key}_field")
+                field = screen.find(_SE_FIELD_WIDGETS[key])
                 if isinstance(field, TextBox):
                     value = self.record.get(key, "")
                     if value:
@@ -259,7 +387,7 @@ class AppController:
             se_screen = self._screens.get("SE")
             if se_screen:
                 for key in _FIELD_KEYS:
-                    field = se_screen.find(f"{key}_field")
+                    field = se_screen.find(_SE_FIELD_WIDGETS[key])
                     if isinstance(field, TextBox):
                         self.record[key] = field.value
             log.info("AppController: record = %s", self.record)
@@ -283,10 +411,13 @@ class AppController:
             # Alive-screen timeout monitor.
             self._mgr.tick()
 
+            # Advance any capture in flight by one step.
+            self._pump_capture()
+
             # Clock: update the active screen's clock widget once per second.
             if now - last_clock >= 1.0:
                 last_clock = now
-                clock = self._mgr.active_screen.find("clock")
+                clock = self._mgr.active_screen.find(_CLOCK_WIDGET)
                 if isinstance(clock, TextBox):
                     clock.set_value(datetime.datetime.now().strftime("%H:%M:%S"))
                     clock.draw(self._disp)

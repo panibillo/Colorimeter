@@ -17,6 +17,7 @@ or with unittest discovery:
 """
 
 import json
+import os
 import sys
 import tempfile
 import unittest
@@ -116,10 +117,17 @@ class FakeLeds:
     def __init__(self):
         self.state: dict = {}
         self.history: list = []
+        self.closed = False
 
     def set_channel(self, channel: int, on: bool) -> None:
         self.state[channel] = on
         self.history.append((channel, on))
+
+    def close(self) -> None:
+        """Mirrors LEDBank.close(): everything off, resources released."""
+        for channel in self.state:
+            self.state[channel] = False
+        self.closed = True
 
     def color_name(self, channel: int) -> str:
         return self._COLORS.get(channel, f"led{channel}")
@@ -165,6 +173,50 @@ class RunnerTestCase(unittest.TestCase):
         """Read one LED's metadata dict back out of the archive."""
         with self.archive(runner) as f:
             return json.loads(f[f"/leds/{color}/led_metadata"][()])
+
+
+# ---------------------------------------------------------------------------
+# Output location
+# ---------------------------------------------------------------------------
+
+class TestOutputLocation(unittest.TestCase):
+
+    def setUp(self):
+        self._saved = os.environ.pop(capture_runner.CAPTURE_DIR_ENV, None)
+
+    def tearDown(self):
+        os.environ.pop(capture_runner.CAPTURE_DIR_ENV, None)
+        if self._saved is not None:
+            os.environ[capture_runner.CAPTURE_DIR_ENV] = self._saved
+
+    def test_default_is_relative_to_the_project(self):
+        """Never a hardcoded home path — the Pi and desktop differ."""
+        out = capture_runner.default_out_dir()
+        self.assertEqual(out.name, capture_runner.CAPTURE_SUBDIR)
+        self.assertEqual(out.parent, Path(capture_runner.__file__).resolve().parent.parent)
+
+    def test_environment_variable_overrides_default(self):
+        os.environ[capture_runner.CAPTURE_DIR_ENV] = "/tmp/somewhere/else"
+        self.assertEqual(capture_runner.default_out_dir(),
+                         Path("/tmp/somewhere/else"))
+
+    def test_environment_variable_expands_user(self):
+        os.environ[capture_runner.CAPTURE_DIR_ENV] = "~/capture_archives"
+        self.assertEqual(capture_runner.default_out_dir(),
+                         Path.home() / "capture_archives")
+
+    def test_config_resolves_location_when_built_not_when_imported(self):
+        """
+        Regression guard: out_dir was once a plain dataclass default, baked in
+        at import, so setting the variable afterwards silently had no effect.
+        """
+        os.environ[capture_runner.CAPTURE_DIR_ENV] = "/tmp/set/after/import"
+        self.assertEqual(CaptureConfig().out_dir, Path("/tmp/set/after/import"))
+
+    def test_explicit_out_dir_wins_over_environment(self):
+        os.environ[capture_runner.CAPTURE_DIR_ENV] = "/tmp/ignored"
+        config = CaptureConfig(out_dir=Path("/tmp/explicit"))
+        self.assertEqual(config.out_dir, Path("/tmp/explicit"))
 
 
 # ---------------------------------------------------------------------------

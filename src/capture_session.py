@@ -1,0 +1,183 @@
+"""
+capture_session.py — drives a CaptureRunner from a non-blocking event loop.
+---------------------------------------------------------------------------
+CaptureRunner.run() is a generator: it yields between camera operations so a
+caller can do something else in the gaps. This module is the something else —
+it owns the camera and LED bank for the duration of one capture, advances the
+generator one step per call, and turns any failure into inspectable state
+rather than an exception escaping into the event loop.
+
+A UI polls step() from its main loop and repaints from the returned Progress.
+Nothing here knows about screens or widgets.
+
+Usage:
+    session = CaptureSession(CaptureConfig(led_start=1, led_end=10))
+    session.start()
+    while session.active:            # in reality, once per event-loop pass
+        progress = session.step()
+        if progress:
+            display(progress.message, progress.fraction)
+    if session.error:
+        display(f"Capture failed: {session.error}")
+    else:
+        display(f"Saved {session.out_path}")
+
+Hardware is created through factories so tests can substitute fakes; the
+defaults build the real BayerCam and LEDBank, both of which fall back to
+their desktop mocks when picamera2 or the GPIO backends are unavailable.
+"""
+
+import logging
+
+from capture_runner import CaptureConfig, CaptureRunner
+
+log = logging.getLogger(__name__)
+
+
+def _default_cam():
+    """Build the real camera (mock-backed on the desktop)."""
+    from bayer_cam import BayerCam
+    return BayerCam()
+
+
+def _default_leds():
+    """Build the real LED bank (mock-backed on the desktop)."""
+    from lighting_cal8 import LEDBank
+    return LEDBank()
+
+
+class CaptureSession:
+    """
+    One capture run, advanced a step at a time.
+
+    Attributes:
+        active:   True between a successful start() and the run finishing.
+        progress: The most recent Progress, or None before the first step.
+        error:    The exception that ended the run, or None.
+        out_path: Path of the archive written, set once the run completes.
+        runner:   The underlying CaptureRunner, or None before start().
+    """
+
+    def __init__(self, config: "CaptureConfig | None" = None,
+                 cam_factory=_default_cam, leds_factory=_default_leds):
+        """
+        Args:
+            config:       Run parameters; defaults to a single-LED run.
+            cam_factory:  Zero-arg callable returning a camera.
+            leds_factory: Zero-arg callable returning an LED bank.
+        """
+        self.config       = config or CaptureConfig()
+        self._cam_factory  = cam_factory
+        self._leds_factory = leds_factory
+
+        self.active   = False
+        self.progress = None
+        self.error: "Exception | None" = None
+        self.out_path = None
+        self.runner: "CaptureRunner | None" = None
+
+        self._cam  = None
+        self._leds = None
+        self._gen  = None
+
+    # ── Lifecycle ────────────────────────────────────────────────────
+
+    def start(self) -> bool:
+        """
+        Acquire hardware and prepare the run. No frames are captured yet;
+        the first step() does that.
+
+        Returns:
+            True if the session is ready to step, False if setup failed —
+            in which case .error holds the reason and hardware is released.
+        """
+        if self.active:
+            log.warning("CaptureSession: start ignored, already active")
+            return False
+
+        self.progress = None
+        self.error    = None
+        self.out_path = None
+
+        try:
+            self._cam  = self._cam_factory()
+            self._leds = self._leds_factory()
+            self.runner = CaptureRunner(self._cam, self._leds, self.config)
+            self._gen = self.runner.run()
+        except Exception as exc:      # hardware may be missing or in use
+            log.exception("CaptureSession: failed to start")
+            self.error = exc
+            self._release()
+            return False
+
+        self.active = True
+        log.info("CaptureSession: started (LEDs %d–%d)",
+                 self.config.led_start, self.config.led_end)
+        return True
+
+    def step(self):
+        """
+        Advance the run by one step.
+
+        Returns:
+            The Progress just reached, or None if the session is not active
+            or has just finished. Check .active and .error afterwards to tell
+            a normal completion from a failure.
+        """
+        if not self.active or self._gen is None:
+            return None
+
+        try:
+            self.progress = next(self._gen)
+            return self.progress
+        except StopIteration:
+            log.info("CaptureSession: complete — %s", self.runner.out_path)
+            self.out_path = self.runner.out_path
+            self._finish()
+            return None
+        except Exception as exc:
+            # A capture failure must not take the event loop down with it.
+            log.exception("CaptureSession: run failed")
+            self.error = exc
+            self._finish()
+            return None
+
+    def cancel(self) -> None:
+        """
+        Abandon the run. The runner turns off any lit LED and closes the
+        archive, leaving whatever was captured so far readable.
+        """
+        if not self.active:
+            return
+        log.info("CaptureSession: cancelled")
+        if self.runner is not None:
+            self.out_path = self.runner.out_path
+        self._finish()
+
+    # ── Internals ────────────────────────────────────────────────────
+
+    def _finish(self) -> None:
+        """End the run and release hardware. Never raises."""
+        self.active = False
+        if self._gen is not None:
+            try:
+                self._gen.close()     # runs the runner's own cleanup
+            except Exception:
+                log.exception("CaptureSession: error closing the run")
+            self._gen = None
+        self._release()
+
+    def _release(self) -> None:
+        """Release camera and LED bank. Never raises."""
+        if self._cam is not None:
+            try:
+                self._cam.stop()
+            except Exception:
+                log.exception("CaptureSession: error stopping the camera")
+            self._cam = None
+        if self._leds is not None:
+            try:
+                self._leds.close()
+            except Exception:
+                log.exception("CaptureSession: error closing the LED bank")
+            self._leds = None
