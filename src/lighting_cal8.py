@@ -36,12 +36,21 @@ Usage as a test script:
   python3 lighting_cal8.py 1 2 1.0        # direct-GPIO channels only
 """
 
+import os
 import sys
-import spidev
-from gpiozero import DigitalOutputDevice
 import time
 
 from utils import install_exit_signals
+
+# Use mock hardware if COLORIMETER_SIMULATION=1
+_SIMULATION_MODE = os.environ.get('COLORIMETER_SIMULATION', '0') == '1'
+
+if _SIMULATION_MODE:
+    from mock.gpiozero_mock import DigitalOutputDevice
+    from mock import spidev_mock as spidev
+else:
+    from gpiozero import DigitalOutputDevice
+    import spidev
 
 # ── Hardware pin assignments ──────────────────────────────────
 _RCLK_PIN    = 24       # BCM — 74HC595 register clock (latch)
@@ -94,6 +103,8 @@ class LEDBank:
             RuntimeError: If SPI1 cannot be opened or a GPIO pin
                 is already claimed (check spi0-1cs overlay).
         """
+        if _SIMULATION_MODE:
+            print("[SIMULATION] LEDBank: using mock spidev/gpiozero drivers")
         self._rclk = DigitalOutputDevice(
             _RCLK_PIN, initial_value=False
         )

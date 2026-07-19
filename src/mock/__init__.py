@@ -9,6 +9,7 @@ from .ili9341_mock import ILI9341
 from .tsc2007_mock import TSC2007
 from .kb_reader_mock import KbReader
 from . import beeper_mock as beeper
+from . import spidev_mock as spidev
 
 __all__ = [
     'DigitalOutputDevice',
@@ -16,4 +17,5 @@ __all__ = [
     'TSC2007',
     'KbReader',
     'beeper',
+    'spidev',
 ]

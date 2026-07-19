@@ -25,11 +25,17 @@ Mock keyboard reader. Captures keyboard events from matplotlib window and queues
 ### `beeper_mock.py`
 Mock audio feedback. Logs all beep/alarm events (no actual sound).
 
+### `spidev_mock.py`
+Mock SPI bus (`spidev.SpiDev`). Used by lighting hardware drivers that drive
+shift registers (e.g. `lighting_cal8.py`'s 74HC595 board). Logs `open`/
+`writebytes`/`close` calls; no real bus is opened.
+
 ## Usage
 
 ### Enable Simulation Mode
 
-Set the environment variable before running the app:
+Set the environment variable on the command line using `export` before running the app.
+This only has to be set once on the desktop or laptop:
 
 ```bash
 export COLORIMETER_SIMULATION=1
@@ -91,6 +97,16 @@ To add new functionality to a mock (e.g., mouse drag for RectWidget):
 - **Touch**: No multi-touch or pressure sensitivity
 - **Keyboard**: Only standard ASCII + special keys (Tab, Enter, Backspace, Delete)
 - **Audio**: No sound; events logged only
+
+## Lighting Drivers
+
+Lighting hardware drivers (e.g. `lighting_cal8.py`) are not switched by
+`app_controller.py`. They check `COLORIMETER_SIMULATION` themselves and
+self-select `gpiozero_mock`/`spidev_mock` vs the real libraries, so any script
+that imports them (its own CLI, `camtest7.py`, `camtest8.py`, etc.) gets
+simulation support automatically. Future lighting boards should follow the
+same convention rather than adding a new whole-module mock, reusing
+`gpiozero_mock.py`/`spidev_mock.py` wherever possible.
 
 ## Real Hardware
 

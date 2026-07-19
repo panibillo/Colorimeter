@@ -1,0 +1,143 @@
+    Select LEDs for an electronics project.
+    The application is a color analyzer. A Rpi Camera Moudule 3 will capture images of color samples.
+    The samples will be lit sequentially by leds of 4 different colors. Roughly:
+       V (violet to near UV)
+       B blue
+       G green
+       R red
+    The camera is thought to capture near UV, but sensitivity probably drops quickly beyond the visible spectrum.
+    The power supply will be 5 V DC.
+    There should be 4 LEDs of each color, but it is possible to use 6 for colors with weak illuminance.
+    The LEDs should have a relatively narrow wavelength band
+    There is about 0.5 amp total available. (2.5 Amp power supply shared with Rpi Zero 2 W)
+    There can be a dedicated 5 V LDO regulator for the LEDs.
+    Low price of LEDS is important.
+    Similar illuminance is important, but that can be controlled by the resistors used per color.
+
+    I would like you to inspect a table of LED parts, and select at least 3 top candidates for each color.
+    I have a table of LEDs available from a supplier.  I can generate a .csv file of the columns you would like to inspect.  The table has the following columns:
+    price                                TEXT,
+    price_qty                            INTEGER,
+    min_qty                              INTEGER,
+    package                              TEXT,
+    series                               TEXT,
+    product_status                       TEXT,
+    color                                TEXT,
+    wavelength                           TEXT,
+    current_test                         TEXT,
+    voltage_forward_vf_typ               TEXT,
+    lumens_watt_at_current_test          TEXT,
+    current_max                          TEXT,
+    luminous_flux_at_current_temperature TEXT,
+    temperature_test                     TEXT,
+    viewing_angle                        TEXT,
+    mounting_type                        TEXT,
+    package_case                         TEXT,
+    supplier_device_package              TEXT,
+    size_dimension                       TEXT,
+    height_seated_max                    TEXT,
+    ==============================
+    These are all smd, but I included columns on form factors.  The viewing angle is tricky.  it is difficult to achieve even lighting because both lights and camera are close to the sample.  So I think a broad viewing angle is preferable, but I don't know how consistent is the luminescence across the stated viewing angle.  I have already filtered the table by min_qty=1 and product_status='Active'.
+
+ I am gathering more candidates in new csv tables. These csv tables will have to be appended to the existing table in
+    /home/bill/Documents/eprojects/Part Data Sheets/digikey_leds.sqlite
+The existing table definition is:
+CREATE TABLE leds (
+    parttype                             TEXT,
+    datasheet                            TEXT,
+    image                                TEXT,
+    dk_part_no                           TEXT    UNIQUE,
+    mfr_part_no                          TEXT,
+    mfr                                  TEXT,
+    supplier                             TEXT,
+    description                          TEXT,
+    stock                                TEXT,
+    price                                TEXT,
+    price_qty                            INTEGER,
+    min_qty                              INTEGER,
+    package                              TEXT,
+    series                               TEXT,
+    product_status                       TEXT,
+    color                                TEXT,
+    wavelength                           TEXT,
+    current_test                         TEXT,
+    voltage_forward_vf_typ               TEXT,
+    lumens_watt_at_current_test          TEXT,
+    current_max                          TEXT,
+    luminous_flux_at_current_temperature TEXT,
+    temperature_test                     TEXT,
+    viewing_angle                        TEXT,
+    mounting_type                        TEXT,
+    package_case                         TEXT,
+    supplier_device_package              TEXT,
+    size_dimension                       TEXT,
+    height_seated_max                    TEXT,
+    url                                  TEXT
+);
+Column name scrubbing was modified, with '@'->'at', and '#'->'no'.
+Evaluate these headers and see if we need to add new columns, or do column mapping.
+If all looks deterministic, then provide a python script to append these 2 csv files to the table.
+Use 'INSERT OR IGNORE' because we expect some duplicate parts in these tables.
+File: /home/bill/Downloads/led_indication___discrete_1.csv
+  Datasheet,Image,DK Part #,Mfr Part #,Mfr,Supplier,Description,Stock,Price,@ qty,Min Qty, Package,Series,Product Status,"Color","Configuration","Lens Color","Lens Transparency","Millicandela Rating","Lens Style","Lens Size","Voltage - Forward (Vf) (Typ)","Current - Test","Viewing Angle","Mounting Type","Wavelength - Dominant","Wavelength - Peak","Features","Grade","Qualification","Package / Case","Supplier Device Package","Size / Dimension","Height (Max)","URL"
+
+File: /home/bill/Downloads/led_indication___discrete_2.csv
+   Datasheet,Image,DK Part #,Mfr Part #,Mfr,Supplier,Description,Stock,Price,@ qty,Min Qty, Package,Series,Product Status,"Color","Configuration","Lens Color","Lens Transparency","Millicandela Rating","Lens Style","Lens Size","Voltage - Forward (Vf) (Typ)","Current - Test","Viewing Angle","Mounting Type","Wavelength - Dominant","Wavelength - Peak","Features","Package / Case","Supplier Device Package","Size / Dimension","Height (Max)","Grade","Qualification","URL"
+
+
+rank    rowid
+V 1 1015
+V 2 1012
+V 3  4
+B 1 2
+B 2 1014
+B 3 101
+G 1 1
+G 2 532
+G 3 783
+R 1 3
+R 2 727
+R 3 6
+
+Good so far. There will be  4 transistors, each controlling 4  of the same color (or possibly 6 of the violet)
+The LEDs will be illuminated one color at a time for imaging.
+First find a reasonable luminance value for all colors and LED options targeting  between 50% and 75% of the capacity of the LED, the power budget, and the power supply.   Call that the medium luminance target.
+Since we are not sure about the violet, solve for both 4 and 6 led options for that color.
+Calculate resistor values for each color, and  for the medium luminance target.
+Also calculate resistor values for brackting Low, and High luminescense targets.
+Use commonly available SMD resistor values.
+The exposure time per color can be calibrated, with a maximum of 1.2 seconds.
+Provide the results in a table showing the rowid, color group, LED ranking (1,2,3), Low/Med/High group, Resistor value, Number of Leds (4 or 6) and all other parameters used in your calculations or considerations.
+
+Changes to the latex document:
+* The data sheet for the Violet LED row 1151 states that the absolute maximum forward current is 30 mA, and the power dissipation is 120 mW, Forward voltage from min 2.8 to max 4.0 V.
+* Draw only one LED color group in the schematic, showing 4 LED's. That will allow the GPIO and MOSFET to separate more - the base resistors are now drawing on top of the MOSFETs.
+* The LDO data sheet shows a 10uf cap in front of the LDO also.  if there is room show that and also the fuse.
+* Now only the LEDs and their individual resistors will be SMD.  The other components will be through hole:  LDO, MOSFETs, caps, trimming resistors, fuse, gate and pulldown resistors, ... Update the part selections.
+
+Power budget:
+ Pi idle  100 mA
+ Pi + wifi + camera 250 mA
+ Lighting 500 mA +
+ Display - 100 mA   Adafruit 1651 2.8" 240x320 color with resistive touch screen
+
+My changes:
+Reorganize the table of LEDs.
+Note that the trimmer resistor might be replaced.
+
+IRL540NPBF mosfet at 100 V 36 A seems too big?
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
