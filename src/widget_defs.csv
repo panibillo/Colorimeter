@@ -1,0 +1,33 @@
+widget_id,widget_name,x,y,w,h,label,size,align,valign,fgcolor,bgcolor,editable,fill,border_color,default,remarks
+# ── SE header (y 0–49) ──────────────────────────────────────────────────────
+101,Label,8,5,178,24,"New Test",22,left,middle,black,white,0,0,,,"title"
+102,Label,8,31,178,17,COLLECT_DT "mm-dd  hh:mm:ss",14,left,top,black,white,0,0,,,"hdr_datetime"
+103,Button,193,0,74,50,"Start",22,center,middle,btn_text,start_green,0,0,,,"start button"
+104,Button,270,0,50,50,B,34,center,middle,slot_b_text,slot_b_bg,0,0,,,"slot_b toggle"
+# ── SE body — labels (y 55–209) ─────────────────────────────────────────────
+111,Label,8,55,68,35,"ID",13,center,middle,white,label_coral,0,0,,,"id_lbl"
+112,TextBox,82,53,230,39,,22,left,middle,black,white,1,0,field_blue,"AB0124","id_field"
+113,Label,8,95,68,35,"User",13,center,middle,white,label_coral,0,0,,,"user_lbl"
+114,TextBox,82,93,230,39,,18,left,middle,black,white,1,0,field_blue,"William Olsen","user_field"
+115,Label,8,135,68,35,"Test",13,center,middle,white,label_coral,0,0,,,"test_lbl"
+116,TextBox,82,133,230,39,,18,left,middle,black,white,1,0,field_blue,,"test_field"
+117,Label,8,175,68,35,"Collect",13,center,middle,white,label_coral,0,0,,,"collect_lbl"
+118,TextBox,82,173,230,39,,18,left,middle,black,white,1,0,field_blue,,"collect_field"
+# ── SE body — row dividers ───────────────────────────────────────────────────
+119,RectWidget,0,92,320,1,,,,,,row_line,0,1,,,"div_id"
+120,RectWidget,0,132,320,1,,,,,,row_line,0,1,,,"div_user"
+121,RectWidget,0,172,320,1,,,,,,row_line,0,1,,,"div_test"
+# ── CA header (y 0–49) ──────────────────────────────────────────────────────
+201,Label,8,5,258,24,"AB0123",22,left,top,hdr_text,hdr_blue,0,0,,,"sample_id"
+# 102,Label,8,31,178,17,COLLECT_DT "mm-dd  hh:mm:ss",14,left,top,black,white,0,0,,"","collection_datetime"
+203,Button,270,0,50,50,"A",34,center,middle,slot_a_text,slot_a_bg,0,0,,,"slot_a toggle"
+# ── CA body (y 50–214) ──────────────────────────────────────────────────────
+211,TextBox,90,60,140,42,"MM:SS",30,center,middle,countdown,body_dark,0,0,,02:00,"countdown timer"
+212,Button,240,64,72,36,Start,18,center,middle,btn_text,start_green,0,0,,,"start_m button"
+213,Label,14,125,280,28,"Add Reagent 1",20,left,middle,body_text,body_dark,0,0,,,"instr1"
+214,Label,14,157,280,28,"and press GO",20,left,middle,body_text,body_dark,0,0,,,"instr2"
+# ── Shared status bar (y 215–239) ───────────────────────────────────────────
+901,Button,2,217,58,21,MENU,13,center,middle,btn_text,btn_gray,0,0,,,"menu button"
+902,TextBox,110,217,100,21,CURRENT_DATETIME "yyyy-mm-dd  hh:mm:ss",13,center,middle,btn_text,status_bg,0,0,,,"Time Sync Error","clock display"
+903,Button,260,217,58,21,"NEXT",13,center,middle,btn_text,btn_gray,0,0,,NO_CLEAR,"next_btn button"
+904,Button,260,217,58,21,"NEXT",13,center,middle,btn_text,btn_gray,0,0,,CLEAR_ALL,"next_btn button"

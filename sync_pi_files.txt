@@ -1,0 +1,17 @@
+# .rsync_files — explicit list of files to sync to the remote.
+#
+# Rules:
+#   - Paths are relative to the project root.
+#   - Blank lines and lines starting with # are ignored by rsync's
+#     --files-from option (rsync treats # as a comment).
+#   - Add or remove lines here to control exactly what gets synced.
+#   - Wildcards (e.g. src/*.py) are NOT expanded by rsync when using
+#     --files-from; list each file explicitly, or use a shell glob to
+#     generate the list dynamically (see sync_project.sh notes).
+
+dev/camtest4.py
+
+#src/color_cam.py
+#src/db_manager.py
+#src/error_handler.py
+

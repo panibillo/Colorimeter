@@ -1,13 +1,28 @@
+# ── Build and environment ────────────────────────────────────────────────
 **.pyc
-**.sqlite
+.venv/
+.project
+.pydevproject
+.settings/
+
+# ── Capture data and generated output ────────────────────────────────────
+# The capture pipeline emits these in bulk; they are data, not source.
 **.csv
 **.txt
 **.jpg
 **.npy
+**.h5
+**.sqlite
 **.prof
-.project
-.pydevproject
-.venv/
-.settings/
 **.log
 docs/.~lock.*
+
+# ── Project source and configuration ─────────────────────────────────────
+# Re-included from the data rules above: hand-maintained files the project
+# cannot be rebuilt without. Negations must follow the rule they override,
+# so keep this block last.
+!src/*.csv
+!requirements-frozen.txt
+!system_requirements.txt
+!sync_pi_files.txt
+!rpiconfig/*.txt

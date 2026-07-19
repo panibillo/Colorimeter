@@ -1,0 +1,5 @@
+screen_id,phase,seq,duration,modal,beginactions,next
+# SE — Sample Entry: user fills form then presses Start
+SE,1,1,0,1,,CA
+# CA — Capture / Measure: 2-minute timed phase (modal; alarm silenced at begin, timer started)
+CA,1,2,120,1,(alarm_off start_timer),SE

@@ -1,0 +1,8 @@
+# Python packages that are installed on the Pi Zero globally using apt
+# DO NOT install these on the Pi Zero using pip
+# These do NOT go in the .venv
+# If already installed, the command just verifies that, or upgrades it.
+sudo apt install python3-numpy      # Python test: import numpy as np
+sudo apt install python3-rpi-lgpio  # Python test: import RPi.GPIO as GPIO (legacy?)
+sudo apt install python3-gpiozero   # Python test: 
+sudo apt install python3-opencv     # Python test: import cv2

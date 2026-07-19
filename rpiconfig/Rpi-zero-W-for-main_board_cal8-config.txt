@@ -1,0 +1,65 @@
+# Rpi-zero-W-for-mainboard_cal8 
+# On strip-board, controls 5 leds - only.
+# /boot/firmware/config.txt 
+# For more options and information see
+# http://rptl.io/configtxt
+# Some settings may impact device functionality. See link above for details
+
+# Uncomment some or all of these to enable the optional hardware interfaces
+#dtparam=i2c_arm=on
+#dtparam=i2s=on
+#dtparam=spi=on
+
+# Enable audio (loads snd_bcm2835)
+dtparam=audio=off
+
+# Additional overlays and parameters are documented
+# /boot/firmware/overlays/README
+
+# Automatically load overlays for detected cameras
+camera_auto_detect=1
+
+# Automatically load overlays for detected DSI displays
+display_auto_detect=1
+
+# Automatically load initramfs files, if found
+auto_initramfs=1
+
+# Enable DRM VC4 V3D driver
+dtoverlay=vc4-kms-v3d
+max_framebuffers=2
+
+# Don't have the firmware create an initial video= setting in cmdline.txt.
+# Use the kernel's default instead.
+disable_fw_kms_setup=1
+
+# Disable compensation for displays with overscan
+disable_overscan=1
+
+# Run as fast as firmware / board allows
+arm_boost=1
+
+[cm4]
+# Enable host mode on the 2711 built-in XHCI USB controller.
+# This line should be removed if the legacy DWC2 controller is required
+# (e.g. for USB device mode) or if USB support is not required.
+otg_mode=1
+
+[cm5]
+dtoverlay=dwc2,dr_mode=host
+
+[all]
+# ── Colorimeter prototype configuration ──────────────────────
+# SPI0: ILI9341 display (MOSI=GPIO10, MISO=GPIO9, SCLK=GPIO11, CE0=GPIO8)
+dtparam=spi=on
+# I2C bus 1: TSC2007 touch controller (SDA=GPIO2, SCL=GPIO3)
+dtparam=i2c_arm=on
+# 1-Wire: GPIO16 (non-default pin; default would be GPIO4)
+# gpiopin= takes the BCM number (16), NOT the physical pin number (36)
+dtoverlay=w1-gpio,gpiopin=16
+# SPI1: 74HC595 shift register (MOSI=GPIO20, SCLK=GPIO21)
+# cs0_pin=23 redirects CE0 away from GPIO18, which is used for JP2/J3 routing.
+# The 74HC595 does not use hardware CE; RCLK is driven manually by GPIO24.
+dtoverlay=spi1-1cs,cs0_pin=23
+# ─────────────────────────────────────────────────────────────
+
