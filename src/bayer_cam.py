@@ -44,7 +44,7 @@ try:
     import libcamera
 except ImportError:
     # Desktop testing with mock camera
-    from mock_Picamera2 import Picamera2, libcamera
+    from mock.picamera2_mock import Picamera2, libcamera
 
 
 _DEFAULT_FOCUS_CAL_PATH = (

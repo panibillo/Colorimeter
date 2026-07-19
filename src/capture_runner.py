@@ -1,0 +1,776 @@
+"""
+capture_runner.py — multi-exposure ROI capture workflow, driveable step by step.
+--------------------------------------------------------------------------------
+Holds the capture workflow previously embedded in dev/camtest8.py's main().
+The workflow is exposed as a generator so a caller can pump it one step at a
+time and render progress between steps, instead of blocking for the several
+minutes a full ten-LED suite takes.
+
+Three-phase workflow:
+  Phase 0: White LED on — find a calibrated unsaturated starting exposure.
+           Target Bayer channel is determined per-LED in Phase 2 (not here).
+  Phase 1: Camera focus (manual diopter or autofocus).
+  Phase 2: Per-LED: determine target channel, compute 7 exposures, capture
+           and save lit frames, then LED-off dark frames at the same exposures.
+
+Exposure bracketing targets (50% of 10-bit saturation = 512):
+  e0: e3 / E3_RATIO                                    (fixed ratio)
+  e1: 89th-percentile pixel in ROI_SAMPLE → 512
+  e2: 66th-percentile pixel in ROI_SAMPLE → 512
+  e3: 50th-percentile pixel in ROI_SAMPLE → 512  (median)
+  e4: 33rd-percentile pixel in ROI_SAMPLE → 512
+  e5: 11th-percentile pixel in ROI_SAMPLE → 512
+  e6: e3 * E3_RATIO                                    (fixed ratio)
+
+Hardware is injected, never constructed here: the caller owns the lifetime of
+the camera and the LED bank. The runner turns off whichever LED it switched on
+when the generator finishes or is abandoned, but does not close either device.
+
+Usage:
+    from capture_runner import CaptureRunner, CaptureConfig
+
+    runner = CaptureRunner(cam, leds, CaptureConfig(led_start=1, led_end=10))
+    for progress in runner.run():
+        if not progress.transient:
+            print(progress.message)
+    print(runner.out_dir, runner.results)
+
+Output filenames (saved to config.out_dir/<timestamp>/):
+  camtest8_BOUND_{color}_{e_label}_{ms}ms_{ch}.npy   — lit ROI_BOUND per channel
+  camtest8_BOUND_black_{e_label}_{ms}ms_{ch}.npy     — dark ROI_BOUND per channel
+  camtest8_{color}_e3.jpg                            — focused full-image JPEG at e3
+  camtest8_{color}_metadata.json                     — focus, channel, exposure analysis
+"""
+
+import json
+import logging
+import time
+from dataclasses import dataclass, field
+from datetime import datetime
+from pathlib import Path
+from typing import Iterator
+
+import numpy as np
+
+from bayer_cam import BayerCam
+
+try:
+    import libcamera as _libcamera  # type: ignore[import-untyped]
+except ImportError:
+    _libcamera = None
+
+log = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Configuration
+# ---------------------------------------------------------------------------
+
+DEFAULT_EXPOSURE_MS  = 10
+LED_WARMUP_S         = 2.0          # seconds after LED on before capture
+MAX_SETTLE_FRAMES    = 15           # max captures while waiting for exposure to settle
+SETTLE_TOLERANCE     = 0.05         # 5 % tolerance for exposure-settle check
+WAIT_TICK_S          = 0.05         # pump interval while waiting out a warmup
+
+OUT_DIR  = Path("/home/bill/pi/Colorimeter/dev/camtest8")
+OUT_STEM = "camtest8"
+
+# ROI definitions — image space (x, y, w, h) for 2304×1296 capture
+ROI_SAMPLE = (1150, 790,  68, 68)
+ROI_WHITE  = (1150, 496, 136, 68)
+ROI_BLACK  = ((1150, 380, 68, 68), (1150, 900, 68, 68))
+ROI_BOUND  = (1090, 360, 160, 630)
+
+# Exposure analysis constants (10-bit sensor: 0–1023)
+HALF_SAT        = 512      # target: 50% of full scale
+SAT_THRESH      = 950      # p90 > this → oversaturated
+MAX_DESAT_TRIES = 3
+PERCENTILES     = [89, 66, 50, 33, 11]    # e1, e2, e3, e4, e5 percentile targets
+EXP_LABELS      = ["e0", "e1", "e2", "e3", "e4", "e5", "e6"]  # ordered capture sequence
+
+WHITE_LED_CH   = 10    # LEDBank channel for white LED
+MAX_AF_DIOPTER = 7.5   # cap autofocus: if result exceeds this, set manually to this
+
+# e3 convergence: iterate until |p50 - HALF_SAT| / HALF_SAT < E3_TOLERANCE
+E3_TOLERANCE = 0.10    # 10 % tolerance for p50 convergence
+E3_MAX_ITER  = 5       # maximum refinement iterations
+E3_RATIO     = 1.5     # e0 = e3 / E3_RATIO;  e6 = e3 * E3_RATIO
+
+# Captures performed per LED, used only to estimate progress fraction.
+_CAPTURES_PER_LED = 2 * len(EXP_LABELS)
+
+
+# ---------------------------------------------------------------------------
+# Value types
+# ---------------------------------------------------------------------------
+
+@dataclass
+class CaptureConfig:
+    """Parameters for one capture run."""
+
+    exposure_ms:   float = DEFAULT_EXPOSURE_MS
+    led_start:     int = 1
+    led_end:       int = 1
+    focus_diopter: "float | None" = None
+    out_dir:       Path = OUT_DIR
+
+    @property
+    def initial_us(self) -> int:
+        """Initial exposure in microseconds."""
+        return int(self.exposure_ms * 1000)
+
+    @property
+    def led_count(self) -> int:
+        """Number of LEDs this run will visit."""
+        return max(0, self.led_end - self.led_start + 1)
+
+
+@dataclass(frozen=True)
+class Progress:
+    """
+    One observable step of a capture run.
+
+    Attributes:
+        phase:     "setup" | "calibrate" | "focus" | "capture" | "done".
+        message:   Human-readable one-line description of the current step.
+        transient: True for repeated updates during a wait, which a caller
+                   may refresh in place or skip entirely rather than log.
+        led_index: 1-based position of the current LED within the run, or 0.
+        led_total: Total LEDs in the run.
+        color:     Current LED color name, or "".
+        step:      Short label of the current operation (e.g. "e3", "dark e3").
+        fraction:  Monotonic estimate of overall completion, 0.0–1.0.
+    """
+
+    phase:     str
+    message:   str
+    transient: bool = False
+    led_index: int = 0
+    led_total: int = 0
+    color:     str = ""
+    step:      str = ""
+    fraction:  float = 0.0
+
+
+@dataclass
+class LedResult:
+    """Outcome of capturing one LED color."""
+
+    color:          str
+    led_channel:    int
+    target_channel: str
+    exposures_us:   list = field(default_factory=list)
+    metadata:       dict = field(default_factory=dict)
+
+
+# ---------------------------------------------------------------------------
+# ROI helpers  (pure functions — no hardware)
+# ---------------------------------------------------------------------------
+
+def _channel_roi(roi: tuple) -> tuple:
+    """Convert image-space (x, y, w, h) to bayer-channel space (÷2 each coord)."""
+    x, y, w, h = roi
+    return (x // 2, y // 2, w // 2, h // 2)
+
+
+def _roi_pixels(layer: np.ndarray, croi: tuple) -> np.ndarray:
+    """Extract and flatten pixels from a channel layer using channel-space ROI."""
+    cx, cy, cw, ch = croi
+    return layer[cy:cy + ch, cx:cx + cw].ravel()
+
+
+def _channel_means(layers: dict, croi: tuple) -> dict:
+    """Return {ch_name: mean} for all channels in the given channel-space ROI."""
+    return {ch: float(_roi_pixels(layers[ch], croi).mean()) for ch in layers}
+
+
+def _select_target_channel(layers: dict, white_croi: tuple) -> str:
+    """Return the channel key ('B','Gb','Gr','R') with highest mean in ROI_WHITE."""
+    means = _channel_means(layers, white_croi)
+    chosen = max(means, key=means.__getitem__)
+    log.debug(f"    target channel: {chosen}  (means: "
+              + "  ".join(f"{k}={v:.1f}" for k, v in sorted(means.items()))
+              + ")")
+    return chosen
+
+
+def _check_saturated(layers: dict, target_ch: str, white_croi: tuple) -> bool:
+    """Return True if p90 of target channel in ROI_WHITE exceeds SAT_THRESH."""
+    pix = _roi_pixels(layers[target_ch], white_croi)
+    p90 = float(np.percentile(pix, 90))
+    log.debug(f"    saturation check: p90({target_ch})={p90:.1f}  threshold={SAT_THRESH}")
+    return p90 > SAT_THRESH
+
+
+def _check_saturated_any(layers: dict, white_croi: tuple) -> bool:
+    """Return True if p90 of ANY channel in ROI_WHITE exceeds SAT_THRESH."""
+    return any(
+        float(np.percentile(_roi_pixels(layers[ch], white_croi), 90)) > SAT_THRESH
+        for ch in layers
+    )
+
+
+def _estimate_e3(pix: np.ndarray, current_us: int) -> int:
+    """
+    Estimate e3 exposure from p50 of a reference pixel array.
+
+    Scales current_us so the median pixel would land at HALF_SAT.
+    Returns the estimated e3 in microseconds (floor at 1000 µs).
+    """
+    p50 = float(np.percentile(pix, 50))
+    p50 = max(p50, 1.0)   # guard divide-by-zero for very dark frames
+    e3_us = max(1000, int(current_us * HALF_SAT / p50))
+    log.debug(f"    e3 estimate: p50={p50:.1f} at {current_us}µs → {e3_us}µs "
+              f"({e3_us // 1000}ms)")
+    return e3_us
+
+
+def _compute_exposures_from_e3(pix_e3: np.ndarray, e3_us: int) -> "tuple[list, list]":
+    """
+    Compute all 7 capture exposures from the pixel distribution at e3.
+
+    e1, e2, e4, e5 are percentile-scaled; e0 and e6 are fixed-ratio brackets
+    around e3, which is passed in already refined.
+
+    Returns:
+        (exposures_us, pcts) where exposures_us is ordered to match
+        EXP_LABELS and pcts is [p89, p66, p50, p33, p11].
+    """
+    pcts = np.percentile(pix_e3, PERCENTILES)    # [p89, p66, p50, p33, p11]
+    p89, p66, p50, p33, p11 = [max(float(v), 1.0) for v in pcts]
+    log.debug(f"    ROI_SAMPLE at e3 ({e3_us}µs): "
+              f"p89={p89:.1f}  p66={p66:.1f}  p50={p50:.1f}  p33={p33:.1f}  p11={p11:.1f}")
+
+    e0_us = max(1000, int(e3_us / E3_RATIO))
+    e1_us = max(1000, int(e3_us * HALF_SAT / p89))
+    e2_us = max(1000, int(e3_us * HALF_SAT / p66))
+    e4_us = max(1000, int(e3_us * HALF_SAT / p33))
+    e5_us = max(1000, int(e3_us * HALF_SAT / p11))
+    e6_us = int(e3_us * E3_RATIO)
+
+    log.debug(f"    e0 = e3/{E3_RATIO} = {e3_us}/{E3_RATIO:.1f} = {e0_us}µs ({e0_us // 1000}ms)")
+    log.debug(f"    e1: p89={p89:.1f}  →  {e1_us}µs ({e1_us // 1000}ms)")
+    log.debug(f"    e2: p66={p66:.1f}  →  {e2_us}µs ({e2_us // 1000}ms)")
+    log.debug(f"    e3: {e3_us}µs ({e3_us // 1000}ms)  [p50={p50:.1f}]")
+    log.debug(f"    e4: p33={p33:.1f}  →  {e4_us}µs ({e4_us // 1000}ms)")
+    log.debug(f"    e5: p11={p11:.1f}  →  {e5_us}µs ({e5_us // 1000}ms)")
+    log.debug(f"    e6 = e3×{E3_RATIO} = {e3_us}×{E3_RATIO:.1f} = {e6_us}µs ({e6_us // 1000}ms)")
+
+    return [e0_us, e1_us, e2_us, e3_us, e4_us, e5_us, e6_us], pcts.tolist()
+
+
+# ---------------------------------------------------------------------------
+# Saving
+# ---------------------------------------------------------------------------
+
+def _save_roi_bound(
+    out_dir: Path, stem: str, bayer: np.ndarray, pattern: str
+) -> None:
+    """
+    Crop ROI_BOUND from bayer array, split into 4 channels, save as NPY files.
+
+    Writes: {stem}_B.npy, {stem}_Gb.npy, {stem}_Gr.npy, {stem}_R.npy
+    Each channel array has shape (ROI_BOUND_h//2, ROI_BOUND_w//2) = (315, 80).
+    """
+    x, y, w, h = ROI_BOUND
+    crop   = bayer[y:y + h, x:x + w]
+    layers = BayerCam.extract_bayer_layers(crop, pattern)
+    for ch_name, arr in layers.items():
+        np.save(str(out_dir / f"{stem}_{ch_name}.npy"), arr)
+    log.debug(f"    saved {stem}_{{B,Gb,Gr,R}}.npy")
+
+
+def _save_led_metadata(out_dir: Path, color: str, data: dict) -> Path:
+    """Write one LED's metadata JSON and return the path written."""
+    path = out_dir / f"{OUT_STEM}_{color}_metadata.json"
+    with open(path, "w") as f:
+        json.dump(data, f, indent=2)
+    return path
+
+
+# ---------------------------------------------------------------------------
+# Camera helpers
+# ---------------------------------------------------------------------------
+
+def _set_and_settle(cam, exposure_us: int) -> "tuple[np.ndarray, np.ndarray, dict]":
+    """
+    Set exposure and capture frames until metadata confirms it has been applied.
+
+    After calling set_exposure(), the Picamera2 pipeline takes at least one
+    frame cycle to adopt the new ExposureTime.  This function keeps capturing
+    until the metadata ExposureTime is within SETTLE_TOLERANCE of the request,
+    or MAX_SETTLE_FRAMES is exhausted.
+    """
+    cam.set_exposure(exposure_us)
+    last = None
+    for frame_num in range(MAX_SETTLE_FRAMES):
+        rgb, bayer, meta = cam.capture_frame()
+        applied = int(meta.get("ExposureTime", 0))
+        last = (rgb, bayer, meta)
+        if applied > 0:
+            delta = abs(applied - exposure_us) / max(exposure_us, 1)
+            if delta <= SETTLE_TOLERANCE:
+                log.debug(f"    settled: {applied}µs ≈ {exposure_us}µs "
+                          f"after {frame_num + 1} frame(s)")
+                return rgb, bayer, meta
+        log.debug(f"    settling [{frame_num + 1}/{MAX_SETTLE_FRAMES}]: "
+                  f"requested={exposure_us}µs  applied={applied}µs")
+    applied = int(last[2].get("ExposureTime", 0))  # type: ignore[index]
+    log.warning(f"    exposure did not settle after {MAX_SETTLE_FRAMES} frames; "
+                f"last applied={applied}µs  requested={exposure_us}µs")
+    return last  # type: ignore[return-value]
+
+
+def _set_manual_lens(cam, diopters: float) -> None:
+    """Apply a manual lens position directly via libcamera controls."""
+    if _libcamera is None:
+        raise RuntimeError("libcamera not importable — cannot set manual focus")
+    if cam.camera is None:
+        raise RuntimeError("Camera not initialized — call setup_camera() first")
+    cam.camera.set_controls({
+        "AfMode":       _libcamera.controls.AfModeEnum.Manual,
+        "LensPosition": float(diopters),
+    })
+    cam.lens_position = float(diopters)
+    time.sleep(0.5)   # allow VCM to settle
+
+
+# ---------------------------------------------------------------------------
+# CaptureRunner
+# ---------------------------------------------------------------------------
+
+class CaptureRunner:
+    """
+    Drives a multi-exposure capture suite one observable step at a time.
+
+    Hardware is injected: the caller creates and owns the camera and LED bank.
+    Call run() and iterate the returned generator; each yielded Progress marks
+    a point at which the caller may repaint a display or service input.
+    """
+
+    def __init__(self, cam, leds, config: "CaptureConfig | None" = None):
+        """
+        Args:
+            cam:    A BayerCam (or compatible) instance, not yet set up.
+            leds:   An LEDBank (or compatible) instance, already open.
+            config: Run parameters; defaults to a single-LED run.
+        """
+        self._cam    = cam
+        self._leds   = leds
+        self.config  = config or CaptureConfig()
+
+        # Populated as the run proceeds.
+        self.out_dir: "Path | None" = None
+        self.results: list = []
+
+        # Progress bookkeeping.
+        self._led_index      = 0
+        self._captures_done  = 0
+        self._current_color  = ""
+        self._lit_on_channel: "int | None" = None
+
+    # ── Progress helpers ─────────────────────────────────────────────
+
+    def _fraction(self) -> float:
+        """Monotonic completion estimate over the whole run."""
+        total = self.config.led_count
+        if total <= 0:
+            return 0.0
+        done = (self._led_index - 1) + (self._captures_done / _CAPTURES_PER_LED)
+        return max(0.0, min(1.0, done / total))
+
+    def _progress(self, phase: str, message: str, **kwargs) -> Progress:
+        """Build a Progress carrying the current LED and completion context."""
+        color = kwargs.pop("color", None)
+        if color is None:
+            color = self._current_color
+        return Progress(
+            phase=phase,
+            message=message,
+            led_index=self._led_index,
+            led_total=self.config.led_count,
+            color=color,
+            fraction=self._fraction(),
+            **kwargs,
+        )
+
+    def _wait(self, seconds: float, what: str) -> Iterator[Progress]:
+        """
+        Sleep for `seconds`, yielding transient progress so the caller can
+        keep a display responsive instead of freezing for the whole wait.
+        """
+        deadline = time.monotonic() + seconds
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return
+            yield self._progress(
+                "capture", f"{what} — {remaining:.1f}s", transient=True, step="wait")
+            time.sleep(min(WAIT_TICK_S, remaining))
+
+    # ── Focus ────────────────────────────────────────────────────────
+
+    def _set_focus(self) -> "tuple[float, str, float | None]":
+        """
+        Set camera focus and return (final_pos, mode, raw_af_pos).
+
+        If config.focus_diopter is given → set that position directly
+        (mode='manual'). Otherwise → run autofocus; if the result exceeds
+        MAX_AF_DIOPTER, cap it there (mode='autofocus_capped'), else accept
+        it as-is (mode='autofocus').
+
+        raw_af_pos is the unmodified autofocus result, or None for manual.
+        """
+        cam = self._cam
+        focus_diopter = self.config.focus_diopter
+
+        if focus_diopter is not None:
+            if not cam.has_autofocus:
+                log.warning("Manual focus requested but camera has no VCM — ignored")
+                return 0.0, "no_vcm", None
+            _set_manual_lens(cam, focus_diopter)
+            log.info(f"Focus: manual  {focus_diopter:.2f} diopters")
+            return float(focus_diopter), "manual", None
+
+        raw_pos = cam.focus(force=False, leds=self._leds)
+        if not cam.has_autofocus:
+            return 0.0, "no_vcm", None
+
+        if raw_pos > MAX_AF_DIOPTER:
+            log.info(f"Focus: autofocus returned {raw_pos:.4f} diopters "
+                     f"> cap {MAX_AF_DIOPTER} — capping")
+            _set_manual_lens(cam, MAX_AF_DIOPTER)
+            return MAX_AF_DIOPTER, "autofocus_capped", raw_pos
+
+        log.info(f"Focus: autofocus  {raw_pos:.4f} diopters (within cap)")
+        return raw_pos, "autofocus", raw_pos
+
+    # ── Run ──────────────────────────────────────────────────────────
+
+    def run(self) -> Iterator[Progress]:
+        """
+        Execute the capture suite, yielding a Progress at each observable step.
+
+        The generator switches LEDs on and off as it goes; abandoning it
+        (via close(), an exception, or garbage collection) turns off any LED
+        still lit, but leaves the camera and LED bank open for the caller to
+        dispose of.
+
+        Yields:
+            Progress values. Those with transient=True are repeated updates
+            during a wait and carry no new information beyond the countdown.
+        """
+        try:
+            yield from self._run()
+        finally:
+            self._all_off()
+
+    def _all_off(self) -> None:
+        """Turn off whichever LED this run switched on. Never raises."""
+        if self._lit_on_channel is None:
+            return
+        try:
+            self._leds.set_channel(self._lit_on_channel, False)
+        except Exception:
+            log.exception("CaptureRunner: failed to turn off LED "
+                          f"channel {self._lit_on_channel}")
+        finally:
+            self._lit_on_channel = None
+
+    def _led_on(self, channel: int) -> None:
+        """Switch an LED on and remember it for cleanup."""
+        self._leds.set_channel(channel, True)
+        self._lit_on_channel = channel
+
+    def _led_off(self, channel: int) -> None:
+        """Switch an LED off and clear the cleanup record."""
+        self._leds.set_channel(channel, False)
+        self._lit_on_channel = None
+
+    def _run(self) -> Iterator[Progress]:
+        cfg  = self.config
+        cam  = self._cam
+        leds = self._leds
+
+        self.out_dir = cfg.out_dir / datetime.now().strftime("%Y%m%d_%H%M")
+        self.out_dir.mkdir(parents=True, exist_ok=True)
+        self.results = []
+
+        white_croi  = _channel_roi(ROI_WHITE)
+        sample_croi = _channel_roi(ROI_SAMPLE)
+
+        # ── Camera init ──────────────────────────────────────────────
+        cam.set_exposure(cfg.initial_us)
+        cam.setup_camera()
+        pattern = cam.bayer_pattern
+        assert cam.config_size is not None, "setup_camera() must set config_size"
+        cam_w, cam_h = cam.config_size
+
+        yield self._progress(
+            "setup",
+            f"Camera {cam.model_description}  pattern={pattern}  {cam_w}×{cam_h}")
+
+        # ================================================================
+        # Phase 0 — White LED: find a calibrated unsaturated exposure
+        # Target channel is NOT selected here; it is per-LED in Phase 2.
+        # ================================================================
+        yield self._progress("calibrate", "Phase 0: white LED exposure calibration")
+
+        self._led_on(WHITE_LED_CH)
+        yield from self._wait(LED_WARMUP_S, "White LED on, warming up")
+
+        current_us     = cfg.initial_us
+        phase0_retries = 0
+
+        for attempt in range(MAX_DESAT_TRIES):
+            log.debug(f"Phase 0 attempt {attempt + 1}: exposure={current_us}µs")
+            _, bayer, _ = _set_and_settle(cam, current_us)
+            layers = BayerCam.extract_bayer_layers(bayer, pattern)
+            means  = _channel_means(layers, white_croi)
+            log.debug("  ROI_WHITE means: "
+                      + "  ".join(f"{k}={v:.1f}" for k, v in sorted(means.items())))
+            if not _check_saturated_any(layers, white_croi):
+                log.debug(f"  Not saturated — accepting {current_us}µs "
+                          f"as calibrated exposure")
+                break
+            new_us = max(current_us // 2, 1000)
+            log.debug(f"  Saturated — halving {current_us}µs → {new_us}µs")
+            yield self._progress(
+                "calibrate",
+                f"ROI_WHITE saturated — halving {current_us:,} → {new_us:,} µs")
+            current_us = new_us
+            phase0_retries += 1
+
+        calibrated_us = current_us
+        self._led_off(WHITE_LED_CH)
+        yield self._progress(
+            "calibrate",
+            f"Calibrated initial exposure: {calibrated_us:,} µs "
+            f"({calibrated_us // 1000} ms)")
+
+        # ================================================================
+        # Phase 1 — Focus
+        # ================================================================
+        yield self._progress("focus", "Phase 1: focus")
+        focus_pos, focus_mode, raw_af_pos = self._set_focus()
+        yield self._progress("focus", f"Focus: {focus_pos:.2f} diopters ({focus_mode})")
+
+        # ================================================================
+        # Phase 2 — Per-LED multi-exposure capture and save
+        # ================================================================
+        yield self._progress("capture", "Phase 2: per-LED multi-exposure capture")
+
+        for led in range(cfg.led_start, cfg.led_end + 1):
+            self._led_index     += 1
+            self._captures_done  = 0
+            color = leds.color_name(led)
+            self._current_color = color
+            log.info(f"=== LED {led}: {color} ===")
+
+            yield self._progress("capture", f"--- {leds.label(led)} ---")
+
+            self._led_on(led)
+            yield from self._wait(LED_WARMUP_S, f"{color} LED on, warming up")
+
+            # Per-LED desat loop + target channel selection
+            current_us      = calibrated_us
+            target_ch: str  = ""
+            ref_means: dict = {}
+            layers: dict    = {}
+            per_led_retries = 0
+
+            for attempt in range(MAX_DESAT_TRIES):
+                log.debug(f"  {color} attempt {attempt + 1}: exposure={current_us}µs")
+                _, bayer, _ = _set_and_settle(cam, current_us)
+                layers    = BayerCam.extract_bayer_layers(bayer, pattern)
+                ref_means = _channel_means(layers, white_croi)
+                target_ch = _select_target_channel(layers, white_croi)
+                if not _check_saturated(layers, target_ch, white_croi):
+                    log.debug(f"  {color}: not saturated — target_ch={target_ch}  "
+                              f"exposure={current_us}µs accepted")
+                    break
+                new_us = max(current_us // 2, 1000)
+                log.debug(f"  {color}: saturated — halving {current_us}µs → {new_us}µs")
+                yield self._progress(
+                    "capture", f"Saturated — halving {current_us:,} → {new_us:,} µs")
+                current_us = new_us
+                per_led_retries += 1
+
+            if not target_ch:
+                raise RuntimeError(
+                    f"Failed to determine target channel for LED '{color}'")
+
+            means_str = "  ".join(f"{k}={v:.1f}" for k, v in sorted(ref_means.items()))
+            log.info(f"  {color}: target_ch={target_ch}  ref_exposure={current_us}µs")
+            yield self._progress(
+                "capture", f"Target channel : {target_ch}  (ROI_WHITE: {means_str})")
+
+            # ── Stage 1: estimate e3 from reference capture ───────────
+            pix_ref = _roi_pixels(layers[target_ch], sample_croi)
+            e3_us   = _estimate_e3(pix_ref, current_us)
+            log.info(f"  {color}: initial e3 estimate = {e3_us}µs ({e3_us // 1000}ms)")
+
+            # ── Stage 2: refine e3 until p50 ≈ HALF_SAT ──────────────
+            e3_history: list = []
+            layers_e3 = layers     # fallback if loop never runs
+
+            for iteration in range(E3_MAX_ITER):
+                log.info(f"  {color} e3 refine [{iteration + 1}/{E3_MAX_ITER}]: "
+                         f"capturing at {e3_us}µs ({e3_us // 1000}ms)")
+                yield self._progress(
+                    "capture",
+                    f"e3 refine [{iteration + 1}/{E3_MAX_ITER}]: "
+                    f"{e3_us}µs ({e3_us // 1000}ms)",
+                    step="e3-refine")
+                _, bayer_e3, _ = _set_and_settle(cam, e3_us)
+                layers_e3  = BayerCam.extract_bayer_layers(bayer_e3, pattern)
+                pix_e3     = _roi_pixels(layers_e3[target_ch], sample_croi)
+                actual_p50 = float(np.percentile(pix_e3, 50))
+                error      = abs(actual_p50 - HALF_SAT) / HALF_SAT
+                e3_history.append({
+                    "iteration":      iteration + 1,
+                    "exposure_us":    e3_us,
+                    "measured_p50":   round(actual_p50, 2),
+                    "error_fraction": round(error, 4),
+                    "converged":      error <= E3_TOLERANCE,
+                })
+                log.debug(f"    p50={actual_p50:.1f}  error={error:.3f}  "
+                          f"target={HALF_SAT}  "
+                          f"{'CONVERGED' if error <= E3_TOLERANCE else 'refining'}")
+                if error <= E3_TOLERANCE:
+                    yield self._progress(
+                        "capture",
+                        f"e3 converged : {e3_us}µs ({e3_us // 1000}ms)  "
+                        f"p50={actual_p50:.1f}  ({iteration + 1} iter)",
+                        step="e3-refine")
+                    break
+                new_e3 = max(1000, int(e3_us * HALF_SAT / max(actual_p50, 1.0)))
+                log.debug(f"    adjusting e3: {e3_us}µs → {new_e3}µs")
+                e3_us = new_e3
+            else:
+                log.warning(f"  {color}: e3 did not converge in {E3_MAX_ITER} iterations")
+                yield self._progress(
+                    "capture",
+                    f"e3 not converged after {E3_MAX_ITER} iterations — using {e3_us}µs",
+                    step="e3-refine")
+
+            # ── Stage 3: compute e0…e6 from e3 capture spread ─────────
+            pix_e3 = _roi_pixels(layers_e3[target_ch], sample_croi)
+            exposures_us, pcts = _compute_exposures_from_e3(pix_e3, e3_us)
+            e0_us, e1_us, e2_us, _, e4_us, e5_us, e6_us = exposures_us
+            exp_summary = ", ".join(
+                f"{lbl}={exp // 1000}ms"
+                for lbl, exp in zip(EXP_LABELS, exposures_us))
+            yield self._progress("capture", f"Exposures      : {exp_summary}")
+
+            meta_json: dict = {
+                "camtest8_version": "4",
+                "timestamp": self.out_dir.name,
+                "led_channel": led,
+                "led_color": color,
+                "led_label": leds.label(led),
+                "camera_model": cam.model_description,
+                "bayer_pattern": pattern,
+                "config_size": [cam_w, cam_h],
+                "focus_diopters": focus_pos,
+                "focus_mode": focus_mode,
+                "focus_max_af_diopter": MAX_AF_DIOPTER,
+                "autofocus_raw_diopters": raw_af_pos,
+                "target_bayer_channel": target_ch,
+                "roi_white_channel_means": ref_means,
+                "phase0_calibrated_exposure_us": calibrated_us,
+                "phase0_desat_retries": phase0_retries,
+                "per_led_desat_retries": per_led_retries,
+                "ref_exposure_us": current_us,
+                "e3_refinement": e3_history,
+                "e3_final_us": e3_us,
+                "e3_ratio": E3_RATIO,
+                "roi_sample_percentiles_at_e3": {
+                    str(p): round(v, 2) for p, v in zip(PERCENTILES, pcts)
+                },
+                "computed_exposures": {
+                    "e0": {"type": "fixed_ratio", "ratio": f"e3/{E3_RATIO}",
+                           "exposure_us": e0_us, "exposure_ms": e0_us // 1000},
+                    "e1": {"type": "percentile", "target_percentile": PERCENTILES[0],
+                           "percentile_value": round(pcts[0], 2),
+                           "exposure_us": e1_us, "exposure_ms": e1_us // 1000},
+                    "e2": {"type": "percentile", "target_percentile": PERCENTILES[1],
+                           "percentile_value": round(pcts[1], 2),
+                           "exposure_us": e2_us, "exposure_ms": e2_us // 1000},
+                    "e3": {"type": "percentile", "target_percentile": PERCENTILES[2],
+                           "percentile_value": round(pcts[2], 2),
+                           "exposure_us": e3_us, "exposure_ms": e3_us // 1000},
+                    "e4": {"type": "percentile", "target_percentile": PERCENTILES[3],
+                           "percentile_value": round(pcts[3], 2),
+                           "exposure_us": e4_us, "exposure_ms": e4_us // 1000},
+                    "e5": {"type": "percentile", "target_percentile": PERCENTILES[4],
+                           "percentile_value": round(pcts[4], 2),
+                           "exposure_us": e5_us, "exposure_ms": e5_us // 1000},
+                    "e6": {"type": "fixed_ratio", "ratio": f"e3*{E3_RATIO}",
+                           "exposure_us": e6_us, "exposure_ms": e6_us // 1000},
+                },
+                "applied_exposures_us": {},
+            }
+
+            # ── Lit frames ────────────────────────────────────────────
+            yield self._progress("capture", "Lit captures:")
+            for exp_label, exp_us in zip(EXP_LABELS, exposures_us):
+                log.info(f"  {color} {exp_label}: setting exposure {exp_us}µs "
+                         f"({exp_us // 1000}ms)")
+                rgb, bayer, meta = _set_and_settle(cam, exp_us)
+                applied = int(meta.get("ExposureTime", 0))
+                meta_json["applied_exposures_us"][exp_label] = applied
+                log.info(f"  {color} {exp_label}: applied={applied}µs  "
+                         f"delta={applied - exp_us:+d}µs")
+
+                stem = f"{OUT_STEM}_BOUND_{color}_{exp_label}_{exp_us // 1000}ms"
+                _save_roi_bound(self.out_dir, stem, bayer, pattern)
+
+                if exp_label == "e3":    # e3 — focused full-image JPEG
+                    jpeg_stem = f"{OUT_STEM}_{color}_e3"
+                    BayerCam.save_frame(
+                        self.out_dir, jpeg_stem, rgb, bayer, meta,
+                        jpeg_only=True, lens_position=cam.lens_position,
+                    )
+
+                self._captures_done += 1
+                yield self._progress(
+                    "capture",
+                    f"    saved {stem}_{{B,Gb,Gr,R}}.npy",
+                    step=exp_label)
+
+            # LED off, then dark frames at the same exposures
+            self._led_off(led)
+            yield from self._wait(LED_WARMUP_S, f"{color} LED off, settling")
+
+            yield self._progress("capture", "Dark captures:")
+            for exp_label, exp_us in zip(EXP_LABELS, exposures_us):
+                log.info(f"  {color} dark {exp_label}: exposure {exp_us}µs")
+                _, bayer, _ = _set_and_settle(cam, exp_us)
+                stem = f"{OUT_STEM}_BOUND_black_{exp_label}_{exp_us // 1000}ms"
+                _save_roi_bound(self.out_dir, stem, bayer, pattern)
+
+                self._captures_done += 1
+                yield self._progress(
+                    "capture",
+                    f"    saved {stem}_{{B,Gb,Gr,R}}.npy",
+                    step=f"dark {exp_label}")
+
+            path = _save_led_metadata(self.out_dir, color, meta_json)
+            yield self._progress("capture", f"    saved metadata: {path.name}")
+
+            self.results.append(LedResult(
+                color=color,
+                led_channel=led,
+                target_channel=target_ch,
+                exposures_us=exposures_us,
+                metadata=meta_json,
+            ))
+
+        self._current_color = ""
+        yield Progress(
+            phase="done",
+            message=f"Done. Output: {self.out_dir}",
+            led_index=self._led_index,
+            led_total=cfg.led_count,
+            fraction=1.0,
+        )

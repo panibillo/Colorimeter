@@ -2,13 +2,19 @@
 """
 build_h5_from_camtest8.py — convert a camtest8.py capture directory to HDF5.
 ------------------------------------------------------------------------------
-One-off / example converter: reads the files produced by dev/camtest8.py in
-a capture directory (excluding .png files) and writes a single HDF5 archive
-using the generic Hdf5Writer primitives from src/hdf5write.py. Then re-opens
-the file with Hdf5Reader and prints a summary, to demonstrate both paths.
+Converter: reads the files produced by dev/camtest8.py in a capture directory
+(excluding .png files) and writes a single HDF5 archive using the schema in
+src/capture_h5.py. Then re-opens the file with Hdf5Reader and prints a
+summary, to demonstrate both paths.
 
-All camtest8-specific filename/format knowledge lives in this script —
-hdf5write.py/hdf5read.py know nothing about camtest8.
+All camtest8-specific *filename* knowledge lives in this script. The archive
+*layout* lives in capture_h5.CaptureSuiteWriter, shared with the live capture
+path so the two cannot drift apart.
+
+Note on exposure precision: camtest8 filenames record exposure only in whole
+milliseconds, so darks recovered from a legacy directory carry millisecond
+precision. Exact microseconds are read from the per-LED metadata JSON where
+available (lit frames and dark links).
 
 Usage:
     python3 dev/build_h5_from_camtest8.py [capture_dir] [output_h5]
@@ -27,7 +33,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
-from hdf5write import Hdf5Writer
+import numpy as np
+
+from capture_h5 import CaptureSuiteWriter
 from hdf5read import Hdf5Reader
 
 STEM = "camtest8"
@@ -100,9 +108,13 @@ def scan_capture_dir(capture_dir: Path) -> dict:
           "metadata": {color: Path},
           "jpeg":     {color: Path},
           "txt":      {color: Path},
-          "lit":      {(color, label, ch): (ms, Path)},
+          "lit":      {(color, label, ch): Path},
           "dark":     {(label, ms, ch): Path},   # color == "black"
         }
+
+    The millisecond field in a lit filename is dropped: the exact exposure
+    is read from the per-LED metadata instead. Dark filenames are the only
+    record of their own exposure, so ms is kept in that key.
     """
     result = {"metadata": {}, "jpeg": {}, "txt": {}, "lit": {}, "dark": {}}
 
@@ -131,7 +143,7 @@ def scan_capture_dir(capture_dir: Path) -> dict:
             if color == "black":
                 result["dark"][(label, ms, ch)] = path
             else:
-                result["lit"][(color, label, ch)] = (ms, path)
+                result["lit"][(color, label, ch)] = path
             continue
 
         print(f"  (skipping unrecognized file: {path.name})")
@@ -143,70 +155,68 @@ def scan_capture_dir(capture_dir: Path) -> dict:
 # Build the HDF5 file
 # ---------------------------------------------------------------------------
 
-def build(capture_dir: Path, output_h5: Path) -> None:
-    import numpy as np
+def _group_channels(entries: dict) -> dict:
+    """
+    Regroup a {(…, ch): path} mapping into {(…): {ch: path}}.
 
+    The trailing element of each key is the Bayer channel name; everything
+    before it identifies the frame. Used to gather the four per-channel .npy
+    files that make up one capture into a single layers dict.
+    """
+    grouped: dict = {}
+    for key, path in entries.items():
+        frame_key, ch = key[:-1], key[-1]
+        grouped.setdefault(frame_key, {})[ch] = path
+    return grouped
+
+
+def _load_layers(paths_by_ch: dict) -> dict:
+    """Load a {ch: path} mapping into a {ch: ndarray} layers dict."""
+    return {ch: np.load(path) for ch, path in paths_by_ch.items()}
+
+
+def build(capture_dir: Path, output_h5: Path) -> None:
     print(f"Scanning {capture_dir} ...")
     files = scan_capture_dir(capture_dir)
     colors = sorted(files["metadata"])
     print(f"  found {len(colors)} LED color(s): {colors}")
 
-    with Hdf5Writer(output_h5, mode="w") as w:
-        w.set_attrs("/", {
-            "suite_id": capture_dir.name,
-            "description": "Colorimeter camtest8 capture suite",
-            "schema_version": 1,
-        })
+    with CaptureSuiteWriter(output_h5, suite_id=capture_dir.name) as w:
 
-        # ── Per-color led_metadata / capture_info / jpeg / lit arrays ──
+        # ── Per-color led_metadata / capture_info / jpeg ───────────────
         led_metadata_by_color = {}
         for color in colors:
-            group_path = f"/leds/{color}"
             meta = json.loads(files["metadata"][color].read_text())
             led_metadata_by_color[color] = meta
 
-            w.write_metadata(group_path, "led_metadata", meta)
-            w.set_attrs(group_path, {
-                "led_color": color,
-                "led_channel": meta["led_channel"],
-            })
+            w.add_led(color, meta, led_channel=meta["led_channel"])
 
             if color in files["txt"]:
                 capture_info = parse_capture_info_txt(files["txt"][color].read_text())
-                w.write_metadata(group_path, "capture_info", capture_info)
+                w.add_capture_info(color, capture_info)
 
             if color in files["jpeg"]:
-                jpeg_bytes = files["jpeg"][color].read_bytes()
-                w.write_bytes(group_path, "jpeg_e3", jpeg_bytes,
-                              attrs={"filename": files["jpeg"][color].name,
-                                     "format": "jpeg"})
+                jpeg_path = files["jpeg"][color]
+                w.add_jpeg(color, jpeg_path.read_bytes(), filename=jpeg_path.name)
 
-        for (color, label, ch), (ms, path) in files["lit"].items():
+        # ── Lit frames: exact microseconds come from the metadata ──────
+        for (color, label), paths_by_ch in _group_channels(files["lit"]).items():
             exp = led_metadata_by_color[color]["computed_exposures"][label]
-            w.write_array(
-                f"/leds/{color}/lit/{label}", ch, np.load(path),
-                attrs={"exposure_us": exp["exposure_us"],
-                       "exposure_ms": exp["exposure_ms"]},
-            )
+            w.add_lit(color, label, _load_layers(paths_by_ch),
+                      exposure_us=exp["exposure_us"])
 
-        # ── Shared dark frames, keyed by (label, ms) — not by color ────
-        dark_group_names = set()
-        for (label, ms, ch), path in files["dark"].items():
-            group_name = f"{label}_{ms}ms"
-            dark_group_names.add(group_name)
-            w.write_array(f"/dark/{group_name}", ch, np.load(path),
-                          attrs={"exposure_ms": ms})
+        # ── Shared dark frames, keyed by exposure — not by color ───────
+        # Legacy filenames carry only whole milliseconds, so scale back up.
+        for (label, ms), paths_by_ch in _group_channels(files["dark"]).items():
+            w.add_dark(label, _load_layers(paths_by_ch), exposure_us=ms * 1000)
 
-        # Link every color+label whose own exposure matches an existing
-        # dark group, so dark frames are named/shared by exposure time.
+        # Link every color+label whose own exposure matches a dark group.
         for color in colors:
             for label in EXP_LABELS:
                 exp = led_metadata_by_color[color]["computed_exposures"].get(label)
                 if exp is None:
                     continue
-                group_name = f"{label}_{exp['exposure_ms']}ms"
-                if group_name in dark_group_names:
-                    w.link(f"/dark/{group_name}", f"/leds/{color}/dark/{label}")
+                w.link_dark(color, label, exposure_us=exp["exposure_us"])
 
     print(f"Wrote {output_h5}")
 
