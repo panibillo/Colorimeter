@@ -149,7 +149,7 @@ def main() -> None:
     backlight = DigitalOutputDevice(BL_PIN, initial_value=True)
     disp = ILI9341()
 
-    def _shutdown(signum=None, frame=None)Some things not working now with data entry.  Pressing a :
+    def _shutdown(signum=None, frame=None):
         try:
             disp.fill_screen(ILI9341.BLACK)
         except Exception:

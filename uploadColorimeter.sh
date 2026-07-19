@@ -11,6 +11,9 @@
 # Transfers only *.py, *.yaml, and *.csv files; skips unmodified files.
 # Never deletes files on the remote.
 #
+# On the RPi, launch the application with:
+#   python3 ~/pi/Colorimeter/src/main.py
+#
 # Examples:
 #   ./up2py.sh rpizero1
 #   ./up2py.sh -n 192.168.1.42
@@ -68,6 +71,11 @@ RSYNC_OPTS=(
     --compress
     --human-readable
     --itemize-changes
+    # --delete                          # uncomment to remove files on the Pi that are absent locally
+    --exclude='mock/'                     # exclude mock hardware drivers (desktop only)
+    --exclude='mock*.py'                  # exclude mock hardware drivers (desktop only)
+    --exclude='test_mock_rendering.py'    # exclude mock testing utility
+    --exclude='run_simulation.py'          # exclude desktop simulation launcher
     --exclude='__pycache__/'
     --exclude='*.pyc'
     --exclude='*.pyo'

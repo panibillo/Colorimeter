@@ -1,0 +1,34 @@
+# Colorimeter — named colour palette
+# All raw RGB values live here. The csv_loader converts to RGB565.
+# CSV files reference colours by name (e.g. fgcolor: black, bgcolor: body_coral).
+
+# ── Neutrals ──────────────────────────────────────────────────────────────────
+white:          [255, 255, 255]
+black:          [  0,   0,   0]
+
+# ── Entry screen (SE) ─────────────────────────────────────────────────────────
+body_coral:     [255, 238, 232]   # body background — warm white
+row_line:       [220, 180, 168]   # divider lines between form rows
+label_coral:    [180,  55,  35]   # label button face — dark coral
+field_blue:     [ 60, 130, 200]   # editable field border
+start_green:    [ 25, 150,  25]   # Start button face
+
+# ── Measure screen (CA) header ────────────────────────────────────────────────
+hdr_blue:       [100, 155, 225]   # header strip background
+hdr_text:       [  0,   0, 110]   # header text on blue strip (dark navy)
+
+# ── Measure screen (CA) body ─────────────────────────────────────────────────
+body_dark:      [ 18,  28,  48]   # body background — near-black blue
+body_text:      [195, 210, 235]   # instruction text on dark body
+countdown:      [255, 220,  40]   # countdown digits
+
+# ── Status bar ────────────────────────────────────────────────────────────────
+status_bg:      [ 28,  38,  58]   # status bar background
+btn_gray:       [ 65,  85, 115]   # MENU / NEXT button face
+btn_text:       [210, 225, 240]   # status bar text and button labels
+
+# ── Slot colours ──────────────────────────────────────────────────────────────
+slot_a_bg:      [  0,   0, 255]   # slot A square fill — pure blue
+slot_a_text:    [173, 216, 250]   # slot A glyph colour — light blue
+slot_b_bg:      [240,  90,  70]   # slot B square fill — coral
+slot_b_text:    [255, 200, 185]   # slot B glyph colour — pale coral

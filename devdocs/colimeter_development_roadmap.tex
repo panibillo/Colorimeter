@@ -1,0 +1,125 @@
+\documentclass{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{enumitem}
+
+\title{Colimeter Development Plan}
+\author{}
+\date{}
+
+\begin{document}
+
+\maketitle
+
+\begin{enumerate}[label=\arabic*.]
+
+\item Determine LED requirements
+\begin{enumerate}[label=\alph*)]
+    \item Type: use CREE J2835 series, only narrow band colors.
+    \begin{itemize}
+        \item All are available from Digikey at about \$0.20 to \$0.62.
+        \item Violet, Royal Blue, Blue, Cyan, Green, Amber, Red, Photo Red.
+        \item Avoid other colors are wide band or multi-band or outside of known camera sensitivity response.
+        \item Include all 8 valid colors in calibration unit, up to 4 in field unit
+    \end{itemize}
+\end{enumerate}
+
+\item Determine LED geometry
+\begin{enumerate}[label=\alph*)]
+    \item Test of 4 corner, recessed plane design in a white lined 3x4 box
+    \item Geometry ``Cmmaa'', where    
+       ``C'' = 4 corner geometry using LED test board 5,
+       mm is distance from light to target in mm, and
+       aa is angle from vertical (lights tilted toward center)
+       The test board 5 is the first example of 4 SMD LEDs, made on 2026-04-16. 
+       The test board 5 is put in the box at one corner, with long side of light board along the 3 inch box side, and end  of light board against the 4 inch box side.
+       Light order from the corner is B0, Bj, Gj, Rj, where 'j' means Cree J-series, and B0 is clear blue. 
+       Lights are angled aa degrees from vertical. 
+    \begin{enumerate}[label=\roman*)]
+        \item Get image in 1 corner
+        \item Process sample rectangles from the image as if summing the light from 4 corners.
+        Define 5 horizontal strips and 7 vertical strips. Plot magnitudes, and save stats.
+        \item Evaluate for evenness of illumination.
+    \end{enumerate}
+\end{enumerate}
+
+\item Determine camera geometry
+\begin{enumerate}[label=\alph*)]
+    \item Focal length
+\end{enumerate}
+
+\item Determine measurement and calibration methods
+\begin{enumerate}[label=\alph*)]
+    \item Lighting at sensor peaks, sensor slopes, or both?
+    \item Analysis scheme
+    \item Test strip calibration scheme
+    \item Reference tile calibration scheme
+    \item Scheme for translating test strip calibration to new reference tiles.
+    \item Scheme for sharing calibrations and tiles.
+\end{enumerate}
+
+\item Determine LED power requirements and Resistors
+\begin{itemize}
+    \item Simplified for field unit
+    \item More complex for calibration unit
+\end{itemize}
+
+\item Determine Camera: Module 2 or 3?
+\begin{itemize}
+    \item Maybe both? Would require building 2 calibration machines, and running every sample through both.
+\end{itemize}
+
+\item Design battery power supply
+
+\item Design and make PCBs
+\begin{enumerate}[label=\alph*)]
+    \item PCBs for LEDs (LEDs and Resistors)
+    \begin{itemize}
+        \item Field machine and Calibration machine patterns?
+    \end{itemize}
+    \item PCB for mobo
+    \begin{itemize}
+        \item Rpi, lighting controls, interface, buttons, connectors, power supply.
+        \item Field machine and Calibration machine patterns?
+    \end{itemize}
+    \item Assemble all parts and verify.
+\end{enumerate}
+
+\item Make Calibration tiles
+\begin{enumerate}[label=\alph*)]
+    \item Base tiles: correct clay, leather hard, pre-scored on backs
+    \item Mason stains and slip base: mix standard slips
+    \item Don't forget white and gray.
+    \item Needed tiles:
+    \begin{itemize}
+        \item Calibration machine color sets
+        \item Field machine color sets
+    \end{itemize}
+    \item Labeling and identification: can we mark the backs?
+\end{enumerate}
+
+\item Design 3D printed housing
+\begin{enumerate}[label=\alph*)]
+    \item Install software
+    \item Body -- size, joints, lining,
+    \item Base -- joints, sample tray, reference chips
+    \item Camera, lighting, and mobo bulkhead
+    \item Top and interface mounting
+    \item Verify
+\end{enumerate}
+
+\item Programming
+\begin{enumerate}[label=\alph*)]
+    \item Camera
+    \item Lighting
+    \item Physical interface
+    \item Web interface
+    \item Timer for test kit reagents
+    \item Sample analysis
+    \item Recalibration analysis
+    \item Archiving results and metadata
+    \item Documentation
+\end{enumerate}
+
+\end{enumerate}
+
+\end{document}

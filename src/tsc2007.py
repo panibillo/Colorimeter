@@ -89,11 +89,11 @@ _CMD_Z1  = 0xE4   # Z1 pressure, PD=01
 _CMD_END = 0x00   # TEMP0, PD=00 — power-down and re-enable PENIRQ
 
 # ── Noise / stability filter ──────────────────────────────────────────────────
-# Two consecutive reads of the same channel must agree before the value is
-# accepted: byte0 identical, |byte1_a − byte1_b| ≤ _STAB_TOL.
-# _STAB_TOL=32 on byte1 corresponds to ≤2 counts in the 12-bit result.
-_STAB_RETRIES = 12   # max attempts to get a stable pair
-_STAB_TOL     = 32   # byte1 tolerance
+# read_raw() compares consecutive (x, y, z1) triples.  A pair is accepted when
+# |dx| < _STAB_TOL and |dy| < _STAB_TOL and z1 > _Z1_MIN.
+# _STAB_TOL=32 in 12-bit counts; panel range ~115 counts.
+_STAB_RETRIES = 12   # max (x,y,z1) reads before declaring "not touched"
+_STAB_TOL     = 32   # max channel-to-channel delta to accept a pair
 
 # ── Minimum Z1 for a valid touch read ────────────────────────────────────────
 _Z1_MIN = 10
@@ -250,55 +250,53 @@ class TSC2007:
     # ── Low-level I2C ─────────────────────────────────────────────────────────
 
     def _read_channel(self, cmd: int) -> int:
-        """
-        Send one TSC2007 measurement command and return the 12-bit result.
-
-        Reads pairs until two consecutive reads agree (byte0 equal,
-        |byte1 diff| ≤ _STAB_TOL), up to _STAB_RETRIES attempts.
-        Returns the last reading if the limit is reached without agreement.
-        """
-        def _once():
-            wr = smbus2.i2c_msg.write(self._addr, [cmd])
-            rd = smbus2.i2c_msg.read(self._addr, 2)
-            self._bus.i2c_rdwr(wr)
-            time.sleep(self._t_conv)
-            self._bus.i2c_rdwr(rd)
-            return list(rd)
-
-        prev = _once()
-        for _ in range(_STAB_RETRIES - 1):
-            curr = _once()
-            if cmd == _CMD_END:
-                return 0
-            if prev[0] == curr[0] and abs(prev[1] - curr[1]) <= _STAB_TOL:
-                return ((curr[0] << 4) | (curr[1] >> 4)) & 0xFFF
-            prev = curr
-        return ((prev[0] << 4) | (prev[1] >> 4)) & 0xFFF
+        """Send one TSC2007 command and return the 12-bit result (single read)."""
+        wr = smbus2.i2c_msg.write(self._addr, [cmd])
+        rd = smbus2.i2c_msg.read(self._addr, 2)
+        self._bus.i2c_rdwr(wr)
+        time.sleep(self._t_conv)
+        self._bus.i2c_rdwr(rd)
+        if cmd == _CMD_END:
+            return 0
+        b = list(rd)
+        return ((b[0] << 4) | (b[1] >> 4)) & 0xFFF
 
     # ── Public reading interface ──────────────────────────────────────────────
 
-    # Minimum z1 pressure for a reading to be accepted by read_raw().
-    _Z1_ACCEPT = 40
-    # Maximum wall-clock time (s) read_raw() will spend collecting samples.
-    _READ_TIMEOUT = 0.3
-
     def read_raw(self):
         """
-        Return raw (x, y, z1) ADC values from the TSC2007.
+        Return stable (x, y, z1) ADC values, or (0, 0, 0) if none found.
 
-        Collects up to 3 readings where z1 > _Z1_ACCEPT, stopping early if
-        _READ_TIMEOUT seconds elapse.  Returns the median of each channel
-        across accepted readings.  If no reading passes the z1 threshold,
-        returns the last reading taken regardless.
-
-        Logs elapsed time from the first read to the last accepted reading.
-        Returns (0, 0, 0) on I2C error.
+        Takes an initial reading as prev, then loops up to _STAB_RETRIES more
+        times.  A pair is accepted when |dx| < _STAB_TOL, |dy| < _STAB_TOL,
+        and z1 > _Z1_MIN.  Returns the mean of the accepted pair.
+        Falls through to (0, 0, 0) after _STAB_RETRIES — interpreted as not touched.
+        Read with _CMD_END powers down the sensor after the final reading.
         """
         try:
-            x  = self._read_channel(_CMD_X)
-            y  = self._read_channel(_CMD_Y)
-            z1 = self._read_channel(_CMD_Z1)
-            log.info("x=%4d  y=%4d  z1=%3d", x, y, z1)    
+            t_start = time.monotonic()
+            px = self._read_channel(_CMD_X)
+            py = self._read_channel(_CMD_Y)
+            pz1 = self._read_channel(_CMD_Z1)
+            log.debug("raw[0]  x=%4d  y=%4d  z1=%3d", px, py, pz1)
+
+            for i in range(1, _STAB_RETRIES + 1):
+                cx = self._read_channel(_CMD_X)
+                cy = self._read_channel(_CMD_Y)
+                cz1 = self._read_channel(_CMD_Z1)
+                
+                dx, dy = abs(cx - px), abs(cy - py)
+                log.debug("raw[%d]  x=%4d  y=%4d  z1=%3d  dx=%d  dy=%d",
+                          i, cx, cy, cz1, dx, dy)
+                if dx < _STAB_TOL and dy < _STAB_TOL and cz1 > _Z1_MIN:
+                    mx, my, mz1 = (px + cx) // 2, (py + cy) // 2, (pz1 + cz1) // 2
+                    log.debug("stable  x=%4d  y=%4d  z1=%3d  elapsed=%.3fs  iters=%d",
+                              mx, my, mz1, time.monotonic() - t_start, i + 1)
+                    return mx, my, mz1
+                px, py, pz1 = cx, cy, cz1
+
+            log.debug("read_raw: no stable pair in %d retries — not touched", _STAB_RETRIES)
+            return 0, 0, 0
         except OSError:
             log.warning("I2C read failed in read_raw()")
             return 0, 0, 0

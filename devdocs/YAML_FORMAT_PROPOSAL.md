@@ -1,6 +1,8 @@
-# YAML Screen/Widget Format — Proposal
+# Screen and Widget Format
 
-*Draft for review. Answer the questions in Section 5 before implementation begins.*
+Defines how screens and widgets are configured. See [TERMINOLOGY.md](TERMINOLOGY.md)
+for definitions and [PHASE_SCHEDULING_DESIGN.md](PHASE_SCHEDULING_DESIGN.md) for
+the scheduling model.
 
 ---
 
@@ -8,19 +10,19 @@
 
 ```
 config/
-  instrument.yaml        hardware config, display dimensions, sim mode
-  palette.yaml           all named colors
+  instrument.yaml      hardware config, display dimensions, simulation mode
+  palette.yaml         named color definitions
   locale/
-    en.yaml              English user-visible strings
-screens/
-  new_test_entry.yaml    one file per screen
-  temperature_check.yaml
-  reagent_phase.yaml     (may be parameterized — see Q9)
-  capture.yaml
-  ...
-protocols/
-  standard_colorimetric.yaml   phase sequence, periods, navigation targets
+    en.yaml            English user-visible strings (added when needed)
+src/
+  widget_defs.csv      all widget instances with visual properties
+  screen_defs.csv      all screen definitions with timing and sequence
+  screen_widgets.csv   maps each screen to its widgets with tab ordering
 ```
+
+`instrument.yaml` and `palette.yaml` remain YAML — they are hardware/style
+config, not layout data. Screens and widgets use CSV for compact, tabular
+definitions suited to a spreadsheet or text editor on a small device.
 
 ---
 
@@ -32,9 +34,8 @@ display:
   height:        240
   header_height:  50
   status_height:  25
-  # body_height is computed: height - header_height - status_height
 
-simulation: false          # true → substitute all mock hardware modules
+simulation: false      # true → use mock hardware modules
 
 hardware:
   backlight_pin: 13
@@ -42,18 +43,14 @@ hardware:
   i2c_bus:       1
 ```
 
-The screen builder reads `display.*` from this file — no hardcoded pixel
-constants anywhere in screen YAML or Python.
-
 ---
 
 ## 3. Palette (`palette.yaml`)
 
-Colors are referenced by name throughout screen YAML. Raw RGB values live
-only here.
+Colors are referenced by name in CSV files. Raw RGB values live only here.
+The screen builder converts to RGB565 on load.
 
 ```yaml
-# Static named colors
 white:          [255, 255, 255]
 black:          [  0,   0,   0]
 body_coral:     [255, 238, 232]
@@ -67,571 +64,181 @@ btn_text:       [210, 225, 240]
 timer_warn:     [255, 180,   0]
 timer_critical: [220,  40,  40]
 
-# Slot colors — one entry per slot letter
 slots:
   A: { bg: [  0,  80, 200], text: [200, 220, 255], dim: [ 30,  50, 120] }
   B: { bg: [200, 150,   0], text: [255, 240, 180], dim: [120,  90,   0] }
-  C: { bg: [ 20, 150,  50], text: [190, 255, 210], dim: [ 10,  90,  30] }
-  D: { bg: [200,  50,  40], text: [255, 200, 190], dim: [120,  30,  25] }
 ```
-
-In widget YAML, `color: slot_bg` resolves to the *active slot's* bg color at
-render time. This is the mechanism for consistent slot color coding.
 
 ---
 
-## 4. Screen YAML Format
+## 4. Widget Definitions (`widget_defs.csv`)
 
-### 4.1 Top-level structure
+One row per widget. Each widget is a **singleton** — widget id `101` is one
+Python object that may appear on multiple screens and always holds the same
+value. This eliminates explicit data-sync on screen navigation.
 
-```yaml
-screen:
-  id: new_test_entry
+### Columns
 
-  header:
-    bg: white
-    widgets:
-      - ...
+| Column | Type | Description |
+|--------|------|-------------|
+| `widget_id` | int (100–999) | Hardcoded permanent identifier |
+| `widget_name` | str | Type name: `Button`, `TextBox`, `Label`, `RectWidget`, `Timer` |
+| `x` | int | Left edge in screen-absolute pixels |
+| `y` | int | Top edge in screen-absolute pixels |
+| `w` | int | Width in pixels |
+| `h` | int | Height in pixels |
+| `label` | str | On Button: button text. On TextBox/Label: label to left of field. |
+| `fgcolor` | str | Foreground color name (from palette) |
+| `bgcolor` | str | Background color name (from palette) |
+| `default` | str | Initial value; empty string if none |
 
-  body:
-    bg: body_coral
-    widgets:
-      - ...
+Coordinates are **screen-absolute** (origin = screen top-left, y increases downward).
+The screen builder does not add zone offsets; the author places widgets by final position.
 
-  # status_bar: omit to get the standard bar; include to override
-  # status_bar:
-  #   bg: status_bg
-  #   widgets: [...]
+### Example rows
+
+```
+widget_id, widget_name, x,   y,  w,   h,  label,    fgcolor,     bgcolor,     default
+101,        TextBox,     82,  53, 230, 39, "",        black,       white,       ""
+102,        TextBox,     82,  93, 230, 39, "",        black,       white,       ""
+103,        TextBox,     82, 133, 230, 39, "",        black,       white,       ""
+104,        TextBox,     82, 173, 230, 39, "",        black,       white,       ""
+111,        Label,        8,  52,  68, 39, "ID",      white,       label_coral, ""
+112,        Label,        8,  92,  68, 39, "User",    white,       label_coral, ""
+113,        Label,        8, 132,  68, 39, "Test",    white,       label_coral, ""
+114,        Label,        8, 172,  68, 39, "Collect", white,       label_coral, ""
+201,        Button,       0, 215, 107, 25, "MENU",    btn_text,    btn_gray,    ""
+202,        Label,       107, 215, 106, 25, "",        btn_text,    status_bg,   ""
+203,        Button,      213, 215, 107, 25, "NEXT",    btn_text,    btn_gray,    ""
 ```
 
-The standard status bar (MENU / clock / NEXT) is generated automatically
-when `status_bar:` is absent. Screens like the overdue widget that replace
-the status bar provide their own `status_bar:` block.
+### Wiring (assigned in Python)
 
-Zone heights come from `instrument.yaml` (`header_height`, `status_height`).
-The body fills the remaining height. No pixel values appear in zone
-declarations.
+Behavioral wiring is assigned at startup in Python, keyed by `widget_id`.
+The CSV defines layout only; callbacks and data bindings are in code.
 
-### 4.2 Widget descriptor fields (all types)
+```python
+# After loading widget_defs.csv into widgets dict:
+widgets[101].editable = True
+widgets[101].on_change = lambda v: record.update({'id': v})
 
-| Field | Required | Description |
-|---|---|---|
-| `type` | yes | `label`, `textbox`, `button`, `rect`, `timer`, `selector`, `image` |
-| `name` | yes | Identifier for `screen.find()` and data binding wiring |
-| `rect` | yes | `[x, y, w, h]` in logical pixels (origin = zone top-left) |
-
-Origin for `rect` is the **zone's** top-left corner (not the screen's).
-The screen builder adds the zone offset when constructing widgets.
-
-### 4.3 Widget types
-
-#### `label` — static or bound text
-
-```yaml
-- type: label
-  name: title
-  text_key: screen.new_test.title    # localization key (preferred)
-  # text: "New Test"                 # inline fallback
-  rect: [8, 5, 178, 24]
-  color: black
-  bg: white
-  size: 22
-  align: left      # left | center | right  (default: left)
-  valign: top      # top  | middle | bottom (default: top)
+widgets[203].on_press = self.nav_next
 ```
 
-#### `textbox` — data-bound editable or read-only field
+This keeps the CSV simple and wiring explicit. Roughly 1–2 lines per
+interactive widget (~20–30 lines total across all screens).
 
-```yaml
-- type: textbox
-  name: id_field
-  bind: record.id          # data binding key (see §4.4)
-  rect: [82, 3, 230, 39]   # relative to body origin
-  color: black
-  bg: white
-  size: 22
-  align: left
-  valign: middle
-  border_color: field_blue
-  editable: true
+---
+
+## 5. Screen Definitions (`screen_defs.csv`)
+
+One row per screen.
+
+### Columns
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `screen_id` | str (2 chars) | Hardcoded permanent identifier (e.g. `MM`, `SE`, `R1`) |
+| `phase` | int | Phase group id if timed; `0` if this screen has no phase |
+| `seq` | int | Sequence order within phase (1, 2, 3…); `0` if not phased |
+| `duration` | int | Timer duration in seconds; `0` = no time limit |
+| `modal` | int | `1` = navigation locked while active; `0` = free navigation |
+| `beginactions` | str | Semicolon-separated action list: `alarm_on`, `alarm_off`, `start_timer` |
+| `next` | str | `screen_id` of the screen NEXT button navigates to; empty = no NEXT |
+
+### Example rows
+
+```
+screen_id, phase, seq, duration, modal, beginactions,        next
+MM,        0,     0,   0,        0,     "",                  SE
+SE,        1,     1,   0,        1,     "",                  TC
+TC,        1,     2,   0,        0,     "",                  R1
+R1,        1,     3,   30,       1,     "alarm_off;start_timer", I1
+I1,        1,     4,   600,      0,     "alarm_off;start_timer", CA
+CA,        1,     5,   60,       1,     "alarm_off;start_timer", CR
+CR,        1,     6,   0,        0,     "",                  RS
+RS,        1,     7,   0,        0,     "",                  MM
 ```
 
-#### `button` — pressable, fires a named action
+Screen ids used above:
+`MM`=Main Menu, `SE`=Sample Entry, `TC`=Temperature Check,
+`R1`=Reagent 1, `I1`=Incubation 1, `CA`=Capture, `CR`=Capture Review, `RS`=Results Summary
 
-```yaml
-- type: button
-  name: start_btn
-  text_key: btn.start
-  rect: [193, 0, 74, 50]   # relative to header origin
-  color: start_green
-  text_color: white
-  size: 22
-  action: start_test        # named action; wired by AppController
+---
+
+## 6. Screen-Widget Mapping (`screen_widgets.csv`)
+
+Maps which widgets appear on each screen, and whether they are in the tab order.
+
+### Columns
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `screen_id` | str | Foreign key to `screen_defs.csv` |
+| `widget_id` | int | Foreign key to `widget_defs.csv` |
+| `tabbed` | int | `1` = included in tab/focus order; `0` = non-focusable (display only) |
+| `tab_order` | int | Position in tab sequence (1, 2, 3…); `0` if not tabbed |
+
+### Example rows
+
+```
+screen_id, widget_id, tabbed, tab_order
+SE,        111,       0,      0          # "ID" label — display only
+SE,        101,       1,      1          # ID TextBox — first tabbed
+SE,        112,       0,      0          # "User" label
+SE,        102,       1,      2          # User TextBox
+SE,        113,       0,      0          # "Test" label
+SE,        103,       1,      3          # Test TextBox
+SE,        114,       0,      0          # "Collect" label
+SE,        104,       1,      4          # Collect TextBox
+SE,        201,       1,      5          # MENU button
+SE,        202,       0,      0          # clock label
+SE,        203,       1,      6          # NEXT button
 ```
 
-#### `rect` — divider line or filled rectangle
+---
 
-```yaml
-- type: rect
-  rect: [0, 39, 320, 1]
-  color: row_line
-  fill: true
-```
+## 7. Loading Sequence
 
-#### `timer` — countdown or countup display
+At startup, `AppController`:
 
-```yaml
-- type: timer
-  name: reagent_timer
-  source: phase.remaining_seconds    # runtime source (see §4.4)
-  direction: countdown               # countdown | countup
-  rect: [60, 30, 200, 70]
-  size: 48
-  color: white
-  bg: body_coral
-  align: center
-  thresholds:                        # color changes as time runs low
-    - at_seconds: 60
-      color: timer_warn
-    - at_seconds: 10
-      color: timer_critical
-```
+1. Reads `palette.yaml` → color name→RGB dict
+2. Reads `instrument.yaml` → display dimensions and hardware config
+3. Reads `widget_defs.csv` → constructs all Widget objects into `widgets` dict keyed by id
+4. Reads `screen_defs.csv` → constructs all Screen objects into `screens` dict keyed by id
+5. Reads `screen_widgets.csv` → populates each screen's `tabbed_widgets` and `untabbed_widgets` lists
+6. Calls `_wire()` → assigns callbacks and data bindings by widget_id
+7. Starts event loop with initial screen (`MM`)
 
-#### `selector` — scrolling list bound to a record field
+---
 
-```yaml
-- type: selector
-  name: volume_selector
-  bind: record.volume
-  options_key: config.reagent_volumes   # key into instrument.yaml list
-  rect: [10, 10, 300, 140]
-  item_color: white
-  item_bg: btn_gray
-  selected_color: white
-  selected_bg: start_green
-```
+## 8. Standard Action Names
 
-#### `image` — pre-downsampled pixel array viewer
-
-```yaml
-- type: image
-  name: capture_preview
-  source: capture.rgb_thumb    # runtime source
-  rect: [0, 0, 320, 165]
-```
-
-### 4.4 Data binding and runtime sources
-
-`bind:` connects a textbox (or label) to a field in the controller's data
-model. The controller reads and writes these at navigation time.
-
-`source:` connects a widget to a runtime value maintained by the controller.
-The controller pushes updates; the widget calls `set_value()` and redraws.
-
-| Key | Meaning |
-|---|---|
-| `record.id` | `controller.record["id"]` — editable test field |
-| `record.user` | `controller.record["user"]` |
-| `clock` | Current time string, updated every second |
-| `slot.letter` | Active slot letter: "A", "B", "C", "D" |
-| `slot_bg` | Active slot background color (palette reference) |
-| `phase.remaining_seconds` | Seconds left in current period |
-| `phase.elapsed_seconds` | Seconds since current period started |
-| `capture.rgb_thumb` | Downsampled RGB array from last capture |
-
-The full list grows as screens are built. New source keys are added to the
-controller and documented here.
-
-### 4.5 Actions
-
-`action:` on a button names a callback registered by `AppController`. The
-YAML does not define what actions do — only that they exist. The controller
-wires each name to a method.
-
-Standard action names:
+Button `on_press` callbacks registered by `AppController`:
 
 | Name | Meaning |
-|---|---|
-| `nav_next` | Advance to next phase per protocol |
-| `nav_back` | Return to previous phase |
-| `nav_menu` | Go to opening menu |
-| `start_test` | Start the test for this slot |
-| `toggle_slot` | Cycle active test slot (A→B→C→D→A) |
-| `confirm_added` | Mark reagent-addition period complete |
-| `start_capture` | Initiate camera capture sequence |
-| `overdue_priority` | Jump to highest-priority overdue task |
-| `overdue_next` | Advance overdue widget cursor |
+|------|---------|
+| `nav_next` | Advance to screen defined by `next` in screen_defs |
+| `nav_back` | Return to previous screen (history stack) |
+| `nav_menu` | Go to `MM` (main menu) |
+| `start_test` | Start test for active slot |
+| `toggle_slot` | Toggle active slot A ↔ B |
+| `confirm_added` | Mark reagent addition complete |
+| `start_capture` | Initiate camera capture |
+| `skip_screen` | Skip current modal screen (marks result degraded) |
 
 ---
 
-## 5. Protocol YAML Format
-
-The protocol defines the phase sequence, period structure, and navigation.
-Screens are reusable; the protocol determines what comes next.
-
-```yaml
-protocol:
-  id: standard_colorimetric
-
-  phases:
-    - id: sample_entry
-      screen_id: new_test_entry
-      nav_next: temperature_check     # phase id to go to on nav_next action
-      periods:
-        - name: data_entry
-          modal: false
-          duration_seconds: 0       # deadline window; 0 = no deadline
-          completion_action: all_required_fields_filled
-
-    - id: temperature_check          # second sample entry screen
-      screen_id: temperature_check
-      nav_next: reagent_phase_1
-      periods:
-        - name: sensor_read
-          modal: false
-          duration_seconds: 0
-
-    - id: reagent_phase_1
-      screen_id: reagent_phase
-      params:                         # Q9: parameterized screen instance
-        phase_label_key: phase.reagent_1.label
-        incubation_seconds: 600
-      nav_next: measurement
-      periods:
-        - name: reagent_addition
-          modal: true
-          duration_seconds: 30
-          alert_repeat_seconds: 30
-          completion_action: confirm_added
-        - name: reagent_agitate
-          modal: true
-          duration_seconds: 15
-          completion_action: null
-        - name: incubation_timer
-          modal: false
-          duration_seconds: 600       # confirm
-
-    - id: reagent_phase_2
-      screen_id: reagent_phase
-      params:                         # Q9: parameterized screen instance
-        phase_label_key: phase.reagent_2.label
-        #incubation_seconds: 420
-      nav_next: measurement
-      periods:
-        - name: reagent_addition
-          modal: true
-          duration_seconds: 20
-          alert_repeat_seconds: 10
-          completion_action: null
-        - name: reagent_agitate
-          modal: true
-          duration_seconds: 5
-          completion_action: confirm_added
-        - name: incubation_timer
-          modal: false
-          duration_seconds: 600       # confirm
-    
-    - id: measurement
-      screen_id: capture
-      nav_next: results_summary
-      periods:
-        - name: manual_classify
-          modal: true
-          duration_seconds: 100
-          alert_repeat_seconds: 30
-          completion_action: classified
-        - name: initiate_capture
-          modal: true
-          duration_seconds: 60
-          alert_repeat_seconds: 60
-          completion_action: capture_started
-        - name: capture_in_progress
-          modal: false
-          duration_seconds: 120
-          completion_action: capture_ended
-
-    - id: results_summary
-      screen_id: results_summary
-      nav_next: null                  # end of protocol
-      periods:
-        - name: view_results
-          modal: false
-          duration_seconds: 0         # no time limit
-```
-
----
-
-## 6. `new_test_entry.yaml` — Worked Example
-
-The full YAML equivalent of the existing `proto_screen1.py`:
-
-```yaml
-screen:
-  id: new_test_entry
-
-  header:
-    bg: white
-    widgets:
-      - type: label
-        name: title
-        text_key: screen.new_test.title
-        rect: [8, 5, 178, 24]
-        color: black
-        bg: white
-        size: 22
-
-      - type: label
-        name: hdr_datetime
-        source: clock
-        rect: [8, 31, 178, 17]
-        color: black
-        bg: white
-        size: 14
-
-      # - type: button
-      #   name: start_btn
-      #   text_key: btn.start
-      #   rect: [193, 0, 74, 50]
-      #   color: start_green
-      #   text_color: btn_text
-      #   size: 22
-      #   action: start_test
-
-      - type: button
-        name: slot_btn
-        source: slot.letter
-        rect: [260, 0, 60, 50]
-        color: slot_bg
-        text_color: slot_dim
-        size: 34
-        action: toggle_slot
-
-  body:
-    bg: body_coral
-    widgets:
-      - type: label
-        name: id_lbl
-        text_key: field.id
-        rect: [8, 2, 68, 35]
-        color: white
-        bg: label_coral
-        size: 13
-
-      - type: textbox
-        name: id_field
-        bind: record.id
-        rect: [82, 0, 230, 39]
-        color: black
-        bg: white
-        size: 22
-        align: left
-        valign: middle
-        border_color: field_blue
-        editable: true
-
-      - type: rect
-        rect: [0, 39, 320, 1]
-        color: row_line
-        fill: true
-
-      - type: label
-        name: user_lbl
-        text_key: field.user
-        rect: [8, 42, 68, 35]
-        color: white
-        bg: label_coral
-        size: 13
-
-      - type: textbox
-        name: user_field
-        bind: record.user
-        rect: [82, 40, 230, 39]
-        color: black
-        bg: white
-        size: 18
-        align: left
-        valign: middle
-        border_color: field_blue
-        editable: true
-
-      - type: rect
-        rect: [0, 79, 320, 1]
-        color: row_line
-        fill: true
-
-      - type: label
-        name: test_lbl
-        text_key: field.test
-        rect: [8, 82, 68, 35]
-        color: white
-        bg: label_coral
-        size: 13
-
-      - type: textbox
-        name: test_field
-        bind: record.test
-        rect: [82, 80, 230, 39]
-        color: black
-        bg: white
-        size: 18
-        align: left
-        valign: middle
-        border_color: field_blue
-        editable: true
-
-      - type: rect
-        rect: [0, 119, 320, 1]
-        color: row_line
-        fill: true
-
-      - type: label
-        name: collect_lbl
-        text_key: field.collect
-        rect: [8, 122, 68, 35]
-        color: white
-        bg: label_coral
-        size: 13
-
-      - type: textbox
-        name: collect_field
-        bind: record.collect
-        rect: [82, 120, 230, 39]
-        color: black
-        bg: white
-        size: 18
-        align: left
-        valign: middle
-        border_color: field_blue
-        editable: true
-```
-
-The worked example is longer than the Python equivalent. That's expected —
-YAML is more explicit. The screen builder removes all repetition.
-
----
-
-## 7. Open Questions
-
-### Q1 — Pixel coordinate origin per zone
-
-Proposed: `rect: [x, y, w, h]` uses the **zone's top-left** as origin (so
-body widgets start at [0, 0] meaning "top-left of body", not [0, 50]).
-The screen builder adds zone offsets automatically.
-
-**Alternative:** Screen-absolute coordinates throughout (widgets know their
-absolute position). Simpler in the builder; harder to author (must
-manually add zone offsets when reading/editing YAML).
-
-*Which do you prefer?*
-
-### Q2 — Color format in palette
-
-Proposed: RGB tuples `[r, g, b]`. The screen builder converts to RGB565.
-
-**Alternative:** Hex strings `"#F05A46"` (more familiar to anyone who has
-done web work). RGB tuples are more readable for numeric adjustment.
-
-*Any preference?*
-
-### Q3 — Strings: `text_key` vs. `text`
-
-Proposed: use `text_key` for all user-visible strings from the start; a
-minimal `locale/en.yaml` provides values. This costs almost nothing now
-and avoids a full-file refactor when localization is added.
-
-**Alternative:** Use inline `text:` now, switch to keys in Step 16.
-
-*Preference? Or: use `text_key` only for strings that will definitely need
-translation, `text` for things like "MENU" that are universal?*
-
-### Q4 — Standard status bar: implicit or included?
-
-Proposed: omitting `status_bar:` in a screen YAML generates the standard bar
-automatically. Providing `status_bar:` overrides (used for the overdue footer
-state and any non-standard screens).
-
-**Alternative:** Every screen explicitly includes the status bar, either by
-repeating it or via a YAML anchor (`*standard_status_bar`).
-
-*Implicit default or explicit everywhere?*
-
-### Q5 — Navigation targets: screen YAML or protocol YAML?
-
-Proposed: navigation targets (`nav_next`, `nav_back`) live in the **protocol
-YAML**, not the screen YAML. The NEXT button action in screen YAML is the
-generic `action: nav_next`; the protocol tells the controller what that means
-for each phase. This keeps screens reusable across protocols.
-
-**Implication:** A screen YAML never knows what comes after it. The
-controller wires the actual target at phase-transition time.
-
-**Alternative:** Each screen hardcodes its next screen in its own YAML.
-Simpler controller; screens are not reusable across different protocol orders.
-
-*Reusable screens (protocol-driven nav) or simpler controller (screen-driven nav)?*
-
-### Q6 — Parameterized / template screens
-
-The reagent timer screen is used for each incubation phase but shows a
-different label (Phase 1, Phase 2) and a different timer duration.
-
-Proposed: a `params:` block in the protocol YAML provides values that
-override specific widget fields in the referenced screen. The screen YAML
-uses `{{ param_name }}` placeholders where protocol-specific values go.
-
-This is a mini-template system (Jinja2-style substitution on YAML load).
-
-**Alternative:** Separate YAML files for each phase instance
-(`reagent_phase_1.yaml`, `reagent_phase_2.yaml`). More files; no
-templating complexity. Fine if there are only 2 phases.
-
-*How many reagent phases does the standard protocol have?*
-*Parameterized template, or duplicate files?*
-
-### Q7 — `source:` key namespace
-
-The proposed source keys (`clock`, `slot.letter`, `phase.remaining_seconds`,
-etc.) are freeform strings interpreted by the controller. There's no
-schema validation — a typo is a runtime error, not a load-time error.
-
-**Alternative:** Enumerate all valid source keys in a schema and validate
-at load time. More upfront work; better error messages.
-
-*Accept runtime errors for now, or define the schema?*
-
-### Q8 — Flask template generation
-
-The spec says Flask templates should be generated from the same YAML screen
-definitions. The YAML format above is written for the touchscreen renderer.
-
-The Flask equivalent of a `textbox` is an `<input type="text">`. The
-equivalent of a `label` is a `<label>`. Positions (`rect:`) are irrelevant
-for HTML — layout is CSS-driven.
-
-**Implication:** The YAML can be used as the *data contract* (what fields
-exist, what they're bound to, what text they show) but the Flask template
-generator ignores `rect:` and translates widget types to HTML elements by
-type name. This is valid structural parity even if the visual layout differs.
-
-*Is this acceptable, or does "generated from the same YAML" mean something
-stricter?*
-
-### Q9 — Body sub-areas
-
-The body zone currently has a flat list of widgets. Some screens may want
-to divide the body into sub-zones (left panel / right panel, or a scrollable
-list area + a fixed action area).
-
-Proposed: allow `area:` as a widget type in the body, with its own `rect`
-and `widgets` list. This maps to the existing `Area` widget class.
-
-```yaml
-- type: area
-  name: left_panel
-  rect: [0, 0, 160, 165]
-  bg: panel_dark
-  widgets:
-    - ...
-```
-
-*Is this needed now, or add it when a screen requires it?*
+## 9. Resolved Design Decisions
+
+| Question | Resolution |
+|----------|------------|
+| Pixel coordinates | Screen-absolute throughout; author places widgets at final position |
+| Color format | Named strings from palette.yaml; builder converts to RGB565 |
+| Strings / localization | Inline `label` in CSV now; migrate to locale keys later |
+| Standard status bar | Three widgets (201 MENU, 202 clock, 203 NEXT) appear on every phased screen via screen_widgets.csv |
+| Navigation targets | `next` field in screen_defs.csv; no protocol-level indirection |
+| Parameterized screens | Not needed now; separate rows for each phase instance (R1, R2, I1, I2 etc.) |
+| Source key validation | Runtime for now; validate at load time when schema is stable |
+| Flask template generation | Deferred; screen_widgets.csv provides the data contract when needed |
+| Body sub-areas | Use RectWidget for visual dividers; Area widget added when a screen requires it |

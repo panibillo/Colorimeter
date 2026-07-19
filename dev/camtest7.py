@@ -44,13 +44,15 @@ def main() -> None:
 
     exposure_ms = float(sys.argv[1]) if len(sys.argv) > 1 else DEFAULT_EXPOSURE_MS
     exposure_us = int(exposure_ms * 1000)
+    led_start = int(sys.argv[2]) if len(sys.argv) > 2 else 1
+    led_end = int(sys.argv[3])  if len(sys.argv) > 3 else led_start
 
     print("=" * 60)
     print("camtest7 — BayerCam + cal8 LED capture test")
     print("=" * 60)
     print(f"  Exposure : {exposure_ms:.0f} ms  ({exposure_us:,} µs)")
     print(f"  Output   : {OUT_DIR.resolve()}")
-    print()
+    print(f"  LEDS     : [{led_start} to {led_end}]")
 
     OUT_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -81,56 +83,59 @@ def main() -> None:
                 print(f"  flush {n+1}: {(time.monotonic()-t0)*1000:.0f} ms")
             print()
 
-            # ── LED on ────────────────────────────────────────────────────
-            leds.set_channel('white', True)
-            print(f"White LED (ch 10) ON  —  warming up {LED_WARMUP_S:.1f} s ...")
-            time.sleep(LED_WARMUP_S)
+            for led in range(led_start, led_end + 1):
+                
+                # ── LED on ────────────────────────────────────────────────────
+                leds.set_channel(led, True)
+                print(f"{leds.label(led)} (ch {led}) ON  —  warming up {LED_WARMUP_S:.1f} s ...")
+                time.sleep(LED_WARMUP_S)
 
-            # ── Capture ───────────────────────────────────────────────────
-            print(f"Capturing ({exposure_ms:.0f} ms) ...")
-            t0 = time.monotonic()
-            rgb, bayer, meta = cam.capture_frame()
-            cap_ms = (time.monotonic() - t0) * 1000
-            print(f"  Done in {cap_ms:.0f} ms")
+                # ── Capture ───────────────────────────────────────────────────
+                print(f"Capturing ({exposure_ms:.0f} ms) ...")
+                t0 = time.monotonic()
+                rgb, bayer, meta = cam.capture_frame()
+                cap_ms = (time.monotonic() - t0) * 1000
+                print(f"  Done in {cap_ms:.0f} ms")
 
-            # ── LED off ───────────────────────────────────────────────────
-            leds.set_channel('white', False)
-            print("White LED (ch 10) OFF")
-            print()
+                # ── LED off ───────────────────────────────────────────────────
+                leds.set_channel(led, False)
+                print(f"{leds.label(led)} (ch {led}) OFF")
+                print("processing image ...")
 
-            # ── Metadata ──────────────────────────────────────────────────
-            applied_us = int(meta.get("ExposureTime", 0))
-            delta_pct  = (applied_us - exposure_us) / max(exposure_us, 1) * 100
-            print("--- metadata ---")
-            print(f"  Requested : {exposure_us:,} µs  ({exposure_ms:.0f} ms)")
-            print(f"  Applied   : {applied_us:,} µs  ({delta_pct:+.1f}%  "
-                  f"{'OK' if abs(delta_pct) <= 5.0 else 'HIGH'})")
-            print(f"  Gain      : {meta.get('AnalogueGain', '?')}")
-            print(f"  Lux       : {meta.get('Lux', '?')}")
-            if cam.lens_position is not None:
-                print(f"  Lens pos  : {cam.lens_position:.3f} diopters")
-            print()
+                # ── Metadata ──────────────────────────────────────────────────
+                applied_us = int(meta.get("ExposureTime", 0))
+                delta_pct  = (applied_us - exposure_us) / max(exposure_us, 1) * 100
+                print("--- metadata ---")
+                print(f"  Requested : {exposure_us:,} µs  ({exposure_ms:.0f} ms)")
+                print(f"  Applied   : {applied_us:,} µs  ({delta_pct:+.1f}%  "
+                    f"{'OK' if abs(delta_pct) <= 5.0 else 'HIGH'})")
+                print(f"  Gain      : {meta.get('AnalogueGain', '?')}")
+                print(f"  Lux       : {meta.get('Lux', '?')}")
+                if cam.lens_position is not None:
+                    print(f"  Lens pos  : {cam.lens_position:.3f} diopters")
+                print()
 
-            # ── Bayer channel means (pattern-aware) ───────────────────────
-            layers = BayerCam.extract_bayer_layers(bayer, cam.bayer_pattern)
-            b_mean = float(layers['B'].mean())
-            g_mean = float(np.concatenate(
-                [layers['Gb'].ravel(), layers['Gr'].ravel()]).mean())
-            r_mean = float(layers['R'].mean())
-            bgr_m  = rgb.astype(float).mean(axis=(0, 1))
-            print("--- channel means ---")
-            print(f"  Bayer  B={b_mean:.1f}  G={g_mean:.1f}  R={r_mean:.1f}"
-                  f"  max={bayer.max()}  dtype={bayer.dtype}")
-            print(f"  RGB888 B={bgr_m[0]:.1f}  G={bgr_m[1]:.1f}  R={bgr_m[2]:.1f}")
-            print()
+                # ── Bayer channel means (pattern-aware) ───────────────────────
+                layers = BayerCam.extract_bayer_layers(bayer, cam.bayer_pattern)
+                b_mean = float(layers['B'].mean())
+                g_mean = float(np.concatenate(
+                    [layers['Gb'].ravel(), layers['Gr'].ravel()]).mean())
+                r_mean = float(layers['R'].mean())
+                bgr_m  = rgb.astype(float).mean(axis=(0, 1))
+                print("--- channel means ---")
+                print(f"  Bayer  B={b_mean:.1f}  G={g_mean:.1f}  R={r_mean:.1f}"
+                      f"  max={bayer.max()}  dtype={bayer.dtype}")
+                print(f"  RGB888 B={bgr_m[0]:.1f}  G={bgr_m[1]:.1f}  R={bgr_m[2]:.1f}")
+                print()
 
-            # ── Save ──────────────────────────────────────────────────────
-            saved = BayerCam.save_frame(
-                OUT_DIR, OUT_STEM, rgb, bayer, meta,
-                lens_position=cam.lens_position)
-            print("--- saved ---")
-            for kind, path in saved.items():
-                print(f"  [{kind}] {path}")
+                # ── Save ──────────────────────────────────────────────────────
+                stem = f"{OUT_STEM}-{led}-{exposure_us}"
+                saved = BayerCam.save_frame(
+                    OUT_DIR, stem, rgb, bayer, meta,
+                    lens_position=cam.lens_position)
+                print("--- saved ---")
+                for kind, path in saved.items():
+                    print(f"  [{kind}] {path}")
 
         finally:
             cam.stop()

@@ -4,6 +4,12 @@ utils.py  —  shared utilities for Colorimeter scripts
 
 import signal
 
+def get_pi_model():
+    try:
+        with open("/sys/firmware/devicetree/base/model", "r") as f:
+            return f.read().strip("\x00\n")
+    except Exception:
+        return None
 
 def install_exit_signals():
     """

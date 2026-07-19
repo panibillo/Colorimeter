@@ -261,7 +261,7 @@ class ILI9341:
         self._set_window(0, 0, self.WIDTH - 1, self.HEIGHT - 1)
         self._flood(self._pixel_bytes(color), self.WIDTH * self.HEIGHT)
 
-    def fill_rect(self, rect: Rect, color: int):
+    def fill_rect(self, rect: Rect, color: int, widget_id: str = ""):
         """Fill a rectangular region with a single RGB565 colour."""
         if rect.w <= 0 or rect.h <= 0:
             return
@@ -271,7 +271,7 @@ class ILI9341:
         self._flood(self._pixel_bytes(color), rect.w * rect.h)
 
     def draw_rect(self, rect: Rect, color: int, fill: bool = False,
-                  thickness: int = 1):
+                  thickness: int = 1, widget_id: str = ""):
         """
         Draw a rectangle outline (fill=False) or filled rectangle (fill=True).
         thickness applies to the outline only; filled rects ignore it.
@@ -386,6 +386,7 @@ class ILI9341:
         align:    str  = "left",    # "left" | "center" | "right"
         valign:   str  = "top",     # "top"  | "middle" | "bottom"
         clip:     bool = True,
+        widget_id: str = "",
     ):
         """
         Render text within a Rect, with alignment and optional background.

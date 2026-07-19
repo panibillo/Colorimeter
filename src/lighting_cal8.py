@@ -176,6 +176,20 @@ class LEDBank:
         wl_str = f"{wl} nm" if wl is not None else "broadband"
         return f"ch {ch} ({name}, {wl_str})"
 
+    def color_name(self, channel) -> str:
+        """
+        Return color name for a channel.
+
+        Args:
+            channel: int 1-10 or str color name.
+
+        Returns:
+            String like 'green' or 'white'.
+        """
+        ch = self._resolve(channel)
+        color_name, _ = self._LED_DEFS[ch - 1]
+        return color_name
+
     # ── Low-level SPI ─────────────────────────────────────────
 
     def _write_sr(self, byte_val: int) -> None:

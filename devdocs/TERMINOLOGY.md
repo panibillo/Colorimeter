@@ -8,141 +8,113 @@ its definition changes.
 
 ## Test
 
-One complete protocol run for one sample. Occupies one slot (A, B, C, or D).
-A test proceeds through a fixed sequence of phases defined by its protocol.
-Up to 4 tests may run concurrently; 2 is the expected practical maximum.
+One complete protocol run for one sample. Occupies one slot (A or B).
+Only one test may run at a time; a second test cannot begin until the
+active test completes.
 
 ---
 
 ## Protocol
 
-The ordered sequence of phases that defines a test type. Loaded from YAML
-config. Specifies phase names, period structure, durations, and which
-periods are modal. The protocol is fixed per test type; individual test
-records store the timestamps and outcomes of each phase.
+The ordered sequence of screens (phases) that defines a test type.
+Specifies screen ids, durations, modal flags, and begin-actions.
+The protocol is fixed per test type; individual test records store
+the timestamps and outcomes of each screen.
 
 ---
 
 ## Phase
 
-One named, sequential step in a protocol (e.g. "Incubation", "Measurement",
-"Sample Entry"). A test's phases are ordered; each phase completes before
-the next begins.
+One named, sequential step in a protocol (e.g. "Incubation",
+"Measurement", "Sample Entry"). Phases are ordered; each completes
+before the next begins.
 
 **One phase = one screen.** Phase is the protocol concept; screen is the
-UI concept for the same unit. The words are interchangeable when the
-distinction does not matter.
-
-A phase may be **repeatable** — some protocols have multiple incubation
-rounds whose phase definitions are templated from a single config entry.
+UI concept. The words are interchangeable when the distinction does not matter.
 
 ---
 
 ## Screen
 
-The UI view displayed while a phase is active. Because one phase = one
-screen, switching phases and switching screens are the same event.
+The UI view displayed while a phase is active. Switching phases and
+switching screens are the same event.
+
+Each screen has:
+- **`id`** — 2-character hardcoded identifier (e.g. `MM` = main menu)
+- **`phase`** — phase_id if this screen is part of a timed sequence; `0` if not
+- **`seq`** — ordering within the phase sequence (1, 2, 3 …); `0` if not phased
+- **`tabbed_widgets`** — ordered list of widgets in their tab/focus order
+- **`untabbed_widgets`** — non-focusable display widgets (labels, decorations)
+- **`duration`** — seconds the screen is timed for; `0` = no time limit
+- **`modal`** — `1` if navigation is locked while this screen is active; `0` if free
+- **`beginactions`** — ordered list of actions taken when the screen's timer starts
+  (e.g. `alarm_on`, `alarm_off`, `start_timer`)
+- **`next`** — screen `id` to navigate to when the NEXT button is pressed
+- **`is_visible`** — True when this screen has focus (is the displayed screen)
+- **`is_alive`** — True when the screen is being monitored for timeout; a screen
+  with a non-zero duration stays alive from when its timer starts until the test
+  ends, and automatically takes focus when its duration expires
 
 ---
 
-## Period
+## Modal Screen
 
-A time window within a phase. Phases consist of one or more periods that
-run sequentially. Each period is either **modal** or **non-modal**.
+A screen with `modal = 1`. The user **cannot navigate away** while it is active.
+Exits from a modal screen:
 
-A phase may have any number of periods. There is no constraint on where
-modal periods appear within a phase.
-
----
-
-## Modal Period  (= Focus Window)
-
-These two terms name the **same concept**.
-
-A period during which the user must perform a specific action. The UI
-behaves like a modal dialog: the user **cannot navigate away** from the
-current screen while a modal period is active. The three exits from a
-modal period are:
-
-1. **Completion** — user performs the required action. Normal flow.
-2. **Overdue** — the deadline passes without completion. The system
-   automatically moves the task to the overdue stack and releases
-   the modal lock, allowing navigation. An alert sounds.
-3. **User override** — (TBD) user may have the option to manually
-   release the modal lock before the deadline, with a warning.
-
-**Conflict scheduling:** The scheduler ensures that no two simultaneously
-running tests have overlapping modal periods. Before a new test may start,
-its projected modal period times are compared against the modal periods of
-all active tests. If any overlap is found, the Start button is disabled
-until a conflict-free start time is available.
+1. **Completion** — user performs the required action and presses NEXT. Normal flow.
+2. **Timeout** — the duration expires. The system sounds an alarm and may auto-advance.
+3. **Skip** — user explicitly skips (marks result degraded).
 
 ---
 
-## Non-Modal Period
+## Non-Modal Screen
 
-A period during which no user action is required. The user is free to
-navigate between active test slots or attend to other tasks. Timers
-and automated processes (e.g. camera capture) may run during non-modal
-periods.
-
----
-
-## Overdue
-
-A modal period whose deadline has passed without completion. When a period
-becomes overdue:
-
-- The modal lock is released (user may now navigate freely)
-- The task is pushed onto the overdue stack
-- An audible alert fires and repeats at a configured cadence
-- A visual indicator replaces the normal status bar footer
-
-The task remains overdue until the user completes or skips it.
-
----
-
-## Overdue Stack
-
-An in-memory sorted collection (Python `deque`) of overdue tasks across
-all active tests. Sorted by deadline (earliest deadline = highest priority
-= position 0). Rebuilt from the database on boot if incomplete tests exist.
-
-The overdue stack is the in-memory working view. The database `test_phases`
-table is the ground truth (status column: `pending / active / overdue /
-complete / skipped`).
-
-See [PHASE_SCHEDULING_DESIGN.md](PHASE_SCHEDULING_DESIGN.md) for the full
-overdue state machine and footer widget behavior.
+A screen with `modal = 0`. The user is free to navigate to other screens.
+The screen's timer continues running in the background (`is_alive = True`).
+When the duration expires the screen takes focus — it does not interrupt
+the user mid-action, it waits for the next navigation event or fires an alarm.
 
 ---
 
 ## Slot
 
-The label (A, B, C, D) identifying which of the four concurrent test
-positions a test occupies. Each slot has a fixed color used consistently
-across the touchscreen and web interfaces:
+The label (A or B) identifying which of the two test positions a test occupies.
+Each slot has a fixed color used consistently across all interfaces:
 
 | Slot | Color |
-|---|---|
+|------|-------|
 | A | Blue |
 | B | Gold / Amber |
-| C | Green |
-| D | Red / Coral |
+
+---
+
+## Widget
+
+A reusable UI element. Each widget is a **singleton**: widget `TX` (for example)
+is one Python object that may appear on multiple screens and always holds the
+same value. This eliminates explicit data-sync on screen navigation.
+
+Widget types include: Button, TextBox, Timer, Label, RectWidget.
+
+Each widget is identified by a hardcoded 3-digit integer `widget_id` (100–999).
+Visual properties (window rect, label, fg/bg colors, default value) are loaded
+from a CSV file at startup. Behavioral wiring (callbacks, data bindings) is
+assigned in Python after loading.
 
 ---
 
 ## Summary table
 
 | Term | Scope | Protocol or UI |
-|---|---|---|
+|------|-------|----------------|
 | Test | Full run, one sample | Both |
-| Protocol | Ordered phase definitions | Protocol |
+| Protocol | Ordered screen definitions | Protocol |
 | Phase | One named step | Protocol |
-| Screen | UI view for one phase | UI |
-| Period | Time window within a phase | Both |
-| Modal period / Focus window | Period requiring user action; locks navigation | Both |
-| Non-modal period | Waiting/informational period; navigation free | Both |
-| Overdue | Modal period past its deadline | Both |
-| Overdue stack | Live sorted list of overdue tasks | Runtime |
-| Slot | A / B / C / D test position | Both |
+| Screen | UI view for one phase; owns duration + modal flag | Both |
+| Modal screen | Screen that locks navigation while active | Both |
+| Non-modal screen | Screen that allows free navigation while its timer runs | Both |
+| Slot | A / B test position | Both |
+| Widget | Singleton UI element with hardcoded id | UI |
+| is_alive | Screen is being monitored for timeout | Runtime |
+| is_visible | Screen currently has focus | Runtime |

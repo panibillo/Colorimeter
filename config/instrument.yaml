@@ -1,0 +1,15 @@
+# Colorimeter — instrument hardware configuration
+
+display:
+  width:         320
+  height:        240
+  header_height:  50
+  status_height:  25
+  # body_height is computed: height - header_height - status_height = 165
+
+simulation: false        # true → substitute all mock hardware modules
+
+hardware:
+  backlight_pin: 13
+  spi_device:    0
+  i2c_bus:       1

@@ -25,7 +25,7 @@
   - Analysis (`color_analysis.py`, `roi_analysis.py`, `color_map.py`)
   - Web interface (`web_interface.py`)
   - Configuration management (`config_manager.py`)
-  - Database operations (`db_interface.py`)
+  - Database operations (`db_manager.py`)
   - Testing (`test/` directory)
 
 ### Error Handling
@@ -108,6 +108,10 @@ def send_data(data: str, ip: str, port: int) -> None:
 - Use `###` (level 3) for subsections
 - Use numbered lists for procedures; bullet lists for collections
 - Code blocks should include language identifier (e.g., ` ```python`)
+- Code blocks should include context where the code is run,
+  by whom and how invoked.
+  (e.g. `# user run on RPi command line in ssh session.`
+   e.g. `# called by GUI ...`)
 - Keep line length reasonable for readability
 
 ### Markdown File Organization

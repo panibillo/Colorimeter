@@ -1,7 +1,7 @@
 """
-mock_Picamera2: Mock library emulating Picamera2 for desktop testing
+picamera2_mock: Mock library emulating Picamera2 for desktop testing
 
-Loads test images and metadata from ../mock_camera directory.
+Loads test images and metadata from the mock_camera directory.
 Naming convention:
     Single-stream RGB configs (1-3):
         cfg{1,2,3}_rgb888_00.jpg     → RGB image
@@ -16,7 +16,7 @@ Usage:
     try:
         from picamera2 import Picamera2
     except ImportError:
-        from mock_Picamera2 import Picamera2
+        from mock.picamera2_mock import Picamera2
 """
 
 import numpy as np

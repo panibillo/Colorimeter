@@ -9,38 +9,41 @@ Effort key: **S** = hours · **M** = 1–2 days · **L** = 3–5 days · **XL** 
 
 ---
 
-## Pre-Step: Phase scheduling design  ✅ Done
+## Pre-Step: Interface and program flow redesign  ✅ Done
 
-The phase scheduling, overdue state machine, and overdue widget design are
-documented in [PHASE_SCHEDULING_DESIGN.md](PHASE_SCHEDULING_DESIGN.md)
-before any YAML or screen work begins — because the YAML phase schema must
-encode `modal`, `duration_seconds`, `alert_repeat_seconds`, and
-`target_screen` per phase, and screen YAML must carry a `focus_window`
-attribute.
+The interface simplification and scheduling model are documented in
+[PHASE_SCHEDULING_DESIGN.md](PHASE_SCHEDULING_DESIGN.md) and
+[TERMINOLOGY.md](TERMINOLOGY.md).
 
 Key decisions resolved:
-- DB `status` enum (`pending/active/overdue/complete/skipped`) is ground truth
-- Overdue deque is a derived in-memory view, rebuilt from DB on boot
-- Priority = oldest missed deadline (no explicit priority field needed)
-- Footer widget: PRIORITY (left) + count-up timer + label (center) + NEXT (right)
-- Skip allowed; flags result `degraded`; button lives on target screen not footer
-- Open questions: OQ-S1 through OQ-S7 in PHASE_SCHEDULING_DESIGN.md
+- **One test at a time**: a second test cannot start until the active test completes;
+  no concurrent scheduling needed
+- **Period layer eliminated**: each Screen is a Phase — one duration, one modal flag;
+  no sub-period structure
+- **`is_alive` model**: screens with non-zero duration are monitored; alarm fires on
+  timeout; modal screens lock navigation until user acts
+- **`active_slot` flag** (not a scheduler): single check; Start disabled while
+  `active_slot` is set
+- **Widget singletons** with hardcoded 3-digit ids; layout from CSV, wiring in Python
+- DB status enum: `pending/active/complete/skipped` + `late_flag` (no `overdue` state)
+- Skip allowed; flags result `degraded`
+- Screen and widget format: CSV files (see [YAML_FORMAT_PROPOSAL.md](YAML_FORMAT_PROPOSAL.md))
 
 ---
 
-## Step 1 — Config & YAML foundation  `L`
+## Step 1 — Config & CSV foundation  `M`
 
-**Decision required:** Choose the YAML screen/widget definition format before building any more screens. This decision shapes everything downstream (screen construction, Flask parity, localization).
+Format is decided: CSV for screens and widgets, YAML for hardware config and palette.
+See [YAML_FORMAT_PROPOSAL.md](YAML_FORMAT_PROPOSAL.md) for full schemas.
 
-- Define YAML schema for screens, widgets, navigation, **and phase definitions**
-  (must include: `modal`, `duration_seconds`, `alert_repeat_seconds`, `target_screen`,
-  `focus_window` — see PHASE_SCHEDULING_DESIGN.md §10)
-- Write `config_loader.py`: load YAML configs; make display dimensions a config value (not hardcoded)
-- Write `screen_builder.py`: instantiate `Screen`/`Area`/widget trees from YAML
-- Migrate `proto_screen1.py` and `proto_screen.py` to YAML-driven construction as validation
-- Add `simulation_mode` config flag that substitutes mock hardware modules at startup
+- Write `config_loader.py`: load `instrument.yaml`, `palette.yaml`; expose display
+  dimensions and hardware config; add `simulation_mode` flag
+- Write `csv_loader.py`: parse `widget_defs.csv`, `screen_defs.csv`,
+  `screen_widgets.csv`; construct Widget and Screen objects
+- Migrate `proto_screen1.py` and `proto_screen.py` to CSV-driven construction as validation
+- Update `AppController._wire()`: assign callbacks and data bindings by widget_id
 
-**Why first:** Every subsequent screen is defined in YAML. Doing this now avoids
+**Why first:** Every subsequent screen is defined in CSV. Doing this now avoids
 rewriting a dozen hand-coded screens later.
 
 ---
@@ -59,18 +62,17 @@ Remaining widgets needed for the production screens:
 
 ---
 
-## Step 3 — Multiple test slots and navigation model  `L`
+## Step 3 — Slot model and navigation  `M`
 
-The slot system (A/B/C/D) is the spine of the entire UX.
+Two slots (A and B). Only one test runs at a time — the `active_slot` flag
+prevents a second Start until the first test completes.
 
-- Define `TestSlot` object: slot letter, color, current screen state, data record
-- Header widget shows active slot letter/color; slot-toggle button cycles active slots
-- `AppController` holds up to 4 slots; each maintains independent screen state
-- "New Test" button on opening menu creates a new slot and navigates to sample entry
-- Slot color coding applied consistently (Blue/Amber/Green/Coral)
-
-**Decision required:** Hard cap at 2 simultaneous tests for now (spec OQ-6 recommendation)?
-This simplifies scheduling significantly and matches practical operator capacity.
+- Define `TestSlot` object: slot letter, color, data record
+- `AppController.active_slot`: `None` | `'A'` | `'B'`; Start button disabled when set
+- Header widget shows active slot letter/color; slot-toggle button switches
+  view between A and B (viewing a slot ≠ running a slot)
+- "New Test" button on opening menu navigates to sample entry for selected slot
+- Slot color coding: A=Blue, B=Amber
 
 ---
 
@@ -163,19 +165,15 @@ vs. deferred to desktop post-processing? Defines minimum viable result for on-de
 
 ---
 
-## Step 10 — Phase scheduling and resource locking  `L`
+## Step 10 — Alive-screen monitor and alarm system  `S`
 
-Required before two simultaneous tests can run safely.
+The concurrent scheduler is replaced by the simpler `is_alive` model.
 
-- Resource lock manager: camera, LED array, display body area
-- Cooperative scheduler: check projected focus-window conflicts before activating Start
-- Timer interleaving: ensure focus windows of concurrent tests don't overlap
-- Focus windows defined in screen YAML (per spec Section 3)
-
-**Decision required:** This is architecturally non-trivial. Cooperative scheduling is
-sufficient (spec says timing precision is loose), but the locking mechanism needs a
-clear design before Step 10 begins. Consider whether a simple mutex per shared resource
-covers all cases.
+- `ScreenManager.alive_screens`: list of Screen objects with running timers
+- Each iteration of the main loop: check elapsed time against `screen.duration`
+- On timeout: fire `screen.timeout()` — triggers alarm and takes focus
+- `Beeper.alarm_on()` / `Beeper.alarm_off()` wired to screen begin-actions
+- `late_flag` set in DB when a modal screen times out before user completes it
 
 ---
 
@@ -269,13 +267,13 @@ Recommend gettext for long-term maintainability.
 
 | # | Decision | When needed | Complexity |
 |---|---|---|---|
-| D-1 | YAML screen/widget schema design | Before Step 1 | High — shapes everything |
-| D-2 | Hard cap at 2 simultaneous tests | Before Step 3 | Low — recommendation is yes |
+| D-1 | Screen/widget format (CSV) | ✅ Resolved | — |
+| D-2 | One test at a time; two slots (A/B) | ✅ Resolved | — |
 | D-3 | Phase sequence and count per test type | Before Step 4 | Medium — scientific/UX |
 | D-4 | SQLite WAL mode suitability | Before Step 5 | Low — spike on hardware |
 | D-5 | Calibration data format and update path | Before Step 8 | Medium — scientific |
 | D-6 | How much analysis on-device vs. desktop | Before Step 8 | High — affects all of Step 8 |
-| D-7 | Resource lock / scheduler design | Before Step 10 | High — concurrent tests |
+| D-7 | Alive-screen timeout behavior (alarm only vs. auto-advance) | Before Step 10 | Low |
 | D-8 | pypubsub vs. custom event bus | Before Step 11 | Low |
 | D-9 | CSS framework for web UI | Before Step 12 | Low |
 | D-10 | Flask auth method (OQ-1) | Before Step 12 | Low |
