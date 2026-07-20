@@ -35,11 +35,14 @@ class CaptureSessionTestCase(unittest.TestCase):
         self.out_root = Path(self._tmp.name)
         self.cam  = FakeCam()
         self.leds = FakeLeds()
-        self._real_warmup = capture_runner.LED_WARMUP_S
-        capture_runner.LED_WARMUP_S = 0.0
+        self._real_on_warmup  = capture_runner.LED_ON_WARMUP_S
+        self._real_off_settle = capture_runner.LED_OFF_SETTLE_S
+        capture_runner.LED_ON_WARMUP_S  = 0.0
+        capture_runner.LED_OFF_SETTLE_S = 0.0
 
     def tearDown(self):
-        capture_runner.LED_WARMUP_S = self._real_warmup
+        capture_runner.LED_ON_WARMUP_S  = self._real_on_warmup
+        capture_runner.LED_OFF_SETTLE_S = self._real_off_settle
         self._tmp.cleanup()
 
     def make_session(self, **kwargs) -> CaptureSession:

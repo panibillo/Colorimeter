@@ -73,7 +73,15 @@ log = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 DEFAULT_EXPOSURE_MS  = 10
-LED_WARMUP_S         = 2.0          # seconds after LED on before capture
+
+# Exactly two LED-state-change waits per color: once after switching it on,
+# before any lit exposures, and once after switching it off, before any dark
+# exposures. All exposures for a state (every lit e0-e6, every dark e0-e6)
+# are captured back to back within that one wait — the LED is not toggled
+# again in between.
+LED_ON_WARMUP_S      = 2.0          # seconds after LED on, before lit captures
+LED_OFF_SETTLE_S     = 2.0          # seconds after LED off, before dark captures
+
 MAX_SETTLE_FRAMES    = 15           # max captures while waiting for exposure to settle
 SETTLE_TOLERANCE     = 0.05         # 5 % tolerance for exposure-settle check
 WAIT_TICK_S          = 0.05         # pump interval while waiting out a warmup
@@ -590,7 +598,7 @@ class CaptureRunner:
         yield self._progress("calibrate", "Phase 0: white LED exposure calibration")
 
         self._led_on(WHITE_LED_CH)
-        yield from self._wait(LED_WARMUP_S, "White LED on, warming up")
+        yield from self._wait(LED_ON_WARMUP_S, "White LED on, warming up")
 
         current_us     = cfg.initial_us
         phase0_retries = 0
@@ -647,7 +655,7 @@ class CaptureRunner:
             yield self._progress("capture", f"--- {leds.label(led)} ---")
 
             self._led_on(led)
-            yield from self._wait(LED_WARMUP_S, f"{color} LED on, warming up")
+            yield from self._wait(LED_ON_WARMUP_S, f"{color} LED on, warming up")
 
             # Per-LED desat loop + target channel selection
             current_us      = calibrated_us
@@ -816,7 +824,7 @@ class CaptureRunner:
 
             # LED off, then dark frames at the same exposures
             self._led_off(led)
-            yield from self._wait(LED_WARMUP_S, f"{color} LED off, settling")
+            yield from self._wait(LED_OFF_SETTLE_S, f"{color} LED off, settling")
 
             yield self._progress("capture", "Dark captures:")
             for exp_label, exp_us in zip(EXP_LABELS, exposures_us):

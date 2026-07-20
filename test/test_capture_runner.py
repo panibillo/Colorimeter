@@ -149,12 +149,15 @@ class RunnerTestCase(unittest.TestCase):
         self.cam  = FakeCam()
         self.leds = FakeLeds()
 
-        # The real 2 s LED warmups would dominate the test runtime.
-        self._real_warmup = capture_runner.LED_WARMUP_S
-        capture_runner.LED_WARMUP_S = 0.0
+        # The real 2 s LED waits would dominate the test runtime.
+        self._real_on_warmup  = capture_runner.LED_ON_WARMUP_S
+        self._real_off_settle = capture_runner.LED_OFF_SETTLE_S
+        capture_runner.LED_ON_WARMUP_S  = 0.0
+        capture_runner.LED_OFF_SETTLE_S = 0.0
 
     def tearDown(self):
-        capture_runner.LED_WARMUP_S = self._real_warmup
+        capture_runner.LED_ON_WARMUP_S  = self._real_on_warmup
+        capture_runner.LED_OFF_SETTLE_S = self._real_off_settle
         self._tmp.cleanup()
 
     def make_runner(self, **kwargs) -> CaptureRunner:
@@ -174,6 +177,21 @@ class RunnerTestCase(unittest.TestCase):
         """Read one LED's metadata dict back out of the archive."""
         with self.archive(runner) as f:
             return json.loads(f[f"/leds/{color}/led_metadata"][()])
+
+
+# ---------------------------------------------------------------------------
+# LED timing
+# ---------------------------------------------------------------------------
+
+class TestLedTiming(unittest.TestCase):
+    """Pins the shipped wait durations, independent of the tests that zero
+    them out for speed."""
+
+    def test_on_warmup_is_two_seconds(self):
+        self.assertEqual(capture_runner.LED_ON_WARMUP_S, 2.0)
+
+    def test_off_settle_is_two_seconds(self):
+        self.assertEqual(capture_runner.LED_OFF_SETTLE_S, 2.0)
 
 
 # ---------------------------------------------------------------------------
@@ -348,6 +366,20 @@ class TestLedLifetime(RunnerTestCase):
         runner = self.make_runner(led_start=1, led_end=1)
         self.run_to_completion(runner)
         self.assertFalse(self.cam.stopped)
+
+    def test_exactly_one_on_off_toggle_per_capture_led(self):
+        """
+        Each color gets exactly two LED-state-change waits: on, then off.
+        The LED must not be toggled again between individual exposures —
+        all lit frames are captured in the one "on" state, all dark frames
+        in the one "off" state.
+        """
+        runner = self.make_runner(led_start=1, led_end=2)
+        self.run_to_completion(runner)
+        for led in (1, 2):
+            events = [(ch, on) for ch, on in self.leds.history if ch == led]
+            self.assertEqual(events, [(led, True), (led, False)],
+                             f"LED {led} was toggled more than once: {events}")
 
 
 # ---------------------------------------------------------------------------
