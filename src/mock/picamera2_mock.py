@@ -219,6 +219,18 @@ class Picamera2:
         """
         self.controls.update(controls)
         print(f"[mock] set_controls: {controls}")
+
+    def _current_metadata(self):
+        """
+        Metadata for a capture: the .txt file values with any values set via
+        set_controls() overlaid.  The real pipeline echoes applied controls
+        (ExposureTime, AnalogueGain, …) back in capture metadata; without
+        this overlay a requested exposure never appears applied and
+        settle loops run to exhaustion.
+        """
+        meta = dict(self.metadata)
+        meta.update(self.controls)
+        return meta
     
     def start(self):
         """Start the camera (no-op in mock, but tracks state)."""
@@ -253,7 +265,13 @@ class Picamera2:
             so dual-stream callers don't crash.
 
         Populates self.main_array, self.raw_array, self.metadata.
+
+        The files never change during a run, so they are read from disk
+        once and cached; every later capture reuses the same arrays.
         """
+        if self.main_array is not None:
+            return
+
         stem = self.mock_stem
         jpg_file  = stem.with_suffix(".jpg")
         npy_file  = stem.with_suffix(".npy")
@@ -353,7 +371,7 @@ class Picamera2:
         request = MockRequest(
             main_array=self.main_array,
             raw_array=self.raw_array if self.is_raw_config else None,
-            metadata=self.metadata
+            metadata=self._current_metadata()
         )
         return request
     
@@ -390,7 +408,7 @@ class Picamera2:
         """
         if not self.started:
             raise RuntimeError("Camera not started; call start() first")
-        
+
         self._load_images_and_metadata()
-        return self.metadata
+        return self._current_metadata()
 

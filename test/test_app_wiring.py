@@ -82,14 +82,25 @@ class TestWidgetLookups(unittest.TestCase):
     def test_capture_widgets_resolve_with_expected_types(self):
         ca = self.screens["CA"]
         for widget_id, expected in (
-            (app_controller._CA_START_BTN, Button),
-            (app_controller._CA_COUNTER,   TextBox),
-            (app_controller._CA_STATUS_1,  Label),
-            (app_controller._CA_STATUS_2,  Label),
+            (app_controller._CA_START_BTN,     Button),
+            (app_controller._COUNTDOWN_WIDGET, TextBox),
+            (app_controller._CA_STATUS_1,      Label),
+            (app_controller._CA_STATUS_2,      Label),
         ):
             widget = ca.find(widget_id)
             self.assertIsNotNone(widget, f"CA widget {widget_id} not found")
             self.assertIsInstance(widget, expected)
+
+    def test_timed_screens_start_their_timer(self):
+        """
+        A screen with a duration must ask for its timer, or it renders a
+        countdown that never moves.
+        """
+        for screen_id, screen in self.screens.items():
+            if screen.duration > 0:
+                self.assertIn("start_timer", screen.beginactions,
+                              f"screen {screen_id!r} has duration "
+                              f"{screen.duration}s but no start_timer beginaction")
 
     def test_start_button_resolves_on_entry_screen(self):
         """The id _wire_callbacks uses to find the Start button."""

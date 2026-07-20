@@ -49,6 +49,7 @@ else:
     from kb_reader import KbReader
     log_prefix = ""
 
+import logging_manager
 import widgets
 from widgets import Button, Label, Screen, TextBox
 from screen_manager import ScreenManager
@@ -81,12 +82,12 @@ _SE_FIELD_WIDGETS = {
     "test":    "116",
     "collect": "118",
 }
-_CLOCK_WIDGET = "902"   # shared status-bar clock, present on every screen
+_CLOCK_WIDGET     = "902"   # shared status-bar clock, present on every screen
+_COUNTDOWN_WIDGET = "211"   # TextBox: MM:SS left on a timed screen, if present
 
 # Widget ids on the Capture screen. Widgets are named by their numeric id in
 # widget_defs.csv, so these are what Screen.find() matches on.
 _CA_START_BTN = "212"   # begins a capture run
-_CA_COUNTER   = "211"   # TextBox: LED progress, e.g. "3/10"
 _CA_STATUS_1  = "213"   # Label: current step
 _CA_STATUS_2  = "214"   # Label: detail / result
 
@@ -136,8 +137,7 @@ class AppController:
 
     def start(self) -> None:
         """Initialise hardware, load screens from CSV, then enter the event loop."""
-        logging.basicConfig(level=logging.INFO,
-                            format="%(levelname)-8s [%(name)s] %(message)s")
+        self._init_logging()
         if _SIMULATION_MODE:
             log.info("=" * 60)
             log.info("SIMULATION MODE: using mock hardware drivers")
@@ -147,6 +147,32 @@ class AppController:
         self._build_and_wire_screens()
         self._navigate_to("SE")  # Start at Sample Entry screen
         self._run()
+
+    @staticmethod
+    def _init_logging() -> None:
+        """
+        Route both logging systems to the terminal at one chosen level.
+
+        The level comes from $COLORIMETER_LOGLEVEL (DEBUG, INFO, WARNING,
+        ERROR), defaulting to INFO, so a level can be raised from the launch
+        command over ssh without editing the source:
+
+            COLORIMETER_LOGLEVEL=DEBUG python3 src/main.py
+
+        Modules are split across stdlib logging (app_controller, widgets,
+        screen_manager, capture_runner) and the logging_manager module
+        (bayer_cam, roi, db_manager, error_handler); one variable sets both.
+        """
+        name = (os.environ.get("COLORIMETER_LOGLEVEL") or "INFO").upper()
+        level = getattr(logging, name, None)
+        if not isinstance(level, int):
+            print(f"Unknown COLORIMETER_LOGLEVEL {name!r} — using INFO")
+            name, level = "INFO", logging.INFO
+
+        logging.basicConfig(level=level,
+                            format="%(levelname)-8s [%(name)s] %(message)s")
+        logging_manager.set_level(name)
+        log.info("Logging at %s (set COLORIMETER_LOGLEVEL to change)", name)
 
     def cleanup(self) -> None:
         """Silence hardware and release resources.  Safe to call multiple times."""
@@ -223,6 +249,11 @@ class AppController:
     def _wire_callbacks(self) -> None:
         """Wire button callbacks for all screens."""
         for screen_id, screen in self._screens.items():
+            # Timed screens ring and release the slot guard when they expire.
+            if screen.duration > 0:
+                screen.on_timeout = self._on_phase_timeout
+                log.info("Wired timeout on screen %r (%ds)", screen_id, screen.duration)
+
             # Wire Start button (if present) to start a test
             start_btn = screen.find("103")  # widget_id for start button
             if isinstance(start_btn, Button):
@@ -321,17 +352,21 @@ class AppController:
         self._capture = None
 
     def _show_progress(self, progress) -> None:
-        """Repaint the Capture screen from one Progress value."""
-        counter = ""
-        if progress.led_total:
-            counter = f"{progress.led_index}/{progress.led_total}"
-        detail = progress.color or f"{progress.fraction * 100:.0f}%"
-        self._set_capture_status(progress.message[:34], detail, counter)
-
-    def _set_capture_status(self, line1: str, line2: str,
-                            counter: "str | None" = None) -> None:
         """
-        Write the capture status lines, and optionally the LED counter.
+        Repaint the Capture screen from one Progress value.
+
+        LED position rides on the detail line rather than in widget 211:
+        that widget is the phase countdown, which runs concurrently with a
+        capture and would otherwise be overwritten every step.
+        """
+        detail = progress.color or f"{progress.fraction * 100:.0f}%"
+        if progress.led_total:
+            detail = f"{progress.led_index}/{progress.led_total}  {detail}"
+        self._set_capture_status(progress.message[:34], detail)
+
+    def _set_capture_status(self, line1: str, line2: str) -> None:
+        """
+        Write the two capture status lines.
 
         Only touches the Capture screen, and only when it is the active one —
         drawing to a screen the user has navigated away from would corrupt
@@ -352,11 +387,74 @@ class AppController:
                 widget.text = text
                 widget.draw(self._disp)
 
-        if counter is not None:
-            box = screen.find(_CA_COUNTER)
-            if isinstance(box, TextBox) and box.value != counter:
-                box.set_value(counter)
-                box.draw(self._disp)
+    # ── Timed phases ──────────────────────────────────────────────────────────
+
+    def _run_beginactions(self, screen: Screen) -> None:
+        """
+        Run the actions a screen declares in screen_defs.csv `beginactions`,
+        on entry to that screen.
+
+        Recognised actions:
+            start_timer         — start the phase countdown and register the
+                                  screen for timeout monitoring
+            alarm_on/alarm_off  — sound or silence the alarm
+
+        The alarm actions are resolved on the beeper module rather than
+        called outright: the simulation beeper defines them, the Pi beeper
+        does not, and a missing one must not take the screen down.
+        """
+        for action in screen.beginactions:
+            if action == "start_timer":
+                if screen.duration <= 0:
+                    log.warning("start_timer on screen %r with duration 0 — ignored",
+                                screen.screen_id)
+                    continue
+                screen.start_timer()
+                self._mgr.add_alive(screen)
+                self._update_countdown()
+            elif action in ("alarm_on", "alarm_off"):
+                fn = getattr(beeper, action, None)
+                if callable(fn):
+                    fn()
+                else:
+                    log.debug("beeper has no %s() — action skipped", action)
+            else:
+                log.warning("Unknown beginaction %r on screen %r",
+                            action, screen.screen_id)
+
+    def _update_countdown(self) -> None:
+        """
+        Repaint the active screen's countdown widget, if it has one running.
+
+        A no-op on screens without a timer or without widget 211, so the
+        event loop can call it unconditionally.
+        """
+        screen = self._mgr.active_screen if self._mgr else None
+        if screen is None or not screen.is_alive or screen.duration <= 0:
+            return
+        remaining = max(0, int(round(screen.duration - screen.elapsed())))
+        text = f"{remaining // 60:02d}:{remaining % 60:02d}"
+        box = screen.find(_COUNTDOWN_WIDGET)
+        if isinstance(box, TextBox) and box.value != text:
+            box.set_value(text)
+            box.draw(self._disp)
+
+    def _on_phase_timeout(self, screen: Screen) -> None:
+        """
+        A timed phase ran out: sound the alarm and release the slot guard.
+
+        The screen is deliberately left showing. A capture sweep outlasts the
+        two-minute phase, and navigating away mid-run would stop its progress
+        from being drawn; the user moves on with NEXT when ready.
+        """
+        log.info("AppController: phase %r timed out",
+                 screen.screen_id or screen.name)
+        alarm = getattr(beeper, "alarm_on", None) or getattr(beeper, "beep", None)
+        if callable(alarm):
+            alarm()
+        if self.active_slot is not None:
+            log.info("AppController: test complete (slot %s)", self.active_slot)
+            self.active_slot = None
 
     # ── Navigation ────────────────────────────────────────────────────────────
 
@@ -394,6 +492,7 @@ class AppController:
 
         self._mgr.switch_to(screen, clear_first=clear_first)
         log.info("AppController: navigated to screen %r (clear_first=%s)", screen_id, clear_first)
+        self._run_beginactions(screen)
 
     # ── Event loop ────────────────────────────────────────────────────────────
 
@@ -414,13 +513,14 @@ class AppController:
             # Advance any capture in flight by one step.
             self._pump_capture()
 
-            # Clock: update the active screen's clock widget once per second.
+            # Clock and phase countdown: once per second on the active screen.
             if now - last_clock >= 1.0:
                 last_clock = now
                 clock = self._mgr.active_screen.find(_CLOCK_WIDGET)
                 if isinstance(clock, TextBox):
                     clock.set_value(datetime.datetime.now().strftime("%H:%M:%S"))
                     clock.draw(self._disp)
+                self._update_countdown()
 
             # Keyboard input.
             key = self._kb.read_one()
@@ -433,9 +533,13 @@ class AppController:
                 log.info(f"AppController: touch detected at {pos}, is_touched={self._touch.is_touched}")  # type: ignore
                 if pos:
                     self._mgr.on_touch(*pos)
-                # Wait for touch release with timeout
+                # Wait for touch release with timeout. In simulation the
+                # release event only arrives through process_events(), so it
+                # must be pumped here or every click waits out the timeout.
                 timeout = time.monotonic() + 1.0  # 1 second timeout
                 while self._touch.is_touched and time.monotonic() < timeout:  # type: ignore
+                    if _SIMULATION_MODE and hasattr(self._disp, 'process_events'):
+                        self._disp.process_events()  # type: ignore
                     time.sleep(_POLL_S)
                 if time.monotonic() >= timeout:
                     log.warning("AppController: touch timeout — forcing release")
