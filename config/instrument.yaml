@@ -1,5 +1,18 @@
 # Colorimeter — instrument hardware configuration
 
+# Where capture archives are written, and what they are called.
+# One archive per capture set, named <timestamp><extension>, e.g.
+# 20260719_1343.h5
+capture:
+  # Relative paths resolve against the project root — the directory holding
+  # src/ and config/. On the Pi that makes this ~/pi/Colorimeter/captures.
+  # An absolute path is used as given.
+  directory:        captures
+  # strftime format for the timestamp that names each archive, and which is
+  # also stored as the archive's suite_id.
+  timestamp_format: "%Y%m%d_%H%M"
+  extension:        .h5
+
 display:
   width:         320
   height:        240

@@ -35,9 +35,11 @@ Usage:
             print(progress.message)
     print(runner.out_path, runner.results)
 
-Output: a single HDF5 archive at config.out_dir/<timestamp>.h5 — by default
-a `captures` directory beside src/, overridable per run via CaptureConfig or
-globally via $COLORIMETER_CAPTURE_DIR. It holds the
+Output: a single HDF5 archive per capture set. Where it is written and what
+it is called are declared in config/instrument.yaml under `capture:`, and
+reached through config_manager — this module contains no paths or filename
+patterns of its own. A caller can override the directory per run through
+CaptureConfig.out_dir. The archive holds the
 ROI crops, per-LED metadata, capture statistics, and the e3 JPEG. Nothing is
 staged on disk first — frames go from the camera into the archive in memory,
 which keeps a ten-LED suite to one file instead of several hundred.
@@ -47,7 +49,6 @@ the converter that rebuilds an archive from a legacy camtest8 directory.
 """
 
 import logging
-import os
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -56,6 +57,7 @@ from typing import Iterator
 
 import numpy as np
 
+import config_manager as config
 from bayer_cam import BayerCam
 from capture_h5 import CaptureSuiteWriter
 
@@ -77,26 +79,6 @@ SETTLE_TOLERANCE     = 0.05         # 5 % tolerance for exposure-settle check
 WAIT_TICK_S          = 0.05         # pump interval while waiting out a warmup
 
 OUT_STEM = "camtest8"
-
-# Where capture archives are written. Resolved per run rather than at import
-# so a caller can redirect output by setting the environment variable, and so
-# tests never inherit a path baked in when the module was first loaded.
-CAPTURE_DIR_ENV = "COLORIMETER_CAPTURE_DIR"
-CAPTURE_SUBDIR  = "captures"
-
-
-def default_out_dir() -> Path:
-    """
-    Return the directory capture archives are written to.
-
-    Uses $COLORIMETER_CAPTURE_DIR when set, otherwise a `captures` directory
-    beside the project's src/. Both the Pi and the desktop keep the project
-    at a different absolute path, so this is deliberately relative.
-    """
-    from_env = os.environ.get(CAPTURE_DIR_ENV)
-    if from_env:
-        return Path(from_env).expanduser()
-    return Path(__file__).resolve().parent.parent / CAPTURE_SUBDIR
 
 # ROI definitions — image space (x, y, w, h) for 2304×1296 capture
 ROI_SAMPLE = (1150, 790,  68, 68)
@@ -135,9 +117,10 @@ class CaptureConfig:
     led_start:     int = 1
     led_end:       int = 1
     focus_diopter: "float | None" = None
-    # default_factory, not a plain default: the location is resolved when a
-    # config is built, so redirecting output does not depend on import order.
-    out_dir:       Path = field(default_factory=default_out_dir)
+    # Declared in config/instrument.yaml under `capture:`. default_factory,
+    # not a plain default, so the location is resolved when a config is built
+    # rather than baked in when this module is first imported.
+    out_dir:       Path = field(default_factory=config.capture_dir)
 
     @property
     def initial_us(self) -> int:
@@ -580,9 +563,10 @@ class CaptureRunner:
         cam  = self._cam
         leds = self._leds
 
-        self.suite_id = datetime.now().strftime("%Y%m%d_%H%M")
+        # Naming lives in config/instrument.yaml under `capture:`.
+        self.suite_id = config.capture_suite_id()
         cfg.out_dir.mkdir(parents=True, exist_ok=True)
-        self.out_path = cfg.out_dir / f"{self.suite_id}.h5"
+        self.out_path = cfg.out_dir / config.capture_archive_name(self.suite_id)
         self.results = []
 
         white_croi  = _channel_roi(ROI_WHITE)

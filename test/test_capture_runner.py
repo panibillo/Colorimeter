@@ -32,6 +32,7 @@ sys.path.insert(0, str(_ROOT / "src"))
 sys.path.insert(0, str(_ROOT / "dev"))
 
 import capture_runner
+import config_manager
 from capture_runner import CaptureConfig, CaptureRunner, EXP_LABELS
 
 # Full-sensor frame size the ROI constants are defined against.
@@ -178,43 +179,30 @@ class RunnerTestCase(unittest.TestCase):
 # ---------------------------------------------------------------------------
 # Output location
 # ---------------------------------------------------------------------------
+# Where archives are written and what they are called is config_manager's
+# job now; see test_config_manager.py. What belongs here is that a config
+# built for a run honours an explicit directory.
 
 class TestOutputLocation(unittest.TestCase):
 
     def setUp(self):
-        self._saved = os.environ.pop(capture_runner.CAPTURE_DIR_ENV, None)
+        self._saved = os.environ.pop(config_manager.CAPTURE_DIR_ENV, None)
 
     def tearDown(self):
-        os.environ.pop(capture_runner.CAPTURE_DIR_ENV, None)
+        os.environ.pop(config_manager.CAPTURE_DIR_ENV, None)
         if self._saved is not None:
-            os.environ[capture_runner.CAPTURE_DIR_ENV] = self._saved
-
-    def test_default_is_relative_to_the_project(self):
-        """Never a hardcoded home path — the Pi and desktop differ."""
-        out = capture_runner.default_out_dir()
-        self.assertEqual(out.name, capture_runner.CAPTURE_SUBDIR)
-        self.assertEqual(out.parent, Path(capture_runner.__file__).resolve().parent.parent)
-
-    def test_environment_variable_overrides_default(self):
-        os.environ[capture_runner.CAPTURE_DIR_ENV] = "/tmp/somewhere/else"
-        self.assertEqual(capture_runner.default_out_dir(),
-                         Path("/tmp/somewhere/else"))
-
-    def test_environment_variable_expands_user(self):
-        os.environ[capture_runner.CAPTURE_DIR_ENV] = "~/capture_archives"
-        self.assertEqual(capture_runner.default_out_dir(),
-                         Path.home() / "capture_archives")
+            os.environ[config_manager.CAPTURE_DIR_ENV] = self._saved
 
     def test_config_resolves_location_when_built_not_when_imported(self):
         """
         Regression guard: out_dir was once a plain dataclass default, baked in
         at import, so setting the variable afterwards silently had no effect.
         """
-        os.environ[capture_runner.CAPTURE_DIR_ENV] = "/tmp/set/after/import"
+        os.environ[config_manager.CAPTURE_DIR_ENV] = "/tmp/set/after/import"
         self.assertEqual(CaptureConfig().out_dir, Path("/tmp/set/after/import"))
 
     def test_explicit_out_dir_wins_over_environment(self):
-        os.environ[capture_runner.CAPTURE_DIR_ENV] = "/tmp/ignored"
+        os.environ[config_manager.CAPTURE_DIR_ENV] = "/tmp/ignored"
         config = CaptureConfig(out_dir=Path("/tmp/explicit"))
         self.assertEqual(config.out_dir, Path("/tmp/explicit"))
 

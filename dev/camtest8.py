@@ -11,9 +11,10 @@ Performs automatic exposure bracketing for each LED color and stores only
 the ROI_BOUND crop (all 4 Bayer channels) for each of 7 exposures, plus
 a focused full-image JPEG at the median exposure (e3).
 
-Output: one HDF5 archive per capture set, at OUT_DIR/<timestamp>.h5. Frames
-go from the camera into the archive in memory; no image files are staged on
-disk. Inspect a finished archive with:
+Output: one HDF5 archive per capture set. The directory and the filename are
+declared in config/instrument.yaml under `capture:` — nothing here hardcodes
+a path. Frames go from the camera into the archive in memory; no image files
+are staged on disk. Inspect a finished archive with:
     python3 src/hdf5read.py <path.h5>
 
 Usage:
