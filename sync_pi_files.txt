@@ -1,17 +1,120 @@
-# .rsync_files — explicit list of files to sync to the remote.
+# sync_pi_files.txt — explicit list of files mirrored onto the Pi.
+#
+# Used by sync_to_pi.sh, which rsyncs each listed path from
+# ~/Projects/Colorimeter/ to ~/pi/Colorimeter/ on the remote.
 #
 # Rules:
 #   - Paths are relative to the project root.
-#   - Blank lines and lines starting with # are ignored by rsync's
-#     --files-from option (rsync treats # as a comment).
-#   - Add or remove lines here to control exactly what gets synced.
-#   - Wildcards (e.g. src/*.py) are NOT expanded by rsync when using
-#     --files-from; list each file explicitly, or use a shell glob to
-#     generate the list dynamically (see sync_project.sh notes).
+#   - Wildcards are NOT expanded. rsync --files-from takes literal paths, so
+#     every file must be listed individually. Adding a module to the project
+#     means adding a line here too, or it silently never reaches the Pi.
+#   - Comments and blank lines are stripped by sync_to_pi.sh before the list
+#     reaches rsync. rsync itself does NOT treat '#' as a comment in a
+#     --files-from file (only in --exclude-from / --include-from / filter
+#     files), so this file must not be passed to rsync directly.
+#
+# The list below is the import graph of the two entry points — src/main.py
+# (touchscreen application) and dev/camtest8.py (command-line capture) — plus
+# the data files they read. See the end of this file for how to regenerate it.
 
-dev/camtest4.py
+# ── Entry points ─────────────────────────────────────────────────────────
+src/main.py
+dev/camtest8.py
 
-#src/color_cam.py
-#src/db_manager.py
-#src/error_handler.py
+# ── Capture pipeline ─────────────────────────────────────────────────────
+src/capture_runner.py
+src/capture_session.py
+src/capture_h5.py
+src/hdf5write.py
+src/hdf5read.py
+src/bayer_cam.py
+src/lighting_cal8.py
 
+# ── User interface ───────────────────────────────────────────────────────
+src/app_controller.py
+src/screen_manager.py
+src/widgets.py
+src/geometry.py
+src/csv_to_widgets.py
+src/csv_loader.py
+
+# Screen layout — the application cannot build a single screen without these.
+src/screen_defs.csv
+src/screen_widgets.csv
+src/widget_defs.csv
+
+# ── Hardware drivers ─────────────────────────────────────────────────────
+src/ili9341.py
+src/tsc2007.py
+src/beeper.py
+src/kb_reader.py
+
+# ── Support ──────────────────────────────────────────────────────────────
+src/config_manager.py
+src/logging_manager.py
+src/error_handler.py
+src/utils.py
+
+# ── Configuration ────────────────────────────────────────────────────────
+config/instrument.yaml
+config/palette.yaml
+
+# ── Tools run on the Pi ──────────────────────────────────────────────────
+src/calibrate_screen.py
+
+# ── Provisioning reference ───────────────────────────────────────────────
+requirements-frozen.txt
+system_requirements.txt
+
+# ── Deliberately NOT synced ──────────────────────────────────────────────
+#
+# config/touch_cal.json
+#     Device-specific. Written on the Pi by calibrate_screen.py and read from
+#     ~/pi/Colorimeter/config/touch_cal.json. Sending the desktop copy would
+#     overwrite the Pi's own touchscreen calibration with a stale one.
+#     config/focus_cal.json (written by bayer_cam.save_focus_cal) is
+#     device-specific in the same way and is never created on the desktop.
+#
+# src/mock/
+#     Desktop test doubles. bayer_cam falls back to mock.picamera2_mock only
+#     when picamera2 is unimportable, which should not happen on the Pi, and
+#     picamera2_mock is useless there anyway without mock_camera/ (44 MB).
+#
+# src/run_simulation.py, src/test_mock_rendering.py
+#     Desktop simulation launchers.
+#
+# test/
+#     Desktop test suite. The capture tests run against fakes and would pass
+#     on the Pi without exercising hardware; add individual files here if you
+#     want them on the device.
+#
+# dev/*.py other than camtest8.py
+#     Earlier experiments. Add a line when you need one on the Pi.
+#
+# ── Regenerating this list ───────────────────────────────────────────────
+# After adding or removing imports, re-derive the module set and compare:
+#
+#   python3 - <<'PY'
+#   import ast
+#   from pathlib import Path
+#   ROOT = Path(".").resolve(); SRC, DEV = ROOT/"src", ROOT/"dev"
+#   def imports(p):
+#       out = set()
+#       for n in ast.walk(ast.parse(p.read_text())):
+#           if isinstance(n, ast.Import):
+#               out |= {a.name.split(".")[0] for a in n.names}
+#           elif isinstance(n, ast.ImportFrom) and n.module and not n.level:
+#               out.add(n.module.split(".")[0])
+#       return out
+#   def find(name):
+#       for b in (SRC, DEV):
+#           if (b/f"{name}.py").exists(): return b/f"{name}.py"
+#           if (b/name/"__init__.py").exists(): return b/name/"__init__.py"
+#   seen, queue = set(), [SRC/"main.py", DEV/"camtest8.py"]
+#   while queue:
+#       p = queue.pop().resolve()
+#       if p in seen: continue
+#       seen.add(p)
+#       queue += [f for n in imports(p) if (f := find(n)) and f.resolve() not in seen]
+#   for f in sorted(p.relative_to(ROOT).as_posix() for p in seen): print(f)
+#   PY

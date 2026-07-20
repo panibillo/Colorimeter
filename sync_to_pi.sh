@@ -41,6 +41,11 @@ fi
 
 # ---------------------------------------------------------------------------
 # Sync local → remote
+#
+# rsync does not treat '#' as a comment in a --files-from file — only in
+# --exclude-from, --include-from and filter files — so comments and blank
+# lines are stripped here before the list is handed over. Without this,
+# every comment line would be sent to the remote as a filename.
 # ---------------------------------------------------------------------------
 echo ">>> Syncing TO ${REMOTE}:${REMOTE_DEST_DIR} ..."
 
@@ -50,7 +55,7 @@ rsync \
     --verbose \
     --checksum \
     --relative \
-    --files-from="${FILE_LIST}" \
+    --files-from=<(grep -vE '^[[:space:]]*(#|$)' "${FILE_LIST}") \
     "${PROJECT_ROOT}/" \
     "${REMOTE}:${REMOTE_DEST_DIR}/"
 
