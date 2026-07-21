@@ -39,7 +39,10 @@ class Slot:
     ------
     name         : 'A' or 'B'
     record       : the data being collected (see _new_record)
-    phase        : current phase id (key into phases.PHASES)
+    phase        : viewed phase id — which screen is on display (key into phases)
+    active_phase : live phase id — where the test actually is.  Equals `phase`
+                   except while the user previews other steps with PRIOR/NEXT;
+                   the header offers Resume to jump back to it.
     running      : a countdown/count-up timer is active (armed vs running)
     capturing    : a camera capture for this slot is in flight
     timer        : the active TimerState, or None
@@ -51,6 +54,7 @@ class Slot:
     name:         str
     record:       dict                 = field(default_factory=_new_record)
     phase:        str                  = "entry"
+    active_phase: str                  = "entry"
     running:      bool                 = False
     capturing:    bool                 = False
     timer:        Optional[TimerState] = None
@@ -65,8 +69,9 @@ class Slot:
 
     def clear_run(self) -> None:
         """Reset the per-run state (keeps name); used when starting a new sample."""
-        self.record    = _new_record()
-        self.phase     = "entry"
+        self.record       = _new_record()
+        self.phase        = "entry"
+        self.active_phase = "entry"
         self.running   = False
         self.capturing = False
         self.timer     = None

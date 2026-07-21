@@ -38,12 +38,32 @@ class ILI9341:
         self._initialized = False
         self._key_event_handler = None
         self._mouse_event_handler = None
+        self._z = 0          # monotonically increasing z-order: draw order = paint order
         log.info("ILI9341 (mock): initialized")
+
+    def _next_z(self) -> int:
+        """
+        Next paint layer.  matplotlib is retained-mode and draws patches *below*
+        text by default zorder, so a later fill_rect could not erase earlier
+        text.  Stamping every artist with an increasing zorder makes call order
+        the paint order — a real framebuffer's behaviour — so per-widget redraws
+        (clock, timer) correctly cover what they replace.
+        """
+        self._z += 1
+        return self._z
 
     def init(self) -> None:
         """Initialize the display and matplotlib figure."""
         if self._initialized:
             return
+
+        # Disable matplotlib's default key bindings.  They hijack ordinary typing:
+        # 'l'/'k'/'L' toggle log axes (which crashes on our flipped y-limits),
+        # 'f' toggles fullscreen, 'q' quits the window, 's' saves, 'g' toggles the
+        # grid, 'p'/'o' pan/zoom, etc.  This is a text-entry surface, so silence
+        # all of them and route keys only through our own handler.
+        for key in [k for k in plt.rcParams if k.startswith("keymap.")]:
+            plt.rcParams[key] = []
 
         fig, ax = plt.subplots(figsize=(8, 6), dpi=100)
         self.fig = fig
@@ -89,6 +109,7 @@ class ILI9341:
         # Clear all existing artists (patches, text) from the axes
         # This mirrors the real ili9341 behavior of clearing display memory
         self.ax.clear()
+        self._z = 0          # fresh frame: restart the paint-order counter
 
         # Re-setup the axes
         self.ax.set_xlim(0, self.WIDTH)
@@ -108,7 +129,7 @@ class ILI9341:
         rgb = self._rgb565_to_rgb(color)
         rect_patch = patches.Rectangle(
             (rect.x, rect.y), rect.w, rect.h,
-            linewidth=0, facecolor=rgb, edgecolor='none'
+            linewidth=0, facecolor=rgb, edgecolor='none', zorder=self._next_z()
         )
         self.ax.add_patch(rect_patch)
 
@@ -117,14 +138,15 @@ class ILI9341:
             # Gray dashed outline around widget bounds
             outline = patches.Rectangle(
                 (rect.x, rect.y), rect.w, rect.h,
-                linewidth=1, facecolor='none', edgecolor=(0.5, 0.5, 0.5), linestyle='--'
+                linewidth=1, facecolor='none', edgecolor=(0.5, 0.5, 0.5),
+                linestyle='--', zorder=self._next_z()
             )
             self.ax.add_patch(outline)
 
             # Widget ID in corner with larger bold font
             self.ax.text(rect.x + 1, rect.y + 1, widget_id,  # type: ignore
                         color=(0.5, 0.5, 0.5), fontsize=12, va='top', ha='left',
-                        fontweight='bold')
+                        fontweight='bold', zorder=self._next_z())
 
         self.fig.canvas.draw_idle()
 
@@ -136,7 +158,7 @@ class ILI9341:
         rect_patch = patches.Rectangle(
             (rect.x, rect.y), rect.w, rect.h,
             linewidth=thickness, facecolor='none' if not fill else rgb,
-            edgecolor=rgb
+            edgecolor=rgb, zorder=self._next_z()
         )
         self.ax.add_patch(rect_patch)  # type: ignore
 
@@ -145,14 +167,15 @@ class ILI9341:
             # Gray dashed outline around widget bounds (drawn behind if widget already has outline)
             outline = patches.Rectangle(
                 (rect.x - 0.5, rect.y - 0.5), rect.w + 1, rect.h + 1,
-                linewidth=0.5, facecolor='none', edgecolor=(0.5, 0.5, 0.5), linestyle=':'
+                linewidth=0.5, facecolor='none', edgecolor=(0.5, 0.5, 0.5),
+                linestyle=':', zorder=self._next_z()
             )
             self.ax.add_patch(outline)  # type: ignore
 
             # Widget ID in corner with larger bold font
             self.ax.text(rect.x + 1, rect.y + 1, widget_id,  # type: ignore
                         color=(0.5, 0.5, 0.5), fontsize=12, va='top', ha='left',
-                        fontweight='bold')
+                        fontweight='bold', zorder=self._next_z())
 
         self.fig.canvas.draw_idle()
 
@@ -195,21 +218,23 @@ class ILI9341:
             y = rect.y + rect.h - 2
 
         fontsize = max(6, size // 2)  # Scale down matplotlib fontsize
-        self.ax.text(x, y, text, color=text_color, ha=ha, va=va, fontsize=fontsize)  # type: ignore
+        self.ax.text(x, y, text, color=text_color, ha=ha, va=va,  # type: ignore
+                     fontsize=fontsize, zorder=self._next_z())
 
         # Draw widget bounds outline and ID if provided
         if widget_id:
             # Gray dashed outline around widget bounds
             outline = patches.Rectangle(
                 (rect.x, rect.y), rect.w, rect.h,
-                linewidth=0.5, facecolor='none', edgecolor=(0.5, 0.5, 0.5), linestyle=':'
+                linewidth=0.5, facecolor='none', edgecolor=(0.5, 0.5, 0.5),
+                linestyle=':', zorder=self._next_z()
             )
             self.ax.add_patch(outline)  # type: ignore
 
             # Widget ID in top-left corner with larger bold font
             self.ax.text(rect.x + 1, rect.y + 1, widget_id,  # type: ignore
                         color=(0.5, 0.5, 0.5), fontsize=12, va='top', ha='left',
-                        fontweight='bold')
+                        fontweight='bold', zorder=self._next_z())
 
         self.fig.canvas.draw_idle()
 

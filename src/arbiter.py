@@ -152,9 +152,13 @@ class Arbiter:
         widgets.set_button_sound(beeper.click)
 
     def _build_model(self) -> None:
-        self._pool   = Pool.build()
-        self._phases = build_phases()
-        self._slots  = {"A": Slot("A"), "B": Slot("B")}
+        self._pool = Pool.build()
+        # Shorten the reagent countdowns in simulation so runs are quick to test.
+        if _SIMULATION_MODE:
+            self._phases = build_phases(reagent1_secs=20, reagent2_secs=20)
+        else:
+            self._phases = build_phases()
+        self._slots = {"A": Slot("A"), "B": Slot("B")}
 
     def cleanup(self) -> None:
         log.info("Arbiter: cleanup")
@@ -188,10 +192,26 @@ class Arbiter:
     # ── Phase contract: navigation / render ────────────────────────────────────
 
     def goto(self, slot: Slot, phase_id: str) -> None:
-        """Move a slot to a phase: run its once-only activate, then draw if focused."""
-        slot.phase = phase_id
+        """
+        Advance a slot to a phase (the real protocol flow): this becomes the
+        slot's live phase.  Runs its once-only activate, then draws if focused.
+        """
+        slot.phase = slot.active_phase = phase_id
         self._phases[phase_id].activate(self, slot)
         self.render(slot)
+
+    def view(self, slot: Slot, phase_id: str) -> None:
+        """
+        Preview a phase without advancing the test (PRIOR/NEXT browsing).  Only
+        the viewed phase changes — the live phase, its timer, and any capture
+        keep running untouched.  No activate(), so nothing is started or reset.
+        """
+        slot.phase = phase_id
+        self.render(slot)
+
+    def resume(self, slot: Slot) -> None:
+        """Return the view to the slot's live phase (the header Resume button)."""
+        self.view(slot, slot.active_phase)
 
     def render(self, slot: Slot) -> None:
         """
@@ -322,7 +342,9 @@ class Arbiter:
             if t is not None and t.expired(now):
                 slot.timer = None
                 self.alarm(slot)
-                self._phases[slot.phase].on_expire(self, slot)
+                # The timer belongs to the live phase, not whatever is being
+                # previewed, so expiry is always handled by active_phase.
+                self._phases[slot.active_phase].on_expire(self, slot)
 
     def pump_capture(self) -> None:
         """Advance the in-flight capture one step; reflect progress on the owner slot."""
@@ -546,7 +568,7 @@ def _selftest() -> None:
     # Advance B in the background into a running reagent; the shared pool must
     # keep showing A's entry phase (its title), not B's.
     arb.focus(A)
-    B.record["id"] = "BX9"; B.phase = "reagent1"
+    B.record["id"] = "BX9"; B.phase = B.active_phase = "reagent1"
     B.running = True
     from timer import TimerState
     B.timer = TimerState.down(120, arb.now())

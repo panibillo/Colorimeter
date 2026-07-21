@@ -18,28 +18,17 @@ import sys
 os.environ['COLORIMETER_SIMULATION'] = '1'
 
 # Import and run the app
-from app_controller import AppController
-
-if 1:
-    from csv_to_widgets import load_all_screens
-
-    screens = load_all_screens('src/widget_defs.csv', 'src/screen_defs.csv', 'src/screen_widgets.csv')
-    se_screen = screens['SE']
-
-    print(f"SE screen has {len(se_screen.tabbed_widgets)} tabbed, {len(se_screen.untabbed_widgets)} untabbed widgets\n")
-
-    print("Label widgets in SE:")
-    for w in se_screen.untabbed_widgets:
-        if w.widget_type == "Label":
-            print(f"  {w.widget_id}: text='{w.label}' fgcolor={w.fgcolor} bgcolor={w.bgcolor}")
+from arbiter import Arbiter
 
 if __name__ == "__main__":
+    app = None
     try:
-        app = AppController()
+        app = Arbiter()
         app.start()
     except KeyboardInterrupt:
         print("\nShutdown requested")
-        app.cleanup()
+        if app:
+            app.cleanup()
         sys.exit(0)
     except Exception as e:
         print(f"Error: {e}")

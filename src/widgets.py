@@ -449,6 +449,10 @@ class Label(Widget):
         self.valign = valign
 
     def draw(self, display) -> None:
+        # Paint the background first: draw_text renders glyphs only (transparent),
+        # so a coloured label needs its own fill, and a redraw needs it to erase
+        # the previous text (e.g. the 1 Hz clock).
+        display.fill_rect(self.rect, self.bg)
         display.draw_text(self.text, self.rect,
                           color=self.color, bg=self.bg,
                           size=self.size,
@@ -557,6 +561,9 @@ class TextBox(Widget):
             return
         self._last_drawn = state
         widget_id_str = str(self.widget_id) if self.widget_id else ""
+        # Fill the background first so edits/backspaces erase the old value
+        # (draw_text renders glyphs only).  The border is drawn after, on top.
+        display.fill_rect(self.rect, self.bg)
         display.draw_text(self.value, self.rect,
                           color=self.color, bg=self.bg,
                           size=self.size,

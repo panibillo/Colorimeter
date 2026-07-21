@@ -76,6 +76,12 @@ class Phase:
     def on_expire(self, arb, slot) -> None:
         """The slot's countdown expired.  Default: nothing."""
 
+    def _show_collect(self, pool, slot) -> None:
+        """Keep the collect stamp in view once a run is under way (post-entry)."""
+        ts = slot.record.get("collect", "")
+        if ts:
+            pool.put("collect_line", f"Collected  {ts}")
+
     # ── shared header/footer chrome ────────────────────────────────────────────
 
     def _chrome(self, pool, slot, arb, main_label: str, main_on,
@@ -83,11 +89,25 @@ class Phase:
         """
         Title, the header main button, the slot toggle, and the footer.
 
-        lock_nav disables PRIOR/NEXT (a timer is running or a capture is in
-        flight — the user must not step away).  The slot toggle's label and
-        colour are the arbiter's concern (they depend on focus), so it is only
-        shown here.
+        PRIOR/NEXT *preview* the neighbouring steps (arb.view) without advancing
+        the test.  While previewing (viewed phase != live phase) the header main
+        button becomes Resume — a jump back to the live phase — and this phase's
+        own action (run_btn) is disabled so a preview can't start or cancel
+        anything.
+
+        lock_nav can still hard-disable PRIOR/NEXT, but nothing uses it now that
+        running countdowns and in-flight captures are safe to leave (the arbiter
+        keeps them alive in the background and Resume returns to them); it stays
+        for any future phase that genuinely must trap the user.  The slot toggle's
+        label and colour are the arbiter's concern (they depend on focus), so it
+        is only shown here.
         """
+        if slot.phase != slot.active_phase:                 # previewing another step
+            main_label, main_enabled = "Resume", True
+            main_on  = lambda: arb.resume(slot)
+            lock_nav = False                                # previewing is safe
+            pool.enable("run_btn", False)
+
         pool.put("title", self.title or slot.record.get("id", ""))
         pool.put("main_btn", main_label, on=main_on, enabled=main_enabled)
         pool.show("slot_btn")
@@ -95,10 +115,10 @@ class Phase:
         can_prior = bool(self.prior) and not lock_nav
         can_next  = bool(self.next)  and not lock_nav
         pool.put("prior_btn", "PRIOR",
-                 on=(lambda: arb.goto(slot, self.prior)) if can_prior else None,
+                 on=(lambda: arb.view(slot, self.prior)) if can_prior else None,
                  enabled=can_prior)
         pool.put("next_btn", "NEXT",
-                 on=(lambda: arb.goto(slot, self.next)) if can_next else None,
+                 on=(lambda: arb.view(slot, self.next)) if can_next else None,
                  enabled=can_next)
         pool.show("clock")
 
@@ -158,8 +178,11 @@ class ReagentPhase(Phase):
         self.running  = running      # (instr1, instr2) while counting down
 
     def enter(self, pool, slot, arb) -> None:
+        # Show the live countdown only when this reagent is the slot's live phase;
+        # while it is merely being previewed, show the armed duration instead.
+        is_live = slot.active_phase == self.phase_id
         pool.put("caption", "Remaining")
-        if slot.running:
+        if is_live and slot.running:
             pool["timer"].bind(slot.timer, interactive=True)
             pool.put("timer")
             pool.put("run_btn", "RESET", on=lambda: arb.open_modal(slot, "reset"))
@@ -174,9 +197,12 @@ class ReagentPhase(Phase):
             i1, i2 = self.armed
         pool.put("instr1", i1)
         pool.put("instr2", i2)
+        self._show_collect(pool, slot)
+        # A running countdown does NOT lock nav: the timer keeps running in the
+        # background (arbiter polls it and alarms on expiry, same as an A/B
+        # toggle), and Resume brings the view back.
         self._chrome(pool, slot, arb, "CANCEL",
-                     main_on=lambda: arb.open_modal(slot, "cancel"),
-                     lock_nav=slot.running)
+                     main_on=lambda: arb.open_modal(slot, "cancel"))
 
     def start(self, arb, slot) -> None:
         slot.timer   = TimerState.down(self.secs, arb.now())
@@ -209,23 +235,34 @@ class ReadPhase(Phase):
         slot.running = True
 
     def enter(self, pool, slot, arb) -> None:
+        # When merely previewing this step (not the live phase) the slot's timer
+        # belongs to another phase, so show a neutral 00:00 elapsed instead.
+        is_live = slot.active_phase == self.phase_id
         pool.put("caption", "Elapsed")
-        pool["timer"].bind(slot.timer, interactive=False)
+        if is_live and slot.timer is not None:
+            pool["timer"].bind(slot.timer, interactive=False)
+        else:
+            preview = TimerState.up(arb.now())
+            preview.pause(arb.now())
+            pool["timer"].bind(preview, interactive=False)
         pool.put("timer")
         pool.put("color_lbl", "Read color")
         pool.put("color_fld", slot.record.get("manual_color", ""))
-        if slot.capturing:
+        if is_live and slot.capturing:
             pool.put("instr1", slot.progress or "Capturing...")
             pool.put("run_btn", "RUNNING", enabled=False)
             pool.put("instr2", "Do not touch strip")
         else:
             pool.put("run_btn", "CAPTURE",
                      on=lambda: self.capture(arb, slot, pool),
-                     enabled=arb.capture_available())
+                     enabled=is_live and arb.capture_available())
             pool.put("instr2", "Insert strip & press CAPTURE")
+        self._show_collect(pool, slot)
+        # A capture in flight does NOT lock nav either: it is arbiter-owned and
+        # runs to completion regardless of what's on screen (same as an A/B
+        # toggle), advancing to analysis when done; Resume returns to it.
         self._chrome(pool, slot, arb, "CANCEL",
-                     main_on=lambda: arb.open_modal(slot, "cancel"),
-                     lock_nav=slot.capturing)
+                     main_on=lambda: arb.open_modal(slot, "cancel"))
 
     def capture(self, arb, slot, pool) -> None:
         slot.record["manual_color"] = pool["color_fld"].value
@@ -266,6 +303,7 @@ class AnalysisPhase(Phase):
         pool.put("run_btn", "POST",
                  on=(lambda: arb.post_results(slot)) if done else None,
                  enabled=done)
+        self._show_collect(pool, slot)
         if done:
             self._chrome(pool, slot, arb, "NEXT",
                          main_on=lambda: arb.next_sample(slot))
@@ -309,14 +347,19 @@ class ModalPhase(Phase):
 # Registry
 # ─────────────────────────────────────────────────────────────────────────────
 
-def build_phases() -> dict:
-    """Return {phase_id: Phase}, the whole protocol."""
+def build_phases(reagent1_secs: int = 120, reagent2_secs: int = 420) -> dict:
+    """
+    Return {phase_id: Phase}, the whole protocol.
+
+    reagent1_secs / reagent2_secs let the caller shorten the reagent countdowns
+    (the arbiter passes 20 s each in simulation so runs are quick to test).
+    """
     phases = [
         EntryPhase(),
-        ReagentPhase("reagent1", 120, "reagent2", prior="entry",
+        ReagentPhase("reagent1", reagent1_secs, "reagent2", prior="entry",
                      armed=("Add Reagent 1", "and press START"),
                      running=("Stir 20 sec, then rest", "Prepare reagent 2 and strip")),
-        ReagentPhase("reagent2", 420, "read", prior="reagent1",
+        ReagentPhase("reagent2", reagent2_secs, "read", prior="reagent1",
                      armed=("Add reagent 2 and cap/strip", "Ventilate and press START"),
                      running=("Stir 20 sec, then rest", "Ventilate")),
         ReadPhase(),
@@ -364,9 +407,14 @@ if __name__ == "__main__":
 
         # navigation / render
         def goto(self, slot, phase_id):
-            slot.phase = phase_id
+            slot.phase = slot.active_phase = phase_id
             self.phases[phase_id].activate(self, slot)
             self.render(slot)
+        def view(self, slot, phase_id):        # preview: no advance, no activate
+            slot.phase = phase_id
+            self.render(slot)
+        def resume(self, slot):
+            self.view(slot, slot.active_phase)
         def render(self, slot):
             self.pool.hide_all()
             self.phases[slot.phase].enter(self.pool, slot, self)
@@ -454,12 +502,12 @@ if __name__ == "__main__":
     check("main is CANCEL",    pool["main_btn"].label, "CANCEL")
     check("NEXT enabled (armed)", pool["next_btn"].enabled, True)
 
-    print("== START -> running, nav locked ==")
+    print("== START -> running; nav stays open (preview + Resume) ==")
     press(pool, "run_btn")
     check("running",           A.running, True)
     check("run_btn is RESET",  pool["run_btn"].label, "RESET")
     check("timer interactive", pool["timer"].interactive, True)
-    check("NEXT locked",       pool["next_btn"].enabled, False)
+    check("NEXT open while running", pool["next_btn"].enabled, True)
 
     print("== reset modal round-trip ==")
     press(pool, "run_btn")                         # RESET -> reset modal
@@ -492,7 +540,7 @@ if __name__ == "__main__":
     check("manual colour saved", A.record["manual_color"], "pale blue")
     check("capturing",         A.capturing, True)
     check("run_btn RUNNING disabled", pool["run_btn"].enabled, False)
-    check("nav locked capturing", pool["prior_btn"].enabled, False)
+    check("nav open while capturing", pool["prior_btn"].enabled, True)
 
     print("== capture completes -> analysis -> done ==")
     arb.clock += 30

@@ -17,7 +17,7 @@ Signals:
 import sys
 import signal
 
-from app_controller import AppController
+from arbiter import Arbiter
 
 
 def main():
@@ -36,7 +36,7 @@ def main():
         # Install handler for Ctrl-Z to allow pause/resume
         signal.signal(signal.SIGTSTP, handle_sigtstp)
 
-        app = AppController()
+        app = Arbiter()
         app.start()
 
     except KeyboardInterrupt:

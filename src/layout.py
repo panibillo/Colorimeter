@@ -45,6 +45,12 @@ RUN_BTN     = Rect(240,  64,  72, 36)   # START / RESET / CAPTURE / POST
 INSTR1      = Rect( 14, 125, 280, 28)
 INSTR2      = Rect( 14, 157, 280, 28)
 
+# ── body: persistent collect stamp  y 188..210 ─────────────────────────────────
+# Shown on the reagent/read/analysis phases (below the instructions, above the
+# footer) so the collect time stays in view once stamped.  The entry phase uses
+# the COLLECT form row above instead.
+COLLECT_LINE = Rect(  8, 188, 304, 22)
+
 # ── body: wide label/field pairs (share y with USER and TEST rows) ─────────────
 COLOR_LBL   = Rect(  8,  95, 110, 35);  COLOR_FLD  = Rect(120,  93, 130, 39)
 RESULT_LBL  = Rect(  8, 135,  68, 35);  RESULT_FLD = Rect( 82, 133, 230, 39)

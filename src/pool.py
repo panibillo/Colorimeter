@@ -107,6 +107,7 @@ class Pool:
         button("run_btn", L.RUN_BTN, "btn_text", "start_green", 18)
         label("instr1", L.INSTR1, "body_text", "body_dark", 20, align="left")
         label("instr2", L.INSTR2, "body_text", "body_dark", 20, align="left")
+        label("collect_line", L.COLLECT_LINE, "black", "white", 13, align="left")
 
         # ── body: wide label/field pairs ───────────────────────────────────────
         label("color_lbl",  L.COLOR_LBL,  "white", "label_coral", 13, text="Read color")
