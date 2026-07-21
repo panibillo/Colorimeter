@@ -691,8 +691,11 @@ class Button(Widget):
                 _click_sound()
             if callable(self.on_press):
                 self.on_press()
-            if display is not None:
-                self.pressed = False
+            # on_press may have navigated to another phase that hides this
+            # button; only repaint the released state if it is still visible,
+            # else we would stamp a stray button over the new screen.
+            self.pressed = False
+            if display is not None and self.visible:
                 self.draw(display)
             return True
         return False

@@ -1,0 +1,75 @@
+"""
+slot.py  —  Slot: one live run of the test protocol.
+-----------------------------------------------------
+A Slot is pure data — the mutable state of one sample's run through the phases.
+There are two (A and B); both stay live even while backgrounded.  The shared
+Pool (the view) renders whichever slot is focused; the Slot never touches
+widgets or hardware.
+
+What survives in the background is here: the record being collected, the
+current phase, and the TimerState (an absolute monotonic deadline, so a
+backgrounded countdown stays correct with no ticking).
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from typing import Optional
+
+from timer import TimerState
+
+
+def _new_record() -> dict:
+    """A blank data record.  Keys mirror the entry-form fields plus results."""
+    return {
+        "id":           "",   # sample id
+        "user":         "",
+        "test":         "",
+        "collect":      "",   # collection timestamp, stamped at Begin
+        "manual_color": "",   # the operator's own reading of the strip
+    }
+
+
+@dataclass
+class Slot:
+    """
+    The state of one protocol run.
+
+    Fields
+    ------
+    name         : 'A' or 'B'
+    record       : the data being collected (see _new_record)
+    phase        : current phase id (key into phases.PHASES)
+    running      : a countdown/count-up timer is active (armed vs running)
+    capturing    : a camera capture for this slot is in flight
+    timer        : the active TimerState, or None
+    progress     : latest capture/analysis status line
+    result       : final analysis result ('' until analysis completes)
+    modal_return : phase id to return to when a modal closes
+    """
+
+    name:         str
+    record:       dict                 = field(default_factory=_new_record)
+    phase:        str                  = "entry"
+    running:      bool                 = False
+    capturing:    bool                 = False
+    timer:        Optional[TimerState] = None
+    progress:     str                  = ""
+    result:       str                  = ""
+    modal_return: Optional[str]        = None
+
+    def ready_to_begin(self) -> bool:
+        """Begin is allowed once id and user are filled."""
+        return bool(self.record.get("id", "").strip()
+                    and self.record.get("user", "").strip())
+
+    def clear_run(self) -> None:
+        """Reset the per-run state (keeps name); used when starting a new sample."""
+        self.record    = _new_record()
+        self.phase     = "entry"
+        self.running   = False
+        self.capturing = False
+        self.timer     = None
+        self.progress  = ""
+        self.result    = ""
+        self.modal_return = None
