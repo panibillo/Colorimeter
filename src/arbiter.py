@@ -37,6 +37,7 @@ import datetime
 import logging
 import os
 import signal
+import subprocess
 import sys
 import time
 
@@ -47,6 +48,7 @@ _SIMULATION_MODE = os.environ.get("COLORIMETER_SIMULATION", "0") == "1"
 # stacks.  Only the pure model + widget layer is imported at module load.
 import logging_manager
 import widgets
+import shutdown_screen
 from widgets import Button, TextBox
 from pool import Pool
 from slot import Slot
@@ -93,6 +95,11 @@ class Arbiter:
         # Placeholder analysis timer: (slot, started_at) or None.
         self._analysis: tuple | None = None
 
+        # Shutdown state: guards against a second signal re-entering shutdown()
+        # or cleanup() running its hardware-release chain twice.
+        self._shutting_down = False
+        self._cleaned_up    = False
+
     # ── Lifecycle ──────────────────────────────────────────────────────────────
 
     def start(self) -> None:
@@ -134,8 +141,7 @@ class Arbiter:
         self._touch     = TSC2007()
 
         def _shutdown(signum=None, frame=None):
-            self.cleanup()
-            sys.exit(0)
+            self.shutdown()
 
         signal.signal(signal.SIGINT,  _shutdown)
         signal.signal(signal.SIGTERM, _shutdown)
@@ -161,25 +167,100 @@ class Arbiter:
         self._slots = {"A": Slot("A"), "B": Slot("B")}
 
     def cleanup(self) -> None:
+        """
+        Release every hardware resource.  Idempotent (safe to call more than
+        once), and each release is wrapped independently so one device
+        failing to close can't strand the rest still holding their pins/fds.
+        """
+        if self._cleaned_up:
+            return
+        self._cleaned_up = True
         log.info("Arbiter: cleanup")
+
         if self._capture is not None:
-            self._capture.cancel()
+            try:
+                self._capture.cancel()
+            except Exception:
+                log.exception("Arbiter: cleanup: capture.cancel failed")
             self._capture = None
-        try:
-            if self._disp and self._ILI9341:
+
+        if self._disp and self._ILI9341:
+            try:
                 self._disp.fill_screen(self._ILI9341.BLACK)
-        except Exception:
-            pass
+            except Exception:
+                log.exception("Arbiter: cleanup: fill_screen failed")
+
         if self._kb:
-            self._kb.cleanup()
+            try:
+                self._kb.cleanup()
+            except Exception:
+                log.exception("Arbiter: cleanup: keyboard release failed")
         if self._beeper:
-            self._beeper.cleanup()
+            try:
+                self._beeper.cleanup()
+            except Exception:
+                log.exception("Arbiter: cleanup: beeper release failed")
         if self._touch:
-            self._touch.cleanup()
+            try:
+                self._touch.cleanup()
+            except Exception:
+                log.exception("Arbiter: cleanup: touch release failed")
         if self._disp:
-            self._disp.cleanup()
+            try:
+                self._disp.cleanup()
+            except Exception:
+                log.exception("Arbiter: cleanup: display release failed")
         if self._backlight:
-            self._backlight.close()
+            try:
+                self._backlight.close()
+            except Exception:
+                log.exception("Arbiter: cleanup: backlight release failed")
+
+    def shutdown(self, error: BaseException | None = None) -> None:
+        """
+        The one true shutdown entry point — called by the SIGINT/SIGTERM
+        handler and by the launchers' top-level except clauses.  Shows the
+        interactive shutdown screen (Re-launch / Exit / Power off) while
+        hardware is still live, then releases hardware, then acts on the
+        choice.  Does not return: it always ends in sys.exit() or os.execv().
+
+        A second call while shutdown is already in progress (e.g. a second
+        Ctrl-C because the first seems to hang) skips straight to a hard
+        process exit rather than re-entering this method or cleanup().
+        """
+        if self._shutting_down:
+            log.warning("Arbiter: shutdown re-entered — forcing immediate exit")
+            os._exit(1)
+        self._shutting_down = True
+        log.info("Arbiter: shutdown requested%s", " (error)" if error else "")
+
+        choice = "exit"
+        try:
+            if self._disp is not None:
+                choice = shutdown_screen.run(self._disp, self._touch, self._kb,
+                                             error=error, simulation=_SIMULATION_MODE)
+        except Exception:
+            log.exception("Arbiter: shutdown screen failed")
+        finally:
+            self.cleanup()
+
+        self._finish_shutdown(choice)
+
+    def _finish_shutdown(self, choice: str) -> None:
+        """Act on the operator's shutdown choice.  Hardware is already released."""
+        if choice == "relaunch":
+            log.info("Arbiter: relaunching")
+            os.execv(sys.executable, [sys.executable] + sys.argv)
+        elif choice == "poweroff":
+            if _SIMULATION_MODE:
+                log.info("Arbiter: SIMULATION — would power off now")
+            else:
+                log.info("Arbiter: powering off")
+                try:
+                    subprocess.run(["sudo", "shutdown", "-h", "now"], check=True)
+                except Exception:
+                    log.exception("Arbiter: poweroff command failed")
+        sys.exit(0)
 
     # ── Phase contract: clock / stamps ─────────────────────────────────────────
 

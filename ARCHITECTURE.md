@@ -50,6 +50,34 @@ Everything is interleaved on one core, so responsiveness is bounded by the
 longest single step — a real concern on a single-core Pi Zero W (no NEON) versus
 a quad-core Zero 2 W. See WEB_INTERFACE.md and the capture review for detail.
 
+## Shutdown
+
+`Arbiter.shutdown(error=None)` (`arbiter.py`) is the one shutdown entry point —
+reached from the SIGINT/SIGTERM handler installed in `_init_hardware()`, and
+from the launchers' top-level `except` clauses (a fallback for anything that
+happens before that handler is installed, or an unhandled exception inside the
+loop). Ctrl-Z (SIGTSTP) is unrelated — `main.py` lets it suspend the process
+normally so `fg` resumes it.
+
+1. Show `shutdown_screen.run()` — a small self-contained screen (independent
+   of `pool.py`/`layout.py`, so it renders even if the phase/slot model never
+   finished building) offering **Re-launch / Exit / Power off**. Touch, Tab,
+   and Enter all work; Exit is focused by default and is also what a 15 s
+   timeout falls back to if no one answers. On an error shutdown the screen
+   shows the exception message instead of "Shutting down".
+2. `Arbiter.cleanup()` — release every hardware resource (capture, kb, beeper,
+   touch, display, backlight). Idempotent, and each release is wrapped
+   independently so one device failing to close can't strand the rest.
+3. Act on the choice: **Exit** → `sys.exit(0)`. **Re-launch** →
+   `os.execv(sys.executable, sys.argv)`, replacing the process image (hardware
+   must already be released at this point, or the new process would inherit
+   half-open SPI/GPIO state). **Power off** → `sudo shutdown -h now`; a no-op
+   log line in simulation, never touching the host machine.
+
+A second SIGINT/SIGTERM while shutdown is already in progress skips straight
+to `os._exit(1)` rather than re-entering `shutdown()` or `cleanup()` — a
+safety valve so a stuck shutdown can't make the process unkillable.
+
 ## The UI: phase / slot model
 
 The screen is driven by four roles — full rationale in

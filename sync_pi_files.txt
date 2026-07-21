@@ -21,27 +21,27 @@
 src/main.py
 dev/camtest8.py
 
+# ── Application core (arbiter + shutdown) ────────────────────────────────
+src/arbiter.py
+src/shutdown_screen.py
+
+# ── UI: phase/slot model ─────────────────────────────────────────────────
+src/pool.py
+src/layout.py
+src/palette.py
+src/phases.py
+src/slot.py
+src/timer.py
+src/widgets.py
+src/geometry.py
+
 # ── Capture pipeline ─────────────────────────────────────────────────────
 src/capture_runner.py
 src/capture_session.py
 src/capture_h5.py
 src/hdf5write.py
-src/hdf5read.py
 src/bayer_cam.py
 src/lighting_cal8.py
-
-# ── User interface ───────────────────────────────────────────────────────
-src/app_controller.py
-src/screen_manager.py
-src/widgets.py
-src/geometry.py
-src/csv_to_widgets.py
-src/csv_loader.py
-
-# Screen layout — the application cannot build a single screen without these.
-src/screen_defs.csv
-src/screen_widgets.csv
-src/widget_defs.csv
 
 # ── Hardware drivers ─────────────────────────────────────────────────────
 src/ili9341.py
@@ -54,6 +54,9 @@ src/config_manager.py
 src/logging_manager.py
 src/error_handler.py
 src/utils.py
+
+# ── Mock hardware (desktop test doubles) ─────────────────────────────────
+src/mock/__init__.py
 
 # ── Configuration ────────────────────────────────────────────────────────
 config/instrument.yaml

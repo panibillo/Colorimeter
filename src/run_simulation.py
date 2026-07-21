@@ -26,12 +26,17 @@ if __name__ == "__main__":
         app = Arbiter()
         app.start()
     except KeyboardInterrupt:
+        # Normally unreachable once Arbiter._init_hardware() has installed its
+        # own SIGINT handler (which calls app.shutdown() directly); this stays
+        # as a fallback for Ctrl-C arriving before that point.
         print("\nShutdown requested")
         if app:
-            app.cleanup()
+            app.shutdown()
         sys.exit(0)
     except Exception as e:
         print(f"Error: {e}")
         import traceback
         traceback.print_exc()
+        if app:
+            app.shutdown(error=e)
         sys.exit(1)
