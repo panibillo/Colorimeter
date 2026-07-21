@@ -37,9 +37,10 @@ TITLE     = Rect( 10,  18, 300, 40)
 DETAIL    = Rect( 10,  62, 300, 40)
 COUNTDOWN = Rect( 10, 110, 300, 28)
 
-RELAUNCH_BTN = Rect( 12, 180, 92, 44)
-EXIT_BTN     = Rect(114, 180, 92, 44)
-POWEROFF_BTN = Rect(216, 180, 92, 44)
+ABORT_BTN    = Rect( 12, 180, 70, 44)
+RELAUNCH_BTN = Rect( 90, 180, 70, 44)
+EXIT_BTN     = Rect(168, 180, 70, 44)
+POWEROFF_BTN = Rect(246, 180, 70, 44)
 
 _BG = "body_dark"
 
@@ -48,8 +49,11 @@ def run(disp, touch, kb, *, error: Optional[BaseException] = None,
         timeout_s: float = _DEFAULT_TIMEOUT_S, simulation: bool = False) -> str:
     """
     Draw the shutdown screen and block, pumping input, until the operator
-    picks a choice or timeout_s elapses.  Returns "relaunch" | "exit" |
-    "poweroff" — "exit" is the default on timeout.
+    picks a choice or timeout_s elapses.  Returns "abort" | "relaunch" |
+    "exit" | "poweroff" — "exit" is the default on timeout.
+
+    "abort" means return to the running program without releasing hardware;
+    all other choices proceed through cleanup() and exit.
 
     Never raises: a shutdown screen must not be the thing that prevents
     shutdown, so any failure here just falls back to "exit".
@@ -84,20 +88,23 @@ def _run(disp, touch, kb, *, error, timeout_s, simulation) -> str:
         picked.append(name)
 
     buttons = [
+        Button(ABORT_BTN, "Abort", color=color("btn_gray"),
+              text_color=color("btn_text"), size=12, name="abort",
+              on_press=lambda: _choose("abort")),
         Button(RELAUNCH_BTN, "Re-launch", color=color("start_green"),
-              text_color=color("btn_text"), size=14, name="relaunch",
+              text_color=color("btn_text"), size=12, name="relaunch",
               on_press=lambda: _choose("relaunch")),
         Button(EXIT_BTN, "Exit", color=color("btn_gray"),
-              text_color=color("btn_text"), size=14, name="exit",
+              text_color=color("btn_text"), size=12, name="exit",
               on_press=lambda: _choose("exit")),
         Button(POWEROFF_BTN, "Power off", color=color("label_coral"),
-              text_color=color("btn_text"), size=14, name="poweroff",
+              text_color=color("btn_text"), size=12, name="poweroff",
               on_press=lambda: _choose("poweroff")),
     ]
     for b in buttons:
         b.draw(disp)
 
-    focus_idx = 1                       # default focus: Exit — matches the timeout outcome
+    focus_idx = 2                       # default focus: Exit — matches the timeout outcome
     buttons[focus_idx].set_focused(True, disp)
 
     deadline   = time.monotonic() + timeout_s
@@ -175,13 +182,17 @@ if __name__ == "__main__":
     choice = run(_MockDisplay(), _MockTouch(), _MockKb(["enter"]), timeout_s=5)
     check("choice", choice, "exit")
 
-    print("== Shift-Tab moves focus to Re-launch, Enter picks it ==")
-    choice = run(_MockDisplay(), _MockTouch(), _MockKb(["shift-tab", "enter"]), timeout_s=5)
-    check("choice", choice, "relaunch")
+    print("== Shift-Tab moves focus to Abort, Enter picks it ==")
+    choice = run(_MockDisplay(), _MockTouch(), _MockKb(["shift-tab", "shift-tab", "enter"]), timeout_s=5)
+    check("choice", choice, "abort")
 
-    print("== Tab moves focus to Power off, Enter picks it ==")
+    print("== Tab from Exit goes to Power off ==")
     choice = run(_MockDisplay(), _MockTouch(), _MockKb(["tab", "enter"]), timeout_s=5)
     check("choice", choice, "poweroff")
+
+    print("== Tab wraps from Power off back to Abort ==")
+    choice = run(_MockDisplay(), _MockTouch(), _MockKb(["tab", "tab", "enter"]), timeout_s=5)
+    check("choice", choice, "abort")
 
     print("== No input -> timeout defaults to exit ==")
     choice = run(_MockDisplay(), _MockTouch(), _MockKb([]), timeout_s=0.1)

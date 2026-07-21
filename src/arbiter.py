@@ -220,9 +220,11 @@ class Arbiter:
         """
         The one true shutdown entry point — called by the SIGINT/SIGTERM
         handler and by the launchers' top-level except clauses.  Shows the
-        interactive shutdown screen (Re-launch / Exit / Power off) while
-        hardware is still live, then releases hardware, then acts on the
-        choice.  Does not return: it always ends in sys.exit() or os.execv().
+        interactive shutdown screen (Abort / Re-launch / Exit / Power off)
+        while hardware is still live.  "Abort" returns to the running program
+        without releasing hardware; all other choices release hardware, then
+        act on the choice.  Never returns: it always ends in sys.exit() or
+        os.execv(), except when choosing "Abort".
 
         A second call while shutdown is already in progress (e.g. a second
         Ctrl-C because the first seems to hang) skips straight to a hard
@@ -241,10 +243,16 @@ class Arbiter:
                                              error=error, simulation=_SIMULATION_MODE)
         except Exception:
             log.exception("Arbiter: shutdown screen failed")
-        finally:
-            self.cleanup()
 
-        self._finish_shutdown(choice)
+        if choice == "abort":
+            log.info("Arbiter: shutdown aborted, resuming")
+            self._shutting_down = False
+            return
+
+        try:
+            self.cleanup()
+        finally:
+            self._finish_shutdown(choice)
 
     def _finish_shutdown(self, choice: str) -> None:
         """Act on the operator's shutdown choice.  Hardware is already released."""
