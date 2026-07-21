@@ -11,6 +11,24 @@ The prototype app (`dev/webtest.py`) exercises all hardware paths and
 establishes the page layout.  It will serve as the template for later
 purpose-built apps (calibration, end-user measurement).
 
+> **Status (2026-07):** `dev/webtest.py` and its `dev/templates/` exist and are
+> the current prototype. This doc describes that prototype; several module paths
+> below drifted and are corrected inline. Two things to keep straight:
+> 1. **Two different LED abstractions.** The prototype uses a GPIO-pin
+>    `LedController` from `dev/lighting_lightboard1.py`. The *application's*
+>    capture pipeline (`capture_runner`/`capture_session`) uses a shift-register
+>    `LEDBank` from `src/lighting_cal8.py`. These are not the same class; a
+>    consolidation into one `src/lighting.py` is still pending.
+> 2. **Two capture paths.** The prototype captures single frames via
+>    `BayerCam.save_frame()` (`.jpg` + `.npy` + `.txt` sidecars). The
+>    application's suite capture (`capture_runner`) instead streams one **HDF5**
+>    archive per suite (`capture_h5.py`). The metadata fields below come from the
+>    prototype's `.txt` sidecar, not the HDF5 pipeline.
+>
+> A production web UI is expected to be a Flask *frontend of the phase/slot
+> model* (swap `layout.py` + the pool builder, keep phases/slots — see
+> [ARCHITECTURE.md](ARCHITECTURE.md)), not a straight extension of this prototype.
+
 ---
 
 ## Framework
@@ -27,7 +45,8 @@ purpose-built apps (calibration, end-user measurement).
 
 ## Startup Sequence
 
-1. Import `LedController` from `src/lighting.py`
+1. Import `LedController` from `dev/lighting_lightboard1.py` (not `src/lighting.py`,
+   which does not exist; the app pipeline uses `LEDBank` in `src/lighting_cal8.py`)
 2. Import `BayerCam` (or mock) from `src/bayer_cam.py`
 3. Instantiate both at module level — they persist for the server lifetime
 4. Register Flask routes
@@ -80,10 +99,10 @@ signal.signal(signal.SIGTSTP, _sigtstp_handler)
 ## Desktop Mock
 
 `webtest.py` runs on the desktop without modification — same
-`try/except ImportError` platform detection used by `camtest5.py`:
+`try/except ImportError` platform detection used by `dev/camtest5.py`:
 
-- **Camera**: `mock_Picamera2` is loaded automatically; set `MOCKIMAGEFILE`
-  in `src/mock_Picamera2.py` to point at a real captured file
+- **Camera**: `mock.picamera2_mock` (in `src/mock/`) is loaded automatically;
+  point its mock source at a real captured file
 - **GPIO**: `LedController` stubs all calls when gpiozero is absent
 - **Flask**: runs identically on desktop; page is reachable at
   `http://localhost:5000`
@@ -169,8 +188,10 @@ Compute Target rect stats from the Target rect array range:
 - Target rect(s): Name, Bayer channel means : B / GB / GR / R
 - Target rect(s): Name, Bayer channel std devs : B / GB / GR / R
 
-Fields are read by parsing the `key: value` lines already written by
-`save_capture()` in `camtest5.py` / `_write_metadata()`.
+Fields are read by parsing the `key: value` lines in the `.txt` sidecar written
+by `BayerCam.save_frame()` (the prototype's single-frame path). The application's
+suite capture does not write these sidecars — it stores per-frame metadata inside
+the HDF5 archive (`capture_h5.py`).
 
 ---
 
@@ -297,9 +318,12 @@ dev/
   templates/
     index.html        Single page template
   captures/           Default output directory (created on first capture)
+dev/
+  lighting_lightboard1.py   LedController, LED_PINS, LED_ORDER (prototype LEDs)
 src/
-  lighting.py         LedController, LED_PINS, LED_ORDER, LIGHTBOARD_3_SEQUENCE
-  bayer_cam.py        BayerCam (real + mock)
+  bayer_cam.py        BayerCam (real; mock via src/mock/picamera2_mock.py)
+  lighting_cal8.py    LEDBank — the application pipeline's LED control
+  mock/               platform mocks (picamera2_mock, gpiozero_mock, …)
 ```
 
 ---
@@ -308,5 +332,9 @@ src/
 
 - Auto-upload captured files to desktop via `scp` / `rsync` after capture
 - Ajax partial updates (avoid full page reload on LED toggle)
-- Migrate layout to the main application (`main.py` + `web_interface.py`)
+- A production web UI as a **Flask frontend of the phase/slot model** (reuse
+  `phases.py` + `slot.py`; provide a web `layout` + pool builder in place of
+  `layout.py`), rather than extending this hardware-test prototype
+- Consolidate the two LED classes (`dev/lighting_lightboard1.LedController` and
+  `src/lighting_cal8.LEDBank`) into one `src/lighting.py`
 - Authentication (simple shared secret) if exposed beyond LAN

@@ -1,230 +1,129 @@
 # Architecture
 
-## Initialization Sequence
+> Scope: how the running system is structured **today**. The UI's phase/slot
+> model has a deep-dive in [dev/phase_model_design.md](dev/phase_model_design.md).
+> Anything not yet built is confined to
+> **[Planned / not yet built](#planned--not-yet-built)** — treat everything
+> outside that section as code that exists.
 
-- Power on event
-    - systemd launches main.py --ili9341
+## Entry points and platform selection
 
-- Commandline launch:  
-    - python -m main
+Two launchers, each of which builds and runs one `Arbiter`:
 
-- Detect platform and configure mock vs. real hardware
-- Initialize logging (`logging_manager.py`)
-- Load configuration from `config_manager.py`
-- Branch 1: (running on desktop: test environment)
-    - initialize mock_GPIO
-    - import ui_terminal as ui
-    - initialize mock_camera
-    - call mainloop(ui)
+| Launcher | Use | Hardware |
+|---|---|---|
+| `main.py` | On the Raspberry Pi | real drivers |
+| `run_simulation.py` | Desktop dev | mock drivers (sets `COLORIMETER_SIMULATION=1`) |
 
-- Branch 2: (running on Rpi from remote terminal)
-    - Initialize GPIO pins (for physical_interface or lighting)
-    - import ui_terminal as ui
-    - Initialize camera (`colorcam.py`)
-    - call mainloop(ui)
+Platform is chosen by the **`COLORIMETER_SIMULATION`** environment variable, read
+once as `arbiter._SIMULATION_MODE`. `Arbiter._init_hardware()` imports drivers
+**lazily**, so the modules import cleanly on any machine:
 
+- Real: `ili9341`, `tsc2007`, `kb_reader`, `beeper`, `gpiozero`
+- Mock (`src/mock/`): `ili9341_mock`, `tsc2007_mock`, `kb_reader_mock`,
+  `beeper_mock`, `gpiozero_mock`, `picamera2_mock`, `spidev_mock`
 
-- Branch 3: (running on Rpi with physical interface)
-    (Adafruit ILI9341 2.8" Color TFT Touchscreen Breakout v2)
-    - Initialize GPIO pins (for physical_interface or lighting)
-    - import ui_ILI9341 as ui
-    - Initialize camera (`colorcam.py`)
-    - call mainloop(ui)
+The mock display is a matplotlib window: mouse = touch, key presses = keyboard.
 
-- mainloop    
-    - Connect to database (lightweight, on-demand per interaction)
-    - while True: try:
-      - ui.read_input()      : read_touch() / input()
-      - update state machine
-      - dispatch()
-      - ui.update()          : redraw screen / print()
- 
-      
-      
-3.    
-    
-7. Start main event loop
+## Initialization sequence
 
-## Program Flow
+1. The launcher installs signal handlers and calls `Arbiter().start()`.
+2. `start()` → `_init_logging()` → `_init_hardware()` (lazy driver import;
+   display/touch/keyboard init) → `_build_model()` → `focus(slot A)` → `_run()`.
+3. `_build_model()` builds the shared `Pool`, the phase registry
+   (`build_phases()`), and slots A and B.
 
-**Launch and Initialize**
-- User opens terminal and launches program (during dev)
-- Final product auto-launches and auto-shuts down
+## Main event loop
 
-**Main Event Loop (non-blocking)**
-- Monitor all interfaces for user input (terminal, physical, web)
-- Update interface states and displays
-- Dispatch to appropriate workflow (capture, calibration, config, reporting, etc.)
-- Return to loop when task completes, closing any open connections
-- Exit cleanly on shutdown signal
+`Arbiter._run()` is a **single-threaded cooperative loop** (no threads). Each
+pass:
 
-## Module Dependencies and Data Flow
+- pump the display's event queue (simulation only);
+- `poll_timers()` — expire check for both slots (arithmetic on monotonic
+  deadlines); on expiry, alarm and advance the slot's live phase;
+- `pump_capture()` — advance the in-flight capture one `step()`;
+- `pump_analysis()` — complete analysis when ready (placeholder today);
+- read one keyboard event; dispatch a touch if the panel is pressed;
+- once per second, repaint the clock and the running timer.
 
-```
-Main data flow:
-  reading → colorcam → color_analysis → [repeat] → color_map → report → interface_manager
+Everything is interleaved on one core, so responsiveness is bounded by the
+longest single step — a real concern on a single-core Pi Zero W (no NEON) versus
+a quad-core Zero 2 W. See WEB_INTERFACE.md and the capture review for detail.
 
-Config layer (read-only, singleton):
-  config_manager.py → {colorcam, color_analysis, color_map, lighting, roi_analysis}
+## The UI: phase / slot model
 
-Database layer (on-demand connection):
-  db_interface.py → {config_manager, color_map, report, interface_manager, color_analysis, roi_analysis}
+The screen is driven by four roles — full rationale in
+[dev/phase_model_design.md](dev/phase_model_design.md):
 
-Error and state handling:
-  error_handler.py ← called by any module on exception
-  state_machine.py ← main.py tracks workflow states
+| role | file(s) | holds |
+|---|---|---|
+| **Pool** — the one view | `pool.py`, `layout.py`, `palette.py` | one widget per named rect for the 320×240 screen |
+| **Phase** — behaviour | `phases.py` | stateless `enter`/`activate`/`on_expire`; entry, two reagents, read, analysis, modals |
+| **Slot** — state | `slot.py` | record, viewed vs live phase, timer, run/capture flags (A and B) |
+| **Arbiter** — coordination | `arbiter.py` | focus, single-camera guard, buzzer, timers, keyboard/focus, main loop |
 
-Logging (available to all modules):
-  logging_manager.py ← all modules log errors, warnings, debug info
-```
+Supporting: `timer.py` (`TimerState` + `TimerWidget`), `widgets.py` (Label,
+Button, TextBox, RectWidget, …), `geometry.py` + `rect.py` (Rect math).
+Navigation is preview/Resume — PRIOR/NEXT preview neighbouring phases without
+advancing; `active_phase` (live) is distinct from `phase` (viewed).
 
-## Module Organization
+**Legacy, being retired:** `screen_manager.py`, `csv_loader.py`,
+`csv_to_widgets.py`, `app_controller.py`, and the `*.csv` screen definitions —
+the old screen-centric UI, superseded by the phase/slot model.
 
-### Core Modules
+## Capture pipeline
 
-**main.py**
-- Initialize program
-- Run main event loop
-- Orchestrate high-level workflow state machine
-- Handle graceful shutdown
+Raw-Bayer, multi-exposure, LED-sweep capture, streamed to one HDF5 archive:
 
-**config_manager.py**
-- Load and cache configuration at startup (singleton)
-- Provide read-only config API to all modules
-- No direct file I/O; only config_manager reads files
-- Config writing handled through `db_interface.py`
-- Schema: camera, lighting, calibration, db, interface settings
+- `bayer_cam.py` — `BayerCam`, the camera abstraction (IMX219 / IMX708). Loads
+  `mock.picamera2_mock` on the desktop. Unpacks packed 10-bit raw to uint16 and
+  crops ROIs.
+- `lighting_cal8.py` — `LEDBank`, the shift-register LED control used by the
+  capture pipeline. (A separate GPIO-pin `LedController` in
+  `dev/lighting_lightboard1.py` serves the web prototype — see the doc note in
+  WEB_INTERFACE.md.)
+- `capture_runner.py` — the suite workflow as a **generator**: white-LED
+  exposure calibration, focus, then per-LED exposure bracketing (7 exposures,
+  lit + dark). Yields `Progress` between camera ops so the caller stays
+  responsive; waits yield every 50 ms.
+- `capture_session.py` — wraps the generator so a UI can `step()` it once per
+  loop pass and inspect `active` / `error`.
+- `capture_h5.py` + `hdf5write.py` / `hdf5read.py` — the HDF5 suite archive (one
+  file per suite). `roi.py` / `rect.py` describe target regions.
 
-**interface_manager.py**
-- High-level abstract interface dispatcher
-- Route user input from:
-  - `terminal_interface.py`: stdin/stdout
-  - `physical_interface.py`: GPIO buttons, LED & beep indicators, character display (TODO)
-  - `web_interface.py`: Flask/lightweight HTTP (TODO)
-- Provide unified interface for all modules to display results
+The arbiter owns at most one `CaptureSession` at a time (single camera).
 
-### Hardware/Imaging Modules
+## Support modules
 
-**lighting.py**
-- Turn image illumination on/off via GPIO pins
-- Send commands to specific LEDs (blue, green, white)
-- Monitor for GPIO failures (TODO)
+- `config_manager.py` — configuration load/access.
+- `logging_manager.py` — unified logging, used across modules.
+- `error_handler.py` — exception handling and cleanup.
+- `db_manager.py` — thin SQL wrapper (`read_all`, `read_one`, `read_val`,
+  `write_one`, `write_many`); connections are request-scoped, not pooled.
+- `utils.py` — shared helpers (no hardware or DB access).
+- Hardware drivers: `ili9341.py` (display, SPI), `tsc2007.py` (touch, I²C),
+  `kb_reader.py` (keyboard), `beeper.py` (buzzer).
 
-**colorcam.py**
-- Abstract camera interface (isolates hardware-specific calls)
-- Platform detection: select real or mock implementation
-  - Real: `import picamera2` (try-except with fallback)
-  - Mock: `import mock_Picamera2` on desktop
-- Configure camera based on `config_manager` settings
-- Capture raw Bayer images (BGGR, minimal color correction)
-- Save and/or return images to caller
+## Database lifecycle
 
-### Analysis Modules
+Request-scoped; no persistent connection. On a task (save a reading, fetch a
+calibration): open a connection, execute in a transaction, commit and close
+(rollback on error). No pooling. `db_manager.py` provides the per-call read/write
+wrappers.
 
-**color_analysis.py**
-- Accept image(s) from memory or file paths
-- Read config from `config_manager`
-- Analyze color values in target ROI
-- Analyze calibration card color patches
-- Return analyzed color values and statistics
+## Planned / not yet built
 
-**roi_analysis.py**
-- Define and locate ROI (regions of interest) on calibration card
-- Read ROI definitions from `config_manager`
-- Accept raw image; confirm or auto-detect ROI boundaries
-- Save refined ROI definitions via `db_interface` for future use
+The measurement-science and reporting layers are designed but not implemented;
+the arbiter's analysis step is a ~1.5 s placeholder today. None of these modules
+exist yet — they are the roadmap, not the current tree:
 
-**color_map.py**
-- Manage mapping from analyzed color values → concentration values
-- Store and retrieve calibration curves from `db_interface`
-- Interpolate concentration from measured color
-- Support different chemical test strip types
-
-### Data and Workflow Modules
-
-**db_interface.py**
-- Lightweight direct SQL wrapper (no ORM)
-- Dedicated wrapper functions for each query (SQL statements encapsulated)
-- **Lifecycle**: Create connection on-demand, close when task completes
-- **Error handling**: All modifications wrapped in try-except, rollback on error
-- Schema: 
-    - colorcard : describes colors and geometry of color calibration cards
-    - cameraconfig : camera parameters
-    - meterconfig : hardware and software parameters
-    - data : readings and metadata
-
-- No connection pooling; one connection per interaction
-
-**report.py**
-- Format results for display (concentration, stats, metadata)
-- Dispatch results to `interface_manager`
-- Store results via `db_interface` (include timestamp, image refs, calibration used, etc.)
-
-**state_machine.py**
-- Track workflow states: idle, capturing, analyzing, reporting, configuring, calibrating
-- Validate state transitions
-- Enforce valid transitions (e.g., cannot analyze before capture)
-
-### Workflow Modules
-
-**calibration_workflow.py**
-- High-level orchestration for calibration process
-- Prompt user for calibration inputs (known concentrations, test strip types)
-- Orchestrate image capture and color analysis
-- Store results via `db_interface`
-
-### Support Modules
-
-**error_handler.py**
-- Catch and log exceptions from all modules
-- Provide recovery/retry strategies (e.g., retry image capture)
-- Notify user via `interface_manager` on recoverable errors
-- Exit gracefully on fatal errors
-- Close open resources (camera, GPIO, db) on shutdown
-
-**logging_manager.py**
-- Unified logging for all modules
-- Log levels: DEBUG, INFO, WARNING, ERROR
-- Destinations: console, file (configurable)
-- Include timestamp and module name in output
-
-**utils.py**
-- Shared utilities: file I/O helpers, math functions, conversion functions
-- **No direct hardware or database access**
-
-## Platform Abstraction Strategy
-
-### Preferred: Platform Detection at Startup
-
-Detection approach:
-- At startup, detect platform (RPi vs. desktop) via `try-except` or `sys.platform` check
-- Branch imports in `colorcam.py` and `lighting.py` accordingly
-- Example:
-  ```python
-  try:
-      import picamera2
-      PLATFORM = "rpi"
-  except ImportError:
-      import mock_Picamera2 as picamera2
-      PLATFORM = "desktop"
-  ```
-- For GPIO: detect RPi GPIO library availability
-
-### Alternative: Distinctive Module Naming
-
-- **Real modules**: `picamera2`, `RPi.GPIO` (available only on RPi)
-- **Mock modules**: `mock_Picamera2`, `mock_gpio` (available only on desktop)
-- Import via try-except; program auto-selects available implementation
-
-## Database Connection Lifecycle
-
-**Key principle**: No persistent connections; connections are request-scoped.
-
-- **At startup**: Do NOT open persistent connection
-- **User initiates task** (e.g., "save reading", "retrieve calibration"):
-  1. `db_interface` creates connection
-  2. Execute query(es) in transaction
-  3. On success: commit and close connection
-  4. On error: rollback, close connection, re-raise to `error_handler`
-- **Return to main loop**: No open connection
-- **Advantages**: Minimal resource usage, clean state between interactions, no stale connections
+- **Analysis** — colour analysis in a target ROI; calibration-card patch reading;
+  ROI auto-detection.
+- **Colour → concentration map** — calibration curves per test-strip type.
+- **Report** — format and persist results (timestamp, image refs, calibration
+  used).
+- **Calibration workflow** — orchestrate calibration captures + analysis.
+- **Web interface** — a Flask frontend. The phase/slot model is designed to make
+  this cheap: swap `layout.py` + the pool builder, keep phases and slots. A
+  separate hardware-exercise prototype already exists at `dev/webtest.py` — see
+  [WEB_INTERFACE.md](WEB_INTERFACE.md).

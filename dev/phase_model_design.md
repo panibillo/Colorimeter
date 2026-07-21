@@ -2,9 +2,9 @@
 
 Supersedes the screen-centric model (`screen_manager.py`, `csv_loader.py`,
 `csv_to_widgets.py`, `screen_defs.csv`, `screen_widgets.csv`, `widget_defs.csv`)
-and the abandoned CSV-step exploration under `src/proposed/`. Nothing is deleted
-yet; the old and new systems coexist on this branch until the new one drives the
-app.
+and the abandoned CSV-step exploration under `src/proposed/`. The new model now
+drives the app — `main.py` and `run_simulation.py` launch `Arbiter().start()`.
+The old modules still exist on this branch, unused, pending retirement.
 
 ## The problem with screens
 
@@ -24,7 +24,7 @@ Three roles, each with one job. No `Screen`, no `ScreenManager`, no
 |---|---|---|---|
 | **Pool** — the view | 1 | one widget instance per rect, keyed by short name | `pool.py` + `layout.py` |
 | **Phase** — behaviour | one per pattern | stateless: `enter(pool, slot, arb)`, `activate(arb, slot)`, `on_expire(arb, slot)` | `phases.py` |
-| **Slot** — state | 2 (A, B) | record, current phase id, `running` flag, `TimerState` | `slot.py` |
+| **Slot** — state | 2 (A, B) | record, viewed + live phase ids, `running`/`capturing` flags, `TimerState` | `slot.py` |
 | **Arbiter** — coordination | 1 | both slots, focus, the single camera + buzzer, main loop | `arbiter.py` |
 
 There is **one physical screen**, so there is **one widget pool** (the view).
@@ -78,16 +78,39 @@ denies:
 
 - `request_capture(slot)` — one capture at a time across BOTH slots. A capture
   begins only from a focused CAPTURE press, then runs capture→analysis to
-  completion while the user may toggle away. Every CAPTURE button is disabled
-  while any capture is live. (Predictive "act within a feasible window" conflict
-  avoidance lands here later — one object to change.)
+  completion while the user may toggle slots or preview other phases. Every
+  CAPTURE button is disabled while any capture is live. (Predictive "act within a
+  feasible window" conflict avoidance lands here later — one object to change.)
 - `alarm(slot)` — sound the buzzer. **Alarm only; never auto-switch focus.**
 - `focus(slot)` — user-initiated toggle only.
-- `pump()` — advance the in-flight capture one step; poll both slots for expiry.
-  Driven by the main loop.
+- `poll_timers()` / `pump_capture()` / `pump_analysis()` — advance the in-flight
+  capture one step, complete analysis, and poll both slots for expiry. Driven by
+  the main loop.
 
 It owns the single in-flight `CaptureSession` (+ which slot owns it), both
 slots, the focus pointer, the pool, and the buzzer.
+
+## Navigation: preview vs the live phase
+
+A slot separates the phase it is **on** from the phase it is **showing**:
+`active_phase` is where the test actually is; `phase` is the screen drawn now.
+They match except while browsing.
+
+- **PRIOR / NEXT preview** the neighbouring steps (`arb.view`) — they change only
+  the viewed phase, never the live one, and never run `activate()`, so a preview
+  starts and resets nothing.
+- **`arb.goto` is the only real advance** (Begin, a countdown expiring, a capture
+  completing, next-sample). It sets both `phase` and `active_phase` and runs
+  `activate()`.
+- **While previewing** (`phase != active_phase`) the header main button becomes
+  **Resume** (`arb.resume` → back to the live phase) and the previewed phase's
+  action button is disabled — a preview can look but not act.
+- **Timer expiry follows `active_phase`**, not the viewed phase, so a countdown
+  you have navigated away from still advances and alarms correctly.
+- **Nothing locks navigation.** A running countdown or an in-flight capture is
+  arbiter-owned and stays alive in the background — leaving its screen is the
+  same safe case as an A/B toggle, and Resume returns. (`lock_nav` survives in
+  `_chrome` but is unused, kept for a future phase that must truly trap the user.)
 
 ## Decisions locked
 
@@ -104,6 +127,12 @@ slots, the focus pointer, the pool, and the buzzer.
    frontend (Flask) cheap: swap `layout.py` + the pool builder, keep phases and
    slots. Geometry is per-frontend and deliberately not shared; the phase model
    is the shared asset.
+6. **Preview navigation, not step-through.** PRIOR/NEXT preview neighbouring
+   phases without advancing the test; the header offers Resume back to the live
+   phase. `active_phase` (live) is distinct from `phase` (viewed).
+7. **Background work never locks the UI.** Running countdowns and in-flight
+   captures keep running while you navigate away — the arbiter polls and alarms,
+   and Resume returns. Same handling as an A/B slot toggle.
 
 ## Files (this branch)
 
@@ -136,10 +165,34 @@ slots, the focus pointer, the pool, and the buzzer.
   so `retry_capture` just returns to read.
 - `next_sample` — clears the run but does not auto-increment the id.
 
+## Rendering notes
+
+- **Labels paint their own background.** `Label`/`TextBox` fill their rect before
+  drawing text — `draw_text` renders glyphs only. Without this, white-on-white
+  labels are invisible and per-widget redraws (the clock) stack text. A real-
+  hardware fix, not just a mock one.
+- **The mock display** (`mock/ili9341_mock.py`) clears matplotlib's default
+  keymaps (else typing `l`/`k`/`L` toggles a log axis into a math-domain crash,
+  `f` fullscreens, `q` quits) and stamps every artist with an increasing z-order
+  so call order is paint order — otherwise matplotlib draws patches under text
+  and a per-widget redraw cannot erase.
+- **Simulation shortcuts:** reagent countdowns are 20 s each under
+  `COLORIMETER_SIMULATION`. Run live with
+  `~/Projects/Colorimeter/.venv/bin/python3 src/run_simulation.py`.
+
 ## Remaining
 
-1. **Cutover.** Point `main.py` (and `run_simulation.py`) at `Arbiter().start()`
-   instead of `AppController().start()`. Verify in simulation (needs
-   `matplotlib`, which is not installed in the current dev shell).
-2. **Retire** `screen_manager.py`, `csv_loader.py`, `csv_to_widgets.py`,
-   `app_controller.py`, and the three CSV files. Move `src/proposed/` out.
+1. **Retire** `screen_manager.py`, `csv_loader.py`, `csv_to_widgets.py`,
+   `app_controller.py`, and the CSV files. Move `src/proposed/` out.
+2. **Screen geometry** in `layout.py` still needs work (spacing, the collect
+   line, the label chips, the footer clock chip).
+3. **Test on the Raspberry Pi.** Verified in simulation only; the GUI is
+   incomplete and untested on hardware. The loop is single-threaded cooperative,
+   so a Pi Zero 2 W (quad A53 + NEON) is the target for concurrent capture +
+   analysis + responsive nav; a Zero W (single ARMv6, no NEON) cannot overlap
+   heavy work.
+4. The arbiter stubs above (analysis engine, `post_results`, `nosample`,
+   `next_sample` id increment).
+
+**Cutover: done** — `main.py` / `run_simulation.py` launch `Arbiter().start()`
+and the app runs live in simulation.

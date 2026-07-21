@@ -31,7 +31,10 @@ Arbiter contract (what phases call; arbiter.py implements it)
 -------------------------------------------------------------
     arb.now() -> float              monotonic time (for creating timers)
     arb.timestamp() -> str          wall-clock string for the collect stamp
-    arb.goto(slot, phase_id)        move slot to a phase (runs activate, renders)
+    arb.goto(slot, phase_id)        advance slot to a phase — the live phase
+                                    (runs activate, renders)
+    arb.view(slot, phase_id)        preview a phase without advancing (no activate)
+    arb.resume(slot)                return the view to the slot's live phase
     arb.render(slot)                re-render slot's current phase in place
     arb.request_capture(slot)->bool start a capture if the camera is free
     arb.capture_available()->bool   is the (single) camera free right now
