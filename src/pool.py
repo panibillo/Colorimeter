@@ -87,18 +87,28 @@ class Pool:
         def rect(name, r, fill_color):
             return p._add(name, RectWidget(r, color=color(fill_color), fill=True))
 
-        # ── body: sample-entry form ────────────────────────────────────────────
+        # ── body: entry screen 1 — id/user/test/test-lot ───────────────────────
+        # The row labels are Buttons: pressing one loads its default value into
+        # the field beside it (wired in EntryPhase / Entry2Phase).
         rect("div1", L.DIV1, "row_line")
         rect("div2", L.DIV2, "row_line")
         rect("div3", L.DIV3, "row_line")
-        label("id_lbl",      L.ID_LBL,      "white", "label_coral", 13, text="ID")
-        field("id_fld",      L.ID_FLD,      22, "field_blue")
-        label("user_lbl",    L.USER_LBL,    "white", "label_coral", 13, text="User")
-        field("user_fld",    L.USER_FLD,    18, "field_blue")
-        label("test_lbl",    L.TEST_LBL,    "white", "label_coral", 13, text="Test")
-        field("test_fld",    L.TEST_FLD,    18, "field_blue")
-        label("collect_lbl", L.COLLECT_LBL, "white", "label_coral", 13, text="Collect")
-        field("collect_fld", L.COLLECT_FLD, 18, "field_blue")
+        button("id_lbl",       L.ID_LBL,      "white", "label_coral", 13, text="ID")
+        field("id_fld",        L.ID_FLD,      22, "field_blue")
+        button("user_lbl",     L.USER_LBL,    "white", "label_coral", 13, text="User")
+        field("user_fld",      L.USER_FLD,    18, "field_blue")
+        button("test_lbl",     L.TEST_LBL,    "white", "label_coral", 13, text="Test")
+        field("test_fld",      L.TEST_FLD,    18, "field_blue")
+        button("test_lot_lbl", L.COLLECT_LBL, "white", "label_coral", 13, text="Test lot")
+        field("test_lot_fld",  L.COLLECT_FLD, 18, "field_blue")
+
+        # ── body: entry screen 2 — temperature/weight/collect (reuses rows) ─────
+        button("temp_lbl",      L.ID_LBL,   "white", "label_coral", 13, text="Temp °C")
+        field("temp_fld",       L.ID_FLD,   18, "field_blue")
+        button("weight_lbl",    L.USER_LBL, "white", "label_coral", 13, text="Weight g")
+        field("weight_fld",     L.USER_FLD, 18, "field_blue")
+        button("collectdt_lbl", L.TEST_LBL, "white", "label_coral", 13, text="Collect")
+        field("collectdt_fld",  L.TEST_FLD, 18, "field_blue")
 
         # ── body: timer cluster + instructions ─────────────────────────────────
         label("caption", L.CAPTION, "white", "label_coral", 13)
@@ -123,13 +133,24 @@ class Pool:
         # ── footer (static chrome) ─────────────────────────────────────────────
         button("prior_btn", L.PRIOR_BTN, "btn_text", "btn_gray", 13, text="PRIOR")
         label("clock", L.CLOCK, "hdr_text", "status_bg", 13)
+        button("menu_btn", L.MENU_BTN, "btn_text", "btn_gray", 13, text="MENU")
         button("next_btn", L.NEXT_BTN, "btn_text", "btn_gray", 13, text="NEXT")
+
+        # ── menu screen (its own screen, reached by the footer MENU button —
+        # not part of the A/B toggle).  OK/CANCEL save or discard the choices
+        # made while in the menu and return to the A/B slot that was showing.
+        button("menu_cancel_btn", L.MENU_CANCEL_BTN, "hdr_text", "btn_gray",   18, text="CANCEL")
+        label("menu_title",       L.MENU_TITLE,       "black",   "white",     20, text="Menu")
+        button("menu_ok_btn",     L.MENU_OK_BTN,       "hdr_text", "start_green", 18, text="OK")
+        button("menu_power",      L.MENU_POWER,        "hdr_text", "label_coral", 20, text="Power")
+        button("menu_defaults",   L.MENU_DEFAULTS,     "hdr_text", "slot_a_bg",   20, text="Defaults")
 
         # ── modal overlay (drawn last = on top) ────────────────────────────────
         rect("modal_panel", L.MODAL_PANEL, "body_dark")
         label("modal_msg", L.MODAL_MSG, "body_text", "body_dark", 16)
         button("modal_yes", L.MODAL_YES, "btn_text", "start_green", 18)
         button("modal_no",  L.MODAL_NO,  "btn_text", "btn_gray", 18)
+        button("modal_third", L.MODAL_3C, "btn_text", "btn_gray", 14)   # 3-choice modals
 
         log.info("Pool.build: %d widgets", len(p._widgets))
         return p
@@ -250,6 +271,24 @@ class Pool:
         return [w for w in self._widgets.values()
                 if w.visible and w.enabled and w.focusable]
 
+    def layout_modal_buttons(self, count: int) -> List[str]:
+        """
+        Position the modal action buttons for a 1/2/3-choice dialog and return
+        their widget names in order.  One shared set of button widgets is
+        repositioned per dialog (centred / two-across / three-across), so
+        ModalPhase never mentions pixels.
+        """
+        if count <= 1:
+            names, rects = ["modal_yes"], [layout.MODAL_ONE]
+        elif count == 2:
+            names, rects = ["modal_yes", "modal_no"], [layout.MODAL_YES, layout.MODAL_NO]
+        else:
+            names = ["modal_yes", "modal_no", "modal_third"]
+            rects = [layout.MODAL_3A, layout.MODAL_3B, layout.MODAL_3C]
+        for name, r in zip(names, rects):
+            self[name].rect = r
+        return names
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Self-test  (no hardware required)
@@ -283,7 +322,7 @@ if __name__ == "__main__":
     pool.enable("main_btn", False)          # disabled until id + user filled
     pool.show("title", "main_btn", "slot_btn",
               "id_lbl", "id_fld", "user_lbl", "user_fld",
-              "test_lbl", "test_fld", "collect_lbl", "collect_fld",
+              "test_lbl", "test_fld", "test_lot_lbl", "test_lot_fld",
               "div1", "div2", "div3",
               "prior_btn", "clock", "next_btn")
     print(f"  visible: {len(pool.visible_names())} widgets")

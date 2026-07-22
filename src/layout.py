@@ -58,10 +58,23 @@ RESULT_LBL  = Rect(  8, 135,  68, 35);  RESULT_FLD = Rect( 82, 133, 230, 39)
 # ── modal overlay ──────────────────────────────────────────────────────────────
 MODAL_PANEL = Rect( 20,  50, 280, 140)
 MODAL_MSG   = Rect( 32,  62, 256,  56)
-MODAL_YES   = Rect( 40, 130, 100,  44)
+MODAL_YES   = Rect( 40, 130, 100,  44)   # two-button layout (yes/no)
 MODAL_NO    = Rect(180, 130, 100,  44)
+MODAL_ONE   = Rect(110, 132, 100,  46)   # single-button layout (centred)
+MODAL_3A    = Rect( 28, 134,  84,  46)   # three-button layout (keep/delete/resume)
+MODAL_3B    = Rect(118, 134,  84,  46)
+MODAL_3C    = Rect(208, 134,  84,  46)
+
+# ── menu screen (reached by the dedicated footer MENU button — a screen of its
+# own, not part of the A/B toggle) ───────────────────────────────────────────────
+MENU_CANCEL_BTN = Rect(  0,   0, 100,  50)   # top-left: discard staged choices
+MENU_TITLE      = Rect(100,   5, 120,  40)
+MENU_OK_BTN     = Rect(220,   0, 100,  50)   # top-right: save staged choices
+MENU_POWER      = Rect( 60,  80, 200,  50)
+MENU_DEFAULTS   = Rect( 60, 148, 200,  50)
 
 # ── footer  y 215..239 ─────────────────────────────────────────────────────────
-PRIOR_BTN   = Rect(  0, 217,  78, 21)
-CLOCK       = Rect( 80, 217, 120, 21)
-NEXT_BTN    = Rect(260, 217,  78, 21)
+PRIOR_BTN   = Rect(  0, 217,  58, 21)
+CLOCK       = Rect( 60, 217, 140, 21)   # "Jul 21 14:32:07"
+MENU_BTN    = Rect(202, 217,  58, 21)
+NEXT_BTN    = Rect(262, 217,  58, 21)

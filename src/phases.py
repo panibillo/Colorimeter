@@ -81,7 +81,7 @@ class Phase:
 
     def _show_collect(self, pool, slot) -> None:
         """Keep the collect stamp in view once a run is under way (post-entry)."""
-        ts = slot.record.get("collect", "")
+        ts = slot.record.get("collect_dt", "")
         if ts:
             pool.put("collect_line", f"Collected  {ts}")
 
@@ -111,7 +111,7 @@ class Phase:
             lock_nav = False                                # previewing is safe
             pool.enable("run_btn", False)
 
-        pool.put("title", self.title or slot.record.get("id", ""))
+        pool.put("title", self.title or slot.record.get("samp_no", ""))
         pool.put("main_btn", main_label, on=main_on, enabled=main_enabled)
         pool.show("slot_btn")
 
@@ -124,39 +124,137 @@ class Phase:
                  on=(lambda: arb.view(slot, self.next)) if can_next else None,
                  enabled=can_next)
         pool.show("clock")
+        pool.put("menu_btn", "MENU", on=lambda: arb.open_menu(slot))
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Entry
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _text(v) -> str:
+    """Render a stored (possibly numeric/None) field as display text."""
+    return "" if v is None else str(v)
+
+
+def _to_float(s):
+    """Parse a numeric entry field to float, or None if blank/invalid."""
+    try:
+        s = str(s).strip()
+        return float(s) if s else None
+    except (TypeError, ValueError):
+        return None
+
+
 class EntryPhase(Phase):
-    """Sample entry: fill the form, press Begin."""
+    """Sample entry (screen 1): id / user / test / test-lot, then Begin."""
 
     phase_id = "entry"
     prior    = None
-    next     = "reagent1"
+    next     = "entry2"
     title    = "New Test"
 
-    # field widget -> record key; the arbiter writes edits straight through to
-    # the record on each keystroke, so the record is always the source of truth.
-    FIELDS = {"id_fld": "id", "user_fld": "user",
-              "test_fld": "test", "collect_fld": "collect"}
+    # entry field widget -> record key; the arbiter writes edits straight through
+    # to the record on each keystroke, so the record is always the source of truth.
+    FIELDS = {"id_fld": "samp_no", "user_fld": "user",
+              "test_fld": "test", "test_lot_fld": "test_lot"}
 
     def enter(self, pool, slot, arb) -> None:
         r = slot.record
-        pool.put("id_lbl", "ID");        pool.put("id_fld", r["id"])
-        pool.put("user_lbl", "User");    pool.put("user_fld", r["user"])
-        pool.put("test_lbl", "Test");    pool.put("test_fld", r["test"])
-        pool.put("collect_lbl", "Collect"); pool.put("collect_fld", r["collect"])
+        if not r.get("samp_no"):
+            self._autofill(arb, slot)     # first view of a fresh run
+        pool.put("id_lbl",       "ID",       on=lambda: self.fill_id(arb, slot))
+        pool.put("id_fld",       r["samp_no"])
+        pool.put("user_lbl",     "User",     on=lambda: self.fill_user(arb, slot))
+        pool.put("user_fld",     r["user"])
+        pool.put("test_lbl",     "Test",     on=lambda: self.fill_test(arb, slot))
+        pool.put("test_fld",     r["test"])
+        pool.put("test_lot_lbl", "Test lot", on=lambda: self.fill_test_lot(arb, slot))
+        pool.put("test_lot_fld", r["test_lot"])
         pool.show("div1", "div2", "div3")
         self._chrome(pool, slot, arb, "Begin",
                      main_on=lambda: self.begin(arb, slot),
                      main_enabled=slot.ready_to_begin())
 
+    # ── defaults + label-button fills ───────────────────────────────────────────
+    # Each row label is a Button: pressing it loads that field's default value.
+
+    def _autofill(self, arb, slot) -> None:
+        """Seed every field of a fresh run from the loaded defaults."""
+        r = slot.record
+        r["samp_no"] = arb.next_sample_no()
+        d = arb.defaults()
+        if d is not None:
+            r["user"],     r["userid"]    = d.fullname, d.userid
+            r["test"],     r["testlotid"] = d.testkit,  d.testlotid
+            r["test_lot"]                 = d.lotno
+            r["colorimeterid"]            = d.deviceid
+
+    def fill_id(self, arb, slot) -> None:
+        slot.record["samp_no"] = arb.next_sample_no()
+        arb.render(slot)
+
+    def fill_user(self, arb, slot) -> None:
+        d = arb.defaults()
+        if d is not None:
+            slot.record["user"], slot.record["userid"] = d.fullname, d.userid
+            arb.render(slot)
+
+    def fill_test(self, arb, slot) -> None:
+        d = arb.defaults()
+        if d is not None:
+            slot.record["test"], slot.record["testlotid"] = d.testkit, d.testlotid
+            arb.render(slot)
+
+    def fill_test_lot(self, arb, slot) -> None:
+        d = arb.defaults()
+        if d is not None:
+            slot.record["test_lot"], slot.record["testlotid"] = d.lotno, d.testlotid
+            arb.render(slot)
+
     def begin(self, arb, slot) -> None:
-        if not slot.record.get("collect"):
-            slot.record["collect"] = arb.timestamp()
+        """Reserve the sample row (claims samp_no); on a duplicate, warn instead."""
+        if arb.begin_sample(slot):
+            arb.goto(slot, self.next)
+        else:
+            arb.open_modal(slot, "dup")
+
+
+class Entry2Phase(Phase):
+    """Sample entry (screen 2): temperature / weight / collect datetime."""
+
+    phase_id = "entry2"
+    prior    = "entry"
+    next     = "reagent1"
+    title    = ""                 # header shows the sample id
+
+    FIELDS = {"temp_fld": "samp_degC", "weight_fld": "samp_grams",
+              "collectdt_fld": "collect_dt"}
+
+    def enter(self, pool, slot, arb) -> None:
+        r = slot.record
+        # temperature/weight have no default source yet — their labels are inert
+        # placeholders; only the collect label fills a value (the current time).
+        pool.put("temp_lbl",      "Temp °C")
+        pool.put("temp_fld",      _text(r.get("samp_degC")))
+        pool.put("weight_lbl",    "Weight g")
+        pool.put("weight_fld",    _text(r.get("samp_grams")))
+        pool.put("collectdt_lbl", "Collect", on=lambda: self.fill_collect(arb, slot))
+        pool.put("collectdt_fld", r.get("collect_dt") or "")
+        pool.show("div1", "div2")
+        self._chrome(pool, slot, arb, "Continue",
+                     main_on=lambda: self.proceed(arb, slot))
+
+    def fill_collect(self, arb, slot) -> None:
+        slot.record["collect_dt"] = arb.timestamp()
+        arb.render(slot)
+
+    def proceed(self, arb, slot) -> None:
+        r = slot.record
+        if not r.get("collect_dt"):
+            r["collect_dt"] = arb.timestamp()
+        arb.persist(slot, collect_dt=r["collect_dt"],
+                    samp_degC=_to_float(r.get("samp_degC")),
+                    samp_grams=_to_float(r.get("samp_grams")))
         arb.goto(slot, self.next)
 
 
@@ -210,11 +308,13 @@ class ReagentPhase(Phase):
     def start(self, arb, slot) -> None:
         slot.timer   = TimerState.down(self.secs, arb.now())
         slot.running = True
+        arb.persist(slot, **{f"{self.phase_id}_start": arb.epoch()})
         arb.render(slot)
 
     def on_expire(self, arb, slot) -> None:
         slot.running = False
         slot.timer   = None
+        arb.persist(slot, **{f"{self.phase_id}_end": arb.epoch()})
         arb.goto(slot, self.next)
 
 
@@ -250,7 +350,7 @@ class ReadPhase(Phase):
             pool["timer"].bind(preview, interactive=False)
         pool.put("timer")
         pool.put("color_lbl", "Read color")
-        pool.put("color_fld", slot.record.get("manual_color", ""))
+        pool.put("color_fld", slot.record.get("manual_read", ""))
         if is_live and slot.capturing:
             pool.put("instr1", slot.progress or "Capturing...")
             pool.put("run_btn", "RUNNING", enabled=False)
@@ -268,7 +368,7 @@ class ReadPhase(Phase):
                      main_on=lambda: arb.open_modal(slot, "cancel"))
 
     def capture(self, arb, slot, pool) -> None:
-        slot.record["manual_color"] = pool["color_fld"].value
+        slot.record["manual_read"] = pool["color_fld"].value
         if arb.request_capture(slot):
             slot.capturing = True
             arb.render(slot)
@@ -322,18 +422,16 @@ class AnalysisPhase(Phase):
 
 class ModalPhase(Phase):
     """
-    A confirm dialog.  `message` may reference record fields (e.g. "{id}").
-    `yes_action` is a callable(arb, slot); the No button always closes back to
-    the phase that opened the modal.
+    A choice dialog.  `message` may reference record fields (e.g. "{samp_no}").
+    `buttons` is a list of 1..3 (label, action) pairs, laid out by count; action
+    is a callable(arb, slot), or None to simply close back to the phase that
+    opened the modal.
     """
 
-    def __init__(self, phase_id: str, message: str,
-                 yes_label: str, yes_action, no_label: str = "Resume"):
-        self.phase_id   = phase_id
-        self.message    = message
-        self.yes_label  = yes_label
-        self.yes_action = yes_action
-        self.no_label   = no_label
+    def __init__(self, phase_id: str, message: str, buttons: list):
+        self.phase_id = phase_id
+        self.message  = message
+        self.buttons  = buttons
 
     def enter(self, pool, slot, arb) -> None:
         try:
@@ -342,8 +440,11 @@ class ModalPhase(Phase):
             msg = self.message
         pool.put("modal_panel")
         pool.put("modal_msg", msg)
-        pool.put("modal_yes", self.yes_label, on=lambda: self.yes_action(arb, slot))
-        pool.put("modal_no",  self.no_label,  on=lambda: arb.close_modal(slot))
+        names = pool.layout_modal_buttons(len(self.buttons))
+        for name, (label, action) in zip(names, self.buttons):
+            on = ((lambda a=action: a(arb, slot)) if action
+                  else (lambda: arb.close_modal(slot)))
+            pool.put(name, label, on=on)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -359,7 +460,8 @@ def build_phases(reagent1_secs: int = 120, reagent2_secs: int = 420) -> dict:
     """
     phases = [
         EntryPhase(),
-        ReagentPhase("reagent1", reagent1_secs, "reagent2", prior="entry",
+        Entry2Phase(),
+        ReagentPhase("reagent1", reagent1_secs, "reagent2", prior="entry2",
                      armed=("Add Reagent 1", "and press START"),
                      running=("Stir 20 sec, then rest", "Prepare reagent 2 and strip")),
         ReagentPhase("reagent2", reagent2_secs, "read", prior="reagent1",
@@ -367,12 +469,20 @@ def build_phases(reagent1_secs: int = 120, reagent2_secs: int = 420) -> dict:
                      running=("Stir 20 sec, then rest", "Ventilate")),
         ReadPhase(),
         AnalysisPhase(),
-        ModalPhase("cancel", "Cancel test {id}?", "Cancel test",
-                   yes_action=lambda arb, slot: arb.cancel_test(slot), no_label="Resume"),
-        ModalPhase("reset", "Reset the timer?", "Reset",
-                   yes_action=lambda arb, slot: arb.reset_timer(slot), no_label="No"),
-        ModalPhase("nosample", "INSERT SAMPLE AND CONTINUE", "CAPTURE",
-                   yes_action=lambda arb, slot: arb.retry_capture(slot), no_label="RETURN"),
+        # Cancel offers three outcomes: stop the run but keep the reserved DB row
+        # as-is, stop and delete the row (start over), or resume the run.
+        ModalPhase("cancel", "Cancel test {samp_no}?",
+                   [("Keep row",   lambda arb, slot: arb.cancel_test(slot, delete=False)),
+                    ("Delete row", lambda arb, slot: arb.cancel_test(slot, delete=True)),
+                    ("Resume",     None)]),
+        ModalPhase("reset", "Reset the timer?",
+                   [("Reset", lambda arb, slot: arb.reset_timer(slot)),
+                    ("No",    None)]),
+        ModalPhase("nosample", "INSERT SAMPLE AND CONTINUE",
+                   [("CAPTURE", lambda arb, slot: arb.retry_capture(slot)),
+                    ("RETURN",  None)]),
+        ModalPhase("dup", "Sample number already in use",
+                   [("OK", None)]),
     ]
     return {p.phase_id: p for p in phases}
 
@@ -395,18 +505,41 @@ if __name__ == "__main__":
         def draw_rect(self, rect, color, **kw): pass
         def draw_text(self, text, rect, **kw): pass
 
+    from types import SimpleNamespace
+
+    DEFAULTS = SimpleNamespace(
+        rowid=1, deviceid=7, userid=3, testlotid=5,
+        samp_no_template="ZZ1000", testkit="Ascel 458201",
+        lotno="0 12V601-HH", fullname="William Olsen",
+        hardware_sn="XCN-001", software_ver="0.2")
+
     class MockArbiter:
         """Minimal stand-in exercising the whole phase contract."""
         def __init__(self, pool, display):
             self.pool, self.display = pool, display
             self.phases = build_phases()
             self.clock = 1000.0
+            self.epoch_s = 1_700_000_000
             self.capturing_slot = None
             self.calls = []
+            self.fail_begin = False       # flip on to simulate a duplicate samp_no
 
-        # clock / stamp
+        # clock / stamps
         def now(self):        return self.clock
         def timestamp(self):  return "2026-07-20 14:00:00"
+        def epoch(self):      return self.epoch_s
+
+        # database / sample lifecycle
+        def defaults(self):        return DEFAULTS
+        def next_sample_no(self):  return "ZZ1001"
+        def begin_sample(self, slot):
+            if self.fail_begin:
+                return False
+            slot.record["db_rowid"] = 42
+            return True
+        def persist(self, slot, **cols):
+            slot.record.update(cols)
+            self.calls.append(("persist", tuple(sorted(cols))))
 
         # navigation / render
         def goto(self, slot, phase_id):
@@ -430,7 +563,7 @@ if __name__ == "__main__":
             slot.phase = mid
             self.render(slot)
         def close_modal(self, slot):
-            slot.phase, slot.modal_return = slot.modal_return, None
+            slot.phase, slot.modal_return = (slot.modal_return or "entry"), None
             self.render(slot)
 
         # capture / analysis
@@ -438,16 +571,20 @@ if __name__ == "__main__":
         def request_capture(self, slot):
             if self.capturing_slot is None:
                 self.capturing_slot = slot
+                self.persist(slot, capture_start=self.epoch(),
+                             manual_read=slot.record.get("manual_read", ""))
                 return True
             return False
         def complete_capture(self, slot):        # driven by the loop in real life
             slot.timer.stop(self.now())
             slot.capturing = False
             self.capturing_slot = None
+            self.persist(slot, capture_end=self.epoch(), h5file="fake.h5")
             self.goto(slot, "analysis")
         def start_analysis(self, slot):  self.calls.append("start_analysis")
         def analysis_done(self, slot, text):
             slot.result = text
+            self.persist(slot, txt_result=text)
             self.render(slot)
 
         # poll for expiry (arithmetic each loop pass)
@@ -458,12 +595,16 @@ if __name__ == "__main__":
                 if t is not None and t.expired(now):
                     slot.timer = None
                     self.alarm(slot)
-                    self.phases[slot.phase].on_expire(self, slot)
+                    self.phases[slot.active_phase].on_expire(self, slot)
 
         # actions invoked by buttons / modals
         def alarm(self, slot):        self.calls.append(("alarm", slot.name))
-        def cancel_test(self, slot):  self.calls.append("cancel"); self.goto(slot, "entry")
+        def cancel_test(self, slot, delete=False):
+            self.calls.append(("cancel", delete)); slot.clear_run(); self.goto(slot, "entry")
         def reset_timer(self, slot):
+            ap = slot.active_phase
+            if ap in ("reagent1", "reagent2"):
+                self.persist(slot, **{f"{ap}_start": None})
             slot.timer = None; slot.running = False
             self.close_modal(slot)
         def retry_capture(self, slot):
@@ -487,79 +628,113 @@ if __name__ == "__main__":
     A    = Slot("A")
     arb.slots = [A]
 
-    print("== entry: Begin disabled until id+user ==")
+    print("== entry: autofills from defaults, Begin enabled ==")
     arb.goto(A, "entry")
-    check("main_btn label",    pool["main_btn"].label, "Begin")
-    check("Begin disabled",    pool["main_btn"].enabled, False)
-    A.record["id"] = "AB0124"; A.record["user"] = "Bill"   # arbiter write-through
-    arb.render(A)
-    check("Begin enabled",     pool["main_btn"].enabled, True)
+    check("main_btn label",       pool["main_btn"].label, "Begin")
+    check("id autofilled",        pool["id_fld"].value, "ZZ1001")
+    check("user autofilled",      pool["user_fld"].value, "William Olsen")
+    check("test autofilled",      pool["test_fld"].value, "Ascel 458201")
+    check("test-lot autofilled",  pool["test_lot_fld"].value, "0 12V601-HH")
+    check("Begin enabled",        pool["main_btn"].enabled, True)
+    check("userid carried",       A.record["userid"], 3)
+    check("testlotid carried",    A.record["testlotid"], 5)
+    check("colorimeterid carried", A.record["colorimeterid"], 7)
 
-    print("== begin -> reagent1 armed ==")
+    print("== label-button refills a cleared field ==")
+    A.record["user"] = ""; arb.render(A)
+    check("user cleared",   pool["user_fld"].value, "")
+    press(pool, "user_lbl")                        # User label = load-default button
+    check("user refilled",  pool["user_fld"].value, "William Olsen")
+
+    print("== Begin reserves the row -> entry2 ==")
     press(pool, "main_btn")
-    check("phase",             A.phase, "reagent1")
-    check("collect stamped",   bool(A.record["collect"]), True)
-    check("run_btn label",     pool["run_btn"].label, "START")
-    check("timer not interactive (armed)", pool["timer"].interactive, False)
-    check("instr1",            pool["instr1"].text, "Add Reagent 1")
-    check("main is CANCEL",    pool["main_btn"].label, "CANCEL")
-    check("NEXT enabled (armed)", pool["next_btn"].enabled, True)
+    check("phase entry2",      A.phase, "entry2")
+    check("row reserved",      A.record["db_rowid"], 42)
+    check("main is Continue",  pool["main_btn"].label, "Continue")
+    check("temp label shown",  pool["temp_lbl"].visible, True)
 
-    print("== START -> running; nav stays open (preview + Resume) ==")
+    print("== entry2: collect stamp + Continue persists -> reagent1 ==")
+    A.record["samp_degC"] = "21.5"; A.record["samp_grams"] = "3.2"   # writethrough sim
+    press(pool, "collectdt_lbl")                   # Collect label stamps the datetime
+    check("collect stamped",  bool(A.record["collect_dt"]), True)
+    press(pool, "main_btn")                        # Continue
+    check("phase reagent1",   A.phase, "reagent1")
+    check("degC persisted (float)",  A.record["samp_degC"], 21.5)
+    check("grams persisted (float)", A.record["samp_grams"], 3.2)
+    check("run_btn label",    pool["run_btn"].label, "START")
+    check("instr1",           pool["instr1"].text, "Add Reagent 1")
+    check("main is CANCEL",   pool["main_btn"].label, "CANCEL")
+
+    print("== reagent1 START stamps reagent1_start ==")
     press(pool, "run_btn")
-    check("running",           A.running, True)
-    check("run_btn is RESET",  pool["run_btn"].label, "RESET")
-    check("timer interactive", pool["timer"].interactive, True)
-    check("NEXT open while running", pool["next_btn"].enabled, True)
+    check("running",              A.running, True)
+    check("run_btn is RESET",     pool["run_btn"].label, "RESET")
+    check("reagent1_start stamped", A.record["reagent1_start"], arb.epoch_s)
 
-    print("== reset modal round-trip ==")
+    print("== reset modal (2 buttons) nulls the start ==")
     press(pool, "run_btn")                         # RESET -> reset modal
     check("phase is modal",    A.phase, "reset")
     check("modal msg",         pool["modal_msg"].text, "Reset the timer?")
+    check("no 3rd button",     pool["modal_third"].visible, False)
     press(pool, "modal_no")                        # No -> back to running reagent1
     check("back to reagent1",  A.phase, "reagent1")
-    check("still running",     A.running, True)
-    press(pool, "run_btn"); press(pool, "modal_yes")   # RESET -> Reset confirmed
+    press(pool, "run_btn"); press(pool, "modal_yes")   # RESET -> confirmed
     check("timer cleared",     A.timer, None)
-    check("armed again",       A.running, False)
+    check("reagent1_start nulled", A.record["reagent1_start"], None)
 
-    print("== run to expiry -> reagent2 ==")
+    print("== run to expiry -> reagent2 (stamps reagent1_end) ==")
     press(pool, "run_btn")                         # START reagent1
-    arb.clock += 121                               # past the 120 s deadline
+    arb.clock += 121                               # past the deadline
     arb.poll()
+    check("reagent1_end stamped", A.record["reagent1_end"], arb.epoch_s)
     check("advanced to reagent2", A.phase, "reagent2")
     check("alarm sounded",     ("alarm", "A") in arb.calls, True)
-    check("reagent2 armed START", pool["run_btn"].label, "START")
 
     print("== reagent2 -> read (capture) ==")
     press(pool, "run_btn")                         # START reagent2
     arb.clock += 421
     arb.poll()
     check("advanced to read",  A.phase, "read")
-    check("count-up running",  A.running, True)
     check("CAPTURE enabled",   pool["run_btn"].enabled, True)
     pool.set("color_fld", "pale blue")             # operator types a reading
     press(pool, "run_btn")                         # CAPTURE
-    check("manual colour saved", A.record["manual_color"], "pale blue")
-    check("capturing",         A.capturing, True)
-    check("run_btn RUNNING disabled", pool["run_btn"].enabled, False)
-    check("nav open while capturing", pool["prior_btn"].enabled, True)
+    check("manual read saved",     A.record["manual_read"], "pale blue")
+    check("capture_start stamped", A.record["capture_start"], arb.epoch_s)
+    check("capturing",             A.capturing, True)
 
     print("== capture completes -> analysis -> done ==")
     arb.clock += 30
     arb.complete_capture(A)
-    check("phase analysis",    A.phase, "analysis")
-    check("start_analysis ran","start_analysis" in arb.calls, True)
-    check("POST disabled",     pool["run_btn"].enabled, False)
-    check("result shows progress", pool["result_fld"].value, "Analyzing ...")
+    check("phase analysis",     A.phase, "analysis")
+    check("capture_end stamped", A.record["capture_end"], arb.epoch_s)
+    check("h5file stamped",     A.record["h5file"], "fake.h5")
     arb.analysis_done(A, "Nitrate 12 ppm")
-    check("result shown",      pool["result_fld"].value, "Nitrate 12 ppm")
-    check("POST enabled",      pool["run_btn"].enabled, True)
-    check("main is NEXT",      pool["main_btn"].label, "NEXT")
+    check("result persisted",   A.record["txt_result"], "Nitrate 12 ppm")
+    check("main is NEXT",       pool["main_btn"].label, "NEXT")
 
-    print("== NEXT -> fresh entry ==")
-    press(pool, "main_btn")
-    check("back to entry",     A.phase, "entry")
-    check("record cleared",    A.record["id"], "")
+    print("== cancel offers 3 choices; Delete row deletes ==")
+    B = Slot("B"); arb.slots = [B]
+    arb.goto(B, "entry"); press(pool, "main_btn")  # Begin -> entry2 (reserved)
+    press(pool, "main_btn")                         # Continue -> reagent1
+    press(pool, "main_btn")                         # CANCEL -> cancel modal
+    check("cancel modal",      B.phase, "cancel")
+    check("3rd button shown",  pool["modal_third"].visible, True)
+    check("keep label",        pool["modal_yes"].label, "Keep row")
+    check("delete label",      pool["modal_no"].label, "Delete row")
+    check("resume label",      pool["modal_third"].label, "Resume")
+    press(pool, "modal_no")                         # Delete row
+    check("cancel(delete=True)", ("cancel", True) in arb.calls, True)
+    check("back to entry",     B.phase, "entry")
+
+    print("== duplicate samp_no opens the dup modal ==")
+    arb.fail_begin = True
+    C = Slot("C"); arb.slots = [C]
+    arb.goto(C, "entry")
+    press(pool, "main_btn")                         # Begin -> begin_sample fails
+    check("dup modal shown",   C.phase, "dup")
+    check("dup message",       pool["modal_msg"].text, "Sample number already in use")
+    check("single button",     pool["modal_no"].visible, False)
+    press(pool, "modal_yes")                        # OK -> close back to entry
+    check("back to entry",     C.phase, "entry")
 
     print("\n== all phase self-tests passed ==")

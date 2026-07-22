@@ -20,13 +20,33 @@ from timer import TimerState
 
 
 def _new_record() -> dict:
-    """A blank data record.  Keys mirror the entry-form fields plus results."""
+    """
+    A blank data record.  Keys are aligned to the `samples` table columns where
+    they persist (see sample_repo), plus a few display-only fields.
+    """
     return {
-        "id":           "",   # sample id
-        "user":         "",
-        "test":         "",
-        "collect":      "",   # collection timestamp, stamped at Begin
-        "manual_color": "",   # the operator's own reading of the strip
+        # ── display fields shown on the entry screens ───────────────────────
+        "samp_no":       "",   # id_fld        -> samples.samp_no
+        "user":          "",   # user_fld      (fullname; display only)
+        "test":          "",   # test_fld      (testkit;  display only)
+        "test_lot":      "",   # test_lot_fld  (lotno;    display only)
+        "collect_dt":    "",   # entry2        -> samples.collect_dt
+        "samp_degC":     "",   # entry2 temp   -> samples.samp_degC
+        "samp_grams":    "",   # entry2 weight -> samples.samp_grams
+        "manual_read":   "",   # read screen   -> samples.manual_read
+        # ── identity carried from the loaded defaults (the real FKs stored) ──
+        "db_rowid":      None,  # samples.rowid, once reserved at Begin
+        "userid":        None,  # samples.userid
+        "testlotid":     None,  # samples.testlotid
+        "colorimeterid": None,  # samples.colorimeterid (defaults.deviceid)
+        # ── milestone timestamps (epoch seconds) -> samples.* ───────────────
+        "reagent1_start": None, "reagent1_end": None,
+        "reagent2_start": None, "reagent2_end": None,
+        "capture_start":  None, "capture_end":  None,
+        # ── results ─────────────────────────────────────────────────────────
+        "txt_result":    "",   # samples.txt_result
+        "num_result":    None, # samples.num_result
+        "h5file":        "",   # samples.h5file (capture archive path)
     }
 
 
@@ -63,8 +83,8 @@ class Slot:
     modal_return: Optional[str]        = None
 
     def ready_to_begin(self) -> bool:
-        """Begin is allowed once id and user are filled."""
-        return bool(self.record.get("id", "").strip()
+        """Begin is allowed once the sample number and user are filled."""
+        return bool(self.record.get("samp_no", "").strip()
                     and self.record.get("user", "").strip())
 
     def clear_run(self) -> None:

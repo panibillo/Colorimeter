@@ -46,13 +46,16 @@ _SIMULATION_MODE = os.environ.get("COLORIMETER_SIMULATION", "0") == "1"
 # Hardware drivers are imported lazily in _init_hardware() so this module (and
 # its logic self-test) imports cleanly on a machine without the display/GPIO
 # stacks.  Only the pure model + widget layer is imported at module load.
+import sqlite3
+
 import logging_manager
 import widgets
 import shutdown_screen
+import sample_repo
 from widgets import Button, TextBox
 from pool import Pool
 from slot import Slot
-from phases import build_phases, EntryPhase
+from phases import build_phases, EntryPhase, Entry2Phase
 
 log = logging.getLogger(__name__)
 
@@ -99,6 +102,16 @@ class Arbiter:
         # or cleanup() running its hardware-release chain twice.
         self._shutting_down = False
         self._cleaned_up    = False
+
+        # Reference data: which default_gui_vals row seeds the entry screens, and
+        # the resolved Defaults loaded from it (rowid 1 for now; later config).
+        self._default_rowid = 1
+        self._defaults: sample_repo.Defaults | None = None
+
+        # Menu screen state: the slot to return to, and a staged (not yet
+        # committed) default_rowid choice — see open_menu()/_menu_ok().
+        self._pre_menu_slot: Slot | None = None
+        self._menu_staged_rowid: int | None = None
 
     # ── Lifecycle ──────────────────────────────────────────────────────────────
 
@@ -165,6 +178,18 @@ class Arbiter:
         else:
             self._phases = build_phases()
         self._slots = {"A": Slot("A"), "B": Slot("B")}
+        self._load_defaults()
+
+    def _load_defaults(self) -> None:
+        """Load the GUI default values (entry pre-fills) from the DB."""
+        try:
+            self._defaults = sample_repo.load_defaults(self._default_rowid)
+        except sqlite3.Error:
+            log.exception("Arbiter: could not load defaults (rowid=%s)",
+                          self._default_rowid)
+            self._defaults = None
+        if self._defaults is None:
+            log.warning("Arbiter: no defaults loaded — entry fields start blank")
 
     def cleanup(self) -> None:
         """
@@ -247,6 +272,7 @@ class Arbiter:
         if choice == "abort":
             log.info("Arbiter: shutdown aborted, resuming")
             self._shutting_down = False
+            self._resume_display()
             return
 
         try:
@@ -277,6 +303,62 @@ class Arbiter:
 
     def timestamp(self) -> str:
         return datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    def epoch(self) -> int:
+        """Wall-clock seconds since the epoch — for the samples.* milestone stamps."""
+        return int(time.time())
+
+    # ── Phase contract: database / sample lifecycle ────────────────────────────
+
+    def defaults(self):
+        """The loaded GUI defaults (entry pre-fills), or None if unavailable."""
+        return self._defaults
+
+    def next_sample_no(self) -> str:
+        """The next sequential sample number for the current default template."""
+        template = self._defaults.samp_no_template if self._defaults else ""
+        try:
+            return sample_repo.next_sample_no(template)
+        except sqlite3.Error:
+            log.exception("Arbiter: next_sample_no failed")
+            return ""
+
+    def begin_sample(self, slot: Slot) -> bool:
+        """
+        Reserve the sample row at Begin (INSERT), claiming its samp_no in the DB.
+        Returns False on a duplicate/invalid samp_no (UNIQUE violation) so the
+        caller can warn the operator instead of advancing.
+        """
+        r = slot.record
+        try:
+            rowid = sample_repo.insert_sample(
+                r["samp_no"], r["userid"], r["testlotid"], r["colorimeterid"])
+        except sqlite3.IntegrityError:
+            log.warning("Arbiter: samp_no %r already in use", r["samp_no"])
+            return False
+        except sqlite3.Error:
+            log.exception("Arbiter: begin_sample failed for slot %s", slot.name)
+            return False
+        r["db_rowid"] = rowid
+        log.info("Arbiter: reserved sample %s (rowid=%s) for slot %s",
+                 r["samp_no"], rowid, slot.name)
+        return True
+
+    def persist(self, slot: Slot, **cols) -> None:
+        """
+        Update the slot's record and write the given columns to its samples row.
+        A no-op on the DB side until the row is reserved (db_rowid set); the
+        record is always updated so the values survive in memory regardless.
+        """
+        slot.record.update(cols)
+        rowid = slot.record.get("db_rowid")
+        if rowid is None:
+            return
+        try:
+            sample_repo.update_sample(rowid, **cols)
+        except sqlite3.Error:
+            log.exception("Arbiter: persist failed for slot %s (rowid=%s)",
+                          slot.name, rowid)
 
     # ── Phase contract: navigation / render ────────────────────────────────────
 
@@ -320,6 +402,14 @@ class Arbiter:
         self._focused = slot
         self.render(slot)
 
+    def _resume_display(self) -> None:
+        """Repaint whatever was on screen before a full-screen interruption
+        (e.g. an aborted shutdown screen) — a slot, or the Menu."""
+        if self._focused is not None:
+            self.render(self._focused)
+        else:
+            self._render_menu()
+
     def toggle_slot(self) -> None:
         """Switch the display to the other slot; both stay live regardless."""
         other = self._slots["B"] if self._focused is self._slots["A"] else self._slots["A"]
@@ -334,6 +424,74 @@ class Arbiter:
         btn.label = target
         btn.color = color("slot_b_bg" if target == "B" else "slot_a_bg")
         btn.on_press = self.toggle_slot
+
+    # ── Menu screen ──────────────────────────────────────────────────────────────
+    # A screen of its own, reached by the dedicated footer MENU button (not the
+    # A/B toggle) and left via its own OK/CANCEL — never tied to slot A/B data.
+
+    def open_menu(self, slot: Slot) -> None:
+        """Open the Menu screen; `slot` is who OK/CANCEL will return the view to."""
+        self._pre_menu_slot = slot
+        self._menu_staged_rowid = self._default_rowid
+        self._focused = None
+        self._render_menu()
+
+    def _render_menu(self) -> None:
+        if self._pool is None:
+            return
+        self._pool.hide_all()
+        self._pool.put("menu_cancel_btn", "CANCEL", on=self._menu_cancel)
+        self._pool.put("menu_title",      "Menu")
+        self._pool.put("menu_ok_btn",     "OK",     on=self._menu_ok)
+        self._pool.put("menu_power",      "Power",    on=self._menu_power)
+        self._pool.put("menu_defaults",   "Defaults", on=self._menu_open_defaults)
+        self._pool.render(self._disp)
+        self._rebuild_focus()
+
+    def _menu_ok(self) -> None:
+        """Save any choices staged while in the menu, then return."""
+        if self._menu_staged_rowid != self._default_rowid:
+            self._default_rowid = self._menu_staged_rowid
+            self._load_defaults()
+        self._close_menu()
+
+    def _menu_cancel(self) -> None:
+        """Discard any choices staged while in the menu, then return."""
+        self._close_menu()
+
+    def _close_menu(self) -> None:
+        slot = self._pre_menu_slot or self._slots["A"]
+        self._pre_menu_slot = None
+        self.focus(slot)
+
+    def _menu_power(self) -> None:
+        self.shutdown()
+
+    def _menu_open_defaults(self) -> None:
+        """
+        A minimal row-picker over default_gui_vals.  Only rowid=1 exists today,
+        so this is a confirm-and-stage rather than a real list; Select stages
+        the rowid (applied only if the menu's OK is then pressed) so the
+        mechanism is exercised end to end and is ready to grow into a real
+        picker once more default rows exist.
+        """
+        if self._pool is None:
+            return
+        d = self._defaults
+        msg = (f"rowid {d.rowid}: {d.fullname} / {d.testkit}"
+              if d else "No defaults loaded")
+        self._pool.hide_all()
+        self._pool.put("modal_panel")
+        self._pool.put("modal_msg", msg)
+        names = self._pool.layout_modal_buttons(2)
+        self._pool.put(names[0], "Select", on=self._menu_select_defaults)
+        self._pool.put(names[1], "Back",   on=self._render_menu)
+        self._pool.render(self._disp)
+        self._rebuild_focus()
+
+    def _menu_select_defaults(self) -> None:
+        self._menu_staged_rowid = 1     # the only default row today
+        self._render_menu()
 
     # ── Phase contract: modals ─────────────────────────────────────────────────
 
@@ -365,6 +523,8 @@ class Arbiter:
         self._capture = session
         self._capture_slot = slot
         slot.progress = "Starting camera..."
+        self.persist(slot, capture_start=self.epoch(),
+                     manual_read=slot.record.get("manual_read", ""))
         log.info("Arbiter: capture started for slot %s", slot.name)
         return True
 
@@ -393,16 +553,32 @@ class Arbiter:
         slot.clear_run()
         self.goto(slot, "entry")
 
-    def cancel_test(self, slot: Slot) -> None:
-        log.info("Arbiter: cancel test in slot %s", slot.name)
+    def cancel_test(self, slot: Slot, delete: bool = False) -> None:
+        """
+        Abandon the current run.  `delete` removes the reserved samples row (the
+        operator chose 'Delete row' to start over); otherwise the row is kept
+        as-is ('Keep row').  Either way the slot resets to a fresh entry.
+        """
+        log.info("Arbiter: cancel test in slot %s (delete=%s)", slot.name, delete)
         if self._capture_slot is slot and self._capture is not None:
             self._capture.cancel()
             self._capture = None
             self._capture_slot = None
+        if delete:
+            rowid = slot.record.get("db_rowid")
+            if rowid is not None:
+                try:
+                    sample_repo.delete_sample(rowid)
+                except sqlite3.Error:
+                    log.exception("Arbiter: delete_sample failed (rowid=%s)", rowid)
         slot.clear_run()
         self.goto(slot, "entry")
 
     def reset_timer(self, slot: Slot) -> None:
+        # Reset re-arms the reagent step, so its recorded start is no longer valid.
+        ap = slot.active_phase
+        if ap in ("reagent1", "reagent2"):
+            self.persist(slot, **{f"{ap}_start": None})
         slot.timer = None
         slot.running = False
         self.close_modal(slot)
@@ -463,10 +639,13 @@ class Arbiter:
         if owner.timer is not None:
             owner.timer.stop(self.now())     # freeze the final elapsed time
         owner.capturing = False
+        self.persist(owner, capture_end=self.epoch(),
+                     h5file=str(session.out_path) if session.out_path else "")
         self.goto(owner, "analysis")
         # A capture just freed the camera; re-enable a waiting CAPTURE button
-        # on the other slot if it is the one being viewed.
-        if self._focused is not owner and self._focused.phase == "read":
+        # on the other slot if it is the one being viewed (not, say, the Menu).
+        if (self._focused is not None and self._focused is not owner
+                and self._focused.phase == "read"):
             self.render(self._focused)
 
     def pump_analysis(self) -> None:
@@ -478,6 +657,7 @@ class Arbiter:
             return
         self._analysis = None
         slot.result = "Analysis not yet implemented"
+        self.persist(slot, txt_result=slot.result)
         log.info("Arbiter: analysis done for slot %s", slot.name)
         self.render(slot)
 
@@ -545,20 +725,26 @@ class Arbiter:
     def _writethrough(self, textbox) -> None:
         """
         Entry-form edits are the source of truth: copy the edited field to the
-        focused slot's record, and re-enable Begin the moment id+user are set.
+        focused slot's record.  On the first entry screen, also re-enable Begin
+        the moment the sample number and user are both set.
         """
         slot = self._focused
-        if slot is None or slot.phase != "entry":
+        if slot is None:
             return
-        key = EntryPhase.FIELDS.get(textbox.name)
+        fields = {"entry":  EntryPhase.FIELDS,
+                  "entry2": Entry2Phase.FIELDS}.get(slot.phase)
+        if not fields:
+            return
+        key = fields.get(textbox.name)
         if key is None:
             return
         slot.record[key] = textbox.value
-        begin = self._pool["main_btn"]
-        want = slot.ready_to_begin()
-        if begin.enabled != want:
-            begin.enabled = want
-            begin.draw(self._disp)
+        if slot.phase == "entry":
+            begin = self._pool["main_btn"]
+            want = slot.ready_to_begin()
+            if begin.enabled != want:
+                begin.enabled = want
+                begin.draw(self._disp)
 
     # ── Main loop ──────────────────────────────────────────────────────────────
 
@@ -598,11 +784,14 @@ class Arbiter:
             time.sleep(_POLL_S)
 
     def _tick_1hz(self) -> None:
-        """Once-a-second repaint of the clock and, if running, the focused timer."""
-        if self._pool is None or self._focused is None:
+        """Once-a-second repaint of the footer clock and, if running, the
+        focused slot's timer.  A no-op on the Menu screen (no clock there)."""
+        if self._pool is None:
             return
-        self._pool.set("clock", datetime.datetime.now().strftime("%H:%M:%S"))
+        self._pool.set("clock", datetime.datetime.now().strftime("%b %d %H:%M:%S"))
         self._pool.redraw(self._disp, "clock")
+        if self._focused is None:
+            return
         tw = self._pool.get("timer")
         if tw is not None and tw.visible and self._focused.running:
             self._pool.redraw(self._disp, "timer")
@@ -657,7 +846,7 @@ def _selftest() -> None:
     # Advance B in the background into a running reagent; the shared pool must
     # keep showing A's entry phase (its title), not B's.
     arb.focus(A)
-    B.record["id"] = "BX9"; B.phase = B.active_phase = "reagent1"
+    B.record["samp_no"] = "BX9"; B.phase = B.active_phase = "reagent1"
     B.running = True
     from timer import TimerState
     B.timer = TimerState.down(120, arb.now())
@@ -672,7 +861,7 @@ def _selftest() -> None:
     check("focus unchanged",     arb._focused is focused_before, True)
 
     print("== single-camera guard across slots ==")
-    A.record["id"] = "AX1"; A.record["user"] = "u"
+    A.record["samp_no"] = "AX1"; A.record["user"] = "u"
     arb.goto(A, "read")
     check("A read: CAPTURE enabled", arb._pool["run_btn"].enabled, True)
     ok = arb.request_capture(A)

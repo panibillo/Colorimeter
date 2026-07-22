@@ -13,11 +13,16 @@ Usage:
               (1, "card1"))
 """
 
+import os
 import sqlite3
 from pathlib import Path
 import logging_manager as log
 
-DBNAME = "src/colorimeter.sqlite"
+# Resolve the DB next to this module so the path is independent of the current
+# working directory (the app is launched from src/, tools from the repo root).
+# COLORIMETER_DB overrides it — used by tests and dev to point at a scratch copy.
+DBNAME = os.environ.get("COLORIMETER_DB") or \
+         str(Path(__file__).resolve().parent / "colorimeter.sqlite")
 
 TABLE_DEFINITIONS = """
 ----------------------------------
