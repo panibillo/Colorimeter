@@ -19,9 +19,10 @@ Platform is chosen by the **`COLORIMETER_SIMULATION`** environment variable, rea
 once as `arbiter._SIMULATION_MODE`. `Arbiter._init_hardware()` imports drivers
 **lazily**, so the modules import cleanly on any machine:
 
-- Real: `ili9341`, `tsc2007`, `kb_reader`, `beeper`, `gpiozero`
+- Real: `ili9341`, `tsc2007`, `kb_reader`, `beeper`, `gpiozero`, `DS18B20`
 - Mock (`src/mock/`): `ili9341_mock`, `tsc2007_mock`, `kb_reader_mock`,
-  `beeper_mock`, `gpiozero_mock`, `picamera2_mock`, `spidev_mock`
+  `beeper_mock`, `gpiozero_mock`, `picamera2_mock`, `spidev_mock`,
+  `DS18B20_mock`
 
 The mock display is a matplotlib window: mouse = touch, key presses = keyboard.
 
@@ -130,7 +131,8 @@ The arbiter owns at most one `CaptureSession` at a time (single camera).
   `write_one`, `write_many`); connections are request-scoped, not pooled.
 - `utils.py` — shared helpers (no hardware or DB access).
 - Hardware drivers: `ili9341.py` (display, SPI), `tsc2007.py` (touch, I²C),
-  `kb_reader.py` (keyboard), `beeper.py` (buzzer).
+  `kb_reader.py` (keyboard), `beeper.py` (buzzer), `DS18B20.py` (temperature,
+  1-Wire on GPIO16).
 
 ## Database lifecycle
 

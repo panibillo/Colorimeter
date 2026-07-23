@@ -31,6 +31,7 @@ Arbiter contract (what phases call; arbiter.py implements it)
 -------------------------------------------------------------
     arb.now() -> float              monotonic time (for creating timers)
     arb.timestamp() -> str          wall-clock string for the collect stamp
+    arb.read_temperature()->float   sample the DS18B20 (°C), or None on failure
     arb.goto(slot, phase_id)        advance slot to a phase — the live phase
                                     (runs activate, renders)
     arb.view(slot, phase_id)        preview a phase without advancing (no activate)
@@ -232,9 +233,9 @@ class Entry2Phase(Phase):
 
     def enter(self, pool, slot, arb) -> None:
         r = slot.record
-        # temperature/weight have no default source yet — their labels are inert
-        # placeholders; only the collect label fills a value (the current time).
-        pool.put("temp_lbl",      "Temp °C")
+        # Temp label reads the DS18B20; Collect label stamps the current time.
+        # Weight has no source yet — its label is an inert placeholder.
+        pool.put("temp_lbl",      "Temp °C", on=lambda: self.fill_temp(arb, slot))
         pool.put("temp_fld",      _text(r.get("samp_degC")))
         pool.put("weight_lbl",    "Weight g")
         pool.put("weight_fld",    _text(r.get("samp_grams")))
@@ -243,6 +244,15 @@ class Entry2Phase(Phase):
         pool.show("div1", "div2")
         self._chrome(pool, slot, arb, "Continue",
                      main_on=lambda: self.proceed(arb, slot))
+
+    def fill_temp(self, arb, slot) -> None:
+        """Sample the temperature sensor into the Temp field (one-press read)."""
+        c = arb.read_temperature()
+        # samp_degC is a string here, exactly as a typed entry would leave it
+        # (proceed() converts it with _to_float); "err" marks a failed read so
+        # the operator sees the press registered but no sensor responded.
+        slot.record["samp_degC"] = "err" if c is None else f"{c:.1f}"
+        arb.render(slot)
 
     def fill_collect(self, arb, slot) -> None:
         slot.record["collect_dt"] = arb.timestamp()
@@ -523,11 +533,13 @@ if __name__ == "__main__":
             self.capturing_slot = None
             self.calls = []
             self.fail_begin = False       # flip on to simulate a duplicate samp_no
+            self.temp_c = 21.7            # canned DS18B20 reading
 
         # clock / stamps
         def now(self):        return self.clock
         def timestamp(self):  return "2026-07-20 14:00:00"
         def epoch(self):      return self.epoch_s
+        def read_temperature(self):  return self.temp_c
 
         # database / sample lifecycle
         def defaults(self):        return DEFAULTS
@@ -652,6 +664,11 @@ if __name__ == "__main__":
     check("row reserved",      A.record["db_rowid"], 42)
     check("main is Continue",  pool["main_btn"].label, "Continue")
     check("temp label shown",  pool["temp_lbl"].visible, True)
+
+    print("== entry2: Temp label reads the sensor into temp_fld ==")
+    press(pool, "temp_lbl")                        # Temp label = sensor-read button
+    check("temp read into field",  pool["temp_fld"].value, "21.7")
+    check("temp stored in record", A.record["samp_degC"], "21.7")
 
     print("== entry2: collect stamp + Continue persists -> reagent1 ==")
     A.record["samp_degC"] = "21.5"; A.record["samp_grams"] = "3.2"   # writethrough sim

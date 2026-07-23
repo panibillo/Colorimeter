@@ -78,6 +78,7 @@ class Arbiter:
         self._touch     = None
         self._kb        = None
         self._beeper    = None
+        self._temp      = None
         self._ILI9341   = None
 
         # Model
@@ -139,12 +140,14 @@ class Arbiter:
             from mock.tsc2007_mock import TSC2007
             from mock import beeper_mock as beeper
             from mock.kb_reader_mock import KbReader
+            from mock.DS18B20_mock import DS18B20
         else:
             from gpiozero import DigitalOutputDevice
             from ili9341 import ILI9341
             from tsc2007 import TSC2007
             import beeper
             from kb_reader import KbReader
+            from DS18B20 import DS18B20
 
         self._beeper    = beeper
         self._ILI9341   = ILI9341
@@ -152,6 +155,7 @@ class Arbiter:
         self._backlight = DigitalOutputDevice(_BL_PIN, initial_value=True)
         self._disp      = ILI9341()
         self._touch     = TSC2007()
+        self._temp      = DS18B20()
 
         def _shutdown(signum=None, frame=None):
             self.shutdown()
@@ -162,6 +166,7 @@ class Arbiter:
         self._disp.init()
         self._touch.init()
         self._kb.open()
+        self._temp.init()
 
         if _SIMULATION_MODE and hasattr(self._disp, "register_key_handler"):
             self._disp.register_key_handler(self._kb._on_key_event)          # type: ignore
@@ -230,6 +235,11 @@ class Arbiter:
                 self._touch.cleanup()
             except Exception:
                 log.exception("Arbiter: cleanup: touch release failed")
+        if self._temp:
+            try:
+                self._temp.cleanup()
+            except Exception:
+                log.exception("Arbiter: cleanup: temperature sensor release failed")
         if self._disp:
             try:
                 self._disp.cleanup()
@@ -307,6 +317,19 @@ class Arbiter:
     def epoch(self) -> int:
         """Wall-clock seconds since the epoch — for the samples.* milestone stamps."""
         return int(time.time())
+
+    # ── Phase contract: temperature sensor ─────────────────────────────────────
+
+    def read_temperature(self):
+        """
+        Sample the DS18B20 and return the temperature in Celsius as a float, or
+        None if no sensor is connected / the reading failed.  Called from the
+        entry2 Temp label button so the operator can capture the sample's
+        temperature with one press.
+        """
+        if self._temp is None:
+            return None
+        return self._temp.read_c()
 
     # ── Phase contract: database / sample lifecycle ────────────────────────────
 

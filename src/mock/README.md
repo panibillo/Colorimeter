@@ -25,6 +25,11 @@ Mock keyboard reader. Captures keyboard events from matplotlib window and queues
 ### `beeper_mock.py`
 Mock audio feedback. Logs all beep/alarm events (no actual sound).
 
+### `DS18B20_mock.py`
+Mock 1-Wire DS18B20 temperature sensor. Reports a simulated near-room
+temperature (~21.5 °C) so the temperature-entry flow works without a real
+sensor. Same interface as the real `DS18B20.DS18B20` driver.
+
 ### `spidev_mock.py`
 Mock SPI bus (`spidev.SpiDev`). Used by lighting hardware drivers that drive
 shift registers (e.g. `lighting_cal8.py`'s 74HC595 board). Logs `open`/
