@@ -27,11 +27,13 @@ TITLE       = Rect(  8,   5, 183, 40)   # "New Test" -> sample id
 MAIN_BTN    = Rect(193,   0,  74, 50)   # Begin / Cancel / Next
 SLOT_BTN    = Rect(270,   0,  50, 50)   # A/B toggle
 
-# ── body: sample-entry form  y 53..212 ─────────────────────────────────────────
-ID_LBL      = Rect(  8,  55,  68, 35);  ID_FLD      = Rect( 82,  53, 230, 39)
-USER_LBL    = Rect(  8,  95,  68, 35);  USER_FLD    = Rect( 82,  93, 230, 39)
-TEST_LBL    = Rect(  8, 135,  68, 35);  TEST_FLD    = Rect( 82, 133, 230, 39)
-COLLECT_LBL = Rect(  8, 175,  68, 35);  COLLECT_FLD = Rect( 82, 173, 230, 39)
+# ── body: 4 generic label/field rows  y 53..212 ─────────────────────────────────
+# Reused across screens (entry: id/user/test/test-lot; entry2: temp/weight/
+# collect) — the rects are positional, not tied to any one field's meaning.
+BODY_LBL1   = Rect(  8,  55,  68, 35);  BODY_FLD1   = Rect( 82,  53, 230, 39)
+BODY_LBL2   = Rect(  8,  95,  68, 35);  BODY_FLD2   = Rect( 82,  93, 230, 39)
+BODY_LBL3   = Rect(  8, 135,  68, 35);  BODY_FLD3   = Rect( 82, 133, 230, 39)
+BODY_LBL4   = Rect(  8, 175,  68, 35);  BODY_FLD4   = Rect( 82, 173, 230, 39)
 DIV1        = Rect(  0,  92, 320,  1)   # row dividers
 DIV2        = Rect(  0, 132, 320,  1)
 DIV3        = Rect(  0, 172, 320,  1)
