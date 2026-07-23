@@ -59,6 +59,20 @@ from timer import TimerState
 log = logging.getLogger(__name__)
 
 
+# Ordered protocol steps, used to place the reagent/capture status chips
+# relative to where the run actually is (slot.active_phase).
+_STEP_SEQUENCE = ("entry", "entry2", "reagent1", "reagent2", "read", "analysis")
+_STEP_POS = {pid: i for i, pid in enumerate(_STEP_SEQUENCE)}
+
+# The three progress chips shown in the reagent/capture phases:
+# (widget name, the step's phase id, chip text).
+_STEP_INDICATORS = (
+    ("chip_a", "reagent1", "1"),
+    ("chip_b", "reagent2", "2"),
+    ("chip_c", "read",     "Capture"),
+)
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Base
 # ─────────────────────────────────────────────────────────────────────────────
@@ -85,6 +99,29 @@ class Phase:
         ts = slot.record.get("collect_dt", "")
         if ts:
             pool.put("collect_line", f"Collected  {ts}")
+
+    def _show_steps(self, pool, slot) -> None:
+        """
+        Show the reagent/capture progress chips (1 / 2 / Capture), colour-coded
+        by the run's live progress (slot.active_phase, not whatever is previewed):
+
+            before the step  → step_pending  (dim RUN green — not yet available)
+            at the step, idle → start_green   (the RUN colour — ready to run)
+            at the step, busy → step_running  (amber — counting down / capturing)
+            past the step     → step_done     (dim amber — complete)
+        """
+        active = _STEP_POS.get(slot.active_phase, -1)
+        for name, step_id, text in _STEP_INDICATORS:
+            step = _STEP_POS[step_id]
+            if active < step:
+                tint = "step_pending"
+            elif active > step:
+                tint = "step_done"
+            else:
+                busy = slot.capturing if step_id == "read" else slot.running
+                tint = "step_running" if busy else "start_green"
+            pool.recolor(name, bg=tint)
+            pool.put(name, text)
 
     # ── shared header/footer chrome ────────────────────────────────────────────
 
@@ -285,14 +322,14 @@ class ReagentPhase(Phase):
         self.secs     = secs
         self.next     = next_phase
         self.prior    = prior
-        self.armed    = armed        # (instr1, instr2) while waiting for START
-        self.running  = running      # (instr1, instr2) while counting down
+        self.armed    = armed        # (instr3, instr4) while waiting for START
+        self.running  = running      # (instr3, instr4) while counting down
 
     def enter(self, pool, slot, arb) -> None:
         # Show the live countdown only when this reagent is the slot's live phase;
         # while it is merely being previewed, show the armed duration instead.
         is_live = slot.active_phase == self.phase_id
-        pool.put("caption", "Remaining")
+        pool.put("timer_lbl", "Remaining")
         if is_live and slot.running:
             pool["timer"].bind(slot.timer, interactive=True)
             pool.put("timer")
@@ -306,8 +343,9 @@ class ReagentPhase(Phase):
             pool.put("timer")
             pool.put("run_btn", "START", on=lambda: self.start(arb, slot))
             i1, i2 = self.armed
-        pool.put("instr1", i1)
-        pool.put("instr2", i2)
+        pool.put("instr3", i1)
+        pool.put("instr4", i2)
+        self._show_steps(pool, slot)
         self._show_collect(pool, slot)
         # A running countdown does NOT lock nav: the timer keeps running in the
         # background (arbiter polls it and alarms on expiry, same as an A/B
@@ -351,7 +389,7 @@ class ReadPhase(Phase):
         # When merely previewing this step (not the live phase) the slot's timer
         # belongs to another phase, so show a neutral 00:00 elapsed instead.
         is_live = slot.active_phase == self.phase_id
-        pool.put("caption", "Elapsed")
+        pool.put("timer_lbl", "Elapsed")
         if is_live and slot.timer is not None:
             pool["timer"].bind(slot.timer, interactive=False)
         else:
@@ -362,14 +400,15 @@ class ReadPhase(Phase):
         pool.put("color_lbl", "Read color")
         pool.put("color_fld", slot.record.get("manual_read", ""))
         if is_live and slot.capturing:
-            pool.put("instr1", slot.progress or "Capturing...")
+            pool.put("instr3", slot.progress or "Capturing...")
             pool.put("run_btn", "RUNNING", enabled=False)
-            pool.put("instr2", "Do not touch strip")
+            pool.put("instr4", "Do not touch strip")
         else:
             pool.put("run_btn", "CAPTURE",
                      on=lambda: self.capture(arb, slot, pool),
                      enabled=is_live and arb.capture_available())
-            pool.put("instr2", "Insert strip & press CAPTURE")
+            pool.put("instr4", "Insert strip & press CAPTURE")
+        self._show_steps(pool, slot)
         self._show_collect(pool, slot)
         # A capture in flight does NOT lock nav either: it is arbiter-owned and
         # runs to completion regardless of what's on screen (same as an A/B
@@ -407,7 +446,7 @@ class AnalysisPhase(Phase):
         arb.start_analysis(slot)
 
     def enter(self, pool, slot, arb) -> None:
-        pool.put("caption", "Final")
+        pool.put("timer_lbl", "Final")
         pool["timer"].bind(slot.timer, interactive=False)
         pool.put("timer")
         pool.put("result_lbl", "Result")
@@ -679,7 +718,7 @@ if __name__ == "__main__":
     check("degC persisted (float)",  A.record["samp_degC"], 21.5)
     check("grams persisted (float)", A.record["samp_grams"], 3.2)
     check("run_btn label",    pool["run_btn"].label, "START")
-    check("instr1",           pool["instr1"].text, "Add Reagent 1")
+    check("instr3",           pool["instr3"].text, "Add Reagent 1")
     check("main is CANCEL",   pool["main_btn"].label, "CANCEL")
 
     print("== reagent1 START stamps reagent1_start ==")

@@ -108,6 +108,13 @@ def format_reading(device_id, temp_c):
         return f"  {device_id}  ERROR"
     return f"  {device_id}  {temp_c:+.3f} °C"
 
+def txt_val(device_id, temp_c):
+    """Return a formatted string for one sensor reading."""
+    if device_id is None:
+        return f"NOT CONNECTED"
+    elif temp_c is None:
+        return f"ERROR"
+    return f"{temp_c:+.3f}"
 
 # ── Command-line entry point ──────────────────────────────────
 

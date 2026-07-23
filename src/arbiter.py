@@ -648,8 +648,8 @@ class Arbiter:
                 detail = f"{progress.led_index}/{progress.led_total} {detail}"
             owner.progress = detail
             if owner is self._focused and owner.phase == "read":
-                self._pool.set("instr1", owner.progress)
-                self._pool.redraw(self._disp, "instr1")
+                self._pool.set("instr3", owner.progress)
+                self._pool.redraw(self._disp, "instr3")
             return
 
         # step() returned None: the run ended.

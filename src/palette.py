@@ -44,6 +44,11 @@ PALETTE: dict[str, int] = {
     "field_blue":  0x041F,
     "field_yellow":0xFFE0,
     "status_bg":   0x0000,
+    # Step-status chips (reagent 1 / 2 / Capture).  "ready" reuses start_green
+    # (the RUN colour); the rest are its dim form and a running amber + dim.
+    "step_pending":0x03E0,   # dim green  — step not yet reached / unavailable
+    "step_running":0xFD20,   # amber      — step in progress
+    "step_done":   0x7A80,   # dim amber  — step complete
 }
 
 

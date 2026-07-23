@@ -96,14 +96,14 @@ CREATE TABLE IF NOT EXISTS samples (
 
 DROP TABLE IF EXISTS defaults;
 CREATE TABLE IF NOT EXISTS defaults(
-    rowid           INTEGER PRIMARY KEY
-                            NOT NULL,
-    deviceid        INTEGER NOT NULL,
-    userid          INTEGER NOT NULL,
-    testlotid       INTEGER NOT NULL,
-    samp_no_prefix  TEXT,
-    dt_update       TEXT,
-    remark          TEXT COLLATE NOCASE,
+    rowid            INTEGER PRIMARY KEY
+                             NOT NULL,
+    deviceid         INTEGER NOT NULL,
+    userid           INTEGER NOT NULL,
+    testlotid        INTEGER NOT NULL,
+    samp_no_template TEXT,
+    dt_update        TEXT,
+    remark           TEXT COLLATE NOCASE,
     CONSTRAINT fk_samples_deviceid FOREIGN KEY (
         deviceid
         )

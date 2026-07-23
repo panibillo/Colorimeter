@@ -11,6 +11,9 @@
 # Transfers only *.py, *.yaml, and *.csv files; skips unmodified files.
 # Never deletes files on the remote.
 #
+# Includes hardware drivers (DS18B20.py, ili9341.py, etc.) from src/.
+# Excludes mock hardware drivers (DS18B20_mock.py, etc.) from src/mock/.
+#
 # On the RPi, launch the application with:
 #   python3 ~/pi/Colorimeter/src/main.py
 #
@@ -71,11 +74,11 @@ RSYNC_OPTS=(
     --compress
     --human-readable
     --itemize-changes
-    # --delete                          # uncomment to remove files on the Pi that are absent locally
-    --exclude='mock/'                     # exclude mock hardware drivers (desktop only)
-    --exclude='mock*.py'                  # exclude mock hardware drivers (desktop only)
-    --exclude='test_mock_rendering.py'    # exclude mock testing utility
-    --exclude='run_simulation.py'          # exclude desktop simulation launcher
+    # --delete                            # uncomment to remove files on the Pi that are absent locally
+    --exclude='mock/'                     # exclude mock hardware drivers (src/mock/*.py)
+    --exclude='mock*.py'                  # exclude mock-pattern files (e.g. test_mock_rendering.py)
+    --exclude='run_simulation.py'         # exclude desktop simulation launcher
+    --exclude='onewire_temp.py'           # exclude DS18B20 development/test script
     --exclude='__pycache__/'
     --exclude='*.pyc'
     --exclude='*.pyo'

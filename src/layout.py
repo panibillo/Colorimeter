@@ -30,22 +30,30 @@ SLOT_BTN    = Rect(270,   0,  50, 50)   # A/B toggle
 # ── body: 4 generic label/field rows  y 53..212 ─────────────────────────────────
 # Reused across screens (entry: id/user/test/test-lot; entry2: temp/weight/
 # collect) — the rects are positional, not tied to any one field's meaning.
-BODY_LBL1   = Rect(  8,  55,  68, 35);  BODY_FLD1   = Rect( 82,  53, 230, 39)
-BODY_LBL2   = Rect(  8,  95,  68, 35);  BODY_FLD2   = Rect( 82,  93, 230, 39)
-BODY_LBL3   = Rect(  8, 135,  68, 35);  BODY_FLD3   = Rect( 82, 133, 230, 39)
-BODY_LBL4   = Rect(  8, 175,  68, 35);  BODY_FLD4   = Rect( 82, 173, 230, 39)
+BODY_LBL1   = Rect(  8,  55,  68, 35); BODY_FLD1 = Rect( 82,  53, 230, 39); BODY_FLD1s = Rect( 82,  53, 130, 39)
+BODY_LBL2   = Rect(  8,  95,  68, 35); BODY_FLD2 = Rect( 82,  93, 230, 39); BODY_FLD2s = Rect( 82,  93, 130, 39)
+BODY_LBL3   = Rect(  8, 135,  68, 35); BODY_FLD3 = Rect( 82, 133, 230, 39); BODY_FLD3s = Rect( 82, 133, 130, 39)
+BODY_LBL4   = Rect(  8, 175,  68, 35); BODY_FLD4 = Rect( 82, 173, 230, 39); BODY_FLD4s = Rect( 82, 173, 130, 39)
 DIV1        = Rect(  0,  92, 320,  1)   # row dividers
 DIV2        = Rect(  0, 132, 320,  1)
 DIV3        = Rect(  0, 172, 320,  1)
 
-# ── body: timer cluster  y 60..102 ─────────────────────────────────────────────
-CAPTION     = Rect(  8,  64,  68, 35)   # Remaining / Elapsed / Final
-TIMER       = Rect( 90,  60, 140, 42)   # compound: ‖ | MM:SS | ›
-RUN_BTN     = Rect(240,  64,  72, 36)   # START / RESET / CAPTURE / POST
+# ── body: timer cluster  y 55..117 ─────────────────────────────────────────────
+TIMER_LBL   = Rect(  8,  55,  68, 68)   # Remaining / Elapsed / Final
+TIMER       = Rect( 90,  55, 140, 42)   # compound: ‖ | MM:SS | ›
+RUN_BTN     = Rect(240,  55,  72, 68)   # START / RESET / CAPTURE / POST
 
-# ── body: instruction lines  y 125..185 ────────────────────────────────────────
-INSTR1      = Rect( 14, 125, 280, 28)
-INSTR2      = Rect( 14, 157, 280, 28)
+# ── body: step-status chips  y 95..229 ─────────────────────────────────────────
+# A "chip" is a small pill/badge widget (the UI sense of the word) — here three
+# compact step-progress indicators (reagent 1, reagent 2, Capture) stacked down
+# the left during the reagent/capture phases, colour-coded by the run's progress.
+CHIP_A      = Rect(  90, 100,  44, 22)   # reagent 1
+CHIP_B      = Rect( 136, 100,  44, 22)   # reagent 2
+CHIP_C      = Rect( 182, 100,  48, 22)   # Capture
+
+# ── body: instruction lines  y 135..203 (aligned to label/field rows 3 & 4) ─────
+INSTR3      = Rect(  8, 135, 304, 28)
+INSTR4      = Rect(  8, 175, 304, 28)
 
 # ── body: persistent collect stamp  y 188..210 ─────────────────────────────────
 # Shown on the reagent/read/analysis phases (below the instructions, above the

@@ -111,19 +111,27 @@ class Pool:
         field("collectdt_fld",  L.BODY_FLD3, 18, "field_blue")
 
         # ── body: timer cluster + instructions ─────────────────────────────────
-        label("caption", L.CAPTION, "white", "label_coral", 13)
+        label("timer_lbl", L.TIMER_LBL, "white", "label_coral", 30)
         p._add("timer", TimerWidget(L.TIMER, text_color=color("timer_text"),
                                     bg=color("body_dark"), size=30))
-        button("run_btn", L.RUN_BTN, "btn_text", "start_green", 18)
-        label("instr1", L.INSTR1, "body_text", "body_dark", 20, align="left")
-        label("instr2", L.INSTR2, "body_text", "body_dark", 20, align="left")
+        button("run_btn", L.RUN_BTN, "btn_text", "start_green", 30)
+        label("instr3", L.INSTR3, "body_text", "body_dark", 20, align="left")
+        label("instr4", L.INSTR4, "body_text", "body_dark", 20, align="left")
         label("collect_line", L.COLLECT_LINE, "black", "white", 13, align="left")
 
+        # ── body: step-status chips (reagent 1 / 2 / Capture) ──────────────────
+        # Small pill/badge labels; shown only in the reagent/capture phases, bg
+        # recoloured per step state by Phase._show_steps (built with the
+        # "pending" tint as the resting look).
+        label("chip_a", L.CHIP_A, "body_text", "step_pending", 13, text="1")
+        label("chip_b", L.CHIP_B, "body_text", "step_pending", 13, text="2")
+        label("chip_c", L.CHIP_C, "body_text", "step_pending", 13, text="Capture")
+
         # ── body: wide label/field pairs ───────────────────────────────────────
-        label("color_lbl",  L.COLOR_LBL,  "white", "label_coral", 13, text="Read color")
-        field("color_fld",  L.COLOR_FLD,  18, "field_yellow")
-        label("result_lbl", L.RESULT_LBL, "white", "label_coral", 13, text="Result")
-        field("result_fld", L.RESULT_FLD, 18, "field_blue", editable=False)
+        label("color_lbl",  L.BODY_LBL3, "white", "label_coral", 13, text="Read color")
+        field("color_fld",  L.BODY_FLD3, 18, "field_yellow")
+        label("result_lbl", L.BODY_LBL4, "white", "label_coral", 13, text="Result")
+        field("result_fld", L.BODY_FLD4, 18, "field_blue", editable=False)
 
         # ── header ─────────────────────────────────────────────────────────────
         label("title", L.TITLE, "black", "white", 22, align="left")
@@ -192,6 +200,20 @@ class Pool:
     def enable(self, name: str, on: bool = True) -> Widget:
         w = self[name]
         w.enabled = on
+        return w
+
+    def recolor(self, name: str, bg: Optional[str] = None,
+                fg: Optional[str] = None) -> Widget:
+        """
+        Recolour a widget by *palette name* (phases still never touch raw
+        values — the pool resolves the name).  bg sets the fill, fg the text.
+        Used for status coding, e.g. the reagent/capture step chips.
+        """
+        w = self[name]
+        if bg is not None:
+            w.bg = color(bg)
+        if fg is not None:
+            w.color = color(fg)
         return w
 
     def on(self, name: str, callback: Optional[Callable]) -> Widget:
@@ -332,13 +354,14 @@ if __name__ == "__main__":
     pool.hide_all()
     st = TimerState.down(120, now=1000.0)
     pool.set("title", "AB0124")
-    pool.set("caption", "Remaining")
+    pool.set("timer_lbl", "Remaining")
     pool["timer"].bind(st)
     pool.set("run_btn", "START")
-    pool.set("instr1", "Add Reagent 1")
-    pool.set("instr2", "and press START")
-    pool.show("title", "main_btn", "slot_btn", "caption", "timer", "run_btn",
-              "instr1", "instr2", "prior_btn", "clock", "next_btn")
+    pool.set("instr3", "Add Reagent 1")
+    pool.set("instr4", "and press START")
+    pool.show("title", "main_btn", "slot_btn", "timer_lbl", "timer", "run_btn",
+              "instr3", "instr4", "chip_a", "chip_b", "chip_c",
+              "prior_btn", "clock", "next_btn")
     pool.render(disp)
 
     print("\n== 1 Hz update: clock only ==")
