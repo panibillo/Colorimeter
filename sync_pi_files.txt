@@ -42,15 +42,18 @@ src/capture_h5.py
 src/hdf5write.py
 src/bayer_cam.py
 src/lighting_cal8.py
+src/sample_repo.py
 
 # ── Hardware drivers ─────────────────────────────────────────────────────
 src/ili9341.py
 src/tsc2007.py
+src/DS18B20.py
 src/beeper.py
 src/kb_reader.py
 
 # ── Support ──────────────────────────────────────────────────────────────
 src/config_manager.py
+src/db_manager.py
 src/logging_manager.py
 src/error_handler.py
 src/utils.py

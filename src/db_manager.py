@@ -23,6 +23,7 @@ import logging_manager as log
 # COLORIMETER_DB overrides it — used by tests and dev to point at a scratch copy.
 DBNAME = os.environ.get("COLORIMETER_DB") or \
          str(Path(__file__).resolve().parent / "colorimeter.sqlite")
+print (f"Colorimeter db_manager.py using db: {DBNAME}")
 
 TABLE_DEFINITIONS = """
 ----------------------------------
@@ -86,7 +87,7 @@ def read_all(sql: str, vals: tuple = None) -> list:
             cursor.execute(sql)
         return cursor.fetchall()
     except sqlite3.Error as e:
-        log.error(f"read_all() failed: {e}\n  SQL: {sql}\n  vals: {vals}")
+        log.error(f"read_all() failed: {e}\n  SQL: {sql}\n  vals: {vals}\n db: {DBNAME}")
         raise
     finally:
         if con:
@@ -163,7 +164,7 @@ def write_one(sql: str, vals: tuple = None) -> int:
     except sqlite3.Error as e:
         if con:
             con.rollback()
-        log.error(f"write_one() failed: {e}\n  SQL: {sql}\n  vals: {vals}")
+        log.error(f"write_one() failed: {e}\n  SQL: {sql}\n  vals: {vals}\n db: {DBNAME}")
         raise
     finally:
         if con:
@@ -195,9 +196,12 @@ def write_many(sql: str, vals_list: list) -> int:
     except sqlite3.Error as e:
         if con:
             con.rollback()
-        log.error(f"write_many() failed: {e}\n  SQL: {sql}\n"
+        log.error(f"write_many() failed: {e}\n  SQL: {sql}\n db: {DBNAME}\n"
                   f"  vals_list length: {len(vals_list)}")
         raise
     finally:
         if con:
             con.close()
+
+if __name__ == '__main__':
+    print (DBNAME)

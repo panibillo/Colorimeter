@@ -554,13 +554,12 @@ if __name__ == "__main__":
         def draw_rect(self, rect, color, **kw): pass
         def draw_text(self, text, rect, **kw): pass
 
-    from types import SimpleNamespace
+    import sample_repo
 
-    DEFAULTS = SimpleNamespace(
-        rowid=1, deviceid=7, userid=3, testlotid=5,
-        samp_no_template="ZZ1000", testkit="Ascel 458201",
-        lotno="0 12V601-HH", fullname="William Olsen",
-        hardware_sn="XCN-001", software_ver="0.2")
+    DEFAULTS = sample_repo.load_defaults(1)
+    if DEFAULTS is None:
+        raise SystemExit("self-test: no default_gui_vals row with rowid=1 "
+                          "in the database — populate the `defaults` table first.")
 
     class MockArbiter:
         """Minimal stand-in exercising the whole phase contract."""
@@ -683,19 +682,19 @@ if __name__ == "__main__":
     arb.goto(A, "entry")
     check("main_btn label",       pool["main_btn"].label, "Begin")
     check("id autofilled",        pool["id_fld"].value, "ZZ1001")
-    check("user autofilled",      pool["user_fld"].value, "William Olsen")
-    check("test autofilled",      pool["test_fld"].value, "Ascel 458201")
-    check("test-lot autofilled",  pool["test_lot_fld"].value, "0 12V601-HH")
+    check("user autofilled",      pool["user_fld"].value, DEFAULTS.fullname)
+    check("test autofilled",      pool["test_fld"].value, DEFAULTS.testkit)
+    check("test-lot autofilled",  pool["test_lot_fld"].value, DEFAULTS.lotno)
     check("Begin enabled",        pool["main_btn"].enabled, True)
-    check("userid carried",       A.record["userid"], 3)
-    check("testlotid carried",    A.record["testlotid"], 5)
-    check("colorimeterid carried", A.record["colorimeterid"], 7)
+    check("userid carried",       A.record["userid"], DEFAULTS.userid)
+    check("testlotid carried",    A.record["testlotid"], DEFAULTS.testlotid)
+    check("colorimeterid carried", A.record["colorimeterid"], DEFAULTS.deviceid)
 
     print("== label-button refills a cleared field ==")
     A.record["user"] = ""; arb.render(A)
     check("user cleared",   pool["user_fld"].value, "")
     press(pool, "user_lbl")                        # User label = load-default button
-    check("user refilled",  pool["user_fld"].value, "William Olsen")
+    check("user refilled",  pool["user_fld"].value, DEFAULTS.fullname)
 
     print("== Begin reserves the row -> entry2 ==")
     press(pool, "main_btn")

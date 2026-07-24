@@ -142,8 +142,9 @@ They match except while browsing.
   **Done.**
 - `timer.py` — `TimerState` (model) + `TimerWidget` (view, pause/‖·MM:SS·›/resume
   thirds). **Done.**
-- `pool.py` — build `{name: Widget}` from the layout; `put`/`show`/`hide_all`,
-  render (full clear) / redraw (one widget) / touch routing. **Done, self-test.**
+- `pool.py` — build `{name: Widget}` from the layout; `put`/`show`/`hide_all`/
+  `recolor` (restyle a widget by palette name — see Rendering notes), render
+  (full clear) / redraw (one widget) / touch routing. **Done, self-test.**
 - `phases.py` — `Phase` base + `EntryPhase`, `ReagentPhase` (×2 by data),
   `ReadPhase`, `AnalysisPhase`, `ModalPhase`; `build_phases()` registry. The
   self-test's `MockArbiter` drives a slot end-to-end and is the executable spec
@@ -176,6 +177,14 @@ They match except while browsing.
   `f` fullscreens, `q` quits) and stamps every artist with an increasing z-order
   so call order is paint order — otherwise matplotlib draws patches under text
   and a per-widget redraw cannot erase.
+- **Status colour-coding still stays in the palette, not the phase.** The
+  reagent/capture step chips (`CHIP_A/B/C` → widgets `chip_a/b/c`, shown by
+  `Phase._show_steps()`) are recoloured per-state via `Pool.recolor(name,
+  bg=...)`, which resolves a palette *name* (`step_pending` / `start_green` /
+  `step_running` / `step_done`) the same way `put()` resolves text — a phase
+  never touches a raw RGB565 value, so decision 5 (pixels/colours never in a
+  phase) holds even for widgets whose look changes at runtime, not just their
+  text.
 - **Simulation shortcuts:** reagent countdowns are 20 s each under
   `COLORIMETER_SIMULATION`. Run live with
   `~/Projects/Colorimeter/.venv/bin/python3 src/run_simulation.py`.
@@ -185,7 +194,8 @@ They match except while browsing.
 1. **Retire** `screen_manager.py`, `csv_loader.py`, `csv_to_widgets.py`,
    `app_controller.py`, and the CSV files. Move `src/proposed/` out.
 2. **Screen geometry** in `layout.py` still needs work (spacing, the collect
-   line, the label chips, the footer clock chip).
+   line, the footer clock chip). The reagent/capture step-status chips
+   (`CHIP_A/B/C`) are done — see Rendering notes.
 3. **Test on the Raspberry Pi.** Verified in simulation only; the GUI is
    incomplete and untested on hardware. The loop is single-threaded cooperative,
    so a Pi Zero 2 W (quad A53 + NEON) is the target for concurrent capture +
