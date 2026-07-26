@@ -126,10 +126,42 @@ class TestExposureTable(unittest.TestCase):
     def test_write_all_groups_supersedes_previous(self):
         er.write_all_groups("white", er.groups_from_estar(40_000))
         er.write_all_groups("white", er.groups_from_estar(10_000))
+        # Reads see only the new (active) calibration.
         self.assertEqual(er.read_exposures("white", "1"), [10_000])
-        # No stale rows from the first calibration linger.
+        active = db.read_val(
+            "SELECT COUNT(*) FROM exposure WHERE LED='white' AND active=1")
+        self.assertEqual(active, 1 + 2 + 3 + 4 + 5)
+
+    def test_recalibration_keeps_history(self):
+        er.write_all_groups("white", er.groups_from_estar(40_000))
+        er.write_all_groups("white", er.groups_from_estar(10_000))
+        # The prior calibration is deactivated, not deleted.
         total = db.read_val("SELECT COUNT(*) FROM exposure WHERE LED='white'")
-        self.assertEqual(total, 1 + 2 + 3 + 4 + 5)
+        self.assertEqual(total, 2 * (1 + 2 + 3 + 4 + 5))
+        inactive = db.read_val(
+            "SELECT COUNT(*) FROM exposure WHERE LED='white' AND active=0")
+        self.assertEqual(inactive, 1 + 2 + 3 + 4 + 5)
+
+    def test_inactive_rows_excluded_from_reads(self):
+        er.write_all_groups("white", er.groups_from_estar(40_000))
+        db.write_one("UPDATE exposure SET active=0 WHERE LED='white'")
+        self.assertEqual(er.read_exposures("white", "1"), [])
+        self.assertEqual(er.read_group("1"), {})
+        self.assertEqual(er.available_groups(), [])
+
+    def test_add_dt_stamped_on_active_rows(self):
+        er.write_all_groups("white", er.groups_from_estar(40_000),
+                            add_dt="2026-07-26 09:30:00")
+        stamps = db.read_all(
+            "SELECT DISTINCT add_dt FROM exposure WHERE LED='white' AND active=1")
+        self.assertEqual(stamps, [("2026-07-26 09:30:00",)])
+
+    def test_write_supersedes_only_named_led(self):
+        er.write_all_groups("white", er.groups_from_estar(40_000))
+        er.write_all_groups("red", er.groups_from_estar(20_000))
+        # Recalibrating white must not disturb red's active rows.
+        er.write_all_groups("white", er.groups_from_estar(10_000))
+        self.assertEqual(er.read_exposures("red", "1"), [20_000])
 
     def test_write_estar_persists_all_groups(self):
         n = er.write_estar("amber", 30_000)
