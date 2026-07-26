@@ -87,8 +87,27 @@ MODAL_3C    = Rect(208, 134,  84,  46)
 MENU_CANCEL_BTN = Rect(  0,   0, 100,  50)   # top-left: discard staged choices
 MENU_TITLE      = Rect(100,   5, 120,  40)
 MENU_OK_BTN     = Rect(220,   0, 100,  50)   # top-right: save staged choices
-MENU_POWER      = Rect( 60,  80, 200,  50)
-MENU_DEFAULTS   = Rect( 60, 148, 200,  50)
+MENU_CAPTURE    = Rect( 60,  66, 200,  46)   # open the capture choice screen
+MENU_DEFAULTS   = Rect( 60, 122, 200,  46)
+MENU_POWER      = Rect( 60, 178, 200,  46)
+
+# ── capture screen (Menu → Capture: pick path + images, run, show result) ───────
+# One screen of its own, reused for three views: the choice form, the running
+# progress, and the done/result. Selector rects and the wide progress rect
+# overlap in y, but the two are never shown together.
+CAP_TITLE     = Rect(  8,   6, 304,  34)
+CAP_MODE_LBL  = Rect(  8,  52,  96,  36)     # "Path"
+CAP_MODE_CAL  = Rect(106,  50, 102,  40)     # Calibrate  ┐ mutually-exclusive
+CAP_MODE_NORM = Rect(212,  50, 100,  40)     # Normal     ┘ (selected = green)
+CAP_N_LBL     = Rect(  8, 100,  96,  36)     # "Images"
+CAP_N1        = Rect(106,  98,  38,  40)     # 1..5 images per LED
+CAP_N2        = Rect(148,  98,  38,  40)
+CAP_N3        = Rect(190,  98,  38,  40)
+CAP_N4        = Rect(232,  98,  38,  40)
+CAP_N5        = Rect(274,  98,  38,  40)
+CAP_PROGRESS  = Rect(  8,  56, 304, 120)     # progress / result text
+CAP_BACK      = Rect(  8, 184, 100,  48)     # Back / Cancel
+CAP_START     = Rect(160, 184, 152,  48)     # START / OK
 
 # ── footer  y 215..239 ─────────────────────────────────────────────────────────
 PRIOR_BTN   = Rect(  0, 217,  58, 21)

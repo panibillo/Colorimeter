@@ -154,8 +154,26 @@ class Pool:
         button("menu_cancel_btn", L.MENU_CANCEL_BTN, "hdr_text", "btn_gray",   18, text="CANCEL")
         label("menu_title",       L.MENU_TITLE,       "black",   "white",     20, text="Menu")
         button("menu_ok_btn",     L.MENU_OK_BTN,       "hdr_text", "start_green", 18, text="OK")
-        button("menu_power",      L.MENU_POWER,        "hdr_text", "label_coral", 20, text="Power")
+        button("menu_capture",    L.MENU_CAPTURE,      "hdr_text", "start_green", 20, text="Capture")
         button("menu_defaults",   L.MENU_DEFAULTS,     "hdr_text", "slot_a_bg",   20, text="Defaults")
+        button("menu_power",      L.MENU_POWER,        "hdr_text", "label_coral", 20, text="Power")
+
+        # ── capture screen (Menu → Capture): choice form, progress, result ──────
+        # Mode + N buttons act as radio groups — the arbiter recolours the
+        # selected one green and the rest gray on each render.
+        label("cap_title",      L.CAP_TITLE,     "black", "white",       22, text="Capture")
+        label("cap_mode_lbl",   L.CAP_MODE_LBL,  "white", "label_coral", 14, text="Path")
+        button("cap_mode_cal",  L.CAP_MODE_CAL,  "btn_text", "btn_gray", 14, text="Calibrate")
+        button("cap_mode_norm", L.CAP_MODE_NORM, "btn_text", "btn_gray", 14, text="Normal")
+        label("cap_n_lbl",      L.CAP_N_LBL,     "white", "label_coral", 14, text="Images")
+        button("cap_n1", L.CAP_N1, "btn_text", "btn_gray", 18, text="1")
+        button("cap_n2", L.CAP_N2, "btn_text", "btn_gray", 18, text="2")
+        button("cap_n3", L.CAP_N3, "btn_text", "btn_gray", 18, text="3")
+        button("cap_n4", L.CAP_N4, "btn_text", "btn_gray", 18, text="4")
+        button("cap_n5", L.CAP_N5, "btn_text", "btn_gray", 18, text="5")
+        label("cap_progress",   L.CAP_PROGRESS,  "black", "white", 16, align="left")
+        button("cap_back",  L.CAP_BACK,  "btn_text", "btn_gray",    16, text="Back")
+        button("cap_start", L.CAP_START, "btn_text", "start_green", 18, text="START")
 
         # ── modal overlay (drawn last = on top) ────────────────────────────────
         rect("modal_panel", L.MODAL_PANEL, "body_dark")

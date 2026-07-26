@@ -39,6 +39,7 @@ src/geometry.py
 src/capture_runner.py
 src/capture_session.py
 src/capture_h5.py
+src/exposure_repo.py
 src/hdf5write.py
 src/bayer_cam.py
 src/lighting_cal8.py

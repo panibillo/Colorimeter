@@ -114,6 +114,16 @@ class Arbiter:
         self._pre_menu_slot: Slot | None = None
         self._menu_staged_rowid: int | None = None
 
+        # Capture screen state (Menu → Capture): the staged path + images
+        # choice, which view is showing, and the run's progress/result text.
+        # A menu-launched capture uses self._capture with _capture_slot = None
+        # (the None marks it standalone, so pump_capture routes it here).
+        self._cap_mode:  str = "normal"       # "calibration" | "normal"
+        self._cap_group: str = "1"            # images per LED, '1'..'5'
+        self._cap_view:  str | None = None    # None | "choice" | "progress" | "done"
+        self._cap_progress: str = ""
+        self._cap_result:   str = ""
+
     # ── Lifecycle ──────────────────────────────────────────────────────────────
 
     def start(self) -> None:
@@ -466,8 +476,9 @@ class Arbiter:
         self._pool.put("menu_cancel_btn", "CANCEL", on=self._menu_cancel)
         self._pool.put("menu_title",      "Menu")
         self._pool.put("menu_ok_btn",     "OK",     on=self._menu_ok)
-        self._pool.put("menu_power",      "Power",    on=self._menu_power)
+        self._pool.put("menu_capture",    "Capture",  on=self._menu_open_capture)
         self._pool.put("menu_defaults",   "Defaults", on=self._menu_open_defaults)
+        self._pool.put("menu_power",      "Power",    on=self._menu_power)
         self._pool.render(self._disp)
         self._rebuild_focus()
 
@@ -516,6 +527,184 @@ class Arbiter:
         self._menu_staged_rowid = 1     # the only default row today
         self._render_menu()
 
+    # ── Capture screen (Menu → Capture) ────────────────────────────────────────
+    # A standalone capture launched from the Menu: pick a path (Calibration or
+    # Normal) and a number of images per LED (1..5 = the exposure group), run it,
+    # and see a placeholder analysis result. It uses the single camera via
+    # self._capture with _capture_slot = None (the None marks it as menu-launched,
+    # so pump_capture routes it to _pump_capture_screen). This is independent of
+    # the A/B slots and the per-sample ReadPhase capture.
+
+    def _menu_open_capture(self) -> None:
+        """Open the capture choice screen, reset to the debugging defaults."""
+        # Default to Normal + 1 image each time it opens (fast for debugging).
+        self._cap_mode  = "normal"
+        self._cap_group = "1"
+        self._cap_progress = ""
+        self._cap_result   = ""
+        self._render_capture_choice()
+
+    def _render_capture_choice(self) -> None:
+        if self._pool is None:
+            return
+        from palette import color
+        # A Button's fill is its .color (Labels use .bg), so a radio group is
+        # highlighted by setting the selected button's .color green.
+        sel, unsel = color("start_green"), color("btn_gray")
+        self._cap_view = "choice"
+        p = self._pool
+        p.hide_all()
+        p.put("cap_title", "Capture")
+        p.put("cap_mode_lbl", "Path")
+        cal = self._cap_mode == "calibration"
+        p.put("cap_mode_cal",  "Calibrate", on=lambda: self._cap_set_mode("calibration"))
+        p["cap_mode_cal"].color  = sel if cal else unsel
+        p.put("cap_mode_norm", "Normal",    on=lambda: self._cap_set_mode("normal"))
+        p["cap_mode_norm"].color = sel if not cal else unsel
+        p.put("cap_n_lbl", "Images")
+        for n in range(1, 6):
+            name = f"cap_n{n}"
+            p.put(name, str(n), on=(lambda nn=n: self._cap_set_group(nn)))
+            p[name].color = sel if self._cap_group == str(n) else unsel
+        p.put("cap_back",  "Back",  on=self._render_menu)
+        p.put("cap_start", "START", on=self._cap_start)
+        p.render(self._disp)
+        self._rebuild_focus()
+
+    def _cap_set_mode(self, mode: str) -> None:
+        self._cap_mode = mode
+        self._render_capture_choice()
+
+    def _cap_set_group(self, n) -> None:
+        self._cap_group = str(n)
+        self._render_capture_choice()
+
+    def _cap_start(self) -> None:
+        """Launch the capture with the staged path + images choice."""
+        if not self.capture_available():
+            self._cap_result = "Camera busy — try again later"
+            self._render_capture_done()
+            return
+        from capture_runner import CaptureConfig
+        cfg = CaptureConfig(mode=self._cap_mode, exposure_group=self._cap_group,
+                            led_start=_CAPTURE_LED_START, led_end=_CAPTURE_LED_END)
+        session = self._new_session(cfg)
+        if not session.start():
+            log.error("Arbiter: capture failed to start: %s", session.error)
+            self._cap_result = f"Camera failed: {session.error}"
+            self._render_capture_done()
+            return
+        self._capture = session
+        self._capture_slot = None          # standalone (menu-launched) capture
+        self._cap_progress = "Starting camera..."
+        log.info("Arbiter: menu capture started (%s, group %s)",
+                 self._cap_mode, self._cap_group)
+        self._render_capture_progress()
+
+    def _render_capture_progress(self) -> None:
+        if self._pool is None:
+            return
+        self._cap_view = "progress"
+        p = self._pool
+        p.hide_all()
+        p.put("cap_title", "Calibrating" if self._cap_mode == "calibration"
+              else "Capturing")
+        p.put("cap_progress", self._cap_progress or "Working...")
+        p.put("cap_back", "Cancel", on=self._cap_cancel)
+        p.render(self._disp)
+        self._rebuild_focus()
+
+    def _render_capture_done(self) -> None:
+        if self._pool is None:
+            return
+        self._cap_view = "done"
+        p = self._pool
+        p.hide_all()
+        failed = "fail" in self._cap_result.lower()
+        p.put("cap_title", "Failed" if failed else "Done")
+        p.put("cap_progress", self._cap_result or "")
+        p.put("cap_start", "OK", on=self._cap_done_ok)
+        p.render(self._disp)
+        self._rebuild_focus()
+
+    def _cap_done_ok(self) -> None:
+        self._cap_view = None
+        self._render_menu()
+
+    def _cap_cancel(self) -> None:
+        """Abandon a running menu capture and return to the Menu."""
+        if self._capture is not None:
+            try:
+                self._capture.cancel()
+            except Exception:
+                log.exception("Arbiter: menu capture cancel failed")
+        self._capture = None
+        self._capture_slot = None
+        self._cap_view = None
+        self._render_menu()
+
+    def _pump_capture_screen(self, session) -> None:
+        """Drive a menu-launched capture and mirror it onto the capture screen."""
+        progress = session.step()
+        if progress is not None:
+            self._cap_progress = (getattr(progress, "message", "")
+                                  or getattr(progress, "color", ""))
+            if self._cap_view == "progress" and self._pool is not None:
+                self._pool.set("cap_progress", self._cap_progress)
+                self._pool.redraw(self._disp, "cap_progress")
+            return
+
+        # step() returned None: the run ended.
+        self._capture = None
+        self._capture_slot = None
+        if session.error is not None:
+            self._cap_result = f"Capture failed: {str(session.error)[:40]}"
+            self._render_capture_done()
+            return
+        if self._cap_mode == "calibration":
+            self._persist_calibration(session)
+            self._cap_result = self._analyze_calibration(session)
+        else:
+            self._cap_result = self._analyze_normal(session)
+        self._render_capture_done()
+
+    def _persist_calibration(self, session) -> None:
+        """
+        Write each LED's discovered ideal exposure (e*) to the exposure table as
+        its family of groups. All LEDs in one run share a single add_dt so the
+        run's rows group together; prior calibrations are kept (active=0).
+        """
+        import exposure_repo
+        runner = getattr(session, "runner", None)
+        results = getattr(runner, "results", None) or []
+        add_dt = self.timestamp()
+        suite = getattr(runner, "suite_id", "")
+        written = 0
+        for r in results:
+            estar = (getattr(r, "metadata", {}) or {}).get("e3_final_us")
+            if estar is None:
+                continue
+            try:
+                exposure_repo.write_estar(r.color, estar, add_dt=add_dt,
+                                          remark=f"calib {suite}")
+                written += 1
+            except Exception:
+                log.exception("Arbiter: failed to persist exposures for %s", r.color)
+        log.info("Arbiter: persisted exposure groups for %d LED(s)", written)
+
+    def _analyze_calibration(self, session) -> str:
+        """Placeholder calibration-analysis path (engine TODO)."""
+        runner = getattr(session, "runner", None)
+        n = len(getattr(runner, "results", None) or [])
+        log.info("Arbiter: calibration analysis (placeholder) for %d LED(s)", n)
+        return f"Calibrated {n} LED(s); exposures saved."
+
+    def _analyze_normal(self, session) -> str:
+        """Placeholder normal-analysis path (engine TODO)."""
+        log.info("Arbiter: normal analysis (placeholder)")
+        name = session.out_path.name if session.out_path else "archive"
+        return f"Capture complete: {name}"
+
     # ── Phase contract: modals ─────────────────────────────────────────────────
 
     def open_modal(self, slot: Slot, modal_id: str) -> None:
@@ -551,14 +740,21 @@ class Arbiter:
         log.info("Arbiter: capture started for slot %s", slot.name)
         return True
 
-    def _new_session(self):
-        """Build a capture session (test factory if given, else the real one)."""
+    def _new_session(self, cfg=None):
+        """
+        Build a capture session (test factory if given, else the real one).
+
+        cfg lets a caller (the capture screen) pass its own CaptureConfig; the
+        per-sample ReadPhase capture passes None for the default full sweep.
+        """
         if self._capture_factory is not None:
             return self._capture_factory()
         from capture_runner import CaptureConfig
         from capture_session import CaptureSession
-        return CaptureSession(CaptureConfig(led_start=_CAPTURE_LED_START,
-                                            led_end=_CAPTURE_LED_END))
+        if cfg is None:
+            cfg = CaptureConfig(led_start=_CAPTURE_LED_START,
+                                led_end=_CAPTURE_LED_END)
+        return CaptureSession(cfg)
 
     def start_analysis(self, slot: Slot) -> None:
         # Analysis engine is not implemented yet; a placeholder completes after
@@ -653,6 +849,11 @@ class Arbiter:
         """
         session = self._capture
         if session is None or not session.active:
+            return
+        # A menu-launched (standalone) capture has no owner slot; route it to
+        # the capture screen instead of the per-slot read/analysis flow.
+        if self._capture_slot is None:
+            self._pump_capture_screen(session)
             return
         owner = self._capture_slot
         progress = session.step()
@@ -863,10 +1064,19 @@ def _selftest() -> None:
             self.color = "blue"; self.fraction = i / n
             self.led_index = i; self.led_total = n; self.transient = False
 
+    from pathlib import Path
+
+    class _FakeRunner:
+        """Stands in for CaptureRunner: what the arbiter reads after a run."""
+        def __init__(self):
+            self.suite_id = "TESTSUITE"; self.results = []
+
     class _FakeCapture:
         """Completes after `steps` step() calls."""
         def __init__(self, config=None, steps=3):
-            self.active = False; self.error = None; self.out_path = "fake.h5"
+            self.active = False; self.error = None
+            self.out_path = Path("fake.h5")
+            self.runner = _FakeRunner()
             self._i = 0; self._n = steps
         def start(self): self.active = True; return True
         def step(self):
@@ -933,6 +1143,71 @@ def _selftest() -> None:
     arb.pump_analysis()
     check("result set",           bool(A.result), True)
     check("POST enabled",         arb._pool["run_btn"].enabled, True)
+
+    # ── Capture screen (Menu → Capture) ──────────────────────────────────────
+    import exposure_repo
+    persisted: list = []
+    _real_write_estar = exposure_repo.write_estar
+    exposure_repo.write_estar = lambda led, estar, **kw: persisted.append((led, estar))
+
+    class _R:                       # a stand-in LedResult carrying e*
+        def __init__(self, color, estar):
+            self.color = color; self.metadata = {"e3_final_us": estar}
+
+    print("== capture screen: choice defaults + selection ==")
+    cap_cal = _FakeCapture(steps=2)
+    cap_cal.runner.results = [_R("amber", 30000), _R("blue", 20000)]
+    arb._capture_factory = lambda: cap_cal
+    arb.open_menu(A)
+    check("menu open (no slot focus)", arb._focused is None, True)
+    arb._menu_open_capture()
+    check("choice view",         arb._cap_view, "choice")
+    check("default mode normal",  arb._cap_mode, "normal")
+    check("default group 1",      arb._cap_group, "1")
+    arb._cap_set_mode("calibration")
+    arb._cap_set_group(3)
+    check("mode -> calibration",  arb._cap_mode, "calibration")
+    check("group -> 3",           arb._cap_group, "3")
+
+    print("== capture screen: calibration run persists e* per LED ==")
+    arb._cap_start()
+    check("progress view",        arb._cap_view, "progress")
+    check("camera busy in run",   arb.capture_available(), False)
+    for _ in range(5):
+        arb.pump_capture()
+    check("done view",            arb._cap_view, "done")
+    check("camera freed",         arb.capture_available(), True)
+    check("persisted amber e*",   ("amber", 30000) in persisted, True)
+    check("persisted blue e*",    ("blue", 20000) in persisted, True)
+    check("result names LEDs",    "2 LED" in arb._cap_result, True)
+    arb._cap_done_ok()
+    check("OK returns to menu",   arb._cap_view, None)
+
+    print("== capture screen: normal run does not persist ==")
+    persisted.clear()
+    cap_norm = _FakeCapture(steps=2)
+    arb._capture_factory = lambda: cap_norm
+    arb._menu_open_capture()
+    check("reopen resets to normal", arb._cap_mode, "normal")
+    arb._cap_start()
+    for _ in range(5):
+        arb.pump_capture()
+    check("normal done",          arb._cap_view, "done")
+    check("normal skipped persist", persisted, [])
+    check("normal result text",   "complete" in arb._cap_result.lower(), True)
+
+    print("== capture screen: cancel aborts and frees the camera ==")
+    cap_cancel = _FakeCapture(steps=99)      # long-running
+    arb._capture_factory = lambda: cap_cancel
+    arb._menu_open_capture()
+    arb._cap_start()
+    arb.pump_capture()                       # one step, still running
+    check("still running",        arb.capture_available(), False)
+    arb._cap_cancel()
+    check("camera freed on cancel", arb.capture_available(), True)
+    check("cancel leaves capture view", arb._cap_view, None)
+
+    exposure_repo.write_estar = _real_write_estar
 
     print("\n== all arbiter self-tests passed ==")
 
