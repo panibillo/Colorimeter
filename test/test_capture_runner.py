@@ -18,6 +18,7 @@ or with unittest discovery:
 
 import json
 import os
+import shutil
 import sys
 import tempfile
 import unittest
@@ -480,6 +481,105 @@ class TestMultiLed(RunnerTestCase):
         messages = [p.message for p in progress if p.step.startswith("dark")]
         self.assertTrue(any("stored dark" in m for m in messages), messages)
         self.assertTrue(any("reused dark" in m for m in messages), messages)
+
+
+# ---------------------------------------------------------------------------
+# Normal capture path — captures only the exposures stored in the DB
+# ---------------------------------------------------------------------------
+
+class TestNormalMode(RunnerTestCase):
+    """
+    The normal path reads each LED's exposures from the `exposure` table for a
+    chosen group and captures exactly those — no white-LED calibration, no e*
+    search. Tests run against a throwaway copy of the real DB so the live one
+    is never touched.
+    """
+
+    def setUp(self):
+        super().setUp()
+        import db_manager as db
+        import exposure_repo
+        self._db = db
+        self._er = exposure_repo
+
+        self._saved_dbname = db.DBNAME
+        self._dbdir = tempfile.TemporaryDirectory()
+        tmpdb = Path(self._dbdir.name) / "test.sqlite"
+        shutil.copy(_ROOT / "src" / "colorimeter.sqlite", tmpdb)
+        db.DBNAME = str(tmpdb)
+        db.write_one("DELETE FROM exposure")
+        # FakeLeds colors: 1 -> amber, 2 -> blue, 10 -> white.
+        exposure_repo.write_all_groups("amber", exposure_repo.groups_from_estar(30_000))
+        exposure_repo.write_all_groups("blue",  exposure_repo.groups_from_estar(20_000))
+
+    def tearDown(self):
+        self._db.DBNAME = self._saved_dbname
+        self._dbdir.cleanup()
+        super().tearDown()
+
+    def test_captures_exactly_the_stored_exposures(self):
+        runner = self.make_runner(led_start=1, led_end=1, mode="normal",
+                                  exposure_group="3")
+        self.run_to_completion(runner)
+        want = self._er.read_exposures("amber", "3")
+        self.assertEqual(len(want), 3)
+        self.assertEqual(runner.results[0].exposures_us, want)
+
+    def test_archive_holds_e0_to_eN_lit_and_dark(self):
+        runner = self.make_runner(led_start=1, led_end=1, mode="normal",
+                                  exposure_group="2")
+        self.run_to_completion(runner)
+        with self.archive(runner) as f:
+            for label in ("e0", "e1"):
+                for ch in ("B", "Gb", "Gr", "R"):
+                    self.assertIn(f"/leds/amber/lit/{label}/{ch}", f)
+                    self.assertIn(f"/leds/amber/dark/{label}/{ch}", f)
+            # group "2" -> exactly two exposures, no e2.
+            self.assertNotIn("/leds/amber/lit/e2", f)
+
+    def test_reaches_done(self):
+        runner = self.make_runner(led_start=1, led_end=2, mode="normal",
+                                  exposure_group="1")
+        progress = self.run_to_completion(runner)
+        self.assertEqual(progress[-1].phase, "done")
+        self.assertEqual(progress[-1].fraction, 1.0)
+
+    def test_no_white_calibration_phase(self):
+        """Normal mode must not switch the white calibration LED on at all."""
+        runner = self.make_runner(led_start=1, led_end=1, mode="normal",
+                                  exposure_group="1")
+        self.run_to_completion(runner)
+        white = capture_runner.WHITE_LED_CH
+        self.assertNotIn((white, True), self.leds.history)
+
+    def test_metadata_records_group_and_source(self):
+        runner = self.make_runner(led_start=1, led_end=1, mode="normal",
+                                  exposure_group="4")
+        self.run_to_completion(runner)
+        meta = self.led_metadata(runner, "amber")
+        self.assertEqual(meta["mode"], "normal")
+        self.assertEqual(meta["exposure_group"], "4")
+        self.assertEqual(meta["exposure_source"], "exposure_table")
+        self.assertEqual(len(meta["exposures_us"]), 4)
+
+    def test_fallback_when_led_has_no_stored_exposures(self):
+        """A LED with no rows for the group still captures, at the fallback."""
+        self._er.delete_led("amber")
+        runner = self.make_runner(led_start=1, led_end=1, mode="normal",
+                                  exposure_group="3")
+        self.run_to_completion(runner)
+        meta = self.led_metadata(runner, "amber")
+        self.assertEqual(meta["exposure_source"], "fallback")
+        self.assertEqual(len(meta["exposures_us"]), 1)
+        with self.archive(runner) as f:
+            self.assertIn("/leds/amber/lit/e0/B", f)
+            self.assertNotIn("/leds/amber/lit/e1", f)
+
+    def test_all_leds_off_at_end(self):
+        runner = self.make_runner(led_start=1, led_end=2, mode="normal",
+                                  exposure_group="2")
+        self.run_to_completion(runner)
+        self.assertEqual(self.leds.lit_channels(), set())
 
 
 if __name__ == "__main__":

@@ -58,6 +58,7 @@ from typing import Iterator
 import numpy as np
 
 import config_manager as config
+import exposure_repo
 from bayer_cam import BayerCam
 from capture_h5 import CaptureSuiteWriter
 
@@ -117,14 +118,28 @@ _CAPTURES_PER_LED = 2 * len(EXP_LABELS)
 # Value types
 # ---------------------------------------------------------------------------
 
+# Capture paths (CaptureConfig.mode):
+#   "calibration" — the adaptive path: find the ideal exposure e* per LED and
+#                   bracket it (the historical workflow). The caller persists the
+#                   discovered e* as exposure groups via exposure_repo.
+#   "normal"      — capture only the exposures stored in the `exposure` table for
+#                   the chosen group (images-per-LED), no e* search.
+MODE_CALIBRATION = "calibration"
+MODE_NORMAL      = "normal"
+
+
 @dataclass
 class CaptureConfig:
     """Parameters for one capture run."""
 
-    exposure_ms:   float = DEFAULT_EXPOSURE_MS
-    led_start:     int = 1
-    led_end:       int = 1
-    focus_diopter: "float | None" = None
+    exposure_ms:    float = DEFAULT_EXPOSURE_MS
+    led_start:      int = 1
+    led_end:        int = 1
+    focus_diopter:  "float | None" = None
+    # Which capture path to run, and (normal only) which stored exposure group
+    # to use — its name is the number of images per LED ('1'..'5').
+    mode:           str = MODE_CALIBRATION
+    exposure_group: str = "1"
     # Declared in config/instrument.yaml under `capture:`. default_factory,
     # not a plain default, so the location is resolved when a config is built
     # rather than baked in when this module is first imported.
@@ -430,6 +445,10 @@ class CaptureRunner:
         self._captures_done  = 0
         self._current_color  = ""
         self._lit_on_channel: "int | None" = None
+        # Captures per LED, for the completion estimate. The calibration path
+        # does a fixed lit+dark bracket; the normal path does lit+dark of the
+        # chosen group, set when that run starts.
+        self._captures_per_led = _CAPTURES_PER_LED
 
     # ── Progress helpers ─────────────────────────────────────────────
 
@@ -438,7 +457,7 @@ class CaptureRunner:
         total = self.config.led_count
         if total <= 0:
             return 0.0
-        done = (self._led_index - 1) + (self._captures_done / _CAPTURES_PER_LED)
+        done = (self._led_index - 1) + (self._captures_done / self._captures_per_led)
         return max(0.0, min(1.0, done / total))
 
     def _progress(self, phase: str, message: str, **kwargs) -> Progress:
@@ -528,7 +547,10 @@ class CaptureRunner:
             during a wait and carry no new information beyond the countdown.
         """
         try:
-            yield from self._run()
+            if str(self.config.mode).lower() == MODE_NORMAL:
+                yield from self._run_normal()
+            else:
+                yield from self._run()
         finally:
             self._all_off()
             self._close_writer()
@@ -859,6 +881,149 @@ class CaptureRunner:
                 led_channel=led,
                 target_channel=target_ch,
                 exposures_us=exposures_us,
+                metadata=meta_json,
+            ))
+
+        self._close_writer()
+        self._current_color = ""
+        yield Progress(
+            phase="done",
+            message=f"Done. Output: {self.out_path}",
+            led_index=self._led_index,
+            led_total=cfg.led_count,
+            fraction=1.0,
+        )
+
+    # ── Normal path ────────────────────────────────────────────────────
+    #
+    # "Use only what calibration stored." No white-LED calibration and no e*
+    # search: for each LED the exposures come straight from the `exposure`
+    # table for the chosen group, so the strip is lit the minimum number of
+    # times. Focus still runs (it is not stored). If a LED has no rows for the
+    # group, one fallback exposure is used so the run still completes.
+
+    def _run_normal(self) -> Iterator[Progress]:
+        cfg  = self.config
+        cam  = self._cam
+        leds = self._leds
+        group = str(cfg.exposure_group)
+
+        self.suite_id = config.capture_suite_id()
+        cfg.out_dir.mkdir(parents=True, exist_ok=True)
+        self.out_path = cfg.out_dir / config.capture_archive_name(self.suite_id)
+        self.results = []
+
+        # ── Camera init ──────────────────────────────────────────────
+        cam.set_exposure(cfg.initial_us)
+        cam.setup_camera()
+        pattern = cam.bayer_pattern
+        assert cam.config_size is not None, "setup_camera() must set config_size"
+        cam_w, cam_h = cam.config_size
+        yield self._progress(
+            "setup",
+            f"Camera {cam.model_description}  pattern={pattern}  {cam_w}×{cam_h}  "
+            f"(normal, group {group})")
+
+        # ── Focus (still needed; exposures are stored, focus is not) ──
+        yield self._progress("focus", "Phase 1: focus")
+        focus_pos, focus_mode, raw_af_pos = self._set_focus()
+        yield self._progress("focus", f"Focus: {focus_pos:.2f} diopters ({focus_mode})")
+
+        # ── Per-LED capture of the stored exposures ──────────────────
+        yield self._progress(
+            "capture", f"Normal capture — exposure group {group}")
+        w = self._writer = CaptureSuiteWriter(self.out_path, suite_id=self.suite_id)
+
+        for led in range(cfg.led_start, cfg.led_end + 1):
+            self._led_index    += 1
+            self._captures_done = 0
+            color = leds.color_name(led)
+            self._current_color = color
+
+            exposures_us = exposure_repo.read_exposures(color, group)
+            used_fallback = not exposures_us
+            if used_fallback:
+                exposures_us = [cfg.initial_us]
+                log.warning("LED %s has no exposures for group %s — "
+                            "falling back to %d µs", color, group, cfg.initial_us)
+            labels = [f"e{i}" for i in range(len(exposures_us))]
+            self._captures_per_led = max(1, 2 * len(exposures_us))
+            log.info(f"=== LED {led}: {color} ({group} exposure(s)"
+                     f"{', fallback' if used_fallback else ''}) ===")
+
+            note = "  [no calibration — fallback]" if used_fallback else ""
+            yield self._progress("capture", f"--- {leds.label(led)} ---{note}")
+
+            self._led_on(led)
+            yield from self._wait(LED_ON_WARMUP_S, f"{color} LED on, warming up")
+
+            # ── Lit frames ────────────────────────────────────────────
+            yield self._progress("capture", "Lit captures:")
+            mid_idx = len(exposures_us) // 2       # keep the middle frame's JPEG
+            mid_frame: "tuple | None" = None
+            applied_us: dict = {}
+
+            for i, (label, exp_us) in enumerate(zip(labels, exposures_us)):
+                rgb, bayer, meta = _set_and_settle(cam, exp_us)
+                applied_us[label] = int(meta.get("ExposureTime", 0))
+                w.add_lit(color, label, _roi_bound_layers(bayer, pattern),
+                          exposure_us=exp_us)
+                if i == mid_idx:
+                    mid_frame = (rgb, bayer, meta)
+                self._captures_done += 1
+                yield self._progress(
+                    "capture", f"    stored lit {label} ({exp_us // 1000}ms)",
+                    step=label)
+
+            # ── Dark frames at the same exposures ─────────────────────
+            self._led_off(led)
+            yield from self._wait(LED_OFF_SETTLE_S, f"{color} LED off, settling")
+
+            yield self._progress("capture", "Dark captures:")
+            for label, exp_us in zip(labels, exposures_us):
+                _, bayer, _ = _set_and_settle(cam, exp_us)
+                stored = w.add_dark(label, _roi_bound_layers(bayer, pattern),
+                                    exposure_us=exp_us)
+                w.link_dark(color, label, exposure_us=exp_us)
+                self._captures_done += 1
+                yield self._progress(
+                    "capture",
+                    f"    {'stored' if stored else 'reused'} dark {label} "
+                    f"({exp_us // 1000}ms)",
+                    step=f"dark {label}")
+
+            # ── Per-LED metadata, statistics and JPEG ─────────────────
+            meta_json: dict = {
+                "mode": MODE_NORMAL,
+                "timestamp": self.suite_id,
+                "led_channel": led,
+                "led_color": color,
+                "led_label": leds.label(led),
+                "camera_model": cam.model_description,
+                "bayer_pattern": pattern,
+                "config_size": [cam_w, cam_h],
+                "focus_diopters": focus_pos,
+                "focus_mode": focus_mode,
+                "autofocus_raw_diopters": raw_af_pos,
+                "exposure_group": group,
+                "exposure_source": "fallback" if used_fallback else "exposure_table",
+                "exposures_us": {lbl: int(us) for lbl, us in zip(labels, exposures_us)},
+                "applied_exposures_us": applied_us,
+            }
+            w.add_led(color, meta_json, led_channel=led)
+            if mid_frame is not None:
+                rgb_m, bayer_m, meta_m = mid_frame
+                w.add_capture_info(color, _build_capture_info(
+                    rgb_m, bayer_m, meta_m, lens_position=cam.lens_position))
+                w.add_jpeg(color, _encode_jpeg(rgb_m),
+                           filename=f"{OUT_STEM}_{color}_{labels[mid_idx]}.jpg")
+            yield self._progress("capture", f"    stored metadata for {color}")
+
+            self.results.append(LedResult(
+                color=color,
+                led_channel=led,
+                target_channel="",
+                exposures_us=list(exposures_us),
                 metadata=meta_json,
             ))
 
