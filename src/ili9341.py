@@ -413,36 +413,43 @@ class ILI9341:
         tmp  = Image.new("RGB", (1, 1))
         draw = ImageDraw.Draw(tmp)
 
-        text_bbox = draw.textbbox((0, 0), text, font=font)
-        tw = text_bbox[2] - text_bbox[0]
-
-        # Full line height from reference string (prevents descender clipping)
+        # Split on newlines and lay the lines out as a block.  Per-line height
+        # comes from a reference string (not the line's own glyphs) so every
+        # line — and single- vs multi-line text — stacks on a consistent
+        # baseline and descenders never clip.
+        lines = text.split("\n")
         ref_bbox = draw.textbbox((0, 0), "Agpqjy|", font=font)
-        th = ref_bbox[3] - ref_bbox[1] + 2
+        lh = ref_bbox[3] - ref_bbox[1] + 2          # single-line height
+        block_h = lh * len(lines)
 
-        # Horizontal alignment within rect
-        if align == "center":
-            tx = (rect.w - tw) // 2
-        elif align == "right":
-            tx = rect.w - tw
-        else:
-            tx = 0
+        line_bboxes = [draw.textbbox((0, 0), ln, font=font) for ln in lines]
+        max_w = max((b[2] - b[0] for b in line_bboxes), default=0)
 
-        # Vertical alignment within rect
+        # Vertical position of the whole block within the rect (uses the real
+        # block height, so multi-line text centres/bottom-aligns correctly).
         if valign == "middle":
-            ty = (rect.h - th) // 2
+            top = (rect.h - block_h) // 2
         elif valign == "bottom":
-            ty = rect.h - th
+            top = rect.h - block_h
         else:
-            ty = 0
+            top = 0
 
-        # Render into a surface sized to the rect (for clipping)
-        surf_w = rect.w if clip else max(rect.w, tx + tw)
-        surf_h = rect.h if clip else max(rect.h, ty + th)
+        # Render the block into a surface sized to the rect (for clipping).
+        surf_w = rect.w if clip else max(rect.w, max_w)
+        surf_h = rect.h if clip else max(rect.h, top + block_h)
         surf = Image.new("RGB", (surf_w, surf_h), self._to_rgb(bg))
-        ImageDraw.Draw(surf).text(
-            (tx, ty - text_bbox[1]),
-            text, font=font, fill=self._to_rgb(color))
+        sdraw = ImageDraw.Draw(surf)
+        for i, ln in enumerate(lines):
+            b  = line_bboxes[i]
+            tw = b[2] - b[0]
+            if align == "center":
+                tx = (rect.w - tw) // 2
+            elif align == "right":
+                tx = rect.w - tw
+            else:
+                tx = 0
+            ly = top + i * lh
+            sdraw.text((tx, ly - b[1]), ln, font=font, fill=self._to_rgb(color))
 
         if clip:
             surf = surf.crop((0, 0, rect.w, rect.h))

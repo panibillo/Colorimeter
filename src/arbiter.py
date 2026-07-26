@@ -52,6 +52,7 @@ import logging_manager
 import widgets
 import shutdown_screen
 import sample_repo
+import exposure_repo
 from widgets import Button, TextBox
 from pool import Pool
 from slot import Slot
@@ -536,13 +537,33 @@ class Arbiter:
     # the A/B slots and the per-sample ReadPhase capture.
 
     def _menu_open_capture(self) -> None:
-        """Open the capture choice screen, reset to the debugging defaults."""
-        # Default to Normal + 1 image each time it opens (fast for debugging).
+        """Open the capture choice screen, initialising from the saved default."""
         self._cap_mode  = "normal"
-        self._cap_group = "1"
+        self._cap_group = self._initial_exposure_group()
         self._cap_progress = ""
         self._cap_result   = ""
         self._render_capture_choice()
+
+    def _initial_exposure_group(self) -> str:
+        """
+        The exposure group to preselect when the capture screen opens: the value
+        saved on the defaults row, provided it still has active rows in the
+        exposure table.
+        """
+        try:
+            saved     = sample_repo.load_default_exposuregroup(self._default_rowid)
+            available = exposure_repo.available_groups()
+        except sqlite3.Error:
+            log.exception("Arbiter: could not read saved exposure group")
+            saved, available = None, []
+        if saved is not None and saved in available:
+            return saved
+        # ── DEFAULT EXPOSURE GROUP (fallback) ──────────────────────────────────
+        # Reached when nothing is saved, or the saved group no longer has active
+        # rows in the exposure table (e.g. the operator deleted that calibration
+        # from the exposure table). Change this literal to pick a different
+        # fallback group.
+        return "3"
 
     def _render_capture_choice(self) -> None:
         if self._pool is None:
@@ -567,7 +588,7 @@ class Arbiter:
             p.put(name, str(n), on=(lambda nn=n: self._cap_set_group(nn)))
             p[name].color = sel if self._cap_group == str(n) else unsel
         p.put("cap_back",  "Back",  on=self._render_menu)
-        p.put("cap_start", "START", on=self._cap_start)
+        p.put("cap_start", "Calibrate\nExposures", on=self._cap_start)
         p.render(self._disp)
         self._rebuild_focus()
 
@@ -577,6 +598,11 @@ class Arbiter:
 
     def _cap_set_group(self, n) -> None:
         self._cap_group = str(n)
+        # Persist the choice onto the defaults row so it is preselected next time.
+        try:
+            sample_repo.save_default_exposuregroup(self._default_rowid, self._cap_group)
+        except sqlite3.Error:
+            log.exception("Arbiter: could not save exposure group to defaults")
         self._render_capture_choice()
 
     def _cap_start(self) -> None:
@@ -674,7 +700,6 @@ class Arbiter:
         its family of groups. All LEDs in one run share a single add_dt so the
         run's rows group together; prior calibrations are kept (active=0).
         """
-        import exposure_repo
         runner = getattr(session, "runner", None)
         results = getattr(runner, "results", None) or []
         add_dt = self.timestamp()
@@ -1145,31 +1170,54 @@ def _selftest() -> None:
     check("POST enabled",         arb._pool["run_btn"].enabled, True)
 
     # ── Capture screen (Menu → Capture) ──────────────────────────────────────
-    import exposure_repo
-    persisted: list = []
-    _real_write_estar = exposure_repo.write_estar
-    exposure_repo.write_estar = lambda led, estar, **kw: persisted.append((led, estar))
+    # Runs against a throwaway copy of the DB so the exposure table and the
+    # saved default group are exercised for real without touching live data.
+    import shutil
+    import tempfile
+    import db_manager as _db
+    _tmpdir = tempfile.mkdtemp()
+    _tmpdb = Path(_tmpdir) / "arbiter_selftest.sqlite"
+    shutil.copy(Path(__file__).resolve().parent / "colorimeter.sqlite", _tmpdb)
+    _db.DBNAME = str(_tmpdb)
+    _db.write_one("DELETE FROM exposure")
+    sample_repo.save_default_exposuregroup(1, None)     # start with nothing saved
 
     class _R:                       # a stand-in LedResult carrying e*
         def __init__(self, color, estar):
             self.color = color; self.metadata = {"e3_final_us": estar}
 
-    print("== capture screen: choice defaults + selection ==")
-    cap_cal = _FakeCapture(steps=2)
-    cap_cal.runner.results = [_R("amber", 30000), _R("blue", 20000)]
-    arb._capture_factory = lambda: cap_cal
+    print("== capture screen: unsaved/unavailable group falls back to 3 ==")
     arb.open_menu(A)
     check("menu open (no slot focus)", arb._focused is None, True)
     arb._menu_open_capture()
-    check("choice view",         arb._cap_view, "choice")
+    check("choice view",          arb._cap_view, "choice")
     check("default mode normal",  arb._cap_mode, "normal")
-    check("default group 1",      arb._cap_group, "1")
+    check("fallback group 3",     arb._cap_group, "3")
+
+    print("== capture screen: selecting a group persists it to defaults ==")
+    arb._cap_set_group(4)
+    check("group set to 4",        arb._cap_group, "4")
+    check("persisted to defaults", sample_repo.load_default_exposuregroup(1), "4")
+
+    print("== capture screen: reopen restores the saved group when available ==")
+    exposure_repo.write_estar("amber", 30000)           # groups 1..5 now available
+    arb._menu_open_capture()
+    check("restored saved group 4", arb._cap_group, "4")
+
+    print("== capture screen: saved group deleted from exposures -> 3 ==")
+    exposure_repo.delete_led("amber")                   # no active groups remain
+    arb._menu_open_capture()
+    check("fallback to 3",        arb._cap_group, "3")
+
+    print("== capture screen: calibration run persists e* per LED ==")
+    _db.write_one("DELETE FROM exposure")
+    cap_cal = _FakeCapture(steps=2)
+    cap_cal.runner.results = [_R("amber", 30000), _R("blue", 20000)]
+    arb._capture_factory = lambda: cap_cal
+    arb._menu_open_capture()
     arb._cap_set_mode("calibration")
     arb._cap_set_group(3)
     check("mode -> calibration",  arb._cap_mode, "calibration")
-    check("group -> 3",           arb._cap_group, "3")
-
-    print("== capture screen: calibration run persists e* per LED ==")
     arb._cap_start()
     check("progress view",        arb._cap_view, "progress")
     check("camera busy in run",   arb.capture_available(), False)
@@ -1177,14 +1225,14 @@ def _selftest() -> None:
         arb.pump_capture()
     check("done view",            arb._cap_view, "done")
     check("camera freed",         arb.capture_available(), True)
-    check("persisted amber e*",   ("amber", 30000) in persisted, True)
-    check("persisted blue e*",    ("blue", 20000) in persisted, True)
+    check("amber e* persisted",   exposure_repo.read_exposures("amber", "1"), [30000])
+    check("blue e* persisted",    exposure_repo.read_exposures("blue", "1"), [20000])
     check("result names LEDs",    "2 LED" in arb._cap_result, True)
     arb._cap_done_ok()
     check("OK returns to menu",   arb._cap_view, None)
 
     print("== capture screen: normal run does not persist ==")
-    persisted.clear()
+    rows_before = _db.read_val("SELECT COUNT(*) FROM exposure")
     cap_norm = _FakeCapture(steps=2)
     arb._capture_factory = lambda: cap_norm
     arb._menu_open_capture()
@@ -1193,7 +1241,7 @@ def _selftest() -> None:
     for _ in range(5):
         arb.pump_capture()
     check("normal done",          arb._cap_view, "done")
-    check("normal skipped persist", persisted, [])
+    check("normal added no rows",  _db.read_val("SELECT COUNT(*) FROM exposure"), rows_before)
     check("normal result text",   "complete" in arb._cap_result.lower(), True)
 
     print("== capture screen: cancel aborts and frees the camera ==")
@@ -1207,7 +1255,7 @@ def _selftest() -> None:
     check("camera freed on cancel", arb.capture_available(), True)
     check("cancel leaves capture view", arb._cap_view, None)
 
-    exposure_repo.write_estar = _real_write_estar
+    shutil.rmtree(_tmpdir, ignore_errors=True)
 
     print("\n== all arbiter self-tests passed ==")
 

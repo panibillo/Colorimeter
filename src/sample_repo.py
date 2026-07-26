@@ -9,6 +9,8 @@ sample-number rule.
 Public surface
 --------------
     load_defaults(rowid=1)  -> Defaults | None    read a row of default_gui_vals
+    load_default_exposuregroup(rowid=1) -> str|None   the saved capture group
+    save_default_exposuregroup(rowid, group) -> int   persist the chosen group
     next_sample_no(template) -> str               the next sequential samp_no
     insert_sample(...)      -> int                reserve a row (raises on dup)
     update_sample(rowid, **cols) -> int           write columns as the run proceeds
@@ -68,6 +70,41 @@ def load_defaults(rowid: int = 1) -> Optional[Defaults]:
         log.error("sample_repo: no default_gui_vals row with rowid=%s", rowid)
         return None
     return Defaults(*row)
+
+
+# ── Saved capture exposure group ────────────────────────────────────────────
+# The capture screen remembers the operator's chosen exposure group (images per
+# LED) on a defaults row. The column was added after the table shipped, so the
+# helpers below self-heal any DB (desktop or Pi) that predates it.
+
+def _ensure_exposuregroup_column() -> None:
+    """
+    Make sure the `defaults` table has the `exposuregroup` column.
+
+    Adding a nullable column is safe and idempotent; this lets an older DB pick
+    up the feature without a manual migration. Cheap enough to call per access.
+    """
+    cols = {row[1] for row in db.read_all("PRAGMA table_info(defaults)")}
+    if "exposuregroup" not in cols:
+        db.write_one("ALTER TABLE defaults ADD COLUMN exposuregroup TEXT")
+
+
+def load_default_exposuregroup(rowid: int = 1) -> Optional[str]:
+    """Return the saved capture exposure group for a defaults row, or None."""
+    _ensure_exposuregroup_column()
+    return db.read_val("SELECT exposuregroup FROM defaults WHERE rowid = ?", (rowid,))
+
+
+def save_default_exposuregroup(rowid: int, group) -> int:
+    """
+    Persist the chosen capture exposure group onto a defaults row.
+
+    `group` is stored as text ('1'..'5'); None clears it. Returns rows updated.
+    """
+    _ensure_exposuregroup_column()
+    val = None if group is None else str(group)
+    return db.write_one(
+        "UPDATE defaults SET exposuregroup = ? WHERE rowid = ?", (val, rowid))
 
 
 # ── Sample numbering ──────────────────────────────────────────────────────────
@@ -247,6 +284,22 @@ if __name__ == "__main__":
     check("samp_no_template",     d.samp_no_template, "ZZ1000")
     check("fullname",             d.fullname, "William Olsen")
     check("testkit present",      bool(d.testkit), True)
+
+    print("== default exposure group: save / load round-trip ==")
+    save_default_exposuregroup(1, None)
+    check("none when cleared",    load_default_exposuregroup(1), None)
+    save_default_exposuregroup(1, 4)
+    check("stored as text",       load_default_exposuregroup(1), "4")
+    save_default_exposuregroup(1, "2")
+    check("overwrite",            load_default_exposuregroup(1), "2")
+
+    print("== _ensure_exposuregroup_column self-heals a legacy DB ==")
+    db.write_one("ALTER TABLE defaults DROP COLUMN exposuregroup")
+    check("column dropped",
+          "exposuregroup" not in {r[1] for r in db.read_all("PRAGMA table_info(defaults)")},
+          True)
+    save_default_exposuregroup(1, "5")          # must re-add the column, then write
+    check("column re-added + written", load_default_exposuregroup(1), "5")
 
     shutil.rmtree(tmp.parent, ignore_errors=True)
     print("\n== all sample_repo self-tests passed ==")

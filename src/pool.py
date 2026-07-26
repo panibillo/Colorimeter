@@ -162,10 +162,10 @@ class Pool:
         # Mode + N buttons act as radio groups — the arbiter recolours the
         # selected one green and the rest gray on each render.
         label("cap_title",      L.CAP_TITLE,     "black", "white",       22, text="Capture")
-        label("cap_mode_lbl",   L.CAP_MODE_LBL,  "white", "label_coral", 14, text="Path")
+        label("cap_mode_lbl",   L.CAP_MODE_LBL,  "black", "white",       18, text="Path")
         button("cap_mode_cal",  L.CAP_MODE_CAL,  "btn_text", "btn_gray", 14, text="Calibrate")
         button("cap_mode_norm", L.CAP_MODE_NORM, "btn_text", "btn_gray", 14, text="Normal")
-        label("cap_n_lbl",      L.CAP_N_LBL,     "white", "label_coral", 14, text="Images")
+        label("cap_n_lbl",      L.CAP_N_LBL,     "black", "white",       18, text="Images")
         button("cap_n1", L.CAP_N1, "btn_text", "btn_gray", 18, text="1")
         button("cap_n2", L.CAP_N2, "btn_text", "btn_gray", 18, text="2")
         button("cap_n3", L.CAP_N3, "btn_text", "btn_gray", 18, text="3")
