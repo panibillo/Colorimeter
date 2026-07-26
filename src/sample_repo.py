@@ -232,7 +232,7 @@ if __name__ == "__main__":
     check("no digits 'ZZ'", _parse_template("ZZ"), ("ZZ", 0, 1))
 
     # Point db_manager at a throwaway copy of the real DB for the DB-backed tests.
-    live = Path(__file__).resolve().parent / "colorimeter.sqlite"
+    live = Path(db.DBNAME)     # the live DB location (from config)
     tmp = Path(tempfile.mkdtemp()) / "test.sqlite"
     shutil.copy(live, tmp)
     db.DBNAME = str(tmp)

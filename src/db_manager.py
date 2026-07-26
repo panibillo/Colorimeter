@@ -13,16 +13,15 @@ Usage:
               (1, "card1"))
 """
 
-import os
 import sqlite3
-from pathlib import Path
+import config_manager as config
 import logging_manager as log
 
-# Resolve the DB next to this module so the path is independent of the current
-# working directory (the app is launched from src/, tools from the repo root).
-# COLORIMETER_DB overrides it — used by tests and dev to point at a scratch copy.
-DBNAME = os.environ.get("COLORIMETER_DB") or \
-         str(Path(__file__).resolve().parent / "colorimeter.sqlite")
+# The database location comes from config (database.path, default
+# src/colorimeter.sqlite, so the path is independent of the working directory —
+# the app launches from src/, tools from the repo root). $COLORIMETER_DB
+# overrides it; tests may also reassign DBNAME directly to a scratch copy.
+DBNAME = str(config.db_path())
 print (f"Colorimeter db_manager.py using db: {DBNAME}")
 
 TABLE_DEFINITIONS = """

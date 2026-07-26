@@ -28,7 +28,7 @@ class Rect:
     """
     Recall for drawing that a rect x,y is upper left corner.
     """
-    def __init__(self, x, y, w, h)
+    def __init__(self, x, y, w, h):
         self.x = int(x)
         self.y = int(y)
         self.w = int(w)
@@ -52,11 +52,10 @@ class Roi(Rect):
 
 class Roi_group:
     def __init__(self, *roi):
-        self.group = set{*roi}
+        self.group = set(roi)
 
 def buffer(bayer_array, roi):
-    
-
+    raise NotImplementedError("roi.buffer() is not yet implemented")
 
 
 def _filter_margin_rectangles(rectangles: list, layer_height: int, layer_width: int, 

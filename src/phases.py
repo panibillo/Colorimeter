@@ -482,10 +482,10 @@ class AnalysisPhase(Phase):
 
 class ModalPhase(Phase):
     """
-    A choice dialog.  `message` may reference record fields (e.g. "{samp_no}").
-    `buttons` is a list of 1..3 (label, action) pairs, laid out by count; action
-    is a callable(arb, slot), or None to simply close back to the phase that
-    opened the modal.
+    A choice dialog.  `message` may reference record fields (e.g. "{samp_no}")
+    and the slot id as "{slot}".  `buttons` is a list of 1..3 (label, action)
+    pairs, laid out by count; action is a callable(arb, slot), or None to simply
+    close back to the phase that opened the modal.
     """
 
     def __init__(self, phase_id: str, message: str, buttons: list):
@@ -494,8 +494,11 @@ class ModalPhase(Phase):
         self.buttons  = buttons
 
     def enter(self, pool, slot, arb) -> None:
+        # slot.name is exposed as {slot}; it wins over any record field of the
+        # same name so the slot id is always the A/B being cancelled.
+        fields = {**slot.record, "slot": slot.name}
         try:
-            msg = self.message.format(**slot.record)
+            msg = self.message.format(**fields)
         except (KeyError, IndexError):
             msg = self.message
         pool.put("modal_panel")
@@ -515,8 +518,9 @@ def build_phases(reagent1_secs: int = 120, reagent2_secs: int = 420) -> dict:
     """
     Return {phase_id: Phase}, the whole protocol.
 
-    reagent1_secs / reagent2_secs let the caller shorten the reagent countdowns
-    (the arbiter passes 20 s each in simulation so runs are quick to test).
+    reagent1_secs / reagent2_secs let the caller set the reagent countdowns; the
+    arbiter passes the configured durations (config_manager.reagent{1,2}_secs),
+    which the simulation profile shortens so runs are quick to test.
     """
     phases = [
         EntryPhase(),
@@ -533,7 +537,7 @@ def build_phases(reagent1_secs: int = 120, reagent2_secs: int = 420) -> dict:
         AnalysisPhase(),
         # Cancel offers three outcomes: stop the run but keep the reserved DB row
         # as-is, stop and delete the row (start over), or resume the run.
-        ModalPhase("cancel", "Cancel test {samp_no}?",
+        ModalPhase("cancel", "Cancel test {slot}  {samp_no}?",
                    [("Keep row",   lambda arb, slot: arb.cancel_test(slot, delete=False)),
                     ("Delete row", lambda arb, slot: arb.cancel_test(slot, delete=True)),
                     ("Resume",     None)]),
@@ -786,6 +790,8 @@ if __name__ == "__main__":
     press(pool, "main_btn")                         # Continue -> reagent1
     press(pool, "main_btn")                         # CANCEL -> cancel modal
     check("cancel modal",      B.phase, "cancel")
+    check("cancel msg: slot + samp_no",
+          pool["modal_msg"].text, f"Cancel test B  {B.record['samp_no']}?")
     check("3rd button shown",  pool["modal_third"].visible, True)
     check("keep label",        pool["modal_yes"].label, "Keep row")
     check("delete label",      pool["modal_no"].label, "Delete row")

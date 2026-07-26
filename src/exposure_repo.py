@@ -305,7 +305,7 @@ if __name__ == "__main__":
     check("group N has N",      [len(g[str(n)]) for n in range(1, 6)], [1, 2, 3, 4, 5])
 
     # Point db_manager at a throwaway copy of the real DB for the table tests.
-    live = Path(__file__).resolve().parent / "colorimeter.sqlite"
+    live = Path(db.DBNAME)     # the live DB location (from config)
     tmp = Path(tempfile.mkdtemp()) / "test.sqlite"
     shutil.copy(live, tmp)
     db.DBNAME = str(tmp)

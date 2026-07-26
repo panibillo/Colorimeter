@@ -34,6 +34,7 @@ Headless logic self-test (no display, fake camera):
 from __future__ import annotations
 
 import datetime
+import functools
 import logging
 import os
 import signal
@@ -48,6 +49,7 @@ _SIMULATION_MODE = os.environ.get("COLORIMETER_SIMULATION", "0") == "1"
 # stacks.  Only the pure model + widget layer is imported at module load.
 import sqlite3
 
+import config_manager as config
 import logging_manager
 import widgets
 import shutdown_screen
@@ -61,11 +63,9 @@ from phases import build_phases, EntryPhase, Entry2Phase
 
 log = logging.getLogger(__name__)
 
-_BL_PIN            = 13
-_POLL_S            = 0.02        # main-loop cadence
-_CAPTURE_LED_START = 1
-_CAPTURE_LED_END   = 10
-_ANALYSIS_S        = 1.5         # placeholder analysis duration (engine TODO)
+# Tunables (LED range, loop cadence, timeouts, reagent durations, rowid, the
+# backlight pin) live in config/instrument.yaml and are read through
+# config_manager — see the config.* calls throughout this module.
 
 
 class Arbiter:
@@ -111,8 +111,8 @@ class Arbiter:
         self._cleaned_up    = False
 
         # Reference data: which default_gui_vals row seeds the entry screens, and
-        # the resolved Defaults loaded from it (rowid 1 for now; later config).
-        self._default_rowid = 1
+        # the resolved Defaults loaded from it (the rowid comes from config).
+        self._default_rowid = config.default_rowid()
         self._defaults: sample_repo.Defaults | None = None
 
         # Menu screen state: the slot to return to, and a staged (not yet
@@ -170,7 +170,8 @@ class Arbiter:
         self._beeper    = beeper
         self._ILI9341   = ILI9341
         self._kb        = KbReader()
-        self._backlight = DigitalOutputDevice(_BL_PIN, initial_value=True)
+        self._backlight = DigitalOutputDevice(config.backlight_pin(),
+                                              initial_value=True)
         self._disp      = ILI9341()
         self._touch     = TSC2007()
         self._temp      = DS18B20()
@@ -195,11 +196,10 @@ class Arbiter:
 
     def _build_model(self) -> None:
         self._pool = Pool.build()
-        # Shorten the reagent countdowns in simulation so runs are quick to test.
-        if _SIMULATION_MODE:
-            self._phases = build_phases(reagent1_secs=10, reagent2_secs=10)
-        else:
-            self._phases = build_phases()
+        # Reagent countdowns come from config; the simulation profile shortens
+        # them so runs are quick to test.
+        self._phases = build_phases(reagent1_secs=config.reagent1_secs(),
+                                    reagent2_secs=config.reagent2_secs())
         self._slots = {"A": Slot("A"), "B": Slot("B")}
         self._load_defaults()
 
@@ -293,7 +293,8 @@ class Arbiter:
         try:
             if self._disp is not None:
                 choice = shutdown_screen.run(self._disp, self._touch, self._kb,
-                                             error=error, simulation=_SIMULATION_MODE)
+                                             error=error, simulation=_SIMULATION_MODE,
+                                             timeout_s=config.shutdown_timeout_s())
         except Exception:
             log.exception("Arbiter: shutdown screen failed")
 
@@ -459,13 +460,22 @@ class Arbiter:
         log.info("Arbiter: focus %s -> %s", self._focused.name, other.name)
         self.focus(other)
 
+    # def _paint_slot_toggle(self) -> None:
+    #     """Label the slot button with the slot you would switch TO."""
+    #     target = "B" if self._focused.name == "A" else "A"
+    #     from palette import color
+    #     btn = self._pool["slot_btn"]
+    #     btn.label = target
+    #     btn.color = color("slot_b_bg" if target == "B" else "slot_a_bg")
+    #     btn.on_press = self.toggle_slot
+
     def _paint_slot_toggle(self) -> None:
-        """Label the slot button with the slot you would switch TO."""
-        target = "B" if self._focused.name == "A" else "A"
+        """Show the CURRENT slot (id + colour); pressing it toggles to the other."""
+        current = self._focused.name
         from palette import color
         btn = self._pool["slot_btn"]
-        btn.label = target
-        btn.color = color("slot_b_bg" if target == "B" else "slot_a_bg")
+        btn.label = current
+        btn.color = color("slot_a_bg" if current == "A" else "slot_b_bg")
         btn.on_press = self.toggle_slot
 
     # ── Menu screen ──────────────────────────────────────────────────────────────
@@ -534,7 +544,7 @@ class Arbiter:
         self._rebuild_focus()
 
     def _menu_select_defaults(self) -> None:
-        self._menu_staged_rowid = 1     # the only default row today
+        self._menu_staged_rowid = config.default_rowid()   # the only row today
         self._render_menu()
 
     # ── Capture screen (Menu → Capture) ────────────────────────────────────────
@@ -561,23 +571,27 @@ class Arbiter:
     def _initial_exposure_group(self) -> str:
         """
         The exposure group to preselect when the capture screen opens: the value
-        saved on the defaults row, provided it still has active rows in the
-        exposure table.
+        last saved on the defaults row, or the configured fallback when nothing
+        has been saved yet.
+
+        The operator's saved choice is honoured whether or not the exposure
+        table currently has rows for that group — preselecting anything else
+        would silently override what they picked (the previous behaviour, which
+        made the screen always reopen on the fallback group after selecting an
+        uncalibrated one). A Normal capture on an uncalibrated group simply
+        finds nothing to capture; that is handled at capture time, not by
+        second-guessing the preselection here.
         """
         try:
-            saved     = sample_repo.load_default_exposuregroup(self._default_rowid)
-            available = exposure_repo.available_groups()
+            saved = sample_repo.load_default_exposuregroup(self._default_rowid)
         except sqlite3.Error:
             log.exception("Arbiter: could not read saved exposure group")
-            saved, available = None, []
-        if saved is not None and saved in available:
+            saved = None
+        if saved is not None:
             return saved
-        # ── DEFAULT EXPOSURE GROUP (fallback) ──────────────────────────────────
-        # Reached when nothing is saved, or the saved group no longer has active
-        # rows in the exposure table (e.g. the operator deleted that calibration
-        # from the exposure table). Change this literal to pick a different
-        # fallback group.
-        return "3"
+        # Nothing saved yet — the configured default (config/instrument.yaml,
+        # capture.fallback_exposure_group).
+        return config.fallback_exposure_group()
 
     def _render_capture_choice(self) -> None:
         if self._pool is None:
@@ -647,7 +661,8 @@ class Arbiter:
             return
         from capture_runner import CaptureConfig
         cfg = CaptureConfig(mode=self._cap_mode, exposure_group=self._cap_group,
-                            led_start=_CAPTURE_LED_START, led_end=_CAPTURE_LED_END)
+                            led_start=config.capture_led_start(),
+                            led_end=config.capture_led_end())
         session = self._new_session(cfg)
         if not session.start():
             log.error("Arbiter: capture failed to start: %s", session.error)
@@ -813,13 +828,13 @@ class Arbiter:
         from capture_runner import CaptureConfig
         from capture_session import CaptureSession
         if cfg is None:
-            cfg = CaptureConfig(led_start=_CAPTURE_LED_START,
-                                led_end=_CAPTURE_LED_END)
+            cfg = CaptureConfig(led_start=config.capture_led_start(),
+                                led_end=config.capture_led_end())
         return CaptureSession(cfg)
 
     def start_analysis(self, slot: Slot) -> None:
         # Analysis engine is not implemented yet; a placeholder completes after
-        # _ANALYSIS_S so the whole flow is exercisable end to end.
+        # config.analysis_secs() so the whole flow is exercisable end to end.
         log.info("Arbiter: analysis started for slot %s (placeholder)", slot.name)
         self._analysis = (slot, self.now())
 
@@ -905,9 +920,13 @@ class Arbiter:
         pending = [s for s in self._alarms if s is not focused]
         if not pending:
             return
-        target = pending[0]
-        self._pool.put("alarm_btn", f"Resume\n{target.name}",
-                       on=lambda t=target: self.focus(t))
+        target = pending[0]          # oldest OTHER slot still alarming
+
+        # Tapping the alarm returns focus to the slot that expired. partial binds
+        # `target` by value now — clearer than a lambda closing over a variable,
+        # and it makes the side effect (focus THIS slot) explicit.
+        on_resume = functools.partial(self.focus, target)
+        self._pool.put("alarm_btn", f"Resume\n{target.name}", on=on_resume)
 
     # ── Poll / pump (driven each loop pass) ────────────────────────────────────
 
@@ -991,14 +1010,14 @@ class Arbiter:
         until start_analysis arms it (the (slot, started_at) pair in _analysis).
 
         Placeholder: no analysis engine exists yet, so there is no work to pump.
-        This simply waits out _ANALYSIS_S of wall-clock time, then stamps a stub
+        This simply waits out config.analysis_secs() of wall-clock time, then stamps a stub
         result, persists it, and repaints the slot.  When the real engine lands
         it will be driven from here the way pump_capture drives a capture.
         """
         if self._analysis is None:
             return
         slot, started = self._analysis
-        if self.now() - started < _ANALYSIS_S:
+        if self.now() - started < config.analysis_secs():
             return
         self._analysis = None
         slot.result = "Analysis not yet implemented"
@@ -1095,6 +1114,7 @@ class Arbiter:
 
     def _run(self) -> None:
         log.info("Arbiter: running — Ctrl-C to exit")
+        poll_s = config.main_loop_poll_s()
         last_clock = 0.0
         while True:
             now = time.monotonic()
@@ -1122,11 +1142,11 @@ class Arbiter:
                 while self._touch.is_touched and time.monotonic() < timeout:  # type: ignore
                     if _SIMULATION_MODE and hasattr(self._disp, "process_events"):
                         self._disp.process_events()  # type: ignore
-                    time.sleep(_POLL_S)
+                    time.sleep(poll_s)
                 if time.monotonic() >= timeout:
                     self._touch._is_touched = False  # type: ignore
 
-            time.sleep(_POLL_S)
+            time.sleep(poll_s)
 
     def _tick_1hz(self) -> None:
         """Once-a-second repaint of the footer clock and, if running, the
@@ -1247,7 +1267,7 @@ def _selftest() -> None:
         arb.pump_capture()
     check("A moved to analysis",  A.phase, "analysis")
     check("camera freed",         arb.capture_available(), True)
-    arb._analysis = (A, arb.now() - _ANALYSIS_S - 1)   # force it done
+    arb._analysis = (A, arb.now() - config.analysis_secs() - 1)   # force it done
     arb.pump_analysis()
     check("result set",           bool(A.result), True)
     check("POST enabled",         arb._pool["run_btn"].enabled, True)
@@ -1260,7 +1280,7 @@ def _selftest() -> None:
     import db_manager as _db
     _tmpdir = tempfile.mkdtemp()
     _tmpdb = Path(_tmpdir) / "arbiter_selftest.sqlite"
-    shutil.copy(Path(__file__).resolve().parent / "colorimeter.sqlite", _tmpdb)
+    shutil.copy(Path(_db.DBNAME), _tmpdb)     # _db.DBNAME is the live DB (config)
     _db.DBNAME = str(_tmpdb)
     _db.write_one("DELETE FROM exposure")
     sample_repo.save_default_exposuregroup(1, None)     # start with nothing saved
@@ -1269,21 +1289,21 @@ def _selftest() -> None:
         def __init__(self, color, estar):
             self.color = color; self.metadata = {"e3_final_us": estar}
 
-    print("== capture screen: unsaved/unavailable group falls back to 3 ==")
+    print("== capture screen: unsaved group falls back to the configured default ==")
     arb.open_menu(A)
     check("menu open (no slot focus)", arb._focused is None, True)
     arb._menu_open_capture()
     check("choice view",          arb._cap_view, "choice")
     check("default mode normal",  arb._cap_mode, "normal")
-    check("fallback group 3",     arb._cap_group, "3")
+    check("fallback group 3",     arb._cap_group, config.fallback_exposure_group())
 
     print("== capture screen: selecting a group persists it to defaults ==")
     arb._cap_set_group(4)
     check("group set to 4",        arb._cap_group, "4")
     check("persisted to defaults", sample_repo.load_default_exposuregroup(1), "4")
 
-    print("== capture screen: reopen restores the saved group when available ==")
-    exposure_repo.write_estar("amber", 30000)           # groups 1..5 now available
+    print("== capture screen: reopen restores the saved group ==")
+    exposure_repo.write_estar("amber", 30000)           # some exposures exist
     arb._menu_open_capture()
     check("restored saved group 4", arb._cap_group, "4")
 
@@ -1299,10 +1319,13 @@ def _selftest() -> None:
     check("OK kept 2",            sample_repo.load_default_exposuregroup(1), "2")
     check("OK leaves choice",     arb._cap_view, None)
 
-    print("== capture screen: saved group deleted from exposures -> 3 ==")
+    print("== capture screen: saved group is honoured even without exposures ==")
     exposure_repo.delete_led("amber")                   # no active groups remain
     arb._menu_open_capture()
-    check("fallback to 3",        arb._cap_group, "3")
+    check("saved group 2 kept",   arb._cap_group, "2")  # was '2' from OK above
+    sample_repo.save_default_exposuregroup(1, None)     # clear the saved choice
+    arb._menu_open_capture()
+    check("fallback when unset",  arb._cap_group, config.fallback_exposure_group())
 
     print("== capture screen: calibration run persists e* per LED ==")
     _db.write_one("DELETE FROM exposure")
