@@ -53,6 +53,7 @@ import widgets
 import shutdown_screen
 import sample_repo
 import exposure_repo
+import layout
 from widgets import Button, TextBox
 from pool import Pool
 from slot import Slot
@@ -124,6 +125,8 @@ class Arbiter:
         self._cap_view:  str | None = None    # None | "choice" | "progress" | "done"
         self._cap_progress: str = ""
         self._cap_result:   str = ""
+        # The group saved before the choice screen opened, so CANCEL can restore it.
+        self._cap_saved_on_open: str | None = None
 
     # ── Lifecycle ──────────────────────────────────────────────────────────────
 
@@ -539,6 +542,11 @@ class Arbiter:
     def _menu_open_capture(self) -> None:
         """Open the capture choice screen, initialising from the saved default."""
         self._cap_mode  = "normal"
+        try:
+            self._cap_saved_on_open = sample_repo.load_default_exposuregroup(
+                self._default_rowid)
+        except sqlite3.Error:
+            self._cap_saved_on_open = None
         self._cap_group = self._initial_exposure_group()
         self._cap_progress = ""
         self._cap_result   = ""
@@ -575,6 +583,9 @@ class Arbiter:
         self._cap_view = "choice"
         p = self._pool
         p.hide_all()
+        # Narrow the title so it sits between the CANCEL/OK corners (like the
+        # Menu screen) instead of painting over them.
+        p["cap_title"].rect = layout.MENU_TITLE
         p.put("cap_title", "Capture")
         p.put("cap_mode_lbl", "Path")
         cal = self._cap_mode == "calibration"
@@ -587,10 +598,27 @@ class Arbiter:
             name = f"cap_n{n}"
             p.put(name, str(n), on=(lambda nn=n: self._cap_set_group(nn)))
             p[name].color = sel if self._cap_group == str(n) else unsel
-        p.put("cap_back",  "Back",  on=self._render_menu)
+        # Top-corner chrome like the Menu screen: reuse its CANCEL/OK widgets.
+        p.put("menu_cancel_btn", "CANCEL", on=self._cap_choice_cancel)
+        p.put("menu_ok_btn",     "OK",     on=self._cap_choice_ok)
         p.put("cap_start", "Calibrate\nExposures", on=self._cap_start)
         p.render(self._disp)
         self._rebuild_focus()
+
+    def _cap_choice_ok(self) -> None:
+        """Keep the current selection (already saved on tap) and leave to Menu."""
+        self._cap_view = None
+        self._render_menu()
+
+    def _cap_choice_cancel(self) -> None:
+        """Discard this visit's group change (restore the pre-open value), to Menu."""
+        try:
+            sample_repo.save_default_exposuregroup(
+                self._default_rowid, self._cap_saved_on_open)
+        except sqlite3.Error:
+            log.exception("Arbiter: could not restore exposure group on cancel")
+        self._cap_view = None
+        self._render_menu()
 
     def _cap_set_mode(self, mode: str) -> None:
         self._cap_mode = mode
@@ -633,6 +661,7 @@ class Arbiter:
         self._cap_view = "progress"
         p = self._pool
         p.hide_all()
+        p["cap_title"].rect = layout.CAP_TITLE       # full width (no corner buttons here)
         p.put("cap_title", "Calibrating" if self._cap_mode == "calibration"
               else "Capturing")
         p.put("cap_progress", self._cap_progress or "Working...")
@@ -646,6 +675,7 @@ class Arbiter:
         self._cap_view = "done"
         p = self._pool
         p.hide_all()
+        p["cap_title"].rect = layout.CAP_TITLE       # full width (no corner buttons here)
         failed = "fail" in self._cap_result.lower()
         p.put("cap_title", "Failed" if failed else "Done")
         p.put("cap_progress", self._cap_result or "")
@@ -1203,6 +1233,18 @@ def _selftest() -> None:
     exposure_repo.write_estar("amber", 30000)           # groups 1..5 now available
     arb._menu_open_capture()
     check("restored saved group 4", arb._cap_group, "4")
+
+    print("== capture screen: CANCEL restores pre-open group; OK keeps ==")
+    arb._menu_open_capture()                            # opens with saved '4'
+    arb._cap_set_group(2)                               # saves '2' on tap
+    arb._cap_choice_cancel()
+    check("CANCEL reverted to 4", sample_repo.load_default_exposuregroup(1), "4")
+    check("CANCEL leaves choice", arb._cap_view, None)
+    arb._menu_open_capture()
+    arb._cap_set_group(2)
+    arb._cap_choice_ok()
+    check("OK kept 2",            sample_repo.load_default_exposuregroup(1), "2")
+    check("OK leaves choice",     arb._cap_view, None)
 
     print("== capture screen: saved group deleted from exposures -> 3 ==")
     exposure_repo.delete_led("amber")                   # no active groups remain

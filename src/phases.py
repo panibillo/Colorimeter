@@ -64,6 +64,12 @@ log = logging.getLogger(__name__)
 _STEP_SEQUENCE = ("entry", "entry2", "reagent1", "reagent2", "read", "analysis")
 _STEP_POS = {pid: i for i, pid in enumerate(_STEP_SEQUENCE)}
 
+# Font size of the timer label ("Remaining"/"Elapsed"/"Final"), set per phase
+# because the one widget (timer_lbl) is shared. Base size is 22 (pool.build).
+_TIMER_LBL_SIZE_REAGENT  = 13   # reagents "Remaining" — ~60% of base
+_TIMER_LBL_SIZE_READ     = 18   # read "Elapsed"       — ~80% of base
+_TIMER_LBL_SIZE_ANALYSIS = 22   # analysis "Final"     — base
+
 # The three progress chips shown in the reagent/capture phases:
 # (widget name, the step's phase id, chip text).
 _STEP_INDICATORS = (
@@ -317,19 +323,22 @@ class ReagentPhase(Phase):
     """
 
     def __init__(self, phase_id: str, secs: int, next_phase: str, prior: str,
-                 armed: Tuple[str, str], running: Tuple[str, str]):
-        self.phase_id = phase_id
-        self.secs     = secs
-        self.next     = next_phase
-        self.prior    = prior
-        self.armed    = armed        # (instr1, instr2) while waiting for START
-        self.running  = running      # (instr1, instr2) while counting down
+                 armed: Tuple[str, str], running: Tuple[str, str],
+                 start_label: str = "START"):
+        self.phase_id    = phase_id
+        self.secs        = secs
+        self.next        = next_phase
+        self.prior       = prior
+        self.armed       = armed        # (instr1, instr2) while waiting for START
+        self.running     = running      # (instr1, instr2) while counting down
+        self.start_label = start_label  # armed START button text (may be multi-line)
 
     def enter(self, pool, slot, arb) -> None:
         # Show the live countdown only when this reagent is the slot's live phase;
         # while it is merely being previewed, show the armed duration instead.
         is_live = slot.active_phase == self.phase_id
         pool.put("timer_lbl", "Remaining")
+        pool["timer_lbl"].size = _TIMER_LBL_SIZE_REAGENT
         if is_live and slot.running:
             pool["timer"].bind(slot.timer, interactive=True)
             pool.put("timer")
@@ -341,7 +350,7 @@ class ReagentPhase(Phase):
             preview.pause(arb.now())
             pool["timer"].bind(preview, interactive=False)
             pool.put("timer")
-            pool.put("run_btn", "START", on=lambda: self.start(arb, slot))
+            pool.put("run_btn", self.start_label, on=lambda: self.start(arb, slot))
             i1, i2 = self.armed
         pool.put("instr1", i1)
         pool.put("instr2", i2)
@@ -390,6 +399,7 @@ class ReadPhase(Phase):
         # belongs to another phase, so show a neutral 00:00 elapsed instead.
         is_live = slot.active_phase == self.phase_id
         pool.put("timer_lbl", "Elapsed")
+        pool["timer_lbl"].size = _TIMER_LBL_SIZE_READ
         if is_live and slot.timer is not None:
             pool["timer"].bind(slot.timer, interactive=False)
         else:
@@ -397,17 +407,17 @@ class ReadPhase(Phase):
             preview.pause(arb.now())
             pool["timer"].bind(preview, interactive=False)
         pool.put("timer")
-        pool.put("color_lbl", "Read color")
+        # The wide Read-color label carries the instruction too (multi-line), so
+        # there is no separate instr line to overlap it. The entry sits to its right.
         pool.put("color_fld", slot.record.get("manual_read", ""))
         if is_live and slot.capturing:
-            # pool.put("instr1", slot.progress or "Capturing...")
             pool.put("run_btn", "RUNNING", enabled=False)
-            pool.put("instr3", "Capturing... Do not touch strip")
+            pool.put("color_lbl", "Capturing...\nDon't touch strip.\nRead color:")
         else:
             pool.put("run_btn", "CAPTURE",
                      on=lambda: self.capture(arb, slot, pool),
                      enabled=is_live and arb.capture_available())
-            pool.put("instr3", "Insert strip & press CAPTURE")
+            pool.put("color_lbl", "Insert strip &\npress CAPTURE.\nRead color:")
         self._show_steps(pool, slot)
         self._show_collect(pool, slot)
         # A capture in flight does NOT lock nav either: it is arbiter-owned and
@@ -447,6 +457,7 @@ class AnalysisPhase(Phase):
 
     def enter(self, pool, slot, arb) -> None:
         pool.put("timer_lbl", "Final")
+        pool["timer_lbl"].size = _TIMER_LBL_SIZE_ANALYSIS
         pool["timer"].bind(slot.timer, interactive=False)
         pool.put("timer")
         pool.put("result_lbl", "Result")
@@ -512,10 +523,12 @@ def build_phases(reagent1_secs: int = 120, reagent2_secs: int = 420) -> dict:
         Entry2Phase(),
         ReagentPhase("reagent1", reagent1_secs, "reagent2", prior="entry2",
                      armed=("Add Reagent 1", "and press START"),
-                     running=("Stir 20 sec, then rest", "Prepare reagent 2 and strip")),
+                     running=("Stir 20 sec, then rest", "Prepare reagent 2 and strip"),
+                     start_label="START\n1"),
         ReagentPhase("reagent2", reagent2_secs, "read", prior="reagent1",
                      armed=("Add reagent 2 and cap/strip", "Ventilate and press START"),
-                     running=("Stir 20 sec, then rest", "Ventilate")),
+                     running=("Stir 20 sec, then rest", "Ventilate"),
+                     start_label="START\n2"),
         ReadPhase(),
         AnalysisPhase(),
         # Cancel offers three outcomes: stop the run but keep the reserved DB row
@@ -716,7 +729,7 @@ if __name__ == "__main__":
     check("phase reagent1",   A.phase, "reagent1")
     check("degC persisted (float)",  A.record["samp_degC"], 21.5)
     check("grams persisted (float)", A.record["samp_grams"], 3.2)
-    check("run_btn label",    pool["run_btn"].label, "START")
+    check("run_btn label",    pool["run_btn"].label, "START\n1")
     check("instr1",           pool["instr1"].text, "Add Reagent 1")
     check("main is CANCEL",   pool["main_btn"].label, "CANCEL")
 

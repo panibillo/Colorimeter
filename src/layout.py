@@ -72,6 +72,14 @@ COLLECT_LINE = Rect(  8, 188, 304, 22)
 COLOR_LBL   = Rect(  8,  95, 110, 35);  COLOR_FLD  = Rect(120,  93, 130, 39)
 RESULT_LBL  = Rect(  8, 135,  68, 35);  RESULT_FLD = Rect( 82, 133, 230, 39)
 
+# ── body: read-strip prompt (ReadPhase) ────────────────────────────────────────
+# A wide multi-line label carries the capture instruction AND the "Read color"
+# prompt (black on white); the manual-reading entry sits to its right with its
+# left margin moved over to make room. Ends above COLLECT_LINE (y188) so the two
+# no longer overlap.
+READ_LBL    = Rect(  8, 128, 176, 58)   # instruction + "Read color:" (multi-line)
+READ_FLD    = Rect(190, 138, 122, 40)   # manual colour reading entry
+
 # ── modal overlay ──────────────────────────────────────────────────────────────
 MODAL_PANEL = Rect( 20,  50, 280, 140)
 MODAL_MSG   = Rect( 32,  62, 256,  56)
@@ -106,8 +114,8 @@ CAP_N3        = Rect(190,  98,  38,  40)
 CAP_N4        = Rect(232,  98,  38,  40)
 CAP_N5        = Rect(274,  98,  38,  40)
 CAP_PROGRESS  = Rect(  8,  56, 304, 120)     # progress / result text
-CAP_BACK      = Rect(  8, 184, 100,  48)     # Back / Cancel
-CAP_START     = Rect(160, 184, 152,  48)     # START / OK
+CAP_BACK      = Rect(  8, 184, 100,  48)     # Cancel (running-capture progress view)
+CAP_START     = Rect( 84, 184, 152,  48)     # "Calibrate Exposures" (run) / done OK
 
 # ── footer  y 215..239 ─────────────────────────────────────────────────────────
 PRIOR_BTN   = Rect(  0, 217,  58, 21)

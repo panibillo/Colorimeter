@@ -132,8 +132,11 @@ class Pool:
         label("chip_c", L.CHIP_C, "body_text", "step_pending", 13, text="Capture")
 
         # ── body: wide label/field pairs ───────────────────────────────────────
-        label("color_lbl",  L.BODY_LBL3, "white", "label_coral", 13, text="Read color")
-        field("color_fld",  L.BODY_FLD3, 18, "field_yellow")
+        # color_lbl carries the read instruction + prompt (multi-line, black on
+        # white); the reading entry sits to its right (READ_FLD). Text is set
+        # per-render by ReadPhase.
+        label("color_lbl",  L.READ_LBL, "black", "white", 14, align="left", text="Read color")
+        field("color_fld",  L.READ_FLD, 18, "field_yellow")
         label("result_lbl", L.BODY_LBL4, "white", "label_coral", 13, text="Result")
         field("result_fld", L.BODY_FLD4, 18, "field_blue", editable=False)
 
