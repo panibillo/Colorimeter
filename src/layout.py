@@ -9,6 +9,12 @@ This is the ONE place pixels live.  Phases never mention a coordinate — they
 speak in these names.  A second frontend (Flask) replaces this file and the
 pool builder, and keeps everything else.
 
+See: 
+  pool.py
+    widgets are assigned Rect's, colors, font size, alignment, initial text
+               
+    phases.py    
+
 Screen is 320 wide x 240 tall, split into three zones:
     header  y   0..49
     body    y  50..214
@@ -39,9 +45,9 @@ DIV2        = Rect(  0, 132, 320,  1)
 DIV3        = Rect(  0, 172, 320,  1)
 
 # ── body: timer cluster  y 55..117 ─────────────────────────────────────────────
-TIMER_LBL   = Rect(  8,  55,  68, 68)   # Remaining / Elapsed / Final
+TIMER_LBL   = Rect(  8,  55,  68, 67)   # Remaining / Elapsed / Final
 TIMER       = Rect( 90,  55, 140, 42)   # compound: ‖ | MM:SS | ›
-RUN_BTN     = Rect(240,  55,  72, 68)   # START / RESET / CAPTURE / POST
+RUN_BTN     = Rect(240,  55,  72, 67)   # START / RESET / CAPTURE / POST
 
 # ── body: step-status chips  y 95..229 ─────────────────────────────────────────
 # A "chip" is a small pill/badge widget (the UI sense of the word) — here three
@@ -52,8 +58,9 @@ CHIP_B      = Rect( 136, 100,  44, 22)   # reagent 2
 CHIP_C      = Rect( 182, 100,  48, 22)   # Capture
 
 # ── body: instruction lines  y 135..203 (aligned to label/field rows 3 & 4) ─────
-INSTR3      = Rect(  8, 135, 304, 28)
-INSTR4      = Rect(  8, 175, 304, 28)
+INSTR1      = Rect(  8, 125, 304, 28)
+INSTR2      = Rect(  8, 155, 304, 28)
+INSTR3      = Rect(  8, 185, 304, 28)
 
 # ── body: persistent collect stamp  y 188..210 ─────────────────────────────────
 # Shown on the reagent/read/analysis phases (below the instructions, above the

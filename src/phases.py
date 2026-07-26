@@ -322,8 +322,8 @@ class ReagentPhase(Phase):
         self.secs     = secs
         self.next     = next_phase
         self.prior    = prior
-        self.armed    = armed        # (instr3, instr4) while waiting for START
-        self.running  = running      # (instr3, instr4) while counting down
+        self.armed    = armed        # (instr1, instr2) while waiting for START
+        self.running  = running      # (instr1, instr2) while counting down
 
     def enter(self, pool, slot, arb) -> None:
         # Show the live countdown only when this reagent is the slot's live phase;
@@ -343,8 +343,8 @@ class ReagentPhase(Phase):
             pool.put("timer")
             pool.put("run_btn", "START", on=lambda: self.start(arb, slot))
             i1, i2 = self.armed
-        pool.put("instr3", i1)
-        pool.put("instr4", i2)
+        pool.put("instr1", i1)
+        pool.put("instr2", i2)
         self._show_steps(pool, slot)
         self._show_collect(pool, slot)
         # A running countdown does NOT lock nav: the timer keeps running in the
@@ -400,14 +400,14 @@ class ReadPhase(Phase):
         pool.put("color_lbl", "Read color")
         pool.put("color_fld", slot.record.get("manual_read", ""))
         if is_live and slot.capturing:
-            pool.put("instr3", slot.progress or "Capturing...")
+            # pool.put("instr1", slot.progress or "Capturing...")
             pool.put("run_btn", "RUNNING", enabled=False)
-            pool.put("instr4", "Do not touch strip")
+            pool.put("instr3", "Capturing... Do not touch strip")
         else:
             pool.put("run_btn", "CAPTURE",
                      on=lambda: self.capture(arb, slot, pool),
                      enabled=is_live and arb.capture_available())
-            pool.put("instr4", "Insert strip & press CAPTURE")
+            pool.put("instr3", "Insert strip & press CAPTURE")
         self._show_steps(pool, slot)
         self._show_collect(pool, slot)
         # A capture in flight does NOT lock nav either: it is arbiter-owned and
@@ -717,7 +717,7 @@ if __name__ == "__main__":
     check("degC persisted (float)",  A.record["samp_degC"], 21.5)
     check("grams persisted (float)", A.record["samp_grams"], 3.2)
     check("run_btn label",    pool["run_btn"].label, "START")
-    check("instr3",           pool["instr3"].text, "Add Reagent 1")
+    check("instr1",           pool["instr1"].text, "Add Reagent 1")
     check("main is CANCEL",   pool["main_btn"].label, "CANCEL")
 
     print("== reagent1 START stamps reagent1_start ==")

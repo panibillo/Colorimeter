@@ -111,12 +111,16 @@ class Pool:
         field("collectdt_fld",  L.BODY_FLD3, 18, "field_blue")
 
         # ── body: timer cluster + instructions ─────────────────────────────────
-        label("timer_lbl", L.TIMER_LBL, "white", "label_coral", 30)
+        #label("timer_lbl", L.TIMER_LBL, "white", "label_coral", 22)
+        label("timer_lbl", L.TIMER_LBL, "black", "white", 22)
         p._add("timer", TimerWidget(L.TIMER, text_color=color("timer_text"),
                                     bg=color("body_dark"), size=30))
-        button("run_btn", L.RUN_BTN, "btn_text", "start_green", 30)
-        label("instr3", L.INSTR3, "body_text", "body_dark", 20, align="left")
-        label("instr4", L.INSTR4, "body_text", "body_dark", 20, align="left")
+        button("run_btn", L.RUN_BTN, "btn_text", "start_green", 24)
+        label("instr1", L.INSTR1, "black", "white", 20, align="left")
+        label("instr2", L.INSTR2, "black", "white", 20, align="left")
+        label("instr3", L.INSTR3, "black", "white", 20, align="left")
+        # label("instr1", L.INSTR1, "body_text", "body_dark", 20, align="left")
+        # label("instr2", L.INSTR2, "body_text", "body_dark", 20, align="left")
         label("collect_line", L.COLLECT_LINE, "black", "white", 13, align="left")
 
         # ── body: step-status chips (reagent 1 / 2 / Capture) ──────────────────
@@ -135,7 +139,7 @@ class Pool:
 
         # ── header ─────────────────────────────────────────────────────────────
         label("title", L.TITLE, "black", "white", 22, align="left")
-        button("main_btn", L.MAIN_BTN, "btn_text", "start_green", 22)
+        button("main_btn", L.MAIN_BTN, "btn_text", "start_green", 14)
         button("slot_btn", L.SLOT_BTN, "slot_b_text", "slot_b_bg", 34)
 
         # ── footer (static chrome) ─────────────────────────────────────────────
@@ -357,10 +361,10 @@ if __name__ == "__main__":
     pool.set("timer_lbl", "Remaining")
     pool["timer"].bind(st)
     pool.set("run_btn", "START")
-    pool.set("instr3", "Add Reagent 1")
-    pool.set("instr4", "and press START")
+    pool.set("instr1", "Add Reagent 1")
+    pool.set("instr2", "and press START")
     pool.show("title", "main_btn", "slot_btn", "timer_lbl", "timer", "run_btn",
-              "instr3", "instr4", "chip_a", "chip_b", "chip_c",
+              "instr1", "instr2", "chip_a", "chip_b", "chip_c",
               "prior_btn", "clock", "next_btn")
     pool.render(disp)
 

@@ -179,7 +179,7 @@ class Arbiter:
         self._pool = Pool.build()
         # Shorten the reagent countdowns in simulation so runs are quick to test.
         if _SIMULATION_MODE:
-            self._phases = build_phases(reagent1_secs=20, reagent2_secs=20)
+            self._phases = build_phases(reagent1_secs=10, reagent2_secs=10)
         else:
             self._phases = build_phases()
         self._slots = {"A": Slot("A"), "B": Slot("B")}
@@ -635,7 +635,22 @@ class Arbiter:
                 self._phases[slot.active_phase].on_expire(self, slot)
 
     def pump_capture(self) -> None:
-        """Advance the in-flight capture one step; reflect progress on the owner slot."""
+        """
+        Drive the in-flight capture forward and mirror its progress onto the
+        owner slot.
+
+        The capture is a generator (CaptureRunner.run) with no thread or callback
+        of its own, so it advances only when pumped — hence the call on every
+        main-loop pass.  Each call resumes the generator and blocks until its next
+        yield: not a fixed unit of work but wherever the runner placed its next
+        checkpoint, from a mere wait tick to several back-to-back camera frames.
+        Every yield carries a Progress, whose text is stored on owner.progress
+        and, when that slot is on screen, repainted live in the read phase.
+
+        A step that yields None means the run has ended: the camera is freed, the
+        elapsed timer frozen, capture_end persisted, and the slot advanced to the
+        analysis phase — or, on failure, left showing the capture error.
+        """
         session = self._capture
         if session is None or not session.active:
             return
@@ -648,8 +663,8 @@ class Arbiter:
                 detail = f"{progress.led_index}/{progress.led_total} {detail}"
             owner.progress = detail
             if owner is self._focused and owner.phase == "read":
-                self._pool.set("instr3", owner.progress)
-                self._pool.redraw(self._disp, "instr3")
+                self._pool.set("instr1", owner.progress)
+                self._pool.redraw(self._disp, "instr1")
             return
 
         # step() returned None: the run ended.
@@ -672,7 +687,16 @@ class Arbiter:
             self.render(self._focused)
 
     def pump_analysis(self) -> None:
-        """Placeholder: complete the analysis after a short delay."""
+        """
+        Advance the pending analysis and, when it finishes, record the result on
+        the slot.  Called on every main-loop pass, like pump_capture — a no-op
+        until start_analysis arms it (the (slot, started_at) pair in _analysis).
+
+        Placeholder: no analysis engine exists yet, so there is no work to pump.
+        This simply waits out _ANALYSIS_S of wall-clock time, then stamps a stub
+        result, persists it, and repaints the slot.  When the real engine lands
+        it will be driven from here the way pump_capture drives a capture.
+        """
         if self._analysis is None:
             return
         slot, started = self._analysis

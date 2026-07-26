@@ -24,6 +24,7 @@ def rgb(r: int, g: int, b: int) -> int:
 
 # Name → RGB565.  Values match the legacy csv_to_widgets palette so mock
 # renders look identical, with two additions (timer_text, field_yellow).
+# RGB565 color picker:  https://barth-dev.de/online/rgb565-color-picker/
 PALETTE: dict[str, int] = {
     "black":       0x0000,
     "white":       0xFFFF,
@@ -46,7 +47,8 @@ PALETTE: dict[str, int] = {
     "status_bg":   0x0000,
     # Step-status chips (reagent 1 / 2 / Capture).  "ready" reuses start_green
     # (the RUN colour); the rest are its dim form and a running amber + dim.
-    "step_pending":0x03E0,   # dim green  — step not yet reached / unavailable
+    #   "step_pending":0x03E0,   # dim green  — step not yet reached / unavailable
+    "step_pending":0xC5F7,   # light gray — step not yet reached / unavailable
     "step_running":0xFD20,   # amber      — step in progress
     "step_done":   0x7A80,   # dim amber  — step complete
 }
