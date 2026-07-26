@@ -144,6 +144,8 @@ class Pool:
         label("title", L.TITLE, "black", "white", 22, align="left")
         button("main_btn", L.MAIN_BTN, "btn_text", "start_green", 14)
         button("slot_btn", L.SLOT_BTN, "slot_b_text", "slot_b_bg", 34)
+        # Visible alarm (arbiter-painted): drawn after the title so it sits on top.
+        button("alarm_btn", L.ALARM_BTN, "alarm_text", "alarm_bg", 18)
 
         # ── footer (static chrome) ─────────────────────────────────────────────
         button("prior_btn", L.PRIOR_BTN, "btn_text", "btn_gray", 13, text="PRIOR")

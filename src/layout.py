@@ -32,6 +32,10 @@ SCREEN_BG = "white"          # cleared to this on every phase change
 TITLE       = Rect(  8,   5, 183, 40)   # "New Test" -> sample id
 MAIN_BTN    = Rect(193,   0,  74, 50)   # Begin / Cancel / Next
 SLOT_BTN    = Rect(270,   0,  50, 50)   # A/B toggle
+# Visible alarm: shown left of MAIN_BTN over the right half of the title when a
+# backgrounded slot's timer expired unattended ("Resume\n<slot>"). Overlaps the
+# title's (usually empty) right half — short sample ids are not obscured.
+ALARM_BTN   = Rect( 98,   0,  93, 50)
 
 # ── body: 4 generic label/field rows  y 53..212 ─────────────────────────────────
 # Reused across screens (entry: id/user/test/test-lot; entry2: temp/weight/

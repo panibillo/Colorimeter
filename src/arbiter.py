@@ -89,6 +89,10 @@ class Arbiter:
         self._slots:  dict[str, Slot] = {}
         self._focused: Slot | None = None
 
+        # Slots whose timer expired while unfocused, oldest first — each shows a
+        # visible "Resume <slot>" alarm button until that slot regains focus.
+        self._alarms: list[Slot] = []
+
         # Focus within the current screen
         self._focusables: list = []
         self._focus_idx:  int  = -1
@@ -431,12 +435,14 @@ class Arbiter:
         self._pool.hide_all()
         self._phases[slot.phase].enter(self._pool, slot, self)
         self._paint_slot_toggle()
+        self._paint_alarm(slot)
         self._pool.render(self._disp)
         self._rebuild_focus()
 
     def focus(self, slot: Slot) -> None:
         """Make a slot the displayed one and render it (user-initiated only)."""
         self._focused = slot
+        self._disarm_alarm(slot)     # regaining focus clears its visible alarm
         self.render(slot)
 
     def _resume_display(self) -> None:
@@ -871,6 +877,38 @@ class Arbiter:
         if callable(fn):
             fn()
 
+    # ── Visible alarm (unfocused slot's timer expired) ──────────────────────────
+
+    def _arm_alarm(self, slot: Slot) -> None:
+        """
+        Record a pending visible alarm for a backgrounded slot, then repaint the
+        focused slot so its "Resume <slot>" button appears.  Oldest stays first.
+        """
+        if slot not in self._alarms:
+            self._alarms.append(slot)
+            log.info("Arbiter: visible alarm armed for slot %s", slot.name)
+        if self._focused is not None:
+            self.render(self._focused)
+
+    def _disarm_alarm(self, slot: Slot) -> None:
+        """Clear a slot's pending visible alarm (it regained focus)."""
+        if slot in self._alarms:
+            self._alarms.remove(slot)
+            log.info("Arbiter: visible alarm disarmed for slot %s", slot.name)
+
+    def _paint_alarm(self, focused: Slot) -> None:
+        """
+        Show the visible alarm button for the oldest OTHER slot with a pending
+        alarm, or leave it hidden (by hide_all) when none remain.  Painted in
+        render() after the phase, like the slot toggle.
+        """
+        pending = [s for s in self._alarms if s is not focused]
+        if not pending:
+            return
+        target = pending[0]
+        self._pool.put("alarm_btn", f"Resume\n{target.name}",
+                       on=lambda t=target: self.focus(t))
+
     # ── Poll / pump (driven each loop pass) ────────────────────────────────────
 
     def poll_timers(self) -> None:
@@ -884,6 +922,10 @@ class Arbiter:
                 # The timer belongs to the live phase, not whatever is being
                 # previewed, so expiry is always handled by active_phase.
                 self._phases[slot.active_phase].on_expire(self, slot)
+                # If the slot that expired is not the one on screen, the operator
+                # would only have the beep to go on — raise a visible alarm too.
+                if slot is not self._focused:
+                    self._arm_alarm(slot)
 
     def pump_capture(self) -> None:
         """
@@ -1171,6 +1213,17 @@ def _selftest() -> None:
     arb.poll_timers()
     check("B advanced to reagent2", B.phase, "reagent2")
     check("focus unchanged",     arb._focused is focused_before, True)
+
+    print("== unfocused expiry raises a visible alarm on the focused slot ==")
+    check("B alarm armed",       B in arb._alarms, True)
+    check("alarm button shown",  arb._pool["alarm_btn"].visible, True)
+    check("alarm button label",  arb._pool["alarm_btn"].label, "Resume\nB")
+    # Resuming B (via the button's action = focus B) disarms it.
+    arb._pool["alarm_btn"].on_press()
+    check("now focused on B",    arb._focused is B, True)
+    check("B alarm disarmed",    B in arb._alarms, False)
+    arb.focus(A)                                     # no alarms left
+    check("alarm button hidden", arb._pool["alarm_btn"].visible, False)
 
     print("== single-camera guard across slots ==")
     A.record["samp_no"] = "AX1"; A.record["user"] = "u"

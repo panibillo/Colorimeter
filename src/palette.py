@@ -51,6 +51,9 @@ PALETTE: dict[str, int] = {
     "step_pending":0xC5F7,   # light gray — step not yet reached / unavailable
     "step_running":0xFD20,   # amber      — step in progress
     "step_done":   0x7A80,   # dim amber  — step complete
+    # Visible alarm button: a backgrounded slot's timer expired unattended.
+    "alarm_bg":    0xF800,   # red
+    "alarm_text":  0xFFE0,   # yellow
 }
 
 
