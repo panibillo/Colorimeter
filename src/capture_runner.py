@@ -61,6 +61,7 @@ import config_manager as config
 import exposure_repo
 from bayer_cam import BayerCam
 from capture_h5 import CaptureSuiteWriter
+from capture_profile import CaptureProfiler
 
 try:
     import libcamera as _libcamera  # type: ignore[import-untyped]
@@ -372,7 +373,9 @@ def _build_capture_info(
 # Camera helpers
 # ---------------------------------------------------------------------------
 
-def _set_and_settle(cam, exposure_us: int) -> "tuple[np.ndarray, np.ndarray, dict]":
+def _set_and_settle(cam, exposure_us: int,
+                    prof: "CaptureProfiler | None" = None,
+                    ) -> "tuple[np.ndarray, np.ndarray, dict]":
     """
     Set exposure and capture frames until metadata confirms it has been applied.
 
@@ -380,11 +383,25 @@ def _set_and_settle(cam, exposure_us: int) -> "tuple[np.ndarray, np.ndarray, dic
     frame cycle to adopt the new ExposureTime.  This function keeps capturing
     until the metadata ExposureTime is within SETTLE_TOLERANCE of the request,
     or MAX_SETTLE_FRAMES is exhausted.
+
+    Args:
+        cam:         Camera to drive.
+        exposure_us: Requested exposure in microseconds.
+        prof:        Optional profiler; when given, this counts one settle-run
+                     and times every capture_frame() call it makes.
     """
     cam.set_exposure(exposure_us)
+    if prof is not None:
+        prof.count("camera.settle")
     last = None
     for frame_num in range(MAX_SETTLE_FRAMES):
-        rgb, bayer, meta = cam.capture_frame()
+        if prof is not None:
+            _t0 = time.perf_counter()
+            rgb, bayer, meta = cam.capture_frame()
+            prof.record_frame(time.perf_counter() - _t0,
+                              int(meta.get("ExposureTime", 0)))
+        else:
+            rgb, bayer, meta = cam.capture_frame()
         applied = int(meta.get("ExposureTime", 0))
         last = (rgb, bayer, meta)
         if applied > 0:
@@ -458,6 +475,11 @@ class CaptureRunner:
         # chosen group, set when that run starts.
         self._captures_per_led = _CAPTURES_PER_LED
 
+        # Wall-clock profiler (on unless COLORIMETER_PROFILE is false-y). Records
+        # every frame, wait, numpy block, and archive write; its summary is
+        # logged when run() finishes. See capture_profile.CaptureProfiler.
+        self.prof = CaptureProfiler()
+
     # ── Progress helpers ─────────────────────────────────────────────
 
     def _fraction(self) -> float:
@@ -492,14 +514,32 @@ class CaptureRunner:
         WAIT_TICK_S, and a caller that repaints only on a changed message
         then redraws about once a second instead of twenty times.
         """
+        t0 = time.perf_counter()
         deadline = time.monotonic() + seconds
         while True:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
+                self.prof.add("wait.led", time.perf_counter() - t0)
                 return
             yield self._progress(
                 "capture", f"{what} — {remaining:.0f}s", transient=True, step="wait")
             time.sleep(min(WAIT_TICK_S, remaining))
+
+    # ── Profiled camera / numpy helpers ──────────────────────────────────
+
+    def _settle(self, exposure_us: int) -> "tuple[np.ndarray, np.ndarray, dict]":
+        """set_exposure + capture until the pipeline adopts it, timing frames."""
+        return _set_and_settle(self._cam, exposure_us, self.prof)
+
+    def _extract(self, bayer: np.ndarray, pattern: str) -> dict:
+        """Split a full bayer frame into channel layers, timed as cpu.extract."""
+        with self.prof.time("cpu.extract"):
+            return BayerCam.extract_bayer_layers(bayer, pattern)
+
+    def _bound_layers(self, bayer: np.ndarray, pattern: str) -> dict:
+        """Crop ROI_BOUND and split into channel layers, timed as cpu.extract."""
+        with self.prof.time("cpu.extract"):
+            return _roi_bound_layers(bayer, pattern)
 
     # ── Focus ────────────────────────────────────────────────────────
 
@@ -562,6 +602,8 @@ class CaptureRunner:
         finally:
             self._all_off()
             self._close_writer()
+            if self.prof.enabled:
+                log.info("capture profile:\n%s", self.prof.summary())
 
     def _close_writer(self) -> None:
         """Close the archive if one is open. Never raises."""
@@ -612,7 +654,8 @@ class CaptureRunner:
 
         # ── Camera init ──────────────────────────────────────────────
         cam.set_exposure(cfg.initial_us)
-        cam.setup_camera()
+        with self.prof.time("camera.setup"):
+            cam.setup_camera()
         pattern = cam.bayer_pattern
         assert cam.config_size is not None, "setup_camera() must set config_size"
         cam_w, cam_h = cam.config_size
@@ -625,6 +668,7 @@ class CaptureRunner:
         # Phase 0 — White LED: find a calibrated unsaturated exposure
         # Target channel is NOT selected here; it is per-LED in Phase 2.
         # ================================================================
+        self.prof.set_section("phase0")
         yield self._progress("calibrate", "Phase 0: white LED exposure calibration")
 
         self._led_on(WHITE_LED_CH)
@@ -635,12 +679,14 @@ class CaptureRunner:
 
         for attempt in range(MAX_DESAT_TRIES):
             log.debug(f"Phase 0 attempt {attempt + 1}: exposure={current_us}µs")
-            _, bayer, _ = _set_and_settle(cam, current_us)
-            layers = BayerCam.extract_bayer_layers(bayer, pattern)
-            means  = _channel_means(layers, white_croi)
+            _, bayer, _ = self._settle(current_us)
+            layers = self._extract(bayer, pattern)
+            with self.prof.time("cpu.analyze"):
+                means     = _channel_means(layers, white_croi)
+                saturated = _check_saturated_any(layers, white_croi)
             log.debug("  ROI_WHITE means: "
                       + "  ".join(f"{k}={v:.1f}" for k, v in sorted(means.items())))
-            if not _check_saturated_any(layers, white_croi):
+            if not saturated:
                 log.debug(f"  Not saturated — accepting {current_us}µs "
                           f"as calibrated exposure")
                 break
@@ -662,8 +708,10 @@ class CaptureRunner:
         # ================================================================
         # Phase 1 — Focus
         # ================================================================
+        self.prof.set_section("focus")
         yield self._progress("focus", "Phase 1: focus")
-        focus_pos, focus_mode, raw_af_pos = self._set_focus()
+        with self.prof.time("focus"):
+            focus_pos, focus_mode, raw_af_pos = self._set_focus()
         yield self._progress("focus", f"Focus: {focus_pos:.2f} diopters ({focus_mode})")
 
         # ================================================================
@@ -680,6 +728,7 @@ class CaptureRunner:
             self._captures_done  = 0
             color = leds.color_name(led)
             self._current_color = color
+            self.prof.set_section(color)
             log.info(f"=== LED {led}: {color} ===")
 
             yield self._progress("capture", f"--- {leds.label(led)} ---")
@@ -696,11 +745,13 @@ class CaptureRunner:
 
             for attempt in range(MAX_DESAT_TRIES):
                 log.debug(f"  {color} attempt {attempt + 1}: exposure={current_us}µs")
-                _, bayer, _ = _set_and_settle(cam, current_us)
-                layers    = BayerCam.extract_bayer_layers(bayer, pattern)
-                ref_means = _channel_means(layers, white_croi)
-                target_ch = _select_target_channel(layers, white_croi)
-                if not _check_saturated(layers, target_ch, white_croi):
+                _, bayer, _ = self._settle(current_us)
+                layers = self._extract(bayer, pattern)
+                with self.prof.time("cpu.analyze"):
+                    ref_means = _channel_means(layers, white_croi)
+                    target_ch = _select_target_channel(layers, white_croi)
+                    saturated = _check_saturated(layers, target_ch, white_croi)
+                if not saturated:
                     log.debug(f"  {color}: not saturated — target_ch={target_ch}  "
                               f"exposure={current_us}µs accepted")
                     break
@@ -721,8 +772,9 @@ class CaptureRunner:
                 "capture", f"Target channel : {target_ch}  (ROI_WHITE: {means_str})")
 
             # ── Stage 1: estimate e3 from reference capture ───────────
-            pix_ref = _roi_pixels(layers[target_ch], sample_croi)
-            e3_us   = _estimate_e3(pix_ref, current_us)
+            with self.prof.time("cpu.analyze"):
+                pix_ref = _roi_pixels(layers[target_ch], sample_croi)
+                e3_us   = _estimate_e3(pix_ref, current_us)
             log.info(f"  {color}: initial e3 estimate = {e3_us}µs ({e3_us // 1000}ms)")
 
             # ── Stage 2: refine e3 until p50 ≈ HALF_SAT ──────────────
@@ -737,10 +789,11 @@ class CaptureRunner:
                     f"e3 refine [{iteration + 1}/{E3_MAX_ITER}]: "
                     f"{e3_us}µs ({e3_us // 1000}ms)",
                     step="e3-refine")
-                _, bayer_e3, _ = _set_and_settle(cam, e3_us)
-                layers_e3  = BayerCam.extract_bayer_layers(bayer_e3, pattern)
-                pix_e3     = _roi_pixels(layers_e3[target_ch], sample_croi)
-                actual_p50 = float(np.percentile(pix_e3, 50))
+                _, bayer_e3, _ = self._settle(e3_us)
+                layers_e3  = self._extract(bayer_e3, pattern)
+                with self.prof.time("cpu.analyze"):
+                    pix_e3     = _roi_pixels(layers_e3[target_ch], sample_croi)
+                    actual_p50 = float(np.percentile(pix_e3, 50))
                 error      = abs(actual_p50 - HALF_SAT) / HALF_SAT
                 e3_history.append({
                     "iteration":      iteration + 1,
@@ -770,8 +823,9 @@ class CaptureRunner:
                     step="e3-refine")
 
             # ── Stage 3: compute e0…e6 from e3 capture spread ─────────
-            pix_e3 = _roi_pixels(layers_e3[target_ch], sample_croi)
-            exposures_us, pcts = _compute_exposures_from_e3(pix_e3, e3_us)
+            with self.prof.time("cpu.analyze"):
+                pix_e3 = _roi_pixels(layers_e3[target_ch], sample_croi)
+                exposures_us, pcts = _compute_exposures_from_e3(pix_e3, e3_us)
             e0_us, e1_us, e2_us, _, e4_us, e5_us, e6_us = exposures_us
             exp_summary = ", ".join(
                 f"{lbl}={exp // 1000}ms"
@@ -834,14 +888,15 @@ class CaptureRunner:
             for exp_label, exp_us in zip(EXP_LABELS, exposures_us):
                 log.info(f"  {color} {exp_label}: setting exposure {exp_us}µs "
                          f"({exp_us // 1000}ms)")
-                rgb, bayer, meta = _set_and_settle(cam, exp_us)
+                rgb, bayer, meta = self._settle(exp_us)
                 applied = int(meta.get("ExposureTime", 0))
                 meta_json["applied_exposures_us"][exp_label] = applied
                 log.info(f"  {color} {exp_label}: applied={applied}µs  "
                          f"delta={applied - exp_us:+d}µs")
 
-                w.add_lit(color, exp_label, _roi_bound_layers(bayer, pattern),
-                          exposure_us=exp_us)
+                layers_out = self._bound_layers(bayer, pattern)
+                with self.prof.time("io.hdf5"):
+                    w.add_lit(color, exp_label, layers_out, exposure_us=exp_us)
 
                 if exp_label == "e3":    # keep the median frame for the JPEG
                     e3_frame = (rgb, bayer, meta)
@@ -859,13 +914,14 @@ class CaptureRunner:
             yield self._progress("capture", "Dark captures:")
             for exp_label, exp_us in zip(EXP_LABELS, exposures_us):
                 log.info(f"  {color} dark {exp_label}: exposure {exp_us}µs")
-                _, bayer, _ = _set_and_settle(cam, exp_us)
+                _, bayer, _ = self._settle(exp_us)
 
                 # Dark frames depend only on exposure, so an exposure already
                 # captured for an earlier LED is reused rather than restored.
-                stored = w.add_dark(exp_label, _roi_bound_layers(bayer, pattern),
-                                    exposure_us=exp_us)
-                w.link_dark(color, exp_label, exposure_us=exp_us)
+                layers_out = self._bound_layers(bayer, pattern)
+                with self.prof.time("io.hdf5"):
+                    stored = w.add_dark(exp_label, layers_out, exposure_us=exp_us)
+                    w.link_dark(color, exp_label, exposure_us=exp_us)
 
                 self._captures_done += 1
                 yield self._progress(
@@ -875,13 +931,18 @@ class CaptureRunner:
                     step=f"dark {exp_label}")
 
             # ── Per-LED metadata, statistics and JPEG ─────────────────
-            w.add_led(color, meta_json, led_channel=led)
+            with self.prof.time("io.hdf5"):
+                w.add_led(color, meta_json, led_channel=led)
             if e3_frame is not None:
                 rgb_e3, bayer_e3, meta_e3 = e3_frame
-                w.add_capture_info(color, _build_capture_info(
-                    rgb_e3, bayer_e3, meta_e3, lens_position=cam.lens_position))
-                w.add_jpeg(color, _encode_jpeg(rgb_e3),
-                           filename=f"{OUT_STEM}_{color}_e3.jpg")
+                info = _build_capture_info(
+                    rgb_e3, bayer_e3, meta_e3, lens_position=cam.lens_position)
+                with self.prof.time("io.jpeg"):
+                    jpeg = _encode_jpeg(rgb_e3)
+                with self.prof.time("io.hdf5"):
+                    w.add_capture_info(color, info)
+                    w.add_jpeg(color, jpeg,
+                               filename=f"{OUT_STEM}_{color}_e3.jpg")
             yield self._progress("capture", f"    stored metadata for {color}")
 
             self.results.append(LedResult(
@@ -923,7 +984,8 @@ class CaptureRunner:
 
         # ── Camera init ──────────────────────────────────────────────
         cam.set_exposure(cfg.initial_us)
-        cam.setup_camera()
+        with self.prof.time("camera.setup"):
+            cam.setup_camera()
         pattern = cam.bayer_pattern
         assert cam.config_size is not None, "setup_camera() must set config_size"
         cam_w, cam_h = cam.config_size
@@ -933,8 +995,10 @@ class CaptureRunner:
             f"(normal, group {group})")
 
         # ── Focus (still needed; exposures are stored, focus is not) ──
+        self.prof.set_section("focus")
         yield self._progress("focus", "Phase 1: focus")
-        focus_pos, focus_mode, raw_af_pos = self._set_focus()
+        with self.prof.time("focus"):
+            focus_pos, focus_mode, raw_af_pos = self._set_focus()
         yield self._progress("focus", f"Focus: {focus_pos:.2f} diopters ({focus_mode})")
 
         # ── Per-LED capture of the stored exposures ──────────────────
@@ -947,6 +1011,7 @@ class CaptureRunner:
             self._captures_done = 0
             color = leds.color_name(led)
             self._current_color = color
+            self.prof.set_section(color)
 
             exposures_us = exposure_repo.read_exposures(color, group)
             used_fallback = not exposures_us
@@ -972,10 +1037,11 @@ class CaptureRunner:
             applied_us: dict = {}
 
             for i, (label, exp_us) in enumerate(zip(labels, exposures_us)):
-                rgb, bayer, meta = _set_and_settle(cam, exp_us)
+                rgb, bayer, meta = self._settle(exp_us)
                 applied_us[label] = int(meta.get("ExposureTime", 0))
-                w.add_lit(color, label, _roi_bound_layers(bayer, pattern),
-                          exposure_us=exp_us)
+                layers_out = self._bound_layers(bayer, pattern)
+                with self.prof.time("io.hdf5"):
+                    w.add_lit(color, label, layers_out, exposure_us=exp_us)
                 if i == mid_idx:
                     mid_frame = (rgb, bayer, meta)
                 self._captures_done += 1
@@ -989,10 +1055,11 @@ class CaptureRunner:
 
             yield self._progress("capture", "Dark captures:")
             for label, exp_us in zip(labels, exposures_us):
-                _, bayer, _ = _set_and_settle(cam, exp_us)
-                stored = w.add_dark(label, _roi_bound_layers(bayer, pattern),
-                                    exposure_us=exp_us)
-                w.link_dark(color, label, exposure_us=exp_us)
+                _, bayer, _ = self._settle(exp_us)
+                layers_out = self._bound_layers(bayer, pattern)
+                with self.prof.time("io.hdf5"):
+                    stored = w.add_dark(label, layers_out, exposure_us=exp_us)
+                    w.link_dark(color, label, exposure_us=exp_us)
                 self._captures_done += 1
                 yield self._progress(
                     "capture",
@@ -1018,13 +1085,18 @@ class CaptureRunner:
                 "exposures_us": {lbl: int(us) for lbl, us in zip(labels, exposures_us)},
                 "applied_exposures_us": applied_us,
             }
-            w.add_led(color, meta_json, led_channel=led)
+            with self.prof.time("io.hdf5"):
+                w.add_led(color, meta_json, led_channel=led)
             if mid_frame is not None:
                 rgb_m, bayer_m, meta_m = mid_frame
-                w.add_capture_info(color, _build_capture_info(
-                    rgb_m, bayer_m, meta_m, lens_position=cam.lens_position))
-                w.add_jpeg(color, _encode_jpeg(rgb_m),
-                           filename=f"{OUT_STEM}_{color}_{labels[mid_idx]}.jpg")
+                info = _build_capture_info(
+                    rgb_m, bayer_m, meta_m, lens_position=cam.lens_position)
+                with self.prof.time("io.jpeg"):
+                    jpeg = _encode_jpeg(rgb_m)
+                with self.prof.time("io.hdf5"):
+                    w.add_capture_info(color, info)
+                    w.add_jpeg(color, jpeg,
+                               filename=f"{OUT_STEM}_{color}_{labels[mid_idx]}.jpg")
             yield self._progress("capture", f"    stored metadata for {color}")
 
             self.results.append(LedResult(

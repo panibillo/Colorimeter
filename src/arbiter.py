@@ -102,6 +102,10 @@ class Arbiter:
         self._capture: CaptureSession | None = None
         self._capture_slot: Slot | None = None
 
+        # Set once the capture subsystem's heavy first-imports (picamera2,
+        # libcamera, numpy, cv2) have been warmed — see prewarm_capture().
+        self._capture_prewarmed = False
+
         # Placeholder analysis timer: (slot, started_at) or None.
         self._analysis: tuple | None = None
 
@@ -1040,6 +1044,59 @@ class Arbiter:
         log.info("Arbiter: analysis done for slot %s", slot.name)
         self.render(slot)
 
+    # ── Capture subsystem prewarm ───────────────────────────────────────────────
+
+    def _maybe_prewarm(self) -> None:
+        """
+        Warm the capture imports once a run reaches its (minutes-long) reagent
+        wait, so the picamera2/libcamera/numpy/cv2 first-import cost is paid
+        during the countdown instead of the instant CAPTURE is pressed.
+
+        Checked from the main loop rather than on phase entry so the reagent
+        screen has already rendered — only a background loop pass absorbs the
+        one-time import stall, and the monotonic reagent timer is unaffected by
+        it (poll_timers is deadline arithmetic, so a stall just detects expiry a
+        few seconds late over a 2–7 minute wait).
+        """
+        if self._capture_prewarmed:
+            return
+        if any(s.active_phase in ("reagent1", "reagent2")
+               for s in self._slots.values()):
+            self.prewarm_capture()
+
+    def prewarm_capture(self) -> None:
+        """
+        Import the capture subsystem ahead of the first CAPTURE press.
+
+        picamera2, libcamera, numpy and cv2 carry several seconds of first-import
+        cost that would otherwise land when CAPTURE is pressed.  Importing them
+        here populates sys.modules for the rest of the process, so the later
+        import inside CaptureSession is a cache hit.  Attempted at most once per
+        process (the flag is set before the work, so broken imports can't spam
+        the loop with repeated stalls); camera hardware is NOT opened here — that
+        has a thermal cost and is opened closer to the read phase.  A failure is
+        logged and swallowed: capture will still import (and surface any real
+        error) at CAPTURE time exactly as it did before.
+        """
+        if self._capture_prewarmed:
+            return
+        self._capture_prewarmed = True
+        t0 = time.monotonic()
+        try:
+            import numpy            # noqa: F401 — also pulled in by capture_runner
+            import capture_runner   # noqa: F401 — → bayer_cam(picamera2), libcamera
+            import capture_session  # noqa: F401
+            import lighting_cal8    # noqa: F401 — LEDBank module (SPI opened later)
+            try:
+                import cv2          # noqa: F401 — JPEG encode; import lazily if absent
+            except ImportError:
+                log.info("Arbiter: prewarm — cv2 unavailable, will import lazily")
+        except Exception:
+            log.exception("Arbiter: capture prewarm failed")
+            return
+        log.info("Arbiter: capture subsystem prewarmed in %.2fs",
+                 time.monotonic() - t0)
+
     # ── Focus / keyboard (over the pool) ───────────────────────────────────────
 
     def _rebuild_focus(self) -> None:
@@ -1138,6 +1195,7 @@ class Arbiter:
                 self._disp.process_events()   # type: ignore
 
             self.poll_timers()
+            self._maybe_prewarm()
             self.pump_capture()
             self.pump_analysis()
 
@@ -1228,6 +1286,18 @@ def _selftest() -> None:
     arb._build_model()
     A, B = arb._slots["A"], arb._slots["B"]
     arb.focus(A)
+
+    print("== capture prewarm: off-reagent no-op, fires on reagent, idempotent ==")
+    check("not prewarmed initially",  arb._capture_prewarmed, False)
+    arb._maybe_prewarm()                          # no slot in a reagent yet
+    check("no prewarm off-reagent",   arb._capture_prewarmed, False)
+    A.active_phase = "reagent1"
+    arb._maybe_prewarm()                          # a slot is now in a reagent
+    check("prewarmed on reagent",     arb._capture_prewarmed, True)
+    check("capture_runner imported",  "capture_runner" in sys.modules, True)
+    check("capture_session imported", "capture_session" in sys.modules, True)
+    arb.prewarm_capture()                         # idempotent — must not raise
+    A.active_phase = "entry"                       # restore for the checks below
 
     print("== render draws only the focused slot ==")
     arb.goto(A, "entry")
