@@ -142,7 +142,12 @@ class Arbiter:
         # choice, which view is showing, and the run's progress/result text.
         # A menu-launched capture uses self._capture with _capture_slot = None
         # (the None marks it standalone, so pump_capture routes it here).
-        self._cap_mode:  str = "normal"       # "calibration" | "normal"
+        # _cap_mode is the Path radio: it selects the mode a Capture takes
+        # during a *test sequence* (ReadPhase → request_capture).  The Menu →
+        # Capture "Calibrate Exposures" button is calibration-only and does NOT
+        # read it — the standalone run's mode is _cap_run_mode, fixed at start.
+        self._cap_mode:     str = "normal"    # Path radio: "calibration" | "normal"
+        self._cap_run_mode: str = "calibration"  # the in-flight standalone run's mode
         self._cap_group: str = "1"            # images per LED, '1'..'5'
         self._cap_view:  str | None = None    # None | "choice" | "progress" | "done"
         self._cap_progress: str = ""
@@ -643,6 +648,9 @@ class Arbiter:
         # Top-corner chrome like the Menu screen: reuse its CANCEL/OK widgets.
         p.put("menu_cancel_btn", "CANCEL", on=self._cap_choice_cancel)
         p.put("menu_ok_btn",     "OK",     on=self._cap_choice_ok)
+        # This button does exactly one thing — calibrate exposures — regardless
+        # of the Path radio, so its label is fixed.  (The Path radio selects the
+        # mode for a Capture run during a test sequence, handled elsewhere.)
         p.put("cap_start", "Calibrate\nExposures", on=self._cap_start)
         p.render(self._disp)
         self._rebuild_focus()
@@ -676,13 +684,21 @@ class Arbiter:
         self._render_capture_choice()
 
     def _cap_start(self) -> None:
-        """Launch the capture with the staged path + images choice."""
+        """
+        Launch the standalone "Calibrate Exposures" run.
+
+        This always calibrates, independent of the Path radio (_cap_mode): the
+        run's mode is pinned to calibration in _cap_run_mode so the progress
+        title and the completion path (persist e*) can't be diverted by whatever
+        Path was selected for test-sequence captures.
+        """
         if not self.capture_available():
             self._cap_result = "Camera busy — try again later"
             self._render_capture_done()
             return
+        self._cap_run_mode = "calibration"
         from capture_runner import CaptureConfig
-        cfg = CaptureConfig(mode=self._cap_mode, exposure_group=self._cap_group,
+        cfg = CaptureConfig(mode=self._cap_run_mode, exposure_group=self._cap_group,
                             led_start=config.capture_led_start(),
                             led_end=config.capture_led_end())
         session = self._new_session(cfg)
@@ -695,7 +711,7 @@ class Arbiter:
         self._capture_slot = None          # standalone (menu-launched) capture
         self._cap_progress = "Starting camera..."
         log.info("Arbiter: menu capture started (%s, group %s)",
-                 self._cap_mode, self._cap_group)
+                 self._cap_run_mode, self._cap_group)
         self._render_capture_progress()
 
     def _render_capture_progress(self) -> None:
@@ -705,7 +721,7 @@ class Arbiter:
         p = self._pool
         p.hide_all()
         p["cap_title"].rect = layout.CAP_TITLE       # full width (no corner buttons here)
-        p.put("cap_title", "Calibrating" if self._cap_mode == "calibration"
+        p.put("cap_title", "Calibrating" if self._cap_run_mode == "calibration"
               else "Capturing")
         p.put("cap_progress", self._cap_progress or "Working...")
         p.put("cap_back", "Cancel", on=self._cap_cancel)
@@ -760,7 +776,7 @@ class Arbiter:
             self._cap_result = f"Capture failed: {str(session.error)[:40]}"
             self._render_capture_done()
             return
-        if self._cap_mode == "calibration":
+        if self._cap_run_mode == "calibration":
             self._persist_calibration(session)
             self._cap_result = self._analyze_calibration(session)
         else:
@@ -1513,6 +1529,7 @@ def _selftest() -> None:
     arb._menu_open_capture()
     check("choice view",          arb._cap_view, "choice")
     check("default mode normal",  arb._cap_mode, "normal")
+    check("button always Calibrate", arb._pool["cap_start"].label, "Calibrate\nExposures")
     check("fallback group 3",     arb._cap_group, config.fallback_exposure_group())
 
     print("== capture screen: selecting a group persists it to defaults ==")
@@ -1545,16 +1562,19 @@ def _selftest() -> None:
     arb._menu_open_capture()
     check("fallback when unset",  arb._cap_group, config.fallback_exposure_group())
 
-    print("== capture screen: calibration run persists e* per LED ==")
+    print("== capture screen: Calibrate button persists e*, even with Path=Normal ==")
     _db.write_one("DELETE FROM exposure")
     cap_cal = _FakeCapture(steps=2)
     cap_cal.runner.results = [_R("amber", 30000), _R("blue", 20000)]
     arb._capture_factory = lambda: cap_cal
     arb._menu_open_capture()
-    arb._cap_set_mode("calibration")
+    arb._cap_set_mode("normal")             # Path = Normal — the button must ignore it
     arb._cap_set_group(3)
-    check("mode -> calibration",  arb._cap_mode, "calibration")
+    check("Path radio is normal", arb._cap_mode, "normal")
+    check("button says Calibrate", arb._pool["cap_start"].label, "Calibrate\nExposures")
     arb._cap_start()
+    check("run pinned to calibration", arb._cap_run_mode, "calibration")
+    check("progress title Calibrating", arb._pool["cap_title"].text, "Calibrating")
     check("progress view",        arb._cap_view, "progress")
     check("camera busy in run",   arb.capture_available(), False)
     for _ in range(5):
@@ -1567,18 +1587,17 @@ def _selftest() -> None:
     arb._cap_done_ok()
     check("OK returns to menu",   arb._cap_view, None)
 
-    print("== capture screen: normal run does not persist ==")
-    rows_before = _db.read_val("SELECT COUNT(*) FROM exposure")
-    cap_norm = _FakeCapture(steps=2)
-    arb._capture_factory = lambda: cap_norm
+    print("== capture screen: Path radio survives a Calibrate run (test-seq mode) ==")
     arb._menu_open_capture()
-    check("reopen resets to normal", arb._cap_mode, "normal")
+    check("reopen resets Path to normal", arb._cap_mode, "normal")
+    arb._cap_set_mode("calibration")        # operator sets the test-sequence Path
+    check("Path now calibration", arb._cap_mode, "calibration")
+    cap_x = _FakeCapture(steps=1)
+    arb._capture_factory = lambda: cap_x
     arb._cap_start()
-    for _ in range(5):
+    for _ in range(3):
         arb.pump_capture()
-    check("normal done",          arb._cap_view, "done")
-    check("normal added no rows",  _db.read_val("SELECT COUNT(*) FROM exposure"), rows_before)
-    check("normal result text",   "complete" in arb._cap_result.lower(), True)
+    check("Path unchanged by the run", arb._cap_mode, "calibration")
 
     print("== capture screen: cancel aborts and frees the camera ==")
     cap_cancel = _FakeCapture(steps=99)      # long-running
