@@ -170,7 +170,7 @@ class Pool:
         label("cap_mode_lbl",   L.CAP_MODE_LBL,  "black", "white",       18, text="Path")
         button("cap_mode_cal",  L.CAP_MODE_CAL,  "btn_text", "btn_gray", 14, text="Calibrate")
         button("cap_mode_norm", L.CAP_MODE_NORM, "btn_text", "btn_gray", 14, text="Normal")
-        label("cap_n_lbl",      L.CAP_N_LBL,     "black", "white",       18, text="Images")
+        label("cap_n_lbl",      L.CAP_N_LBL,     "black", "white",       18, text="Exposures")
         button("cap_n1", L.CAP_N1, "btn_text", "btn_gray", 18, text="1")
         button("cap_n2", L.CAP_N2, "btn_text", "btn_gray", 18, text="2")
         button("cap_n3", L.CAP_N3, "btn_text", "btn_gray", 18, text="3")

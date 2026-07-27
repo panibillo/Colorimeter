@@ -797,13 +797,25 @@ class Arbiter:
     def capture_available(self) -> bool:
         return self._capture is None
 
+    @property
+    def cap_mode(self) -> str:
+        """Current Menu -> Capture path selection: 'calibration' | 'normal'."""
+        return self._cap_mode
+
     def request_capture(self, slot: Slot) -> bool:
         """Start a capture for slot if the camera is free.  Returns granted."""
         if self._capture is not None:
             log.info("Arbiter: capture denied — camera busy (slot %s)",
                      self._capture_slot.name if self._capture_slot else "?")
             return False
-        session = self._new_session()
+        # Use the Menu -> Capture screen's staged path + images choice, same
+        # as the standalone menu capture — a sample's Read-phase capture must
+        # not silently fall back to a full calibration sweep.
+        from capture_runner import CaptureConfig
+        cfg = CaptureConfig(mode=self._cap_mode, exposure_group=self._cap_group,
+                            led_start=config.capture_led_start(),
+                            led_end=config.capture_led_end())
+        session = self._new_session(cfg)
         if not session.start():
             log.error("Arbiter: capture failed to start: %s", session.error)
             slot.progress = "Camera failed"
@@ -813,15 +825,18 @@ class Arbiter:
         slot.progress = "Starting camera..."
         self.persist(slot, capture_start=self.epoch(),
                      manual_read=slot.record.get("manual_read", ""))
-        log.info("Arbiter: capture started for slot %s", slot.name)
+        log.info("Arbiter: capture started for slot %s (mode=%s, group=%s)",
+                 slot.name, self._cap_mode, self._cap_group)
         return True
 
     def _new_session(self, cfg=None):
         """
         Build a capture session (test factory if given, else the real one).
 
-        cfg lets a caller (the capture screen) pass its own CaptureConfig; the
-        per-sample ReadPhase capture passes None for the default full sweep.
+        Both callers (the Menu capture screen and the per-sample ReadPhase
+        capture) now pass their own CaptureConfig, built from the current
+        self._cap_mode / self._cap_group selection. cfg=None is a defensive
+        fallback only — no caller currently relies on it.
         """
         if self._capture_factory is not None:
             return self._capture_factory()

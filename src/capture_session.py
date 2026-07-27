@@ -111,8 +111,9 @@ class CaptureSession:
             return False
 
         self.active = True
-        log.info("CaptureSession: started (LEDs %d–%d)",
-                 self.config.led_start, self.config.led_end)
+        log.info("CaptureSession: started (LEDs %d–%d, mode=%s, group=%s)",
+                 self.config.led_start, self.config.led_end,
+                 self.config.mode, self.config.exposure_group)
         return True
 
     def step(self):

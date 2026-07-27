@@ -39,6 +39,7 @@ Arbiter contract (what phases call; arbiter.py implements it)
     arb.render(slot)                re-render slot's current phase in place
     arb.request_capture(slot)->bool start a capture if the camera is free
     arb.capture_available()->bool   is the (single) camera free right now
+    arb.cap_mode -> str              "calibration" | "normal" (Menu -> Capture selection)
     arb.open_modal(slot, modal_id)  push a modal, remembering the return phase
     arb.close_modal(slot)           pop back to the remembered phase
     arb.cancel_test(slot)           abandon this run
@@ -412,11 +413,18 @@ class ReadPhase(Phase):
         pool.put("color_fld", slot.record.get("manual_read", ""))
         if is_live and slot.capturing:
             pool.put("run_btn", "RUNNING", enabled=False)
+            pool["run_btn"].size = 18
             pool.put("color_lbl", "Capturing...\nDon't touch strip.\nRead color:")
         else:
-            pool.put("run_btn", "CAPTURE",
+            # Reflect what a press will actually do — the Menu -> Capture
+            # screen's Path selection governs this capture too, so a stale
+            # "CAPTURE" label can no longer hide a full calibration sweep.
+            label = ("Calibrate\nExposures" if arb.cap_mode == "calibration"
+                     else f"Capture\n{slot.name}")
+            pool.put("run_btn", label,
                      on=lambda: self.capture(arb, slot, pool),
                      enabled=is_live and arb.capture_available())
+            pool["run_btn"].size = 18
             pool.put("color_lbl", "Insert strip &\npress CAPTURE.\nRead color:")
         self._show_steps(pool, slot)
         self._show_collect(pool, slot)
@@ -586,6 +594,7 @@ if __name__ == "__main__":
             self.clock = 1000.0
             self.epoch_s = 1_700_000_000
             self.capturing_slot = None
+            self.cap_mode = "normal"      # "calibration" | "normal"
             self.calls = []
             self.fail_begin = False       # flip on to simulate a duplicate samp_no
             self.temp_c = 21.7            # canned DS18B20 reading
