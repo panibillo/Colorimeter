@@ -59,12 +59,20 @@ class CaptureSession:
     """
 
     def __init__(self, config: "CaptureConfig | None" = None,
+                 cam=None, leds=None,
                  cam_factory=_default_cam, leds_factory=_default_leds):
         """
         Args:
             config:       Run parameters; defaults to a single-LED run.
-            cam_factory:  Zero-arg callable returning a camera.
-            leds_factory: Zero-arg callable returning an LED bank.
+            cam:          A pre-opened camera to *borrow* for this run (the
+                          Arbiter's persistent camera).  When given, the session
+                          does not stop it at the end — the owner disposes of it.
+                          None builds a fresh one from cam_factory and owns it.
+            leds:         A pre-opened LED bank to borrow, mirroring `cam`.
+            cam_factory:  Zero-arg callable returning a camera (used when
+                          `cam` is None).
+            leds_factory: Zero-arg callable returning an LED bank (used when
+                          `leds` is None).
         """
         self.config       = config or CaptureConfig()
         self._cam_factory  = cam_factory
@@ -76,8 +84,12 @@ class CaptureSession:
         self.out_path = None
         self.runner: "CaptureRunner | None" = None
 
-        self._cam  = None
-        self._leds = None
+        # Borrowed hardware is used as-is and never released here; only hardware
+        # this session builds itself (cam/leds left None) is stopped at the end.
+        self._cam  = cam
+        self._leds = leds
+        self._owns_cam  = cam is None
+        self._owns_leds = leds is None
         self._gen  = None
 
     # ── Lifecycle ────────────────────────────────────────────────────
@@ -100,8 +112,10 @@ class CaptureSession:
         self.out_path = None
 
         try:
-            self._cam  = self._cam_factory()
-            self._leds = self._leds_factory()
+            if self._cam is None:
+                self._cam = self._cam_factory()
+            if self._leds is None:
+                self._leds = self._leds_factory()
             self.runner = CaptureRunner(self._cam, self._leds, self.config)
             self._gen = self.runner.run()
         except Exception as exc:      # hardware may be missing or in use
@@ -169,16 +183,22 @@ class CaptureSession:
         self._release()
 
     def _release(self) -> None:
-        """Release camera and LED bank. Never raises."""
+        """
+        Release hardware this session owns. Borrowed camera/LED bank (passed in
+        by the Arbiter) are left running for the owner to dispose of; only
+        hardware the session built itself is stopped here. Never raises.
+        """
         if self._cam is not None:
-            try:
-                self._cam.stop()
-            except Exception:
-                log.exception("CaptureSession: error stopping the camera")
+            if self._owns_cam:
+                try:
+                    self._cam.stop()
+                except Exception:
+                    log.exception("CaptureSession: error stopping the camera")
             self._cam = None
         if self._leds is not None:
-            try:
-                self._leds.close()
-            except Exception:
-                log.exception("CaptureSession: error closing the LED bank")
+            if self._owns_leds:
+                try:
+                    self._leds.close()
+                except Exception:
+                    log.exception("CaptureSession: error closing the LED bank")
             self._leds = None

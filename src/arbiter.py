@@ -63,6 +63,11 @@ from phases import build_phases, EntryPhase, Entry2Phase
 
 log = logging.getLogger(__name__)
 
+# Phases during which the shared camera is kept open: a run from its first
+# reagent wait through capture and analysis.  Outside this set (entry/entry2,
+# and after results) no capture is imminent, so the camera is released.
+_CAMERA_PHASES = ("reagent1", "reagent2", "read", "analysis")
+
 # Tunables (LED range, loop cadence, timeouts, reagent durations, rowid, the
 # backlight pin) live in config/instrument.yaml and are read through
 # config_manager — see the config.* calls throughout this module.
@@ -105,6 +110,15 @@ class Arbiter:
         # Set once the capture subsystem's heavy first-imports (picamera2,
         # libcamera, numpy, cv2) have been warmed — see prewarm_capture().
         self._capture_prewarmed = False
+
+        # The persistent camera + LED bank, owned by the Arbiter and shared by
+        # every capture.  Opened once a run reaches its reagent wait (so the
+        # ~1s sensor-start settle overlaps the countdown) and reused across
+        # captures; released when no slot needs them and at cleanup.  Each
+        # CaptureSession *borrows* these rather than opening its own.  None
+        # until opened — see _ensure_camera()/_maybe_open_camera().
+        self._camera = None
+        self._leds   = None
 
         # Placeholder analysis timer: (slot, started_at) or None.
         self._analysis: tuple | None = None
@@ -235,6 +249,10 @@ class Arbiter:
             except Exception:
                 log.exception("Arbiter: cleanup: capture.cancel failed")
             self._capture = None
+
+        # Sessions borrow the shared camera without stopping it, so the Arbiter
+        # (its owner) releases it here.
+        self._release_camera()
 
         if self._disp and self._ILI9341:
             try:
@@ -849,6 +867,13 @@ class Arbiter:
         if cfg is None:
             cfg = CaptureConfig(led_start=config.capture_led_start(),
                                 led_end=config.capture_led_end())
+        # Borrow the Arbiter's persistent camera when available, so this run
+        # reuses the already-open sensor instead of paying the open cost again.
+        # If it could not be opened, the session builds and owns its own.
+        hw = self._ensure_camera()
+        if hw is not None:
+            cam, leds = hw
+            return CaptureSession(cfg, cam=cam, leds=leds)
         return CaptureSession(cfg)
 
     def start_analysis(self, slot: Slot) -> None:
@@ -1097,6 +1122,79 @@ class Arbiter:
         log.info("Arbiter: capture subsystem prewarmed in %.2fs",
                  time.monotonic() - t0)
 
+    # ── Shared camera (persistent, borrowed by every capture) ───────────────────
+
+    def _camera_wanted(self) -> bool:
+        """True while any slot is in a phase that will soon use the camera."""
+        return any(s.active_phase in _CAMERA_PHASES
+                   for s in self._slots.values())
+
+    def _maybe_open_camera(self) -> None:
+        """
+        Open the shared camera once a run reaches its reagent wait, so the
+        ~1s sensor-start settle is paid during the (minutes-long) countdown
+        rather than at CAPTURE.  Gated on prewarm so the picamera2 import cost
+        is already absorbed; a failure is logged and left for capture time.
+
+        Like _maybe_prewarm, this is polled from the main loop (not phase
+        entry) so the reagent screen has rendered first and only a background
+        pass wears the open cost.
+        """
+        if self._camera is not None or not self._capture_prewarmed:
+            return
+        if self._camera_wanted():
+            self._ensure_camera()
+
+    def _ensure_camera(self):
+        """
+        Return the open shared (camera, leds), opening them on demand.
+
+        Used both by _maybe_open_camera (during reagent) and by _new_session
+        (so a capture launched before the camera was opened — e.g. a Menu
+        capture with no running slot — still gets one).  Returns None on
+        failure; the caller then falls back to per-session hardware so capture
+        still works (and surfaces any real error) exactly as before.
+        """
+        if self._camera is not None and self._leds is not None:
+            return self._camera, self._leds
+        try:
+            from bayer_cam import BayerCam
+            from lighting_cal8 import LEDBank
+            cam = self._camera or BayerCam()
+            cam.setup_camera()          # idempotent; opens + settles the sensor
+            leds = self._leds or LEDBank()
+            self._camera, self._leds = cam, leds
+            log.info("Arbiter: shared camera opened")
+            return self._camera, self._leds
+        except Exception:
+            log.exception("Arbiter: failed to open shared camera")
+            self._release_camera()
+            return None
+
+    def _maybe_release_camera(self) -> None:
+        """Close the shared camera once no slot needs it and no capture is live."""
+        if self._camera is None and self._leds is None:
+            return
+        if self._capture is not None or self._camera_wanted():
+            return
+        log.info("Arbiter: no slot needs the camera — releasing it")
+        self._release_camera()
+
+    def _release_camera(self) -> None:
+        """Stop + close the shared camera and LED bank. Idempotent; never raises."""
+        if self._camera is not None:
+            try:
+                self._camera.stop()
+            except Exception:
+                log.exception("Arbiter: error stopping shared camera")
+            self._camera = None
+        if self._leds is not None:
+            try:
+                self._leds.close()
+            except Exception:
+                log.exception("Arbiter: error closing shared LED bank")
+            self._leds = None
+
     # ── Focus / keyboard (over the pool) ───────────────────────────────────────
 
     def _rebuild_focus(self) -> None:
@@ -1196,8 +1294,10 @@ class Arbiter:
 
             self.poll_timers()
             self._maybe_prewarm()
+            self._maybe_open_camera()
             self.pump_capture()
             self.pump_analysis()
+            self._maybe_release_camera()
 
             if now - last_clock >= 1.0:
                 last_clock = now
@@ -1298,6 +1398,39 @@ def _selftest() -> None:
     check("capture_session imported", "capture_session" in sys.modules, True)
     arb.prewarm_capture()                         # idempotent — must not raise
     A.active_phase = "entry"                       # restore for the checks below
+
+    print("== shared camera: opens on reagent, released when idle ==")
+
+    class _FakeCam:
+        def __init__(self):  self.stopped = False
+        def setup_camera(self): pass
+        def stop(self):      self.stopped = True
+
+    class _FakeLeds:
+        def __init__(self):  self.closed = False
+        def close(self):     self.closed = True
+
+    # Stand in for the real hardware open so the self-test needs no camera.
+    def _fake_ensure():
+        if arb._camera is None:
+            arb._camera, arb._leds = _FakeCam(), _FakeLeds()
+        return arb._camera, arb._leds
+    arb._ensure_camera = _fake_ensure
+
+    check("no camera while idle",   arb._camera_wanted(), False)
+    arb._maybe_open_camera()
+    check("idle → camera stays shut", arb._camera is None, True)
+    A.active_phase = "reagent2"
+    arb._maybe_open_camera()
+    check("reagent → camera opened", arb._camera is not None, True)
+    fake_cam, fake_leds = arb._camera, arb._leds
+    arb._maybe_release_camera()                    # still wanted (A in reagent2)
+    check("kept open while wanted",  arb._camera is fake_cam, True)
+    A.active_phase = "entry"                        # both slots idle now
+    arb._maybe_release_camera()
+    check("idle → camera released",  arb._camera is None, True)
+    check("camera stopped",          fake_cam.stopped, True)
+    check("leds closed",             fake_leds.closed, True)
 
     print("== render draws only the focused slot ==")
     arb.goto(A, "entry")

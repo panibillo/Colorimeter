@@ -195,6 +195,12 @@ class BayerCam:
         (IMX708), autofocus is explicitly set to Manual so it does not interfere
         with captures.  Camera must be started before capture_frame() can be called.
 
+        Idempotent: if the camera is already open (self.camera set), this returns
+        immediately without re-opening.  That lets the Arbiter hold one persistent
+        camera across captures while each CaptureRunner still calls setup_camera()
+        defensively — the second and later calls are cheap no-ops, and the live
+        exposure/gain are kept in step by set_exposure()/set_analog_gain().
+
         Side effects:
             - Creates and starts camera object (self.camera)
             - Sets self.config_size to the active config size
@@ -205,6 +211,9 @@ class BayerCam:
             >>> cam.setup_camera()
             >>> rgb, bayer, meta = cam.capture_frame()
         """
+        if self.camera is not None:
+            log.debug("Camera already initialized; reusing the open camera")
+            return
         try:
             size = self.config["size"]
             log.info(f"Initializing {self.model_description} "
