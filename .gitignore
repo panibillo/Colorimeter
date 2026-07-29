@@ -25,4 +25,9 @@ docs/.~lock.*
 !requirements-frozen.txt
 !system_requirements.txt
 !sync_pi_files.txt
-!rpiconfig/*.txt
+!commissioning/*.txt
+
+# ── Local-only symlinks ───────────────────────────────────────────────────
+# Absolute-path links into ~/Documents; would dangle on any other clone.
+commissioning/ssh-key-setup-guide.md
+commissioning/ssh-terminal-color.md
