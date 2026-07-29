@@ -4,7 +4,7 @@
 #
 # Run this ON the Raspberry Pi:
 #   ssh rpizero1
-#   ~/pi/Colorimeter/rpiconfig/uninstall_colorimeter_service.sh
+#   ~/pi/Colorimeter/commissioning/uninstall_colorimeter_service.sh
 #
 # Does NOT touch colorimeter-gpio-init.service (a separate, independent
 # unit) or any project files — only removes the boot-launch wiring for

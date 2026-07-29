@@ -4,7 +4,7 @@
 #
 # Run this ON the Raspberry Pi, as the "bill" user:
 #   ssh rpizero1
-#   ~/pi/Colorimeter/rpiconfig/install_colorimeter_service.sh
+#   ~/pi/Colorimeter/commissioning/install_colorimeter_service.sh
 #
 # Safe to re-run: it overwrites the unit file and reloads/restarts the
 # service, so editing this script and re-running picks up the change.
