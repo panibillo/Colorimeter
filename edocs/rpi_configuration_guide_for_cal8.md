@@ -256,12 +256,17 @@ While still connected, ensure the libraries needed for this design are
 installed. Do this before the reboot so you can test immediately after.
 The libraries covered here are installed via apt to get architecture-optimised builds for the Pi.
 
-- RPi.GPIO — general GPIO (usually pre-installed)
-- gpiozero
+- gpiozero — general GPIO and backlight on/off, GPIO13 (`src/arbiter.py`)
+- lgpio — beeper PWM on GPIO12 (`src/beeper.py`); also gpiozero's pin factory
 - spidev — SPI access from Python (usually pre-installed)
 - smbus2 — I2C access for TSC2007
-- pigpio — required for hardware PWM on GPIO12 and GPIO13
-- i2c-tools — 
+- i2c-tools —
+
+> GPIO policy (see `CODING_GUIDELINES.md`): the app uses **gpiozero** for
+> general GPIO / backlight and **lgpio** for the beeper's PWM. It does **not**
+> use `pigpio`/`pigpiod` or `RPi.GPIO` — there is deliberately **no background
+> daemon**. `python3-lgpio` supplies both the `lgpio` module and gpiozero's
+> default pin factory on Bookworm/Trixie.
 
 ```bash
 # Update package list:
@@ -273,21 +278,20 @@ sudo apt upgrade
 sudo apt install -y \
     python3-full \
     python3-numpy \
-    # python3-rpi.gpio \ # deprecated
     python3-gpiozero \
+    python3-lgpio \
     python3-spidev \
     python3-smbus2 \
-    pigpio python3-pigpio \
     i2c-tools
-    
-# Enable pigpio daemon to start at boot:
-sudo systemctl enable pigpiod
+
+# No daemon to enable — backlight (gpiozero) and beeper (lgpio) are daemonless.
 
 # Sanity checks:
 
-python3 -c "import spidev; print('spidev ok')"
-python3 -c "import RPi.GPIO; print('RPi.GPIO ok')"
-python3 -c "import smbus2; print('smbus2 ok')"
+python3 -c "import spidev;   print('spidev ok')"
+python3 -c "import gpiozero; print('gpiozero ok')"
+python3 -c "import lgpio;    print('lgpio ok')"
+python3 -c "import smbus2;   print('smbus2 ok')"
 ```
 
 If any import fails, install with **BUT FIRST DOUBLE CHECK THAT THIS IS OK!!**:
@@ -334,9 +338,9 @@ source .venv/bin/activate
 Confirm key packages are visible inside the venv:
 ```bash
 python3 -c "import spidev;    print('spidev ok')"
-python3 -c "import RPi.GPIO;  print('RPi.GPIO ok')"
+python3 -c "import gpiozero;  print('gpiozero ok')"
+python3 -c "import lgpio;     print('lgpio ok')"
 python3 -c "import smbus2;    print('smbus2 ok')"
-python3 -c "import pigpio;    print('pigpio ok')"
 python3 -c "import numpy;     print('numpy ok')"
 ```
 
@@ -463,41 +467,47 @@ Expected: `func=ALT4` — GPIO23 is now SPI1 CE0.
 Note: in software you will use `spi1.no_cs = True` anyway, so this
 GPIO23 CE0 assignment is mainly to keep it away from GPIO18.
 
-### 11e — Hardware PWM (pigpio daemon)
+### 11e — Backlight (gpiozero) and beeper (lgpio)
 
-```bash
-# Confirm pigpiod is running:
-sudo systemctl status pigpiod
-```
+There is **no PWM daemon**. The backlight (GPIO13) is driven on/off with
+`gpiozero` (as `src/arbiter.py` does), and the beeper (GPIO12) uses `lgpio`
+software PWM (as `src/beeper.py` does). Nothing to enable or start.
 
-Expected: `active (running)`.
-
-If not running:
-```bash
-sudo systemctl start pigpiod
-sudo systemctl status pigpiod
-```
-
-Quick functional test — blink the backlight:
+Quick functional test — toggle the backlight:
 ```bash
 python3 - << 'EOF'
-import pigpio, time
-pi = pigpio.pi()
-if not pi.connected:
-    print("ERROR: pigpio not connected")
-else:
-    print("pigpio connected OK")
-    # Backlight on GPIO13 at 50% brightness
-    pi.hardware_PWM(13, 2000, 500000)
-    print("Backlight PWM set: GPIO13 2000Hz 50%")
-    time.sleep(2)
-    pi.hardware_PWM(13, 2000, 0)
-    print("Backlight off")
-    pi.stop()
+import time
+from gpiozero import DigitalOutputDevice
+
+# Backlight on GPIO13 (matches src/arbiter.py — on/off, not dimming)
+bl = DigitalOutputDevice(13)
+bl.on();  print("Backlight ON");  time.sleep(2)
+bl.off(); print("Backlight OFF")
+bl.close()
 EOF
 ```
 
-If the backlight visibly changes on the 1651 display, hardware PWM is working.
+If the backlight visibly changes on the 1651 display, GPIO13 is working. (For
+dimming rather than on/off, `gpiozero.PWMOutputDevice(13)` gives software PWM —
+see `CODING_GUIDELINES.md` Rule 5; the app currently uses on/off.)
+
+Quick functional test — chirp the beeper:
+```bash
+python3 - << 'EOF'
+import lgpio, time
+
+PIN, CHIP, CARRIER = 12, 0, 10_000   # GPIO12, /dev/gpiochip0, 10 kHz (lgpio max)
+h = lgpio.gpiochip_open(CHIP)
+lgpio.gpio_claim_output(h, PIN)
+lgpio.tx_pwm(h, PIN, CARRIER, 50.0)  # 50% duty → audible carrier
+time.sleep(0.3)
+lgpio.tx_pwm(h, PIN, CARRIER, 0.0)   # transistor fully off
+lgpio.gpiochip_close(h)
+print("Beeper chirped")
+EOF
+```
+
+A short tone confirms GPIO12 / the MMBT3904 / beeper path is working.
 
 ---
 
@@ -547,10 +557,10 @@ pinctrl set 24 op dl    # GPIO24 RCLK
 
 # Clear shift register (channels 1-8) via SPI1
 python3 - << 'PYEOF'
-import spidev, RPi.GPIO as GPIO
+import spidev
+from gpiozero import DigitalOutputDevice
 
-GPIO.setmode(GPIO.BCM)
-GPIO.setup(24, GPIO.OUT, initial=GPIO.LOW)
+rclk = DigitalOutputDevice(24, initial_value=False)   # 74HC595 RCLK
 
 spi = spidev.SpiDev()
 spi.open(1, 0)
@@ -560,11 +570,11 @@ spi.mode = 0
 
 for _ in range(3):
     spi.writebytes([0x00])
-    GPIO.output(24, GPIO.HIGH)
-    GPIO.output(24, GPIO.LOW)
+    rclk.on()
+    rclk.off()
 
 spi.close()
-GPIO.cleanup()
+rclk.close()
 print("colorimeter-gpio-init: shift register cleared")
 PYEOF
 
@@ -649,10 +659,10 @@ wiring before connecting LEDs:
 
 ```bash
 python3 - << 'EOF'
-import spidev, RPi.GPIO as GPIO, time
+import spidev, time
+from gpiozero import DigitalOutputDevice
 
-GPIO.setmode(GPIO.BCM)
-GPIO.setup(24, GPIO.OUT, initial=GPIO.LOW)   # RCLK
+rclk = DigitalOutputDevice(24, initial_value=False)   # RCLK
 
 spi1 = spidev.SpiDev()
 spi1.open(1, 0)
@@ -661,8 +671,8 @@ spi1.max_speed_hz = 500_000
 
 def shift_out(byte_val):
     spi1.writebytes([byte_val])
-    GPIO.output(24, GPIO.HIGH)
-    GPIO.output(24, GPIO.LOW)
+    rclk.on()
+    rclk.off()
 
 print("Shifting 0x00 (all off)...")
 shift_out(0x00)
@@ -680,7 +690,7 @@ for i in range(8):
 
 shift_out(0x00)
 print("Done.")
-GPIO.cleanup()
+rclk.close()
 spi1.close()
 EOF
 ```
@@ -697,6 +707,7 @@ EOF
 | `/dev/spidev1.0` missing | Check `grep spi1 /boot/firmware/config.txt` — overlay line correct? |
 | GPIO18 shows ALT4 (SPI1 CE0) | `cs0_pin=23` missing or has a space — edit config.txt and reboot |
 | 1-Wire devices directory empty | Probe connected? 4.7kΩ pull-up present? `gpiopin=16` in config? |
-| `pigpiod` not running | `sudo systemctl enable pigpiod && sudo systemctl start pigpiod` |
-| Backlight PWM test does nothing | Check GPIO13 / J1-Pin9 wiring; confirm LITE/#3 jumper soldered on 1651 |
+| `import lgpio` / `import gpiozero` fails | `sudo apt install python3-lgpio python3-gpiozero` (no daemon needed) |
+| Backlight test does nothing | Check GPIO13 / J1-Pin9 wiring; confirm LITE/#3 jumper soldered on 1651; `gpiozero` importing? |
+| Beeper silent | Check GPIO12 / MMBT3904 wiring; `import lgpio` OK? (`src/beeper.py`) |
 | Shift register all-on/all-off works, walking bits wrong order | Bit order reversed — change `1 << (7-i)` to `1 << i` in software |
