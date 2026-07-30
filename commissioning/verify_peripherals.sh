@@ -7,7 +7,8 @@
 #   ~/pi/Colorimeter/commissioning/verify_peripherals.sh
 #
 # Checks SPI0, SPI1, I2C bus 1 (+ TSC2007 @0x48), 1-Wire (+ a DS18B20 and a
-# temperature read), the pigpio daemon, the SPI1 pin function, and the camera.
+# temperature read), the GPIO character device (gpiozero/lgpio backends —
+# there is no daemon), the SPI1 pin function, and the camera.
 # It changes nothing and is safe to run repeatedly. A ✗ means investigate;
 # see docs/commissioning/07_troubleshooting.md.
 
@@ -72,10 +73,16 @@ else
     fail "no 28-* device — see docs/DS18B20_troubleshooting.md (usually physical: pull-up/solder/pin)"
 fi
 
-# ── Hardware PWM daemon ─────────────────────────────────────────────────────
-echo "Hardware PWM (pigpio daemon, backlight GPIO13):"
-if systemctl is-active --quiet pigpiod; then pass "pigpiod active"
-else fail "pigpiod not active — sudo systemctl enable --now pigpiod"; fi
+# ── GPIO (gpiozero backlight GPIO13, lgpio beeper GPIO12 — daemonless) ──────
+echo "GPIO (gpiozero + lgpio backends; no daemon):"
+if [[ -e /dev/gpiochip0 ]]; then pass "/dev/gpiochip0 present"
+else fail "/dev/gpiochip0 missing — kernel GPIO char device unavailable"; fi
+
+if python3 -c 'import lgpio' 2>/dev/null; then pass "python3 can import lgpio (beeper PWM)"
+else warn "python3 cannot import lgpio — sudo apt install python3-lgpio (src/beeper.py needs it)"; fi
+
+if python3 -c 'import gpiozero' 2>/dev/null; then pass "python3 can import gpiozero (backlight/CE pins)"
+else warn "python3 cannot import gpiozero — sudo apt install python3-gpiozero"; fi
 
 # ── Camera ──────────────────────────────────────────────────────────────────
 echo "Camera (IMX219 / IMX708):"

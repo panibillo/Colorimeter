@@ -13,8 +13,9 @@ stop and fix anything that fails before moving on.
 ## 5a — Verify peripherals (scripted)
 
 Run the bundled checker on the Pi. It confirms SPI0, SPI1, I2C (+ the TSC2007 at
-`0x48`), 1-Wire (+ a `28-*` probe and a temperature read), the pigpio daemon,
-and the camera, printing a ✓/✗ line for each.
+`0x48`), 1-Wire (+ a `28-*` probe and a temperature read), the GPIO character
+device (`gpiozero`/`lgpio` backends — no daemon), and the camera, printing a
+✓/✗ line for each.
 
 ```bash
 # On the Pi:
@@ -32,7 +33,8 @@ ls /dev/spidev0.0 /dev/spidev1.0 /dev/i2c-1       # buses present
 sudo i2cdetect -y 1                                # touch at 0x48
 cat /sys/bus/w1/devices/28-*/w1_slave              # probe temperature (…t=NNNNN)
 pinctrl get 20                                     # SPI1 MOSI → ALT-func (not input)
-systemctl is-active pigpiod                        # → active
+ls /dev/gpiochip0                                  # GPIO char device (gpiozero/lgpio)
+python3 -c 'import gpiozero, lgpio'                # backlight + beeper libs import
 rpicam-hello --list-cameras                        # camera detected
 ```
 

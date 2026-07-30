@@ -127,14 +127,14 @@ board is slow and often runs out of memory. The venv then inherits them with
 ```bash
 # On the Pi:
 cd ~/pi/Colorimeter
-./commissioning/bootstrap_system.sh     # apt packages + enable pigpiod
+./commissioning/bootstrap_system.sh     # apt packages (no daemon)
 ./commissioning/make_venv.sh            # create .venv, verify key imports
 ```
 
 `make_venv.sh` finishes by importing `numpy`, `cv2`, `h5py`, `yaml`, `spidev`,
-`RPi.GPIO`, `smbus2`, and `pigpio` **from inside the venv** and printing their
-versions. If any import fails, fix it before continuing — the app will not start
-otherwise.
+`gpiozero`, `lgpio`, `smbus2`, and `picamera2` **from inside the venv** and
+printing their versions. If any import fails, fix it before continuing — the app
+will not start otherwise.
 
 To activate the venv in interactive SSH sessions:
 

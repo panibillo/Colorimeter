@@ -102,8 +102,8 @@ Quick reference; wiring detail lives in the electronics docs under `edocs/`.
 | Touch | I2C bus 1 (SDA=GPIO2, SCL=GPIO3) | TSC2007 @ `0x48` | `i2cdetect -y 1` |
 | Temp probe | 1-Wire on **GPIO16** (phys 36) | DS18B20 (`28-*`) | `/sys/bus/w1/devices/` |
 | LED driver | SPI1 (MOSI=GPIO20, SCLK=GPIO21), RCLK=GPIO24 | 74HC595 shift register | `/dev/spidev1.0` |
-| Backlight | Hardware PWM GPIO13 | 1651 LITE | pigpio PWM test |
-| Buzzer | GPIO12 | magnetic buzzer | audible |
+| Backlight | GPIO13 (on/off via `gpiozero`) | 1651 LITE | `/dev/gpiochip0`, backlight toggles |
+| Buzzer | GPIO12 (PWM via `lgpio`) | magnetic buzzer (`src/beeper.py`) | audible |
 | Camera | CSI | IMX219 (Cam Module 2) / IMX708 (Module 3) | `rpicam-hello --list-cameras` |
 
 ---
@@ -115,9 +115,9 @@ Low-risk, repeatable steps are provided as scripts in the repo's
 
 | Script | Does |
 |---|---|
-| `commissioning/bootstrap_system.sh` | Install apt system packages + enable `pigpiod` |
+| `commissioning/bootstrap_system.sh` | Install apt system packages (`gpiozero`/`lgpio`/`spidev`/`smbus2`/camera/…); **no daemon** |
 | `commissioning/make_venv.sh` | Create `.venv` (`--system-site-packages`) and verify imports |
-| `commissioning/verify_peripherals.sh` | Check SPI0/I2C/1-Wire/SPI1/PWM/camera after reboot |
+| `commissioning/verify_peripherals.sh` | Check SPI0/I2C/1-Wire/SPI1/GPIO/camera after reboot |
 | `commissioning/install_colorimeter_service.sh` | Install + enable the boot-launch service (existing) |
 | `commissioning/uninstall_colorimeter_service.sh` | Remove the boot-launch service (existing) |
 
@@ -142,7 +142,7 @@ retired deliberately. **None of these files have been edited by this guide.**
 
 | File | Finding | Recommendation |
 |---|---|---|
-| `edocs/rpi_configuration_guide_for_cal8.md` | Excellent deep reference for cal8 peripherals and the `colorimeter-gpio-init` service, but written for the **original Zero W / Bookworm**; carries Bullseye/Bookworm branching this guide drops. Also its Step 7 adds `dtoverlay=spi0-1cs` (to free GPIO7 for LED channel 9) which the committed cal8 config file omits. | Keep as the authoritative reference for the **gpio-init service** (step 5 links to it). Reconcile the `spi0-1cs` discrepancy on real hardware (step 2). |
+| `edocs/rpi_configuration_guide_for_cal8.md` | Excellent deep reference for cal8 peripherals and the `colorimeter-gpio-init` service, but written for the **original Zero W / Bookworm**; carries Bullseye/Bookworm branching this guide drops. Also its Step 7 adds `dtoverlay=spi0-1cs` (to free GPIO7 for LED channel 9) which the committed cal8 config file omits. ⚠ Its PWM sections (11e, install step) install **`pigpio`/`pigpiod`** for GPIO12/13 — **obsolete**: the code now uses `gpiozero` (backlight) and `lgpio` (beeper) with **no daemon**, per [CODING_GUIDELINES.md](../CODING_GUIDELINES.md). | Keep as the authoritative reference for the **gpio-init service** (step 5 links to it), but **ignore its pigpio/pigpiod steps**. Reconcile the `spi0-1cs` discrepancy on real hardware (step 2). |
 | `commissioning/Rpi-zero-W-2-for-mainboard_C-config.txt` | A **different board** (5-LED stripboard, `spi=off`, direct-GPIO LEDs), not the colorimeter. | Keep only as the stock Zero 2 W `config.txt` skeleton. Not the cal8 config. |
 | `commissioning/Rpi-zero-W-for-main_board_cal8-config.txt` | The cal8 `[all]` block, but for the **original Zero W** and missing `spi0-1cs`. | Basis for step 2's canonical block; verify `spi0-1cs`. |
 | `src/db_DDL.sql` | **Incomplete.** Defines 6 tables but the live DB has 9 (missing `colorcard`, `exposure`, `data`); all seed `INSERT`s are commented out. `src/db_manager.py:TABLE_DEFINITIONS` is a third, also-incomplete schema. | Do **not** build the DB from it. Treat a working `colorimeter.sqlite` as the source of truth. Regenerate the DDL from the live DB if a clean schema is needed. |

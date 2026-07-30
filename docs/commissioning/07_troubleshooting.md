@@ -33,7 +33,8 @@ issues specific to commissioning (venv, services, DB).
 | No `28-*` under `/sys/bus/w1/devices/` | See the DS18B20 guide — usually physical (pull-up/solder/pin), not config. |
 | GPIO18 shows `ALT4` | `cs0_pin=23` missing or has a space in `config.txt`; fix and reboot. |
 | LED stuck on for ~10–15 s at boot | Expected until `colorimeter-gpio-init.service` runs; confirm the service is enabled (below). |
-| Backlight PWM test does nothing | `pigpiod` running? GPIO13 / J1-9 wiring; 1651 LITE jumper soldered? |
+| Backlight stays off | GPIO13 / J1-9 wiring; 1651 LITE jumper soldered? `gpiozero` importing (needs `python3-lgpio` as its pin factory)? |
+| Beeper silent / `import lgpio` fails | `sudo apt install python3-lgpio` (src/beeper.py imports `lgpio` directly); GPIO12 / MMBT3904 wiring. |
 | Camera not found | `rpicam-hello --list-cameras`; `camera_auto_detect=1` in `config.txt`; ribbon seated. |
 
 Query one pin at a time: `pinctrl get <n>` (`raspi-gpio` is not installed).

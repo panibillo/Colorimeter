@@ -44,9 +44,9 @@ mods = [
     ("h5py",      "h5py"),
     ("yaml",      "PyYAML"),
     ("spidev",    "spidev"),
-    ("RPi.GPIO",  "RPi.GPIO (rpi-lgpio)"),
+    ("gpiozero",  "gpiozero"),
+    ("lgpio",     "lgpio"),
     ("smbus2",    "smbus2"),
-    ("pigpio",    "pigpio"),
     ("picamera2", "picamera2"),
 ]
 
