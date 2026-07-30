@@ -104,18 +104,22 @@ Save and exit: **Ctrl+O**, Enter, **Ctrl+X**.
 ## Step 2c — Sanity-check the edit before rebooting
 
 ```bash
-# Each of these should print exactly 1 (no duplicates):
-grep -c 'dtparam=spi=on'        /boot/firmware/config.txt
-grep -c 'dtparam=i2c_arm=on'    /boot/firmware/config.txt
-grep -c 'dtoverlay=w1-gpio'     /boot/firmware/config.txt
-grep -c 'dtoverlay=spi1'        /boot/firmware/config.txt
+# Each of these should print exactly 1 (no duplicates). The leading ^
+# anchors to start-of-line so it does NOT match the stock image's commented-
+# out placeholders (e.g. "#dtparam=spi=on") — a plain, unanchored grep will
+# count those too and falsely report 2.  Expected output: 1 1 1 1 (column-wise)
+grep -c '^dtparam=spi=on'        /boot/firmware/config.txt && \
+grep -c '^dtparam=i2c_arm=on'    /boot/firmware/config.txt && \
+grep -c '^dtoverlay=w1-gpio'     /boot/firmware/config.txt && \
+grep -c '^dtoverlay=spi1'        /boot/firmware/config.txt
 
 # 1-Wire must be on BCM 16, not 4/7/36:
 grep 'w1-gpio' /boot/firmware/config.txt      # → dtoverlay=w1-gpio,gpiopin=16
 ```
 
 If any count is `2` or more, re-open the file and delete the older/duplicate
-line.
+**active** (non-`#`) line — a `2` caused by an unrelated commented-out stock
+placeholder is not a problem; see the note above.
 
 ---
 

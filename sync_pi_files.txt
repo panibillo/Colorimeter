@@ -37,6 +37,7 @@ src/geometry.py
 
 # ── Capture pipeline ─────────────────────────────────────────────────────
 src/capture_runner.py
+src/capture_profile.py
 src/capture_session.py
 src/capture_h5.py
 src/exposure_repo.py

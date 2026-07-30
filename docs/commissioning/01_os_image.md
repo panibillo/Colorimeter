@@ -100,6 +100,7 @@ ping -c1 <hostname>.local
 ssh mgwwg@<hostname>.local
 ```
 
+At this point, the `hostname` is probably 'raspberrypi', but might be something assigned during burning.
 If `<hostname>.local` does not resolve, find the Pi's IP from your router's
 DHCP client list (look for the hostname), then `ssh mgwwg@<ip>`.
 
@@ -107,7 +108,16 @@ DHCP client list (look for the hostname), then `ssh mgwwg@<ip>`.
 > The cleanest way is a **DHCP reservation** in your router (bind the Pi's Wi-Fi
 > MAC to a fixed IP) — no Pi-side change, survives re-imaging. Add a matching
 > `Host` entry to your desktop `~/.ssh/config` (see [04_ssh.md](04_ssh.md)) so
-> you can just `ssh <host>`.
+> you can just `ssh <host>`.  
+
+Once you are into the Pi's terminal you can type:
+
+```bash
+ip -brief link   # get the unique MAC address of the Pi
+hostname - I     # get the current IP address assigned by the router
+hostname         # get the current hostname
+```
+To change the hostname, see below section **C. (Optional) Give it a unique hostname** 
 
 ---
 
