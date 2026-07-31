@@ -31,6 +31,36 @@ else
     python3 -m venv --system-site-packages "${VENV_DIR}"
 fi
 
+# ── Convenience: auto-cd + activate the venv on interactive SSH logins ───────
+# Append an idempotent block to ~/.bashrc so that logging into the Pi drops you
+# straight into the project with the venv already active. It is guarded to run
+# only in interactive shells and only when the paths exist, so it is harmless
+# before the venv is built or if the app dir moves. systemd is unaffected: the
+# service calls the venv python by absolute path and never sources .bashrc.
+BASHRC="${HOME}/.bashrc"
+if [[ -f "${BASHRC}" ]] && grep -qF ">>> colorimeter login env >>>" "${BASHRC}"; then
+    echo ">>> Login-env block already present in ${BASHRC} (leaving as-is)"
+else
+    echo ">>> Adding auto-cd + venv-activate block to ${BASHRC}"
+    cat >> "${BASHRC}" <<'EOF'
+
+# >>> colorimeter login env >>>
+# Auto-navigate to the Colorimeter app and activate its venv on interactive SSH
+# logins. Added by commissioning/make_venv.sh — delete this block (through the
+# matching "<<<" line) to disable. systemd is unaffected: the service calls the
+# venv python by absolute path and never sources .bashrc.
+if [[ $- == *i* ]]; then
+    _colorimeter_home="$HOME/pi/Colorimeter"
+    if [[ -d "$_colorimeter_home" ]]; then
+        cd "$_colorimeter_home" || true
+        [[ -f "$_colorimeter_home/.venv/bin/activate" ]] && source "$_colorimeter_home/.venv/bin/activate"
+    fi
+    unset _colorimeter_home
+fi
+# <<< colorimeter login env <<<
+EOF
+fi
+
 # ── Verify the imports the app depends on, FROM INSIDE the venv ──────────────
 # --system-site-packages must be in effect for the apt packages to be visible.
 echo ">>> Verifying imports inside the venv…"

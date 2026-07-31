@@ -136,15 +136,34 @@ cd ~/pi/Colorimeter
 printing their versions. If any import fails, fix it before continuing — the app
 will not start otherwise.
 
-To activate the venv in interactive SSH sessions:
+### Interactive-login convenience (automatic)
+
+`make_venv.sh` also appends a small, **idempotent** block to `~/.bashrc` so that
+each interactive SSH login drops you straight into the project with the venv
+already active:
 
 ```bash
-# On the Pi (optional convenience):
-echo 'source ~/pi/Colorimeter/.venv/bin/activate' >> ~/.bashrc
+# >>> colorimeter login env >>>
+if [[ $- == *i* ]]; then
+    _colorimeter_home="$HOME/pi/Colorimeter"
+    if [[ -d "$_colorimeter_home" ]]; then
+        cd "$_colorimeter_home" || true
+        [[ -f "$_colorimeter_home/.venv/bin/activate" ]] && source "$_colorimeter_home/.venv/bin/activate"
+    fi
+    unset _colorimeter_home
+fi
+# <<< colorimeter login env <<<
 ```
 
-> The boot service does **not** rely on this — `colorimeter.service` calls the
-> venv interpreter by absolute path (`~/pi/Colorimeter/.venv/bin/python3`).
+- Guarded on the interactive flag and on the paths existing, so it is harmless
+  before the venv is built (re-run `make_venv.sh` afterward — it will not add a
+  duplicate block).
+- **To disable:** delete the block from `~/.bashrc` (the two `>>>`/`<<<` marker
+  lines and everything between).
+
+> The boot service does **not** rely on any of this — `colorimeter.service`
+> calls the venv interpreter by absolute path
+> (`~/pi/Colorimeter/.venv/bin/python3`) and never sources `.bashrc`.
 
 ---
 
