@@ -73,41 +73,70 @@ what state it is in — you **observe the artifacts** each step leaves behind.
 
 Paste this whole block into an SSH session. It changes nothing.
 
+> **If you land on a `>` prompt, press Ctrl-C.** That is bash's continuation
+> prompt: a pasted line arrived with an unclosed quote, and everything you type
+> afterwards — including `exit` — is swallowed as more of the string. Ctrl-C
+> abandons the line. The block below is written in short, independent lines
+> precisely so a mangled paste costs you one command instead of the whole run;
+> if a long block ever misbehaves, paste it one `=====` section at a time.
+
 ```bash
-# On the Pi — read-only commissioning state report.
+# On the Pi - read-only commissioning state report.
 APP="$HOME/pi/Colorimeter"
 
 echo "===== identity ====================================="
-hostname; whoami; echo "HOME=$HOME"; id
+hostname
+whoami
+echo "HOME=$HOME"
+id
+
 echo "===== os / board ==================================="
-uname -m; grep PRETTY /etc/os-release; grep -m1 Model /proc/cpuinfo
-echo "===== step 2 — config.txt =========================="
+uname -m
+grep PRETTY /etc/os-release
+grep -m1 Model /proc/cpuinfo
+
+echo "===== step 2 - config.txt =========================="
 grep -nE '^(dtparam|dtoverlay|camera_auto_detect)' /boot/firmware/config.txt
-echo "----- buses actually present -----"
-ls -d /dev/spidev0.0 /dev/spidev1.0 /dev/i2c-1 /sys/bus/w1/devices/28-* 2>&1
-echo "===== step 3 — app tree ============================"
-ls -d "$APP" "$APP/src" "$APP/config" "$APP/captures" "$APP/provisioning" "$APP/.venv" 2>&1
-echo "===== step 3c — database ==========================="
+echo "--- buses actually present ---"
+ls -d /dev/spidev0.0 /dev/spidev1.0 /dev/i2c-1 2>&1
+ls -d /sys/bus/w1/devices/28-* 2>&1
+
+echo "===== step 3 - app tree ============================"
+ls -d "$APP" "$APP/src" "$APP/config" "$APP/captures" 2>&1
+ls -d "$APP/provisioning" "$APP/.venv" 2>&1
+
+echo "===== step 3c - database ==========================="
 ls -l "$APP/src/colorimeter.sqlite" 2>&1
-echo "===== step 3d — provisioning scripts ==============="
+
+echo "===== step 3d - provisioning scripts ==============="
 ls -l "$APP/provisioning/" 2>&1
-echo "===== step 3e — venv =============================="
-"$APP/.venv/bin/python3" -c 'import sys; print("prefix:", sys.prefix)' 2>&1
-echo "paths baked into activate:"; grep -o '/[^ )"]*/\.venv' "$APP/.venv/bin/activate" 2>&1 | sort -u
-echo "bashrc login block: $(grep -c 'colorimeter login env' "$HOME/.bashrc" 2>/dev/null) marker line(s) (expect 2)"
-echo "===== step 5 — services ============================"
-systemctl is-enabled colorimeter.service colorimeter-gpio-init.service 2>&1
-systemctl is-active  colorimeter.service colorimeter-gpio-init.service 2>&1
-grep -E '^(User|WorkingDirectory|ExecStart)=' /etc/systemd/system/colorimeter.service 2>&1
+
+echo "===== step 3e - venv ==============================="
+"$APP/.venv/bin/python3" -c 'import sys; print(sys.prefix)' 2>&1
+echo "--- path baked into activate ---"
+grep VIRTUAL_ENV= "$APP/.venv/bin/activate" 2>&1
+echo "--- bashrc login block (expect 2) ---"
+grep -c 'colorimeter login env' "$HOME/.bashrc" 2>&1
+
+echo "===== step 5 - services ============================"
+systemctl is-enabled colorimeter.service 2>&1
+systemctl is-enabled colorimeter-gpio-init.service 2>&1
+systemctl is-active colorimeter.service 2>&1
+systemctl is-active colorimeter-gpio-init.service 2>&1
+grep -E '^(User|WorkingDirectory|ExecStart)=' \
+     /etc/systemd/system/colorimeter.service 2>&1
 ls -l /usr/local/bin/colorimeter-gpio-init.sh 2>&1
-echo "===== step 6 — calibration ========================="
-ls -l "$APP/config/touch_cal.json" "$APP/config/focus_cal.json" 2>&1
+
+echo "===== step 6 - calibration ========================="
+ls -l "$APP/config/touch_cal.json" 2>&1
+ls -l "$APP/config/focus_cal.json" 2>&1
 ```
 
 Read the output against the table in [1a](#1a--what-each-step-leaves-behind).
 Two lines deserve a second look:
 
-- **`prefix:` and the paths baked into `activate`** must all name the **current**
+- **The `step 3e - venv` paths** — the interpreter's own prefix and every
+  `VIRTUAL_ENV=` line from `activate` — must all name the **current**
   `$HOME/pi/Colorimeter/.venv`. If any shows a *different* path, the venv was
   built for a home directory that no longer applies — see
   [Part 4](#4b--the-pi-username-or-home-directory-changed).
