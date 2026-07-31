@@ -8,8 +8,9 @@
 #   -n       Dry run — show what would be sent without transferring anything
 #
 # Copies the exact contents of provisioning/deploy/ (bootstrap_system.sh,
-# make_venv.sh, verify_peripherals.sh, install/uninstall_colorimeter_service.sh,
-# install_gpio_init_service.sh, colorimeter-gpio-init.sh) to
+# make_venv.sh, verify_peripherals.sh, commissioning_status.sh,
+# install/uninstall_colorimeter_service.sh, install_gpio_init_service.sh,
+# colorimeter-gpio-init.sh) to
 #   <host>:~/pi/Colorimeter/provisioning/
 #
 # NOTE the flatten: on the desktop these live under provisioning/deploy/, but on
@@ -19,6 +20,10 @@
 #
 # This handles only the *scripts*. Firmware/config/DB are sent separately
 # (sync_to_pi.sh / bulk_sync_to_pi.sh + the DB copy in docs/commissioning step 3).
+#
+# On a unit of uncertain history, start by asking it what state it is in
+# (read-only; see docs/commissioning/00_reentry.md):
+#   ~/pi/Colorimeter/provisioning/commissioning_status.sh
 #
 # After uploading, run them ON the Pi in order (see docs/commissioning/03,05):
 #   ~/pi/Colorimeter/provisioning/bootstrap_system.sh

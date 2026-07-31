@@ -127,6 +127,7 @@ Low-risk, repeatable steps are provided as scripts. The **Pi-run** set lives in
 | `bootstrap_system.sh` | Install apt system packages (`gpiozero`/`lgpio`/`spidev`/`smbus2`/camera/…); **no daemon** | 🟢 |
 | `make_venv.sh` | Create `.venv` (`--system-site-packages`), verify imports, add the `~/.bashrc` login helper | 🟡 reuses an existing `.venv` |
 | `verify_peripherals.sh` | Check SPI0/I2C/1-Wire/SPI1/GPIO/camera after reboot | 🟡 stop the app first |
+| `commissioning_status.sh` | Report which commissioning steps this unit has had, and where to re-enter | 🟢 |
 | `install_colorimeter_service.sh` | Install + enable the boot-launch service | 🟢 |
 | `uninstall_colorimeter_service.sh` | Remove the boot-launch service | 🟢 |
 | `install_gpio_init_service.sh` | Install + enable the boot-time LED safe-state service | 🟢 |

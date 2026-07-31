@@ -71,7 +71,27 @@ what state it is in — you **observe the artifacts** each step leaves behind.
 
 ### 1b — Probe the unit (read-only, safe any time)
 
-Paste this whole block into an SSH session. It changes nothing.
+The same checks are available two ways. **Prefer the script** — it adds a verdict
+naming the step(s) to re-enter at, and there is no paste to mangle:
+
+```bash
+# On local — push the current script set first (safe on any unit):
+./push_pi_scripts.sh <host>
+
+# On the Pi:
+~/pi/Colorimeter/provisioning/commissioning_status.sh
+```
+
+It needs no `sudo`, changes nothing, works on a unit that has never been
+commissioned at all, and exits non-zero if it found gaps. It reports on steps
+1–6, flags **duplicated** `config.txt` overlay lines, and specifically detects
+the two artifacts a username or home-directory change invalidates — a relocated
+`.venv` and a stale `colorimeter.service`. It deliberately leaves venv imports to
+`make_venv.sh` and peripheral health to `verify_peripherals.sh`.
+
+Use the paste-able block below instead when `provisioning/` on the Pi is itself
+missing or of unknown vintage — which is the case the script cannot bootstrap
+itself out of. It changes nothing either.
 
 > **If you land on a `>` prompt, press Ctrl-C.** That is bash's continuation
 > prompt: a pasted line arrived with an unclosed quote, and everything you type

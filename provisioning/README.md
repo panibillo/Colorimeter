@@ -11,7 +11,7 @@ calibration → troubleshooting).
 
 | Path | Runs on | What |
 |---|---|---|
-| `deploy/` | the **Pi** | The exact set of scripts uploaded to `~/pi/Colorimeter/provisioning/` and run there: `bootstrap_system.sh`, `make_venv.sh`, `verify_peripherals.sh`, `install_colorimeter_service.sh`, `uninstall_colorimeter_service.sh`, `install_gpio_init_service.sh`, and the `colorimeter-gpio-init.sh` it installs to `/usr/local/bin`. |
+| `deploy/` | the **Pi** | The exact set of scripts uploaded to `~/pi/Colorimeter/provisioning/` and run there: `bootstrap_system.sh`, `make_venv.sh`, `verify_peripherals.sh`, `commissioning_status.sh`, `install_colorimeter_service.sh`, `uninstall_colorimeter_service.sh`, `install_gpio_init_service.sh`, and the `colorimeter-gpio-init.sh` it installs to `/usr/local/bin`. |
 | `reference/` | — | Stock `config.txt` skeletons for reference only; **not** uploaded. The canonical cal8 `[all]` block is in docs step 2. |
 
 > **Flatten note:** on the desktop the scripts sit at `provisioning/deploy/`, but
@@ -42,6 +42,14 @@ local-only `ssh-*.md` guide symlinks.
 5. On the Pi: `provisioning/verify_peripherals.sh`, `provisioning/install_gpio_init_service.sh`, `provisioning/install_colorimeter_service.sh` — docs step 5.
 
 ## Re-running these on an already-commissioned unit
+
+Start with `commissioning_status.sh` — it reports which steps this unit has
+actually had and names the step(s) to re-enter at:
+
+```bash
+./push_pi_scripts.sh <host>                              # on local
+~/pi/Colorimeter/provisioning/commissioning_status.sh    # on the Pi
+```
 
 All the `deploy/` scripts are written to be re-run, with two caveats worth
 knowing: `make_venv.sh` **reuses** an existing `.venv` (so it cannot repair a bad
