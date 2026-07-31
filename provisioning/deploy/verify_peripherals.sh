@@ -4,7 +4,7 @@
 # (step 2) and rebooting.
 #
 #   ssh rpizero2
-#   ~/pi/Colorimeter/commissioning/verify_peripherals.sh
+#   ~/pi/Colorimeter/provisioning/verify_peripherals.sh
 #
 # Checks SPI0, SPI1, I2C bus 1 (+ TSC2007 @0x48), 1-Wire (+ a DS18B20 and a
 # temperature read), the GPIO character device (gpiozero/lgpio backends —

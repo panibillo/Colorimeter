@@ -5,7 +5,7 @@
 # Run this ON the Raspberry Pi, as the account that owns the app directory
 # (e.g. "mgwwg" on a newly commissioned unit, or "bill" on rpizero1):
 #   ssh <host>
-#   ~/pi/Colorimeter/commissioning/install_colorimeter_service.sh
+#   ~/pi/Colorimeter/provisioning/install_colorimeter_service.sh
 #
 # The service runs as whichever user invokes this script (via `whoami`) — it
 # is not tied to one hardcoded username.

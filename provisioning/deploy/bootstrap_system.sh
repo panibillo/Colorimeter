@@ -3,7 +3,7 @@
 # needs. Run this ON the Raspberry Pi.
 #
 #   ssh rpizero2
-#   ~/pi/Colorimeter/commissioning/bootstrap_system.sh
+#   ~/pi/Colorimeter/provisioning/bootstrap_system.sh
 #
 # These heavy/hardware packages are installed system-wide via apt (not pip):
 # building numpy / OpenCV / h5py / picamera2 from source on a Zero-class board
@@ -55,4 +55,4 @@ sudo apt install -y rpicam-apps 2>/dev/null \
 
 echo ""
 echo "Done. Next: build the virtual environment with make_venv.sh"
-echo "  ~/pi/Colorimeter/commissioning/make_venv.sh"
+echo "  ~/pi/Colorimeter/provisioning/make_venv.sh"

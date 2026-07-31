@@ -4,7 +4,7 @@
 # bootstrap_system.sh has installed the apt packages.
 #
 #   ssh rpizero2
-#   ~/pi/Colorimeter/commissioning/make_venv.sh
+#   ~/pi/Colorimeter/provisioning/make_venv.sh
 #
 # The venv is created with --system-site-packages so it inherits the apt-built
 # numpy / OpenCV / h5py / picamera2 / GPIO / SPI / I2C packages without slow,
@@ -16,7 +16,7 @@
 
 set -euo pipefail
 
-# Project root = the directory that contains this script's parent (commissioning/).
+# Project root = the directory that contains this script's parent (provisioning/).
 PROJECT_ROOT="$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)"
 VENV_DIR="${PROJECT_ROOT}/.venv"
 VENV_PY="${VENV_DIR}/bin/python3"
@@ -46,7 +46,7 @@ else
 
 # >>> colorimeter login env >>>
 # Auto-navigate to the Colorimeter app and activate its venv on interactive SSH
-# logins. Added by commissioning/make_venv.sh — delete this block (through the
+# logins. Added by provisioning/deploy/make_venv.sh — delete this block (through the
 # matching "<<<" line) to disable. systemd is unaffected: the service calls the
 # venv python by absolute path and never sources .bashrc.
 if [[ $- == *i* ]]; then
