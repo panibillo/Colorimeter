@@ -1,13 +1,17 @@
 #!/usr/bin/env bash
-# up2py.sh — upload new and modified source files to the Pi.
+# bulk_sync_to_pi.sh — bulk-upload new/modified source files to the Pi.
+#
+# The BULK counterpart to sync_to_pi.sh: where sync_to_pi.sh sends only the
+# curated sync_pi_files.txt list, this blanket-syncs every *.py/*.yaml/*.csv
+# under src/, dev/, and config/. Use it when you want everything; use
+# sync_to_pi.sh for the minimal commissioning set.
 #
 # Usage:
-#   ./up2py.sh [-n] <host>
+#   ./bulk_sync_to_pi.sh [-n] <host>
 #
 #   <host>   SSH host alias or IP address  (e.g. rpizero1 or 192.168.1.42)
 #   -n       Dry run — show what would be sent without transferring anything
 #
-# Syncs src/, dev/, and config/ from the project root.
 # Transfers only *.py, *.yaml, and *.csv files; skips unmodified files.
 # Never deletes files on the remote.
 #
@@ -18,8 +22,8 @@
 #   python3 ~/pi/Colorimeter/src/main.py
 #
 # Examples:
-#   ./up2py.sh rpizero1
-#   ./up2py.sh -n 192.168.1.42
+#   ./bulk_sync_to_pi.sh rpizero1
+#   ./bulk_sync_to_pi.sh -n 192.168.1.42
 
 set -euo pipefail
 
