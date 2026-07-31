@@ -41,7 +41,7 @@ grep -nE 'spi|i2c|w1|dtoverlay|dtparam|pwm|gpio' /boot/firmware/config.txt
 A stock Zero 2 W image typically already has `dtparam=spi=off` (or `=on`),
 `camera_auto_detect=1`, `dtoverlay=vc4-kms-v3d`, `arm_64bit=1`, and an `[all]`
 section — that is the skeleton shown in
-`commissioning/Rpi-zero-W-2-for-mainboard_C-config.txt`. Leave those lines;
+`provisioning/reference/Rpi-zero-W-2-for-mainboard_C-config.txt`. Leave those lines;
 we only add/adjust the peripheral overlays.
 
 ---
@@ -87,7 +87,7 @@ Save and exit: **Ctrl+O**, Enter, **Ctrl+X**.
 
 > ⚠ **`spi0-1cs` — verify against the running reference unit.** The committed
 > cal8 config file
-> (`commissioning/Rpi-zero-W-for-main_board_cal8-config.txt`) **omits**
+> (`provisioning/reference/Rpi-zero-W-for-main_board_cal8-config.txt`) **omits**
 > `dtoverlay=spi0-1cs`, but the detailed cal8 guide **includes** it, because a
 > default `dtparam=spi=on` claims **GPIO7 as SPI0 CE1** — and GPIO7 is LED
 > channel 9 on this board. Before trusting either, check the working `rpizero1`:
@@ -137,7 +137,7 @@ ls /sys/bus/w1/devices/   # → a 28-* entry if the probe is connected
 Full per-peripheral verification (with expected `pinctrl` states, `i2cdetect`,
 temperature read, PWM blink, and the shift-register walk test) is in
 [05_testing.md](05_testing.md) and the scripted
-`commissioning/verify_peripherals.sh`.
+`provisioning/verify_peripherals.sh`.
 
 ---
 

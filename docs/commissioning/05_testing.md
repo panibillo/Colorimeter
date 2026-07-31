@@ -19,7 +19,7 @@ device (`gpiozero`/`lgpio` backends — no daemon), and the camera, printing a
 
 ```bash
 # On the Pi:
-~/pi/Colorimeter/commissioning/verify_peripherals.sh
+~/pi/Colorimeter/provisioning/verify_peripherals.sh
 ```
 
 If any line is ✗, jump to [07_troubleshooting.md](07_troubleshooting.md) or the
@@ -47,25 +47,28 @@ a stray bit **on** during boot. `colorimeter-gpio-init.service` clears it after
 boot (writes `0x00`, pulses RCLK) and forces the direct-control pins low. The
 application service is ordered to start **after** it.
 
-Create it once using the full recipe in the cal8 reference guide:
+Install it with the bundled script (on the Pi, after step 3d uploaded the
+`provisioning/` set):
 
-➡ **[edocs/rpi_configuration_guide_for_cal8.md — Step 12](../../edocs/rpi_configuration_guide_for_cal8.md)**
-(creates `/usr/local/bin/colorimeter-gpio-init.sh` and the matching
-`colorimeter-gpio-init.service`, then enables it).
+```bash
+# On the Pi:
+~/pi/Colorimeter/provisioning/install_gpio_init_service.sh
+```
 
-Confirm it is active:
+It copies `colorimeter-gpio-init.sh` to `/usr/local/bin/`, writes the
+`colorimeter-gpio-init.service` unit, then enables and starts it. Confirm:
 
 ```bash
 systemctl status colorimeter-gpio-init.service    # → active (exited), SUCCESS
 ```
 
+> **Manual alternative:** the same unit can be created by hand — full recipe in
+> **[edocs/rpi_configuration_guide_for_cal8.md — Step 12](../../edocs/rpi_configuration_guide_for_cal8.md)**.
+> The installer just automates it.
+
 > A short (~10–15 s) LED-on flash during boot, until this service runs, is
 > expected with the software-only fix. See the guide's note on the hardware fix
 > for the next PCB revision.
->
-> *Candidate for automation:* this service is not yet captured as a committed
-> script under `commissioning/` — it is created inline from the guide. A future
-> `install_gpio_init_service.sh` would close that gap.
 
 ---
 
@@ -96,7 +99,7 @@ re-run after code changes):
 
 ```bash
 # On the Pi:
-~/pi/Colorimeter/commissioning/install_colorimeter_service.sh
+~/pi/Colorimeter/provisioning/install_colorimeter_service.sh
 ```
 
 This writes `/etc/systemd/system/colorimeter.service` (User=*whoever runs the
@@ -110,7 +113,7 @@ systemctl status colorimeter --no-pager
 journalctl -u colorimeter -f          # live logs; Ctrl-C to stop watching
 ```
 
-To undo: `~/pi/Colorimeter/commissioning/uninstall_colorimeter_service.sh`
+To undo: `~/pi/Colorimeter/provisioning/uninstall_colorimeter_service.sh`
 (leaves the gpio-init service and all files untouched).
 
 ---

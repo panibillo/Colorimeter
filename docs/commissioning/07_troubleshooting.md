@@ -45,7 +45,7 @@ Query one pin at a time: `pinctrl get <n>` (`raspi-gpio` is not installed).
 
 ### venv import fails (`make_venv.sh`)
 
-- Re-run `commissioning/bootstrap_system.sh` — a system apt package is missing.
+- Re-run `provisioning/bootstrap_system.sh` — a system apt package is missing.
 - The venv **must** have been created with `--system-site-packages`, or
   apt-installed numpy/cv2/h5py/picamera2 are invisible inside it. `make_venv.sh`
   does this; if you created a venv by hand without the flag, delete `.venv` and
@@ -77,7 +77,7 @@ systemctl is-enabled colorimeter.service colorimeter-gpio-init.service
 ```
 
 Re-install the launch service with
-`~/pi/Colorimeter/commissioning/install_colorimeter_service.sh` (idempotent).
+`~/pi/Colorimeter/provisioning/install_colorimeter_service.sh` (idempotent).
 
 ---
 

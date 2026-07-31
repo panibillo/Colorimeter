@@ -55,11 +55,11 @@ points (`src/main.py`, `dev/camtest8.py`) import, plus the config they read.
 - Re-run it any time you change code; it transfers only what changed (checksum).
 - It deliberately **does not** send `config/touch_cal.json` (device-specific
   touchscreen calibration written on the Pi) — see step 6.
-- Alternative bulk uploader: `./uploadColorimeter.sh <host>` rsyncs all
+- Alternative bulk uploader: `./bulk_sync_to_pi.sh <host>` rsyncs all
   `*.py/*.yaml/*.csv` under `src/ dev/ config/` (excludes the mock drivers).
   Use `-n` for a dry run.
 
-> Neither sync script copies `.venv/`, the `commissioning/` scripts, or the
+> Neither sync script copies `.venv/`, the `provisioning/deploy/` scripts, or the
 > `.sqlite` database — those are handled explicitly below.
 
 ---
@@ -104,16 +104,19 @@ populated. An empty `colorcard` means the wrong/blank DB was copied.
 
 ---
 
-## Step 3d — Upload the commissioning scripts (on local)
+## Step 3d — Upload the Pi-run scripts (on local)
 
-The setup/verify scripts live in `commissioning/`. Send the shell scripts (skip
-the two `ssh-*.md` symlinks — they point into your local `~/Documents` and would
-dangle on the Pi):
+The setup/verify scripts live in `provisioning/deploy/`. Push that exact set to
+`~/pi/Colorimeter/provisioning/` on the Pi with the bundled helper (flattened
+one level, which `make_venv.sh` relies on):
 
 ```bash
 # On local, from ~/Projects/Colorimeter:
-rsync -av --exclude='ssh-*.md' commissioning/ <host>:~/pi/Colorimeter/commissioning/
+./push_pi_scripts.sh <host>            # add -n for a dry run
 ```
+
+The two `ssh-*.md` guides are local-only symlinks under `docs/commissioning/`,
+not part of this set, so they are never uploaded.
 
 ---
 
@@ -127,8 +130,8 @@ board is slow and often runs out of memory. The venv then inherits them with
 ```bash
 # On the Pi:
 cd ~/pi/Colorimeter
-./commissioning/bootstrap_system.sh     # apt packages (no daemon)
-./commissioning/make_venv.sh            # create .venv, verify key imports
+./provisioning/bootstrap_system.sh     # apt packages (no daemon)
+./provisioning/make_venv.sh            # create .venv, verify key imports
 ```
 
 `make_venv.sh` finishes by importing `numpy`, `cv2`, `h5py`, `yaml`, `spidev`,

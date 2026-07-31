@@ -65,7 +65,7 @@ New SD card
      │    ├─ src/…                   ← firmware (rsync'd from desktop)
      │    ├─ config/…                ← instrument.yaml, palette.yaml
      │    ├─ src/colorimeter.sqlite  ← reference DB (copied, not built from DDL)
-     │    ├─ commissioning/*.sh      ← setup/verify scripts
+     │    ├─ provisioning/*.sh       ← setup/verify scripts (uploaded)
      │    └─ .venv/                  ← --system-site-packages venv (step 3)
      └─ systemd services
           ├─ colorimeter-gpio-init.service  ← clears 74HC595 at boot (LEDs off)
@@ -110,16 +110,23 @@ Quick reference; wiring detail lives in the electronics docs under `edocs/`.
 
 ## Automation
 
-Low-risk, repeatable steps are provided as scripts in the repo's
-`commissioning/` directory (run **on the Pi**):
+Low-risk, repeatable steps are provided as scripts. The **Pi-run** set lives in
+`provisioning/deploy/` in the repo and is uploaded to
+`~/pi/Colorimeter/provisioning/` on the Pi by `push_pi_scripts.sh`:
 
-| Script | Does |
+| Script (in `provisioning/deploy/`) | Does |
 |---|---|
-| `commissioning/bootstrap_system.sh` | Install apt system packages (`gpiozero`/`lgpio`/`spidev`/`smbus2`/camera/…); **no daemon** |
-| `commissioning/make_venv.sh` | Create `.venv` (`--system-site-packages`) and verify imports |
-| `commissioning/verify_peripherals.sh` | Check SPI0/I2C/1-Wire/SPI1/GPIO/camera after reboot |
-| `commissioning/install_colorimeter_service.sh` | Install + enable the boot-launch service (existing) |
-| `commissioning/uninstall_colorimeter_service.sh` | Remove the boot-launch service (existing) |
+| `bootstrap_system.sh` | Install apt system packages (`gpiozero`/`lgpio`/`spidev`/`smbus2`/camera/…); **no daemon** |
+| `make_venv.sh` | Create `.venv` (`--system-site-packages`), verify imports, add the `~/.bashrc` login helper |
+| `verify_peripherals.sh` | Check SPI0/I2C/1-Wire/SPI1/GPIO/camera after reboot |
+| `install_colorimeter_service.sh` | Install + enable the boot-launch service |
+| `uninstall_colorimeter_service.sh` | Remove the boot-launch service |
+| `install_gpio_init_service.sh` | Install + enable the boot-time LED safe-state service |
+| `colorimeter-gpio-init.sh` | The safe-state script itself (installed to `/usr/local/bin`) |
+
+**Desktop-run** helpers stay at the repo root: `sync_to_pi.sh` (curated firmware
+push), `bulk_sync_to_pi.sh` (blanket `src/dev/config` push), `push_pi_scripts.sh`
+(upload the `provisioning/deploy/` set), and `sync_from_pi.sh` (Pi→desktop pull).
 
 The **`/boot/firmware/config.txt` edit is deliberately *not* scripted** — a bad
 `config.txt` can stop the Pi from booting, so step 2 walks through it manually
@@ -136,15 +143,16 @@ commissioned by copying a working `colorimeter.sqlite`; see step 3.
 Findings from the existing docs, recorded here so they can be corrected or
 retired deliberately. **None of these files have been edited by this guide.**
 
-> ⚠ **Backup note:** `docs/` and `edocs/` are **not tracked in Git** (only
-> `commissioning/*.txt` and the service scripts are). Commit anything under
-> those folders you care about *before* editing or replacing it.
+> ⚠ **Backup note:** the commissioning docs under `docs/` and the
+> `provisioning/` scripts + config skeletons **are** tracked in Git now, but
+> most of `edocs/` is not. Commit anything under `edocs/` you care about
+> *before* editing or replacing it.
 
 | File | Finding | Recommendation |
 |---|---|---|
 | `edocs/rpi_configuration_guide_for_cal8.md` | Excellent deep reference for cal8 peripherals and the `colorimeter-gpio-init` service, but written for the **original Zero W / Bookworm**; carries Bullseye/Bookworm branching this guide drops. Also its Step 7 adds `dtoverlay=spi0-1cs` (to free GPIO7 for LED channel 9) which the committed cal8 config file omits. ⚠ Its PWM sections (11e, install step) install **`pigpio`/`pigpiod`** for GPIO12/13 — **obsolete**: the code now uses `gpiozero` (backlight) and `lgpio` (beeper) with **no daemon**, per [CODING_GUIDELINES.md](../CODING_GUIDELINES.md). | Keep as the authoritative reference for the **gpio-init service** (step 5 links to it), but **ignore its pigpio/pigpiod steps**. Reconcile the `spi0-1cs` discrepancy on real hardware (step 2). |
-| `commissioning/Rpi-zero-W-2-for-mainboard_C-config.txt` | A **different board** (5-LED stripboard, `spi=off`, direct-GPIO LEDs), not the colorimeter. | Keep only as the stock Zero 2 W `config.txt` skeleton. Not the cal8 config. |
-| `commissioning/Rpi-zero-W-for-main_board_cal8-config.txt` | The cal8 `[all]` block, but for the **original Zero W** and missing `spi0-1cs`. | Basis for step 2's canonical block; verify `spi0-1cs`. |
+| `provisioning/reference/Rpi-zero-W-2-for-mainboard_C-config.txt` | A **different board** (5-LED stripboard, `spi=off`, direct-GPIO LEDs), not the colorimeter. | Keep only as the stock Zero 2 W `config.txt` skeleton. Not the cal8 config. |
+| `provisioning/reference/Rpi-zero-W-for-main_board_cal8-config.txt` | The cal8 `[all]` block, but for the **original Zero W** and missing `spi0-1cs`. | Basis for step 2's canonical block; verify `spi0-1cs`. |
 | `src/db_DDL.sql` | **Incomplete.** Defines 6 tables but the live DB has 9 (missing `colorcard`, `exposure`, `data`); all seed `INSERT`s are commented out. `src/db_manager.py:TABLE_DEFINITIONS` is a third, also-incomplete schema. | Do **not** build the DB from it. Treat a working `colorimeter.sqlite` as the source of truth. Regenerate the DDL from the live DB if a clean schema is needed. |
 | `project_setup.md` (repo root) | Older dual-environment notes assuming Pi Zero **v1** / ARMv6, `raspi-config nonint do_*`, and `/etc/dhcpcd.conf` static IP. | Superseded by this guide for the Zero 2 W / Trixie target. Retain for the `sync_pi_files.txt` maintenance notes. |
 
@@ -154,6 +162,6 @@ retired deliberately. **None of these files have been edited by this guide.**
 
 - [edocs/rpi_configuration_guide_for_cal8.md](../edocs/rpi_configuration_guide_for_cal8.md) — step-by-step peripheral setup + gpio-init service (deep reference)
 - [docs/DS18B20_troubleshooting.md](DS18B20_troubleshooting.md) — 1-Wire temperature probe diagnostics
-- [commissioning/ssh-key-setup-guide.md](../commissioning/ssh-key-setup-guide.md) — SSH keypair setup *(local-only symlink)*
-- [commissioning/ssh-terminal-color.md](../commissioning/ssh-terminal-color.md) — colored SSH terminal helper *(local-only symlink)*
+- [docs/commissioning/ssh-key-setup-guide.md](commissioning/ssh-key-setup-guide.md) — SSH keypair setup *(local-only symlink)*
+- [docs/commissioning/ssh-terminal-color.md](commissioning/ssh-terminal-color.md) — colored SSH terminal helper *(local-only symlink)*
 - [ARCHITECTURE.md](../ARCHITECTURE.md), [PROJECT_OVERVIEW.md](../PROJECT_OVERVIEW.md) — how the app is structured and why

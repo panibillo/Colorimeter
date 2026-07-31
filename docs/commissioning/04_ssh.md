@@ -14,7 +14,7 @@ the instrument to function; they make day-to-day access nicer and safer.
 Generate an Ed25519 keypair on local, copy the public key to the Pi, and add a
 `~/.ssh/config` alias so you can just type `ssh <host>`. Full walkthrough:
 
-➡ **[commissioning/ssh-key-setup-guide.md](../../commissioning/ssh-key-setup-guide.md)**
+➡ **[ssh-key-setup-guide.md](ssh-key-setup-guide.md)**
 *(local-only symlink into `~/Documents`; not present on fresh clones)*
 
 Short version:
@@ -52,7 +52,7 @@ A tiny local wrapper that tints the terminal background while you are SSH'd into
 the instrument and restores it on exit — an instant visual "you are on the Pi"
 cue. Full write-up:
 
-➡ **[commissioning/ssh-terminal-color.md](../../commissioning/ssh-terminal-color.md)**
+➡ **[ssh-terminal-color.md](ssh-terminal-color.md)**
 *(local-only symlink; describes the pattern for the NAS — adapt the `ssh ash`
 line to `ssh rpizero2`)*
 
