@@ -43,6 +43,7 @@ the previous ones are done.
 
 | # | Step | Page | Status |
 |---|------|------|--------|
+| 0 | **Re-entry & refresh** — *not* a fresh unit? Start here | [00_reentry.md](commissioning/00_reentry.md) | ✅ ready |
 | 1 | Flash the OS onto a new SD card (Imager headless preset, or the Desktop-wizard alt path) | [01_os_image.md](commissioning/01_os_image.md) | ✅ ready |
 | 2 | Configure peripherals in `config.txt` (SPI0, I2C, 1-Wire, SPI1, PWM) | [02_peripherals.md](commissioning/02_peripherals.md) | ✅ ready |
 | 3 | Upload firmware, database, and setup scripts; create directories + venv | [03_upload_firmware_db_venv.md](commissioning/03_upload_firmware_db_venv.md) | ✅ ready |
@@ -52,6 +53,13 @@ the previous ones are done.
 | 7 | Troubleshooting index | [07_troubleshooting.md](commissioning/07_troubleshooting.md) | ✅ ready |
 
 **Status legend:** ✅ ready · 🟡 usable, some gaps · 🚧 stub, awaiting software.
+
+Steps 1–6 describe a **linear first build**. If the unit in front of you is
+partly commissioned, of uncertain history, or was disrupted by a username /
+password / hostname change, go to
+**[00_reentry.md](commissioning/00_reentry.md)** instead — it tells you how to
+work out what state the unit is actually in, where to rejoin the sequence, and
+which steps are safe to repeat.
 
 ---
 
@@ -114,15 +122,20 @@ Low-risk, repeatable steps are provided as scripts. The **Pi-run** set lives in
 `provisioning/deploy/` in the repo and is uploaded to
 `~/pi/Colorimeter/provisioning/` on the Pi by `push_pi_scripts.sh`:
 
-| Script (in `provisioning/deploy/`) | Does |
-|---|---|
-| `bootstrap_system.sh` | Install apt system packages (`gpiozero`/`lgpio`/`spidev`/`smbus2`/camera/…); **no daemon** |
-| `make_venv.sh` | Create `.venv` (`--system-site-packages`), verify imports, add the `~/.bashrc` login helper |
-| `verify_peripherals.sh` | Check SPI0/I2C/1-Wire/SPI1/GPIO/camera after reboot |
-| `install_colorimeter_service.sh` | Install + enable the boot-launch service |
-| `uninstall_colorimeter_service.sh` | Remove the boot-launch service |
-| `install_gpio_init_service.sh` | Install + enable the boot-time LED safe-state service |
-| `colorimeter-gpio-init.sh` | The safe-state script itself (installed to `/usr/local/bin`) |
+| Script (in `provisioning/deploy/`) | Does | Repeat? |
+|---|---|---|
+| `bootstrap_system.sh` | Install apt system packages (`gpiozero`/`lgpio`/`spidev`/`smbus2`/camera/…); **no daemon** | 🟢 |
+| `make_venv.sh` | Create `.venv` (`--system-site-packages`), verify imports, add the `~/.bashrc` login helper | 🟡 reuses an existing `.venv` |
+| `verify_peripherals.sh` | Check SPI0/I2C/1-Wire/SPI1/GPIO/camera after reboot | 🟡 stop the app first |
+| `install_colorimeter_service.sh` | Install + enable the boot-launch service | 🟢 |
+| `uninstall_colorimeter_service.sh` | Remove the boot-launch service | 🟢 |
+| `install_gpio_init_service.sh` | Install + enable the boot-time LED safe-state service | 🟢 |
+| `colorimeter-gpio-init.sh` | The safe-state script itself (installed to `/usr/local/bin`) | — |
+
+🟢 safe to re-run any time · 🟡 re-run with a caveat. Full classification of
+*every* commissioning step — including the three that are **not** safe to repeat
+blindly (SD flash, the `config.txt` edit, the database copy) — is in
+[00_reentry.md, Part 3](commissioning/00_reentry.md#part-3--repeatability-reference).
 
 **Desktop-run** helpers stay at the repo root: `sync_to_pi.sh` (curated firmware
 push), `bulk_sync_to_pi.sh` (blanket `src/dev/config` push), `push_pi_scripts.sh`

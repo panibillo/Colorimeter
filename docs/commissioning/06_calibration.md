@@ -7,7 +7,11 @@ evolving), or 🚧 (not implemented yet — placeholder).
 Each colorimeter unit needs several distinct calibrations. They are independent;
 do the ones that are ready and revisit this page as the software lands.
 
-← [05_testing.md](05_testing.md) · Back to [master guide](../RPi_commissioning.md) · Next → [07_troubleshooting.md](07_troubleshooting.md)
+← [05_testing.md](05_testing.md) · Back to [master guide](../RPi_commissioning.md) · Re-entering? [00_reentry.md](00_reentry.md) · Next → [07_troubleshooting.md](07_troubleshooting.md)
+
+> ⚠ **Stop the app first:** `sudo systemctl stop colorimeter`. Both calibrations
+> below drive the display/camera directly and will contend with a running
+> `main.py`. Restart it (or reboot) when you are done.
 
 ---
 

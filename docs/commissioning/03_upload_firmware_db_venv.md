@@ -9,7 +9,12 @@ Goal: put the application code (**firmware**), the **reference database**, the
 Some commands run **on local** (the desktop, source of truth for the code) and
 some **on the Pi**. Each block is marked.
 
-← [02_peripherals.md](02_peripherals.md) · Back to [master guide](../RPi_commissioning.md) · Next → [04_ssh.md](04_ssh.md)
+← [02_peripherals.md](02_peripherals.md) · Back to [master guide](../RPi_commissioning.md) · Re-entering? [00_reentry.md](00_reentry.md) · Next → [04_ssh.md](04_ssh.md)
+
+> **Repeating this step?** 3a/3b/3d are safe to re-run any time. 🔴 **3c
+> overwrites the unit's database** — see the warning there. 🟡 **3e's
+> `make_venv.sh` reuses an existing `.venv`** and will not repair a bad or
+> relocated one; `rm -rf .venv` first if you need a clean rebuild.
 
 ---
 
@@ -74,6 +79,15 @@ the entry-screen defaults. It is **not** in Git (`.sqlite` is gitignored) and is
 > **Do not build it from `src/db_DDL.sql`.** That DDL is incomplete — it defines
 > 6 of the 9 live tables (no `colorcard`, `exposure`, or `data`) and carries no
 > seed rows. The authoritative database is a working `colorimeter.sqlite`.
+
+> 🔴 **On a unit that has already been used, this step destroys data.** The DB is
+> not just seed rows once the instrument has run: it holds measurement results,
+> the `exposure` calibration table, and the rows that index the HDF5 files in
+> `captures/`. Copying the reference DB over it discards all of that and orphans
+> the archives. On a re-entry, run the row-count check *first* and only recopy if
+> `colorcard` is empty — [00_reentry.md § 1c](00_reentry.md#1c--is-the-database-real).
+> If unsure, back up first:
+> `cp ~/pi/Colorimeter/src/colorimeter.sqlite{,.bak-$(date +%F)}`
 
 Copy a known-good copy onto the new unit:
 

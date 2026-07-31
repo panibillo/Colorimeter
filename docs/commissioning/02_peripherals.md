@@ -7,7 +7,16 @@ Goal: enable the buses the cal8 mainboard needs — **SPI0** (display), **I2C bu
 and leave hardware **PWM** (backlight) available. This is a single edit to
 `/boot/firmware/config.txt`, done manually with a backup.
 
-← [01_os_image.md](01_os_image.md) · Back to [master guide](../RPi_commissioning.md) · Next → [03_upload_firmware_db_venv.md](03_upload_firmware_db_venv.md)
+← [01_os_image.md](01_os_image.md) · Back to [master guide](../RPi_commissioning.md) · Re-entering? [00_reentry.md](00_reentry.md) · Next → [03_upload_firmware_db_venv.md](03_upload_firmware_db_venv.md)
+
+> 🔴 **Already been through this step once?** Do **not** paste the block from
+> [2b](#step-2b--add-the-cal8-peripheral-block) again — re-running the edit
+> appends a *second* copy of every overlay line, and a duplicate `dtoverlay` can
+> stop the Pi booting. Run the read-only
+> [2c](#step-2c--sanity-check-the-edit-before-rebooting) checks *instead*, and
+> only edit what they flag. Same for [2a](#step-2a--locate-and-back-up-the-file):
+> re-running the `cp` overwrites your good backup with the current file — back up
+> to a dated name instead.
 
 > **Why not scripted?** A malformed `config.txt` can prevent boot. Editing it by
 > hand, with a backup, keeps recovery simple: if the Pi won't boot, mount the SD

@@ -7,7 +7,11 @@ power-up — no monitor or keyboard needed. We do this with Raspberry Pi Imager'
 built-in customisation, which writes the Wi-Fi, hostname, user, and SSH settings
 directly into the image.
 
-← Back to [master guide](../RPi_commissioning.md) · Next → [02_peripherals.md](02_peripherals.md)
+← Back to [master guide](../RPi_commissioning.md) · Resuming a part-built unit? [00_reentry.md](00_reentry.md) · Next → [02_peripherals.md](02_peripherals.md)
+
+> 🔴 **Flashing erases the card.** If the SD card already holds a commissioned
+> unit, rescue its database, `config/*_cal.json`, and `captures/` first —
+> [00_reentry.md § 4f](00_reentry.md#4f--re-flashing-the-card).
 
 > **Took a different route?** If you flashed the **Desktop** image and clicked
 > through the graphical first-boot wizard (user / password / timezone) instead

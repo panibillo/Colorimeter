@@ -40,3 +40,17 @@ local-only `ssh-*.md` guide symlinks.
 3. `./push_pi_scripts.sh <host>` — uploads `deploy/` — docs step 3d.
 4. On the Pi: `provisioning/bootstrap_system.sh`, then `provisioning/make_venv.sh` — docs step 3e.
 5. On the Pi: `provisioning/verify_peripherals.sh`, `provisioning/install_gpio_init_service.sh`, `provisioning/install_colorimeter_service.sh` — docs step 5.
+
+## Re-running these on an already-commissioned unit
+
+All the `deploy/` scripts are written to be re-run, with two caveats worth
+knowing: `make_venv.sh` **reuses** an existing `.venv` (so it cannot repair a bad
+or relocated one — `rm -rf .venv` first), and `verify_peripherals.sh` probes live
+buses (so stop `colorimeter.service` first). The steps that are *not* safe to
+repeat blindly are all outside this directory: the SD flash, the `config.txt`
+edit, and the database copy.
+
+➡ **[docs/commissioning/00_reentry.md](../docs/commissioning/00_reentry.md)** —
+how to work out what state an unknown unit is in, where to rejoin the sequence,
+the full repeat-safety classification, and what to fix after a username,
+password, hostname, or app-directory change.

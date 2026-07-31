@@ -5,7 +5,13 @@
 Two conveniences, both set up on your **local** machine. Neither is required for
 the instrument to function; they make day-to-day access nicer and safer.
 
-← [03_upload_firmware_db_venv.md](03_upload_firmware_db_venv.md) · Back to [master guide](../RPi_commissioning.md) · Next → [05_testing.md](05_testing.md)
+← [03_upload_firmware_db_venv.md](03_upload_firmware_db_venv.md) · Back to [master guide](../RPi_commissioning.md) · Re-entering? [00_reentry.md](00_reentry.md) · Next → [05_testing.md](05_testing.md)
+
+> 🔴 **Repeat hazards on this page.** Do **not** re-run `ssh-keygen` over an
+> existing key, and do **not** re-run the `cat >> ~/.ssh/config` block — it
+> appends a second `Host` stanza and the stale earlier one silently wins. Edit
+> the existing stanza instead. Details:
+> [00_reentry.md § step 4](00_reentry.md#step-4--ssh).
 
 ---
 

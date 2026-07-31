@@ -6,7 +6,13 @@ Where to look when a step fails. Peripheral-level detail lives in the two
 reference documents linked below; this page is the fast triage table plus the
 issues specific to commissioning (venv, services, DB).
 
-← [06_calibration.md](06_calibration.md) · Back to [master guide](../RPi_commissioning.md)
+← [06_calibration.md](06_calibration.md) · Back to [master guide](../RPi_commissioning.md) · Re-entering? [00_reentry.md](00_reentry.md)
+
+> **Not sure the unit was ever commissioned correctly?** This page assumes the
+> steps were run in order. If the unit's history is uncertain — or a username,
+> password, hostname, or directory changed part-way through — start from
+> [00_reentry.md](00_reentry.md), which probes what state the unit is actually in
+> before you debug symptoms.
 
 ---
 

@@ -6,7 +6,14 @@ Goal: prove each peripheral works, install the two systemd services, run the
 application by hand, then confirm it auto-starts at boot. Do these in order —
 stop and fix anything that fails before moving on.
 
-← [04_ssh.md](04_ssh.md) · Back to [master guide](../RPi_commissioning.md) · Next → [06_calibration.md](06_calibration.md)
+← [04_ssh.md](04_ssh.md) · Back to [master guide](../RPi_commissioning.md) · Re-entering? [00_reentry.md](00_reentry.md) · Next → [06_calibration.md](06_calibration.md)
+
+> ⚠ **Re-running these on a unit where 5d is already installed?** Stop the app
+> service first — `sudo systemctl stop colorimeter` — then start it again (or
+> reboot) when you finish. A running `main.py` holds the display, camera, and
+> I2C bus, so 5a's probes and 5c's hand-run will contend with it and fail in ways
+> that look like hardware faults. `Restart=on-failure` means a killed instance
+> comes back on its own. Every step on this page is otherwise safe to repeat.
 
 ---
 
@@ -24,7 +31,9 @@ device (`gpiozero`/`lgpio` backends — no daemon), and the camera, printing a
 
 If any line is ✗, jump to [07_troubleshooting.md](07_troubleshooting.md) or the
 [cal8 reference guide](../../edocs/rpi_configuration_guide_for_cal8.md) for that
-bus, fix it, and re-run. The script is read-only and safe to run repeatedly.
+bus, fix it, and re-run. The script makes no system changes and is safe to run
+repeatedly — but its `i2cdetect` and `rpicam-hello` probes do touch live buses,
+so stop `colorimeter.service` first if it is already installed.
 
 Manual spot checks it wraps (run individually if you want detail):
 
