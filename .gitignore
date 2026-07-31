@@ -25,9 +25,9 @@ docs/.~lock.*
 !requirements-frozen.txt
 !system_requirements.txt
 !sync_pi_files.txt
-!commissioning/*.txt
+!provisioning/reference/*.txt
 
 # ── Local-only symlinks ───────────────────────────────────────────────────
 # Absolute-path links into ~/Documents; would dangle on any other clone.
-commissioning/ssh-key-setup-guide.md
-commissioning/ssh-terminal-color.md
+docs/commissioning/ssh-key-setup-guide.md
+docs/commissioning/ssh-terminal-color.md
