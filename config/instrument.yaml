@@ -23,7 +23,11 @@ capture:
   fallback_exposure_group: "3"
 
 # Timed protocol steps, in seconds. The simulation profile (bottom of file)
-# shortens the reagent waits so a run is quick to test.
+# shortens the reagent waits so a run is quick to test, but only in simulation.
+# To shorten them on the instrument itself use Menu -> Config: the durations
+# entered there are saved to config/user_settings.json and win over both the
+# values here and the simulation profile. Menu -> Config -> Restore drops them
+# and puts these values back in charge.
 protocol:
   reagent1_secs: 120
   reagent2_secs: 420
@@ -60,7 +64,8 @@ database:
 # simulation_overrides profile below is merged on top of everything else.
 simulation: false
 
-# Values that replace their counterparts above only while simulation is active.
+# Values that replace their counterparts above only while simulation is active
+# (COLORIMETER_SIMULATION=1 or `simulation: true`) — never on real hardware.
 # Add any key here to give it a simulation-specific variant.
 simulation_overrides:
   protocol:

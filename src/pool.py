@@ -159,9 +159,33 @@ class Pool:
         button("menu_cancel_btn", L.MENU_CANCEL_BTN, "hdr_text", "btn_gray",   18, text="CANCEL")
         label("menu_title",       L.MENU_TITLE,       "black",   "white",     20, text="Menu")
         button("menu_ok_btn",     L.MENU_OK_BTN,       "hdr_text", "start_green", 18, text="OK")
-        button("menu_capture",    L.MENU_CAPTURE,      "hdr_text", "start_green", 20, text="Capture")
-        button("menu_defaults",   L.MENU_DEFAULTS,     "hdr_text", "slot_a_bg",   20, text="Defaults")
-        button("menu_power",      L.MENU_POWER,        "hdr_text", "label_coral", 20, text="Power")
+        # The 3x2 option grid: left column Capture/Defaults/Config, right column
+        # two unassigned stubs and Power.
+        button("menu_capture",    L.MENU_CAPTURE,      "hdr_text", "start_green", 18, text="Capture")
+        button("menu_stub1",      L.MENU_STUB1,        "hdr_text", "btn_gray",    18, text="stub1")
+        button("menu_defaults",   L.MENU_DEFAULTS,     "hdr_text", "slot_a_bg",   18, text="Defaults")
+        button("menu_stub2",      L.MENU_STUB2,        "hdr_text", "btn_gray",    18, text="stub2")
+        button("menu_config",     L.MENU_CONFIG,       "hdr_text", "slot_b_bg",   18, text="Config")
+        button("menu_power",      L.MENU_POWER,        "hdr_text", "label_coral", 18, text="Power")
+
+        # ── config screen (Menu → Config): the two reagent countdowns ───────────
+        # Each row is label / seconds field / four step buttons; the arbiter
+        # wires the steps and writes the staged value into the field.
+        label("cfg_title",   L.MENU_TITLE, "black", "white", 20, text="Config")
+        label("cfg_r1_lbl",  L.CFG_LBL1,   "black", "white", 13, align="left", text="Reagent 1")
+        field("cfg_r1_fld",  L.CFG_FLD1,   18, "field_blue", align="center")
+        button("cfg_r1_m60", L.CFG_R1_M60, "btn_text", "btn_gray", 13, text="-60")
+        button("cfg_r1_m10", L.CFG_R1_M10, "btn_text", "btn_gray", 13, text="-10")
+        button("cfg_r1_p10", L.CFG_R1_P10, "btn_text", "btn_gray", 13, text="+10")
+        button("cfg_r1_p60", L.CFG_R1_P60, "btn_text", "btn_gray", 13, text="+60")
+        label("cfg_r2_lbl",  L.CFG_LBL2,   "black", "white", 13, align="left", text="Reagent 2")
+        field("cfg_r2_fld",  L.CFG_FLD2,   18, "field_blue", align="center")
+        button("cfg_r2_m60", L.CFG_R2_M60, "btn_text", "btn_gray", 13, text="-60")
+        button("cfg_r2_m10", L.CFG_R2_M10, "btn_text", "btn_gray", 13, text="-10")
+        button("cfg_r2_p10", L.CFG_R2_P10, "btn_text", "btn_gray", 13, text="+10")
+        button("cfg_r2_p60", L.CFG_R2_P60, "btn_text", "btn_gray", 13, text="+60")
+        label("cfg_hint",    L.CFG_HINT,   "black", "white", 13, align="left")
+        button("cfg_restore", L.CFG_RESTORE, "btn_text", "btn_gray", 16, text="Restore")
 
         # ── capture screen (Menu → Capture): choice form, progress, result ──────
         # Mode + N buttons act as radio groups — the arbiter recolours the

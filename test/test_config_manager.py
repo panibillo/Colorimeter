@@ -14,7 +14,9 @@ or with unittest discovery:
     python -m unittest test.test_config_manager
 """
 
+import json
 import os
+import shutil
 import sys
 import tempfile
 import unittest
@@ -41,10 +43,18 @@ class ConfigTestCase(unittest.TestCase):
     def setUp(self):
         self._saved_env  = {k: os.environ.pop(k, None) for k in self._MANAGED_ENV}
         self._saved_path = config_manager.INSTRUMENT_PATH
+        self._saved_user = config_manager.USER_SETTINGS_PATH
+        # Operator settings saved on a real instrument must not colour the
+        # tests, so every case starts from an empty (not yet written) file in a
+        # temporary directory.
+        self._user_dir = tempfile.mkdtemp()
+        config_manager.USER_SETTINGS_PATH = Path(self._user_dir) / "user_settings.json"
         config_manager.load(reload=True)
 
     def tearDown(self):
-        config_manager.INSTRUMENT_PATH = self._saved_path
+        config_manager.INSTRUMENT_PATH    = self._saved_path
+        config_manager.USER_SETTINGS_PATH = self._saved_user
+        shutil.rmtree(self._user_dir, ignore_errors=True)
         for key, value in self._saved_env.items():
             if value is None:
                 os.environ.pop(key, None)
@@ -268,6 +278,93 @@ class TestSimulationOverlay(ConfigTestCase):
         config_manager.load(reload=True)
         self.assertFalse(config_manager.is_simulation())
         self.assertEqual(config_manager.reagent1_secs(), 120)
+
+
+class TestUserSettings(ConfigTestCase):
+    """
+    Values the operator changes on the instrument (Menu -> Config) are saved to
+    user_settings.json and win over every other layer.
+    """
+
+    _CONFIG = (
+        "protocol:\n"
+        "  reagent1_secs: 120\n"
+        "  reagent2_secs: 420\n"
+        "simulation: false\n"
+        "simulation_overrides:\n"
+        "  protocol:\n"
+        "    reagent1_secs: 10\n"
+    )
+
+    def test_nothing_saved_leaves_the_config_file_in_charge(self):
+        self.use_config(self._CONFIG)
+        self.assertEqual(config_manager.reagent1_secs(), 120)
+        self.assertEqual(config_manager.user_settings(), {})
+
+    def test_saved_value_wins_over_the_config_file(self):
+        self.use_config(self._CONFIG)
+        self.assertTrue(
+            config_manager.save_user_setting("protocol", "reagent1_secs", 45))
+        self.assertEqual(config_manager.reagent1_secs(), 45)
+
+    def test_saved_value_survives_a_reload(self):
+        self.use_config(self._CONFIG)
+        config_manager.save_user_setting("protocol", "reagent1_secs", 45)
+        config_manager.load(reload=True)
+        self.assertEqual(config_manager.reagent1_secs(), 45)
+
+    def test_saved_value_wins_over_the_simulation_profile(self):
+        """The point of the Config screen: a custom wait holds in either mode."""
+        self.use_config(self._CONFIG)
+        os.environ[config_manager.SIMULATION_ENV] = "1"
+        config_manager.load(reload=True)
+        self.assertEqual(config_manager.reagent1_secs(), 10)   # profile applies
+        config_manager.save_user_setting("protocol", "reagent1_secs", 45)
+        self.assertEqual(config_manager.reagent1_secs(), 45)
+
+    def test_saving_one_key_leaves_its_siblings_alone(self):
+        self.use_config(self._CONFIG)
+        config_manager.save_user_setting("protocol", "reagent1_secs", 45)
+        self.assertEqual(config_manager.reagent2_secs(), 420)
+        self.assertEqual(config_manager.analysis_secs(), 1.5)
+
+    def test_configured_reports_the_file_value_regardless(self):
+        self.use_config(self._CONFIG)
+        config_manager.save_user_setting("protocol", "reagent1_secs", 45)
+        self.assertEqual(config_manager.configured("protocol", "reagent1_secs"), 120)
+
+    def test_clearing_restores_the_file_value(self):
+        self.use_config(self._CONFIG)
+        config_manager.save_user_setting("protocol", "reagent1_secs", 45)
+        self.assertTrue(
+            config_manager.clear_user_setting("protocol", "reagent1_secs"))
+        self.assertEqual(config_manager.reagent1_secs(), 120)
+        self.assertEqual(config_manager.user_settings(), {})
+
+    def test_clearing_what_was_never_set_is_a_no_op(self):
+        self.use_config(self._CONFIG)
+        self.assertTrue(
+            config_manager.clear_user_setting("protocol", "reagent1_secs"))
+        self.assertEqual(config_manager.reagent1_secs(), 120)
+
+    def test_deleting_the_file_restores_the_file_values(self):
+        self.use_config(self._CONFIG)
+        config_manager.save_user_setting("protocol", "reagent1_secs", 45)
+        os.unlink(config_manager.USER_SETTINGS_PATH)
+        config_manager.load(reload=True)
+        self.assertEqual(config_manager.reagent1_secs(), 120)
+
+    def test_corrupt_settings_file_is_ignored(self):
+        self.use_config(self._CONFIG)
+        Path(config_manager.USER_SETTINGS_PATH).write_text("{not json")
+        config_manager.load(reload=True)
+        self.assertEqual(config_manager.reagent1_secs(), 120)
+
+    def test_saved_file_holds_only_what_changed(self):
+        self.use_config(self._CONFIG)
+        config_manager.save_user_setting("protocol", "reagent2_secs", 30)
+        saved = json.loads(Path(config_manager.USER_SETTINGS_PATH).read_text())
+        self.assertEqual(saved, {"protocol": {"reagent2_secs": 30}})
 
 
 class TestCaching(ConfigTestCase):

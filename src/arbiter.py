@@ -68,9 +68,26 @@ log = logging.getLogger(__name__)
 # and after results) no capture is imminent, so the camera is released.
 _CAMERA_PHASES = ("reagent1", "reagent2", "read", "analysis")
 
+# Bounds for a reagent countdown entered on the Menu → Config screen.  Zero is
+# excluded (a wait that expires the instant it starts is never what was meant)
+# and the ceiling is one hour, well past the longest protocol step.
+_CFG_MIN_SECS, _CFG_MAX_SECS = 1, 3600
+# The step buttons on each config row, in the order they are laid out.
+_CFG_STEPS = (-60, -10, 10, 60)
+
 # Tunables (LED range, loop cadence, timeouts, reagent durations, rowid, the
 # backlight pin) live in config/instrument.yaml and are read through
 # config_manager — see the config.* calls throughout this module.
+
+
+def _clamp_secs(secs: int) -> int:
+    """Hold an entered reagent duration inside the allowed range."""
+    return max(_CFG_MIN_SECS, min(_CFG_MAX_SECS, int(secs)))
+
+
+def _mmss(secs: int) -> str:
+    """Seconds as m:ss, so the config screen shows what a duration means."""
+    return f"{secs // 60}:{secs % 60:02d}"
 
 
 class Arbiter:
@@ -154,6 +171,10 @@ class Arbiter:
         self._cap_result:   str = ""
         # The group saved before the choice screen opened, so CANCEL can restore it.
         self._cap_saved_on_open: str | None = None
+
+        # Config screen state (Menu → Config): the reagent countdowns in
+        # seconds, staged while the screen is open and written only by its OK.
+        self._cfg_secs: dict[str, int] = {"r1": 0, "r2": 0}
 
     # ── Lifecycle ──────────────────────────────────────────────────────────────
 
@@ -523,8 +544,14 @@ class Arbiter:
         self._pool.put("menu_cancel_btn", "CANCEL", on=self._menu_cancel)
         self._pool.put("menu_title",      "Menu")
         self._pool.put("menu_ok_btn",     "OK",     on=self._menu_ok)
+        # The 3x2 option grid, laid out in layout.py: the two stubs are shown
+        # disabled (no handler wired) so the grid reads as a whole while the
+        # screens behind them are still to come.
         self._pool.put("menu_capture",    "Capture",  on=self._menu_open_capture)
+        self._pool.put("menu_stub1",      "stub1",    enabled=False)
         self._pool.put("menu_defaults",   "Defaults", on=self._menu_open_defaults)
+        self._pool.put("menu_stub2",      "stub2",    enabled=False)
+        self._pool.put("menu_config",     "Config",   on=self._menu_open_config)
         self._pool.put("menu_power",      "Power",    on=self._menu_power)
         self._pool.render(self._disp)
         self._rebuild_focus()
@@ -573,6 +600,122 @@ class Arbiter:
     def _menu_select_defaults(self) -> None:
         self._menu_staged_rowid = config.default_rowid()   # the only row today
         self._render_menu()
+
+    # ── Config screen (Menu → Config) ──────────────────────────────────────────
+    # Custom reagent countdowns, entered on the instrument itself.  The two
+    # durations are staged in self._cfg_secs while the screen is open and are
+    # written (through config_manager's user-settings layer) only by its OK, so
+    # a mis-tap costs nothing — CANCEL leaves the saved values alone.
+    #
+    # A saved duration wins over both instrument.yaml and the simulation
+    # profile, so it applies on real hardware too — which the shortened
+    # simulation_overrides durations do not.
+
+    def _menu_open_config(self) -> None:
+        """Open the config screen, staging the durations now in force."""
+        self._cfg_secs = {"r1": config.reagent1_secs(),
+                          "r2": config.reagent2_secs()}
+        self._render_config()
+
+    def _render_config(self) -> None:
+        if self._pool is None:
+            return
+        p = self._pool
+        p.hide_all()
+        # Top-corner chrome like the Menu and Capture screens.
+        p.put("menu_cancel_btn", "CANCEL", on=self._cfg_cancel)
+        p.put("cfg_title",       "Config")
+        p.put("menu_ok_btn",     "OK",     on=self._cfg_ok)
+        for row, n in (("r1", 1), ("r2", 2)):
+            p.put(f"cfg_{row}_lbl", f"Reagent {n}")
+            for step in _CFG_STEPS:
+                p.put(self._cfg_step_widget(row, step), f"{step:+d}",
+                      on=(lambda r=row, d=step: self._cfg_step(r, d)))
+        p.put("cfg_r1_fld")
+        p.put("cfg_r2_fld")
+        p.put("cfg_hint")
+        p.put("cfg_restore", "Restore", on=self._cfg_restore)
+        self._cfg_paint_values(redraw=False)
+        p.render(self._disp)
+        self._rebuild_focus()
+
+    @staticmethod
+    def _cfg_step_widget(row: str, step: int) -> str:
+        """Widget name of one step button, e.g. ('r1', -60) -> 'cfg_r1_m60'."""
+        return f"cfg_{row}_{'m' if step < 0 else 'p'}{abs(step)}"
+
+    def _cfg_paint_values(self, redraw: bool = True) -> None:
+        """
+        Write the staged durations into their fields and the hint line.
+
+        `redraw` repaints just those three widgets — a step button changes
+        nothing else on the screen, so it costs one small update instead of a
+        full-screen render on every tap.
+        """
+        p = self._pool
+        if p is None:
+            return
+        for row in ("r1", "r2"):
+            p.set(f"cfg_{row}_fld", str(self._cfg_secs[row]))
+        p.set("cfg_hint", f"seconds     R1 {_mmss(self._cfg_secs['r1'])}"
+                          f"     R2 {_mmss(self._cfg_secs['r2'])}")
+        if redraw:
+            for name in ("cfg_r1_fld", "cfg_r2_fld", "cfg_hint"):
+                p.redraw(self._disp, name)
+
+    def _cfg_staged(self, row: str) -> int:
+        """
+        The row's duration as it now reads on screen, clamped to the allowed
+        range.  The field is editable (a keyboard can type a duration straight
+        in), so what it shows — not the last stepped value — is the answer;
+        anything unparseable falls back to the staged value.
+        """
+        field = self._pool.get(f"cfg_{row}_fld") if self._pool else None
+        try:
+            return _clamp_secs(int(str(field.value).strip()))
+        except (AttributeError, TypeError, ValueError):
+            return self._cfg_secs[row]
+
+    def _cfg_step(self, row: str, delta: int) -> None:
+        self._cfg_secs[row] = _clamp_secs(self._cfg_staged(row) + delta)
+        self._cfg_paint_values()
+
+    def _cfg_restore(self) -> None:
+        """Stage the durations from the config files (saved only if OK follows)."""
+        self._cfg_secs = {"r1": int(config.configured("protocol", "reagent1_secs")),
+                          "r2": int(config.configured("protocol", "reagent2_secs"))}
+        self._cfg_paint_values()
+
+    def _cfg_ok(self) -> None:
+        """Save the staged durations, apply them, and return to the Menu."""
+        for row, key in (("r1", "reagent1_secs"), ("r2", "reagent2_secs")):
+            secs = self._cfg_staged(row)
+            self._cfg_secs[row] = secs
+            # Matching the config file again means there is nothing custom left
+            # to remember: drop the override rather than freeze today's file
+            # value into the operator's settings.
+            if secs == config.configured("protocol", key):
+                config.clear_user_setting("protocol", key)
+            else:
+                config.save_user_setting("protocol", key, secs)
+        self._apply_reagent_secs()
+        self._render_menu()
+
+    def _cfg_cancel(self) -> None:
+        """Discard the staged durations and return to the Menu."""
+        self._render_menu()
+
+    def _apply_reagent_secs(self) -> None:
+        """
+        Rebuild the phase strategies so the new durations take effect at once.
+
+        Phases hold no run state (slots do), so this is safe mid-run: a
+        countdown already running lives on its slot and is untouched — only
+        what the next START arms changes.
+        """
+        r1, r2 = config.reagent1_secs(), config.reagent2_secs()
+        self._phases = build_phases(reagent1_secs=r1, reagent2_secs=r2)
+        log.info("Arbiter: reagent countdowns set to %ds / %ds", r1, r2)
 
     # ── Capture screen (Menu → Capture) ────────────────────────────────────────
     # A standalone capture launched from the Menu: pick a path (Calibration or
@@ -1610,6 +1753,67 @@ def _selftest() -> None:
     check("camera freed on cancel", arb.capture_available(), True)
     check("cancel leaves capture view", arb._cap_view, None)
 
+    # ── Menu grid + Config screen ────────────────────────────────────────────
+    # The operator settings are redirected to a throwaway file so the project's
+    # config/ directory is untouched by the self-test.
+    _cfg_saved_path = config.USER_SETTINGS_PATH
+    config.USER_SETTINGS_PATH = Path(_tmpdir) / "user_settings.json"
+    config.load(reload=True)
+
+    print("== menu: six options in a 3x2 grid, stubs inert ==")
+    arb.open_menu(A)
+    for _name in ("menu_capture", "menu_stub1", "menu_defaults",
+                  "menu_stub2", "menu_config", "menu_power"):
+        check(f"{_name} shown", arb._pool[_name].visible, True)
+    check("stub1 inert",   arb._pool["menu_stub1"].enabled, False)
+    check("stub2 inert",   arb._pool["menu_stub2"].enabled, False)
+
+    _file_r1 = int(config.configured("protocol", "reagent1_secs"))
+    _file_r2 = int(config.configured("protocol", "reagent2_secs"))
+
+    print("== config screen: steps stage a duration; CANCEL discards it ==")
+    arb._menu_open_config()
+    check("stages the live durations", arb._cfg_secs["r1"], config.reagent1_secs())
+    check("field shows the seconds",   arb._pool["cfg_r1_fld"].value, str(_file_r1))
+    arb._pool["cfg_r1_p60"].on_press()
+    check("+60 stepped",       arb._cfg_secs["r1"], _file_r1 + 60)
+    arb._cfg_cancel()
+    check("CANCEL saved nothing", config.reagent1_secs(), _file_r1)
+
+    print("== config screen: OK saves the custom wait and applies it ==")
+    arb._menu_open_config()
+    arb._pool["cfg_r1_m10"].on_press()
+    arb._cfg_ok()
+    check("saved",             config.reagent1_secs(), _file_r1 - 10)
+    check("phases rebuilt",    arb._phases["reagent1"].secs, _file_r1 - 10)
+    check("reagent2 untouched", config.reagent2_secs(), _file_r2)
+
+    print("== config screen: a typed duration is honoured and clamped ==")
+    arb._menu_open_config()
+    arb._pool.set("cfg_r2_fld", "45")          # as a keyboard would leave it
+    arb._cfg_ok()
+    check("typed value saved", config.reagent2_secs(), 45)
+    arb._menu_open_config()
+    arb._pool.set("cfg_r1_fld", "99999")
+    check("clamped to the max", arb._cfg_staged("r1"), _CFG_MAX_SECS)
+    arb._pool.set("cfg_r1_fld", "0")
+    check("clamped to the min", arb._cfg_staged("r1"), _CFG_MIN_SECS)
+    arb._pool.set("cfg_r1_fld", "abc")
+    check("unparseable keeps the staged value",
+          arb._cfg_staged("r1"), arb._cfg_secs["r1"])
+    arb._cfg_cancel()
+
+    print("== config screen: Restore returns to the configured durations ==")
+    arb._menu_open_config()
+    arb._cfg_restore()
+    check("staged from the config file", arb._cfg_secs["r2"], _file_r2)
+    arb._cfg_ok()
+    check("reagent1 back to file",   config.reagent1_secs(), _file_r1)
+    check("reagent2 back to file",   config.reagent2_secs(), _file_r2)
+    check("no overrides left behind", config.user_settings(), {})
+
+    config.USER_SETTINGS_PATH = _cfg_saved_path
+    config.load(reload=True)
     shutil.rmtree(_tmpdir, ignore_errors=True)
 
     print("\n== all arbiter self-tests passed ==")

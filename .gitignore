@@ -27,6 +27,11 @@ docs/.~lock.*
 !sync_pi_files.txt
 !provisioning/reference/*.txt
 
+# ── Per-instrument operator settings ──────────────────────────────────────
+# Written by the Menu -> Config screen; belongs to one instrument, not the
+# project. Deleting it restores the config/instrument.yaml values.
+config/user_settings.json
+
 # ── Local-only symlinks ───────────────────────────────────────────────────
 # Absolute-path links into ~/Documents; would dangle on any other clone.
 docs/commissioning/ssh-key-setup-guide.md

@@ -96,12 +96,38 @@ MODAL_3C    = Rect(208, 134,  84,  46)
 
 # ── menu screen (reached by the dedicated footer MENU button — a screen of its
 # own, not part of the A/B toggle) ───────────────────────────────────────────────
+# Options sit in a 3-row x 2-column grid filling the body; the menu draws no
+# footer, so the bottom row may run to the foot of the screen.
+#
+#       Capture  | stub1
+#       Defaults | stub2
+#       Config   | Power
 MENU_CANCEL_BTN = Rect(  0,   0, 100,  50)   # top-left: discard staged choices
 MENU_TITLE      = Rect(100,   5, 120,  40)
 MENU_OK_BTN     = Rect(220,   0, 100,  50)   # top-right: save staged choices
-MENU_CAPTURE    = Rect( 60,  66, 200,  46)   # open the capture choice screen
-MENU_DEFAULTS   = Rect( 60, 122, 200,  46)
-MENU_POWER      = Rect( 60, 178, 200,  46)
+MENU_CAPTURE    = Rect(  8,  54, 148,  56)   # row 1 left: capture choice screen
+MENU_STUB1      = Rect(164,  54, 148,  56)   # row 1 right: unassigned
+MENU_DEFAULTS   = Rect(  8, 118, 148,  56)   # row 2 left
+MENU_STUB2      = Rect(164, 118, 148,  56)   # row 2 right: unassigned
+MENU_CONFIG     = Rect(  8, 182, 148,  56)   # row 3 left: config screen
+MENU_POWER      = Rect(164, 182, 148,  56)   # row 3 right
+
+# ── config screen (Menu → Config: the reagent countdown durations) ──────────────
+# Two identical rows — a label, the value in seconds, and four step buttons
+# (-60 / -10 / +10 / +60).  The value is an editable field as well, so a
+# keyboard can type a duration straight in.  CANCEL/OK reuse the menu's corners.
+CFG_LBL1    = Rect(  6,  58,  78,  40); CFG_FLD1 = Rect( 88,  58,  60,  40)
+CFG_R1_M60  = Rect(152,  58,  39,  40)   # −60 s  ┐
+CFG_R1_M10  = Rect(193,  58,  39,  40)   # −10 s  │ reagent 1
+CFG_R1_P10  = Rect(234,  58,  39,  40)   # +10 s  │
+CFG_R1_P60  = Rect(275,  58,  39,  40)   # +60 s  ┘
+CFG_LBL2    = Rect(  6, 104,  78,  40); CFG_FLD2 = Rect( 88, 104,  60,  40)
+CFG_R2_M60  = Rect(152, 104,  39,  40)   # −60 s  ┐
+CFG_R2_M10  = Rect(193, 104,  39,  40)   # −10 s  │ reagent 2
+CFG_R2_P10  = Rect(234, 104,  39,  40)   # +10 s  │
+CFG_R2_P60  = Rect(275, 104,  39,  40)   # +60 s  ┘
+CFG_HINT    = Rect(  8, 152, 304,  26)   # units + the mm:ss the seconds mean
+CFG_RESTORE = Rect(  8, 184, 148,  48)   # back to the configured durations
 
 # ── capture screen (Menu → Capture: pick path + images, run, show result) ───────
 # One screen of its own, reused for three views: the choice form, the running
