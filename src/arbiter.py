@@ -74,9 +74,36 @@ _CAMERA_PHASES = ("reagent1", "reagent2", "read", "analysis")
 _PREVIEW_LED_CH      = 10       # LEDBank channel for the white LED
 _PREVIEW_LED_NAME    = "white"  # its name in the `exposure` table
 _PREVIEW_SETTLE_S    = 0.25     # after switching the LED on, before capturing
-_PREVIEW_FALLBACK_US = 40_000   # when no calibrated white exposure exists
+_PREVIEW_FALLBACK_US = 10_000   # first guess when nothing better is known
+
+# Preview auto-exposure.  The preview is metered on the **sample** ROI alone:
+# it is the only rectangle whose contents have to be readable, and the white
+# patch beside it is far brighter, so metering over the frame (or over `white`,
+# which is what the stored calibration exposures are for) leaves the sample a
+# dark smudge — or, when the stored exposure was calibrated against a dimmer
+# scene, blows it out.  Target and tolerance follow the capture path's e3
+# convention: the median of the brightest Bayer channel at half of the
+# sensor's 10-bit full scale.  See _meter_sample_level().
+_PREVIEW_TARGET        = 512    # half of 1023 — capture_runner.HALF_SAT
+_PREVIEW_AE_TOLERANCE  = 0.20   # accept a median within ±20 % of the target
+_PREVIEW_AE_MAX_FRAMES = 3      # metered frames per preview, at most
+# Frames the preview will spend waiting for the sensor to adopt a requested
+# exposure, well under the capture path's MAX_SETTLE_FRAMES: a frame taken
+# slightly off the request is fine here (the metering scales from the exposure
+# the metadata reports, not from the request), whereas a screen that sits
+# frozen for a dozen full-res captures is not.
+_PREVIEW_SETTLE_FRAMES = 4
+_PREVIEW_MIN_US        = 1_000  # exposure floor, matching the capture path
+_PREVIEW_MAX_US        = 200_000  # ceiling: past this the preview is too slow
+
 _VIEW_ZOOM_STEP      = 1.5      # one press of + or −
-_VIEW_PAN_FRACTION   = 0.25     # one press of an arrow, as a fraction of the view
+# One press of an arrow in view mode, as a fraction of the view box.  The
+# 1px/10px button picks between them: it is a fine/coarse switch for panning
+# and a literal pixel step for the edit nudge.  A pan of one image pixel would
+# be invisible at every zoom the viewer can reach, which is why view mode
+# scales with the view instead.
+_VIEW_PAN_FINE       = 0.05     # with the step on 1px
+_VIEW_PAN_COARSE     = 0.25     # with the step on 10px
 _EDIT_MARGIN         = 0.5      # Edit zooms to the rectangle plus half its size
 _EDIT_EDGE_TOL_PX    = 12       # canvas px within which a tap arms an edge
 _EDIT_MIN_SIDE       = 16       # smallest ROI a Save will accept, image px
@@ -96,6 +123,11 @@ _CFG_STEPS = (-60, -10, 10, 60)
 def _clamp_secs(secs: int) -> int:
     """Hold an entered reagent duration inside the allowed range."""
     return max(_CFG_MIN_SECS, min(_CFG_MAX_SECS, int(secs)))
+
+
+def _clamp_us(us: float) -> int:
+    """Hold a preview exposure inside the range the viewer will ask the sensor for."""
+    return max(_PREVIEW_MIN_US, min(_PREVIEW_MAX_US, int(us)))
 
 
 def _mmss(secs: int) -> str:
@@ -199,8 +231,13 @@ class Arbiter:
         self._view_rois:  dict = {}    # name -> rect.Rect, in image space
         self._view_selected: str | None = None   # one name, or None
         self._view_return_slot: Slot | None = None
-        self._view_step      = 1       # edit nudge, image px: 1 or 10
+        self._view_step      = 1       # edit nudge, image px: 1 or 10; also
+                                       # picks the view-mode pan fraction
         self._view_status    = ""      # transient message for the name strip
+        # The exposure the last preview settled on, in µs — the starting point
+        # for the next one, so re-imaging normally converges on its first frame
+        # instead of walking back from the stored calibration every time.
+        self._view_exposure_us: int | None = None
         # Edit mode: a working copy of the selected rectangle, and which of its
         # sides (if any) the arrows move.  The working copy is what the screen
         # draws and what Save validates; the stored ROI is untouched until then,
@@ -1411,21 +1448,19 @@ class Arbiter:
 
     def preview_frame(self):
         """
-        Take one briefly-lit frame for the image viewer.
+        Take a briefly-lit, sample-metered frame for the image viewer.
 
-        The white LED is switched on, given a short settle, one frame is
-        captured, and the LED goes off again.  The settle is deliberately far
-        shorter than a capture run's LED_ON_WARMUP_S: this frame is for looking
-        at, and for judging where the ROI rectangles fall, so colour accuracy
-        is not required and the operator's wait matters more.
+        The white LED is switched on, given a short settle, the exposure is
+        metered on the sample ROI (see `_auto_expose`), and the LED goes off
+        again.  The LED settle is deliberately far shorter than a capture run's
+        LED_ON_WARMUP_S: this frame is for looking at, and for judging where
+        the ROI rectangles fall, so colour accuracy is not required and the
+        operator's wait matters more.
 
-        The exposure used is the calibrated white exposure when one exists (the
-        middle rung of group '3', or whatever group '1' holds), so the preview
-        looks like what a capture would see; otherwise a fixed fallback.
-
-        Blocks the main loop for roughly a second.  That is acceptable because
-        it only ever runs from an explicit button press, and every alternative
-        (threads, a state machine over the settle) buys nothing here.
+        Blocks the main loop for one to three frame times plus the settle.
+        That is acceptable because it only ever runs from an explicit button
+        press, and every alternative (threads, a state machine over the settle)
+        buys nothing here.
 
         Returns:
             (frame, error).  `frame` is a numpy BGR array of the full stream on
@@ -1437,15 +1472,13 @@ class Arbiter:
             return None, "Camera unavailable"
         cam, leds = hw
 
-        exposure_us = self._preview_exposure_us()
         lit = False
         try:
             if leds is not None:
                 leds.set_channel(_PREVIEW_LED_CH, True)
                 lit = True
                 time.sleep(_PREVIEW_SETTLE_S)
-            cam.set_exposure(exposure_us)
-            rgb, _bayer, _meta = cam.capture_frame()
+            rgb, exposure_us = self._auto_expose(cam)
         except Exception:
             log.exception("Arbiter: preview capture failed")
             return None, "Preview failed"
@@ -1462,24 +1495,141 @@ class Arbiter:
                  rgb.shape[1], rgb.shape[0], exposure_us)
         return rgb, ""
 
-    def _preview_exposure_us(self) -> int:
+    def _auto_expose(self, cam):
         """
-        Pick an exposure for the preview: the calibrated white one if there is
-        one, else a fixed fallback.
+        Capture the preview, metering the exposure on the sample ROI alone.
 
-        Reads the middle of whatever active group the white LED has, so the
-        preview brightness matches what a capture of the same scene would see.
-        Any failure falls back rather than propagating — a preview is never
-        worth failing a screen over.
+        Each pass sets an exposure, waits for the pipeline to actually adopt it
+        (`capture_runner._set_and_settle` — without that wait the frame read
+        back still carries the *previous* exposure, which is the older bug this
+        replaces), then measures the sample.  The measurement is the median of
+        the brightest raw Bayer channel inside the sample rectangle, and the
+        next exposure is the linear scaling that would put that median on
+        `_PREVIEW_TARGET`.  Raw, not the ISP's 8-bit output, because only the
+        raw values are linear in exposure — scaling against gamma-encoded
+        pixels under-corrects and would need many more frames to converge.
+
+        At most `_PREVIEW_AE_MAX_FRAMES` frames are taken, so a scene that
+        cannot be brought into range (the LED failed, the cuvette is opaque)
+        costs a bounded wait and returns the best frame it managed.
+
+        Every pass is logged at INFO with the exposure in µs and what the
+        sample measured, so an over- or under-exposed preview can be diagnosed
+        from the log alone.
+
+        Also updates `_view_exposure_us`, the starting point for the next
+        preview: the exposure that worked when the metering converged, and the
+        correction it was about to try when it ran out of frames.  Either way
+        the next preview starts from the best estimate this one reached.
+
+        Args:
+            cam: The shared camera, already started.
+
+        Returns:
+            (rgb, exposure_us) — the BGR frame and the exposure it was actually
+            taken at, in microseconds.  `exposure_us` is what the frame used,
+            which is not always what was asked for.
         """
+        import capture_runner
+
+        us = self._start_exposure_us()
+        rgb, applied = None, us
+        for i in range(_PREVIEW_AE_MAX_FRAMES):
+            rgb, bayer, meta = capture_runner._set_and_settle(
+                cam, us, max_frames=_PREVIEW_SETTLE_FRAMES)
+            applied = int(meta.get("ExposureTime") or us)
+            level = self._meter_sample_level(bayer, cam)
+            if level is None:
+                log.info("Arbiter: preview exposure %d us (sample not metered)",
+                         applied)
+                self._view_exposure_us = applied
+                return rgb, applied
+
+            error = abs(level - _PREVIEW_TARGET) / _PREVIEW_TARGET
+            wanted = _clamp_us(applied * _PREVIEW_TARGET / max(level, 1.0))
+            log.info("Arbiter: preview AE [%d/%d] %d us -> sample median %.0f "
+                     "of %d (%+.0f%%)%s", i + 1, _PREVIEW_AE_MAX_FRAMES,
+                     applied, level, _PREVIEW_TARGET,
+                     100.0 * (level - _PREVIEW_TARGET) / _PREVIEW_TARGET,
+                     "" if error <= _PREVIEW_AE_TOLERANCE
+                     else f" -> retry at {wanted} us")
+            if error <= _PREVIEW_AE_TOLERANCE or wanted == us:
+                # `wanted == us` means the correction is pinned at a limit;
+                # another frame would only ask for the same exposure again.
+                self._view_exposure_us = applied
+                return rgb, applied
+            us = wanted
+
+        log.warning("Arbiter: preview exposure did not converge in %d frames — "
+                    "showing the frame taken at %d us; next preview starts at "
+                    "%d us", _PREVIEW_AE_MAX_FRAMES, applied, us)
+        self._view_exposure_us = us
+        return rgb, applied
+
+    def _start_exposure_us(self) -> int:
+        """
+        Where the preview's metering starts: the last settled preview exposure,
+        else the calibrated white exposure, else a fixed fallback.
+
+        The calibrated value is the middle rung of whatever active group the
+        white LED has — a sensible opening guess because it was measured under
+        this instrument's own LED, even though it was metered on `white` rather
+        than on the sample.  Any failure falls back rather than propagating: a
+        preview is never worth failing a screen over.
+        """
+        if self._view_exposure_us:
+            return _clamp_us(self._view_exposure_us)
         try:
             for group in ("1", "3", "5"):
                 us = exposure_repo.read_exposures(_PREVIEW_LED_NAME, group)
                 if us:
-                    return int(us[len(us) // 2])
+                    return _clamp_us(us[len(us) // 2])
         except Exception:
             log.exception("Arbiter: could not read a calibrated preview exposure")
         return _PREVIEW_FALLBACK_US
+
+    def _meter_sample_level(self, bayer, cam) -> "float | None":
+        """
+        Measure the sample ROI: the median of its brightest raw Bayer channel.
+
+        The brightest channel rather than the mean of all four, for the same
+        reason the capture path picks a target channel — a coloured sample
+        leaves one channel near the floor, and metering on the average would
+        drive the bright channel into clipping.
+
+        Args:
+            bayer: The raw (H, W) uint16 mosaic from the same capture.
+            cam:   The camera, for its Bayer pattern.
+
+        Returns:
+            The median in 10-bit counts, or None when the sample cannot be
+            measured (no sample ROI loaded, no raw stream, a rectangle that
+            does not lie inside the mosaic) — the caller then keeps the
+            exposure it has rather than guessing.
+        """
+        r = self._view_rois.get("sample")
+        if r is None or bayer is None or getattr(bayer, "ndim", 0) != 2:
+            return None
+        try:
+            import numpy as np
+            import roi as roi_mod
+            from bayer_cam import BayerCam
+
+            lr = roi_mod.to_layer_rect(r)
+            layers = BayerCam.extract_bayer_layers(
+                bayer, getattr(cam, "bayer_pattern", "BGGR"))
+            lh, lw = next(iter(layers.values())).shape
+            if lr.w < 1 or lr.h < 1 or lr.x < 0 or lr.y < 0 \
+                    or lr.x2() > lw or lr.y2() > lh:
+                log.warning("Arbiter: sample ROI %s falls outside the %dx%d "
+                            "Bayer layers — preview not metered",
+                            r.xywh(), lw, lh)
+                return None
+            return max(float(np.median(layer[lr.xyslice()]))
+                       for layer in layers.values())
+        except Exception:
+            log.exception("Arbiter: could not meter the sample ROI")
+            return None
 
     # ── Image viewer screen (Menu → View Image) ────────────────────────────────
     # A screen of its own, like Menu and Config: _focused is None while it is
@@ -1667,6 +1817,48 @@ class Arbiter:
         self._pool.redraw(self._disp, "img_canvas")
         self._pool.put("img_name", self._view_name_text())
         self._pool.redraw(self._disp, "img_name")
+        self._sync_edit_button()
+
+    def _sync_edit_button(self) -> None:
+        """
+        Keep Edit's enabled state in step with the selection.
+
+        Selecting a rectangle from the canvas repaints only the canvas and the
+        name strip, so without this the button keeps whatever state the last
+        *full* render left it in.  Opening from the Menu selects nothing, which
+        disabled Edit, and `Pool.handle_touch` skips disabled widgets — so
+        pressing Edit after tapping a rectangle did nothing at all.
+
+        Only touched when it changes: repainting a button that already looks
+        right costs a needless SPI blit on every pan.
+        """
+        if self._pool is None:
+            return
+        w = self._pool.get("img_edit")
+        if w is None or not w.visible:
+            return
+        want = (self._view_mode != "edit"
+                and self._view_selected is not None
+                and self._view_frame is not None)
+        if w.enabled == want:
+            return
+        self._pool.put("img_edit", "Edit", on=self._view_edit, enabled=want)
+        self._pool.redraw(self._disp, "img_edit")
+        self._refresh_focusables()
+
+    def _refresh_focusables(self) -> None:
+        """
+        Rebuild the tab list after a widget's enabled state changed, keeping
+        whatever is focused focused.
+
+        `_rebuild_focus()` would do the rebuild but also drags the focus ring
+        back to the first control, which is wrong for a change the user did not
+        make with the keyboard.
+        """
+        current = self._focused_widget()
+        self._focusables = self._pool.focusable_widgets()
+        self._focus_idx = (self._focusables.index(current)
+                           if current in self._focusables else -1)
 
     def _view_name_text(self) -> str:
         """
@@ -1711,6 +1903,12 @@ class Arbiter:
         In edit mode they move the armed side if one is armed, and the whole
         rectangle if none is — the rule as specified, and it means the same
         four buttons cover both kinds of adjustment without a mode button.
+
+        In view mode they pan by a fraction of what is on screen, so a press
+        moves the same *visible* distance at every zoom.  The 1px/10px button
+        picks the fraction (fine or coarse); it does not mean image pixels
+        here, because one image pixel is a fraction of a canvas pixel at fit
+        zoom and would look like a dead button.
         """
         if self._view_state is None:
             return
@@ -1719,7 +1917,8 @@ class Arbiter:
             self._nudge(sx, sy)
         else:
             v = self._view_state
-            v.pan(sx * v.w * _VIEW_PAN_FRACTION, sy * v.h * _VIEW_PAN_FRACTION)
+            frac = _VIEW_PAN_FINE if self._view_step == 1 else _VIEW_PAN_COARSE
+            v.pan(sx * v.w * frac, sy * v.h * frac)
         self._repaint_canvas()
 
     def _nudge(self, sx: int, sy: int) -> None:
@@ -1782,8 +1981,18 @@ class Arbiter:
         self._repaint_canvas()
 
     def _view_toggle_step(self) -> None:
-        """Toggle the edit nudge between 1 and 10 image px (used in step 8)."""
+        """
+        Toggle the arrow step: fine or coarse.
+
+        It means two things, one per mode — the edit nudge in image pixels
+        (1 or 10, which is what the label states), and the view-mode pan
+        fraction (`_VIEW_PAN_FINE` or `_VIEW_PAN_COARSE`).
+        """
         self._view_step = 10 if self._view_step == 1 else 1
+        log.debug("Arbiter: viewer step -> %dpx (pan %.0f%% of the view)",
+                  self._view_step,
+                  100 * (_VIEW_PAN_FINE if self._view_step == 1
+                         else _VIEW_PAN_COARSE))
         if self._pool is not None:
             self._pool.put("img_step", f"{self._view_step}px",
                            on=self._view_toggle_step)
@@ -2435,8 +2644,11 @@ def _selftest() -> None:
     arb._menu_open_config()
     arb._pool["cfg_r1_m10"].on_press()
     arb._cfg_ok()
-    check("saved",             config.reagent1_secs(), _file_r1 - 10)
-    check("phases rebuilt",    arb._phases["reagent1"].secs, _file_r1 - 10)
+    # Clamped, not _file_r1 - 10: the configured wait may itself be under 10 s
+    # (it is, on a development instrument), and -10 then floors at the minimum.
+    _stepped_r1 = _clamp_secs(_file_r1 - 10)
+    check("saved",             config.reagent1_secs(), _stepped_r1)
+    check("phases rebuilt",    arb._phases["reagent1"].secs, _stepped_r1)
     check("reagent2 untouched", config.reagent2_secs(), _file_r2)
 
     print("== config screen: a typed duration is honoured and clamped ==")
@@ -2469,20 +2681,35 @@ def _selftest() -> None:
     import layout as _L
 
     class _PreviewCam:
-        """A camera that returns a recognisable synthetic frame."""
+        """
+        A camera that returns a recognisable synthetic frame.
+
+        Its raw level rises with the exposure and clips at 10-bit full scale,
+        so the viewer's sample metering has something real to converge on: at
+        the 40 ms fallback the sample reads clipped, exactly the overexposed
+        preview the metering exists to fix.
+        """
         config_size = (2304, 1296)
         model = "imx708"
+        bayer_pattern = "RGGB"
+        COUNTS_PER_US = 0.05                          # 10-bit counts per µs
         def __init__(self):
             self.stopped = False
             self.exposures = []
             self.frames = 0
+            self.exposure_us = 0
         def setup_camera(self): pass
-        def set_exposure(self, us): self.exposures.append(int(us))
+        def set_exposure(self, us):
+            self.exposure_us = int(us); self.exposures.append(int(us))
+        def sample_level(self):
+            return min(1023, int(self.exposure_us * self.COUNTS_PER_US))
         def capture_frame(self):
             self.frames += 1
             f = _np.zeros((1296, 2304, 3), dtype=_np.uint8)
             f[790:858, 1150:1218] = (0, 200, 250)     # BGR: the sample, orange
-            return f, _np.zeros((1296, 2304), _np.uint16), {}
+            bayer = _np.zeros((1296, 2304), _np.uint16)
+            bayer[790:858, 1150:1218] = self.sample_level()
+            return f, bayer, {"ExposureTime": self.exposure_us}
         def stop(self): self.stopped = True
 
     class _PreviewLeds:
@@ -2513,7 +2740,7 @@ def _selftest() -> None:
     check("viewer open",            arb._view_open, True)
     check("no slot has focus",      arb._focused is None, True)
     check("frame captured",         arb._view_frame.shape, (1296, 2304, 3))
-    check("one frame per open",     pcam.frames, 1)
+    check("metering is bounded",    pcam.frames <= _PREVIEW_AE_MAX_FRAMES, True)
     check("white LED on then off",  pleds.history[-2:],
           [(_PREVIEW_LED_CH, True), (_PREVIEW_LED_CH, False)])
     check("ROIs loaded",            sorted(arb._view_rois),
@@ -2570,18 +2797,75 @@ def _selftest() -> None:
     arb.on_touch(_L.IMG_CANVAS.x + 3, _L.IMG_CANVAS.y + 3)
     check("tap on empty space deselects", arb._view_selected, None)
 
-    print("== image viewer: 1px/10px toggle ==")
+    print("== image viewer: the preview is metered on the sample ROI ==")
+    # The sample's median must land within tolerance of the target, and the
+    # exposure that achieved it is remembered for the next preview.
+    _lvl = pcam.sample_level()
+    check("sample median is on target",
+          abs(_lvl - _PREVIEW_TARGET) <= _PREVIEW_AE_TOLERANCE * _PREVIEW_TARGET,
+          True)
+    check("exposure inside the allowed range",
+          _PREVIEW_MIN_US <= pcam.exposure_us <= _PREVIEW_MAX_US, True)
+    check("and it is remembered",   arb._view_exposure_us, pcam.exposure_us)
+    print(f"     converged to {pcam.exposure_us} us in {pcam.frames} frame(s), "
+          f"sample median {_lvl} of {_PREVIEW_TARGET}")
+    # Metering reads only the sample: a ROI outside the mosaic is refused
+    # rather than silently metered on something else.
+    _saved_sample = arb._view_rois["sample"]
+    from rect import Rect as _Rect
+    arb._view_rois["sample"] = _Rect(9000, 9000, 68, 68, name="sample")
+    check("an off-frame sample is not metered",
+          arb._meter_sample_level(_np.zeros((1296, 2304), _np.uint16), pcam), None)
+    arb._view_rois.pop("sample")
+    check("no sample ROI at all is not metered",
+          arb._meter_sample_level(_np.zeros((1296, 2304), _np.uint16), pcam), None)
+    arb._view_rois["sample"] = _saved_sample
+
+    print("== image viewer: 1px/10px toggle drives both modes ==")
     check("starts at 1px",   arb._pool["img_step"].label, "1px")
+    arb._view_state.fit_to(arb._view_rois["sample"])   # zoomed in, so pan bites
+    _w_before = arb._view_state.w
+    _cx0 = arb._view_state.cx
+    arb._view_arrow(1, 0)
+    check("fine pan moves 5% of the view",
+          round(arb._view_state.cx - _cx0, 3), round(_w_before * _VIEW_PAN_FINE, 3))
     arb._view_toggle_step()
     check("toggles to 10px", (arb._view_step, arb._pool["img_step"].label),
           (10, "10px"))
+    _cx1 = arb._view_state.cx
+    arb._view_arrow(1, 0)
+    check("coarse pan moves 25% of the view",
+          round(arb._view_state.cx - _cx1, 3),
+          round(_w_before * _VIEW_PAN_COARSE, 3))
     arb._view_toggle_step()
     check("and back",        arb._view_step, 1)
+    arb._view_fit()
+
+    print("== image viewer: Edit follows the selection, not just the render ==")
+    # The bug this covers: opening from the Menu selects nothing, so Edit was
+    # rendered disabled; selecting a ROI by touch repaints only the canvas, so
+    # Edit stayed disabled and its press was swallowed by the pool.
+    arb._view_selected = None
+    arb._repaint_canvas()
+    check("nothing selected -> Edit disabled", arb._pool["img_edit"].enabled, False)
+    _tap_on("sample")
+    check("tap selects",       arb._view_selected, "sample")
+    check("Edit is now live",  arb._pool["img_edit"].enabled, True)
+    check("and the pool routes a press to it",
+          arb._pool.handle_touch(_L.IMG_EDIT.x + 5, _L.IMG_EDIT.y + 5), True)
+    check("which entered edit mode", arb._view_mode, "edit")
+    arb._view_cancel()
+    arb._view_selected = None
+    arb._repaint_canvas()
+    check("deselecting disables it again",
+          arb._pool["img_edit"].enabled, False)
 
     print("== image viewer: reimage takes a fresh frame ==")
     n_before = pcam.frames
     arb._view_reimage()
     check("one more capture", pcam.frames, n_before + 1)
+    check("already-converged exposure needs no second frame",
+          pcam.frames - n_before, 1)
     check("LED cycled again", pleds.history[-2:],
           [(_PREVIEW_LED_CH, True), (_PREVIEW_LED_CH, False)])
 

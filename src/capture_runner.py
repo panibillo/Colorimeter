@@ -477,6 +477,7 @@ def _build_capture_info(
 
 def _set_and_settle(cam, exposure_us: int,
                     prof: "CaptureProfiler | None" = None,
+                    max_frames: int = MAX_SETTLE_FRAMES,
                     ) -> "tuple[np.ndarray, np.ndarray, dict]":
     """
     Set exposure and capture frames until metadata confirms it has been applied.
@@ -484,19 +485,29 @@ def _set_and_settle(cam, exposure_us: int,
     After calling set_exposure(), the Picamera2 pipeline takes at least one
     frame cycle to adopt the new ExposureTime.  This function keeps capturing
     until the metadata ExposureTime is within SETTLE_TOLERANCE of the request,
-    or MAX_SETTLE_FRAMES is exhausted.
+    or `max_frames` is exhausted.
+
+    The returned metadata carries the exposure the frame was *actually* taken
+    at, which is what a caller must use when it scales an exposure from what it
+    measured — the request and the frame can still disagree when the budget
+    runs out.
 
     Args:
         cam:         Camera to drive.
         exposure_us: Requested exposure in microseconds.
         prof:        Optional profiler; when given, this counts one settle-run
                      and times every capture_frame() call it makes.
+        max_frames:  Frame budget.  A capture spends the full
+                     MAX_SETTLE_FRAMES because its numbers are the result; the
+                     image viewer's preview passes a much smaller budget,
+                     because there a slow screen is worse than a frame taken
+                     slightly off the requested exposure.
     """
     cam.set_exposure(exposure_us)
     if prof is not None:
         prof.count("camera.settle")
     last = None
-    for frame_num in range(MAX_SETTLE_FRAMES):
+    for frame_num in range(max_frames):
         if prof is not None:
             _t0 = time.perf_counter()
             rgb, bayer, meta = cam.capture_frame()
@@ -512,10 +523,10 @@ def _set_and_settle(cam, exposure_us: int,
                 log.debug(f"    settled: {applied}µs ≈ {exposure_us}µs "
                           f"after {frame_num + 1} frame(s)")
                 return rgb, bayer, meta
-        log.debug(f"    settling [{frame_num + 1}/{MAX_SETTLE_FRAMES}]: "
+        log.debug(f"    settling [{frame_num + 1}/{max_frames}]: "
                   f"requested={exposure_us}µs  applied={applied}µs")
     applied = int(last[2].get("ExposureTime", 0))  # type: ignore[index]
-    log.warning(f"    exposure did not settle after {MAX_SETTLE_FRAMES} frames; "
+    log.warning(f"    exposure did not settle after {max_frames} frames; "
                 f"last applied={applied}µs  requested={exposure_us}µs")
     return last  # type: ignore[return-value]
 
