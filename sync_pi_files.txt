@@ -34,6 +34,15 @@ src/slot.py
 src/timer.py
 src/widgets.py
 src/geometry.py
+src/image_view.py
+
+# ── Regions of interest ──────────────────────────────────────────────────
+# roi.py is the `roi` table plus the image/Bayer coordinate conversions;
+# rect.py is the rectangle type both it and image_view.py use.  Required by
+# capture_runner (which loads its ROIs per run) and by the arbiter's image
+# viewer — without them the app dies at import on the Pi.
+src/roi.py
+src/rect.py
 
 # ── Capture pipeline ─────────────────────────────────────────────────────
 src/capture_runner.py
@@ -59,6 +68,11 @@ src/db_manager.py
 src/logging_manager.py
 src/error_handler.py
 src/utils.py
+# The schema, so a unit with no reference colorimeter.sqlite to copy can build
+# a complete seeded one in place:  sqlite3 src/colorimeter.sqlite < src/db_DDL.sql
+# (idempotent).  The destructive companion, db_DDL_reset.sql, stays on the
+# desktop deliberately.
+src/db_DDL.sql
 
 # ── Mock hardware (desktop test doubles) ─────────────────────────────────
 src/mock/__init__.py
@@ -66,6 +80,18 @@ src/mock/__init__.py
 # ── Configuration ────────────────────────────────────────────────────────
 config/instrument.yaml
 config/palette.yaml
+# The commissioned lens position.  bayer_cam.focus() restores this and skips
+# the autofocus sweep entirely; without the file every capture run sweeps,
+# which only means anything with a focus target on the stage.  Focus is a
+# property of the optical stage rather than of an individual unit, it rarely
+# changes, and re-deriving it needs both that target and a focus procedure
+# that is not written yet — so the commissioned value is shipped rather than
+# rediscovered per unit.
+#
+# ⚠ Syncing overwrites whatever the Pi holds, including a value it wrote
+# itself through save_focus_cal().  If a unit has been re-focused on the
+# device, pull that value back (sync_from_pi.sh) before pushing.
+config/focus_cal.json
 
 # ── Tools run on the Pi ──────────────────────────────────────────────────
 src/calibrate_screen.py
@@ -77,11 +103,15 @@ system_requirements.txt
 # ── Deliberately NOT synced ──────────────────────────────────────────────
 #
 # config/touch_cal.json
-#     Device-specific. Written on the Pi by calibrate_screen.py and read from
-#     ~/pi/Colorimeter/config/touch_cal.json. Sending the desktop copy would
-#     overwrite the Pi's own touchscreen calibration with a stale one.
-#     config/focus_cal.json (written by bayer_cam.save_focus_cal) is
-#     device-specific in the same way and is never created on the desktop.
+#     Genuinely device-specific: it corrects the alignment of one panel as
+#     assembled, so no two units share a value. Written on the Pi by
+#     calibrate_screen.py and read from ~/pi/Colorimeter/config/touch_cal.json.
+#     Sending the desktop copy would overwrite the Pi's own calibration with a
+#     stale one.
+#
+#     config/focus_cal.json is NOT in this category and IS synced — see the
+#     Configuration section above. It describes the optical stage, not the
+#     individual unit.
 #
 # src/mock/
 #     Desktop test doubles. bayer_cam falls back to mock.picamera2_mock only
