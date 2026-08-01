@@ -24,7 +24,7 @@ some **on the Pi**. Each block is marked.
 ~/pi/Colorimeter/            (on the Pi; mirrors ~/Projects/Colorimeter on local)
 ├── src/                     firmware — the application
 │   └── colorimeter.sqlite   reference database (copied, step 3c)
-├── config/                  instrument.yaml, palette.yaml
+├── config/                  instrument.yaml
 │                            (touch_cal.json / focus_cal.json are written on the Pi)
 ├── commissioning/           setup + verify scripts
 ├── captures/                capture archives land here (created below)

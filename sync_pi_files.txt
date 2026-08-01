@@ -79,7 +79,6 @@ src/mock/__init__.py
 
 # ── Configuration ────────────────────────────────────────────────────────
 config/instrument.yaml
-config/palette.yaml
 # The commissioned lens position.  bayer_cam.focus() restores this and skips
 # the autofocus sweep entirely; without the file every capture run sweeps,
 # which only means anything with a focus target on the stage.  Focus is a

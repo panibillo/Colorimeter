@@ -145,7 +145,7 @@ if [[ -f "${APP}/src/main.py" ]]; then
 else
     fail "src/main.py missing"; reenter "3b (./sync_to_pi.sh <host>)"
 fi
-for y in instrument.yaml palette.yaml; do
+for y in instrument.yaml; do
     if [[ -f "${APP}/config/${y}" ]]; then pass "config/${y}"
     else fail "config/${y} missing"; reenter "3b (./sync_to_pi.sh <host>)"; fi
 done
