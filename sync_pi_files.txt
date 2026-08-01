@@ -63,7 +63,7 @@ src/beeper.py
 src/kb_reader.py
 
 # ── Support ──────────────────────────────────────────────────────────────
-src/config_manager.py
+src/config_repo.py
 src/db_manager.py
 src/logging_manager.py
 src/error_handler.py
@@ -78,7 +78,9 @@ src/db_DDL.sql
 src/mock/__init__.py
 
 # ── Configuration ────────────────────────────────────────────────────────
-config/instrument.yaml
+# Instrument settings moved into the database's `config` table in 2026-08 —
+# see provisioning/config_defaults.sql, synced with db_DDL.sql below.
+#
 # The commissioned lens position.  bayer_cam.focus() restores this and skips
 # the autofocus sweep entirely; without the file every capture run sweeps,
 # which only means anything with a focus target on the stage.  Focus is a

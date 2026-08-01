@@ -49,7 +49,7 @@ _SIMULATION_MODE = os.environ.get("COLORIMETER_SIMULATION", "0") == "1"
 # stacks.  Only the pure model + widget layer is imported at module load.
 import sqlite3
 
-import config_manager as config
+import config_repo as config
 import logging_manager
 import widgets
 import shutdown_screen
@@ -89,8 +89,8 @@ _CFG_MIN_SECS, _CFG_MAX_SECS = 1, 3600
 _CFG_STEPS = (-60, -10, 10, 60)
 
 # Tunables (LED range, loop cadence, timeouts, reagent durations, rowid, the
-# backlight pin) live in config/instrument.yaml and are read through
-# config_manager — see the config.* calls throughout this module.
+# backlight pin) are rows in the database's `config` table and are read through
+# config_repo — see the config.* calls throughout this module.
 
 
 def _clamp_secs(secs: int) -> int:
@@ -650,12 +650,13 @@ class Arbiter:
     # ── Config screen (Menu → Config) ──────────────────────────────────────────
     # Custom reagent countdowns, entered on the instrument itself.  The two
     # durations are staged in self._cfg_secs while the screen is open and are
-    # written (through config_manager's user-settings layer) only by its OK, so
-    # a mis-tap costs nothing — CANCEL leaves the saved values alone.
+    # written (as new rows in the `config` table) only by its OK, so a mis-tap
+    # costs nothing — CANCEL leaves the saved values alone.
     #
-    # A saved duration wins over both instrument.yaml and the simulation
+    # A saved duration wins over both the commissioned value and the simulation
     # profile, so it applies on real hardware too — which the shortened
-    # simulation_overrides durations do not.
+    # simulation durations do not.  Restore supersedes it with the commissioned
+    # row again; the edit stays in the table as history either way.
 
     def _menu_open_config(self) -> None:
         """Open the config screen, staging the durations now in force."""
@@ -727,9 +728,9 @@ class Arbiter:
         self._cfg_paint_values()
 
     def _cfg_restore(self) -> None:
-        """Stage the durations from the config files (saved only if OK follows)."""
-        self._cfg_secs = {"r1": int(config.configured("protocol", "reagent1_secs")),
-                          "r2": int(config.configured("protocol", "reagent2_secs"))}
+        """Stage the commissioned durations (saved only if OK follows)."""
+        self._cfg_secs = {"r1": int(config.default("protocol", "reagent1_secs")),
+                          "r2": int(config.default("protocol", "reagent2_secs"))}
         self._cfg_paint_values()
 
     def _cfg_ok(self) -> None:
@@ -737,13 +738,13 @@ class Arbiter:
         for row, key in (("r1", "reagent1_secs"), ("r2", "reagent2_secs")):
             secs = self._cfg_staged(row)
             self._cfg_secs[row] = secs
-            # Matching the config file again means there is nothing custom left
-            # to remember: drop the override rather than freeze today's file
-            # value into the operator's settings.
-            if secs == config.configured("protocol", key):
-                config.clear_user_setting("protocol", key)
+            # Matching the commissioned value again means there is nothing
+            # custom left to remember: restore rather than freeze today's
+            # commissioned value into an operator row.
+            if secs == config.default("protocol", key):
+                config.restore("protocol", key)
             else:
-                config.save_user_setting("protocol", key, secs)
+                config.save("protocol", key, secs)
         self._apply_reagent_secs()
         self._render_menu()
 
@@ -805,7 +806,7 @@ class Arbiter:
             saved = None
         if saved is not None:
             return saved
-        # Nothing saved yet — the configured default (config/instrument.yaml,
+        # Nothing saved yet — the configured default (the config table,
         # capture.fallback_exposure_group).
         return config.fallback_exposure_group()
 
@@ -2304,8 +2305,13 @@ def _selftest() -> None:
     import db_manager as _db
     _tmpdir = tempfile.mkdtemp()
     _tmpdb = Path(_tmpdir) / "arbiter_selftest.sqlite"
-    shutil.copy(Path(_db.DBNAME), _tmpdb)     # _db.DBNAME is the live DB (config)
+    shutil.copy(Path(_db.DBNAME), _tmpdb)     # _db.DBNAME is the live DB
     _db.DBNAME = str(_tmpdb)
+    # Settings are rows in that database now, so the copy also isolates the
+    # Config screen's writes below — but the cache was filled from the live DB
+    # during construction, so it has to be refilled from the copy.
+    config.load(reload=True)
+    config.seed_defaults()                    # in case the copy predates `config`
     _db.write_one("DELETE FROM exposure")
     sample_repo.save_default_exposuregroup(1, None)     # start with nothing saved
 
@@ -2401,11 +2407,8 @@ def _selftest() -> None:
     check("cancel leaves capture view", arb._cap_view, None)
 
     # ── Menu grid + Config screen ────────────────────────────────────────────
-    # The operator settings are redirected to a throwaway file so the project's
-    # config/ directory is untouched by the self-test.
-    _cfg_saved_path = config.USER_SETTINGS_PATH
-    config.USER_SETTINGS_PATH = Path(_tmpdir) / "user_settings.json"
-    config.load(reload=True)
+    # The Config screen writes to the `config` table, which is already the
+    # throwaway copy set up above, so the live settings are untouched.
 
     print("== menu: six options in a 3x2 grid ==")
     arb.open_menu(A)
@@ -2416,8 +2419,8 @@ def _selftest() -> None:
     check("stub1 is View Image", arb._pool["menu_stub1"].label, "View\nImage")
     check("stub2 inert",   arb._pool["menu_stub2"].enabled, False)
 
-    _file_r1 = int(config.configured("protocol", "reagent1_secs"))
-    _file_r2 = int(config.configured("protocol", "reagent2_secs"))
+    _file_r1 = int(config.default("protocol", "reagent1_secs"))
+    _file_r2 = int(config.default("protocol", "reagent2_secs"))
 
     print("== config screen: steps stage a duration; CANCEL discards it ==")
     arb._menu_open_config()
@@ -2451,17 +2454,14 @@ def _selftest() -> None:
           arb._cfg_staged("r1"), arb._cfg_secs["r1"])
     arb._cfg_cancel()
 
-    print("== config screen: Restore returns to the configured durations ==")
+    print("== config screen: Restore returns to the commissioned durations ==")
     arb._menu_open_config()
     arb._cfg_restore()
-    check("staged from the config file", arb._cfg_secs["r2"], _file_r2)
+    check("staged from the commissioned row", arb._cfg_secs["r2"], _file_r2)
     arb._cfg_ok()
-    check("reagent1 back to file",   config.reagent1_secs(), _file_r1)
-    check("reagent2 back to file",   config.reagent2_secs(), _file_r2)
-    check("no overrides left behind", config.user_settings(), {})
-
-    config.USER_SETTINGS_PATH = _cfg_saved_path
-    config.load(reload=True)
+    check("reagent1 back to commissioned", config.reagent1_secs(), _file_r1)
+    check("reagent2 back to commissioned", config.reagent2_secs(), _file_r2)
+    check("no overrides left behind", config.overrides(), [])
 
     # ── Image viewer (Tool 1) ─────────────────────────────────────────────────
     print("== image viewer: camera guard ==")

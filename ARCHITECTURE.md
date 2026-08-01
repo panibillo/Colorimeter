@@ -124,11 +124,16 @@ The arbiter owns at most one `CaptureSession` at a time (single camera).
 
 ## Support modules
 
-- `config_manager.py` — configuration load/access.
+- `config_repo.py` — every tunable instrument parameter, as rows in the
+  database's `config` table (role/name/vtype/value, versioned like `exposure`
+  and `roi`). Replaced `config_manager.py` + `config/instrument.yaml` in 2026-08.
 - `logging_manager.py` — unified logging, used across modules.
 - `error_handler.py` — exception handling and cleanup.
 - `db_manager.py` — thin SQL wrapper (`read_all`, `read_one`, `read_val`,
-  `write_one`, `write_many`); connections are request-scoped, not pooled.
+  `write_one`, `write_many`); connections are request-scoped, not pooled. Also
+  resolves the database path itself (`db_path()` / `$COLORIMETER_DB`), since
+  `config_repo` reads its parameters out of the database and cannot be the one
+  to say where it lives.
 - `utils.py` — shared helpers (no hardware or DB access).
 - Hardware drivers: `ili9341.py` (display, SPI), `tsc2007.py` (touch, I²C),
   `kb_reader.py` (keyboard), `beeper.py` (buzzer), `DS18B20.py` (temperature,

@@ -33,7 +33,7 @@ sys.path.insert(0, str(_ROOT / "src"))
 sys.path.insert(0, str(_ROOT / "dev"))
 
 import capture_runner
-import config_manager
+import config_repo
 from capture_runner import CaptureConfig, CaptureRunner, EXP_LABELS
 
 # Full-sensor frame size the ROI constants are defined against.
@@ -198,30 +198,30 @@ class TestLedTiming(unittest.TestCase):
 # ---------------------------------------------------------------------------
 # Output location
 # ---------------------------------------------------------------------------
-# Where archives are written and what they are called is config_manager's
-# job now; see test_config_manager.py. What belongs here is that a config
+# Where archives are written and what they are called is config_repo's
+# job now; see test_config_repo.py. What belongs here is that a config
 # built for a run honours an explicit directory.
 
 class TestOutputLocation(unittest.TestCase):
 
     def setUp(self):
-        self._saved = os.environ.pop(config_manager.CAPTURE_DIR_ENV, None)
+        self._saved = os.environ.pop(config_repo.CAPTURE_DIR_ENV, None)
 
     def tearDown(self):
-        os.environ.pop(config_manager.CAPTURE_DIR_ENV, None)
+        os.environ.pop(config_repo.CAPTURE_DIR_ENV, None)
         if self._saved is not None:
-            os.environ[config_manager.CAPTURE_DIR_ENV] = self._saved
+            os.environ[config_repo.CAPTURE_DIR_ENV] = self._saved
 
     def test_config_resolves_location_when_built_not_when_imported(self):
         """
         Regression guard: out_dir was once a plain dataclass default, baked in
         at import, so setting the variable afterwards silently had no effect.
         """
-        os.environ[config_manager.CAPTURE_DIR_ENV] = "/tmp/set/after/import"
+        os.environ[config_repo.CAPTURE_DIR_ENV] = "/tmp/set/after/import"
         self.assertEqual(CaptureConfig().out_dir, Path("/tmp/set/after/import"))
 
     def test_explicit_out_dir_wins_over_environment(self):
-        os.environ[config_manager.CAPTURE_DIR_ENV] = "/tmp/ignored"
+        os.environ[config_repo.CAPTURE_DIR_ENV] = "/tmp/ignored"
         config = CaptureConfig(out_dir=Path("/tmp/explicit"))
         self.assertEqual(config.out_dir, Path("/tmp/explicit"))
 

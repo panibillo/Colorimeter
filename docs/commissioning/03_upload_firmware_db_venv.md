@@ -23,9 +23,8 @@ some **on the Pi**. Each block is marked.
 ```
 ~/pi/Colorimeter/            (on the Pi; mirrors ~/Projects/Colorimeter on local)
 ├── src/                     firmware — the application
-│   └── colorimeter.sqlite   reference database (copied, step 3c)
-├── config/                  instrument.yaml
-│                            (touch_cal.json / focus_cal.json are written on the Pi)
+│   └── colorimeter.sqlite   reference database, incl. the `config` table (copied, step 3c)
+├── config/                  touch_cal.json / focus_cal.json (written on the Pi)
 ├── commissioning/           setup + verify scripts
 ├── captures/                capture archives land here (created below)
 └── .venv/                   Python venv, --system-site-packages (step 3e)
@@ -40,9 +39,9 @@ some **on the Pi**. Each block is marked.
 mkdir -p ~/pi/Colorimeter/captures
 ```
 
-The `captures/` directory is where `config/instrument.yaml` writes archives
-(`capture.directory: captures`, resolved relative to the project root). Creating
-it up front avoids a first-run error.
+The `captures/` directory is where the config table's `capture.directory` row
+writes archives (default `captures`, resolved relative to the project root).
+Creating it up front avoids a first-run error.
 
 ---
 
@@ -76,8 +75,9 @@ the color-card ROI rectangles (`colorcard`), the device/user/testkit rows, and
 the entry-screen defaults. It is **not** in Git (`.sqlite` is gitignored) and is
 **not** in the sync list.
 
-> **`src/db_DDL.sql` will build a runnable database** (all 10 tables, the
-> `default_gui_vals` view, and seed rows) if you have no reference copy to hand:
+> **`src/db_DDL.sql` will build a runnable database** (all 11 tables, incl. the
+> commissioned `config` table, the `default_gui_vals` view, and seed rows) if
+> you have no reference copy to hand:
 > `sqlite3 src/colorimeter.sqlite < src/db_DDL.sql`. It is idempotent, so
 > re-running it is safe. Prefer copying a working `colorimeter.sqlite` anyway —
 > that is what carries this fleet's reference data. *(Before 2026-07-31 the DDL

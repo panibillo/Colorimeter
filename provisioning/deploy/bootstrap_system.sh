@@ -36,7 +36,6 @@ PKGS=(
     python3-picamera2     # import picamera2  (camera)
     python3-opencv        # import cv2
     python3-h5py          # import h5py       (capture archives)
-    python3-yaml          # import yaml       (config/instrument.yaml)
     python3-evdev         # import evdev      (USB keyboard, src/kb_reader.py)
 )
 

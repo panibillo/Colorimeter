@@ -36,8 +36,8 @@ Usage:
     print(runner.out_path, runner.results)
 
 Output: a single HDF5 archive per capture set. Where it is written and what
-it is called are declared in config/instrument.yaml under `capture:`, and
-reached through config_manager — this module contains no paths or filename
+it is called are rows of the database's `config` table under role `capture`,
+reached through config_repo — this module contains no paths or filename
 patterns of its own. A caller can override the directory per run through
 CaptureConfig.out_dir. The archive holds the
 ROI crops, per-LED metadata, capture statistics, and the e3 JPEG. Nothing is
@@ -57,7 +57,7 @@ from typing import Iterator
 
 import numpy as np
 
-import config_manager as config
+import config_repo as config
 import exposure_repo
 import roi
 from bayer_cam import BayerCam
@@ -163,7 +163,7 @@ class CaptureConfig:
     # to use — its name is the number of images per LED ('1'..'5').
     mode:           str = MODE_CALIBRATION
     exposure_group: str = "1"
-    # Declared in config/instrument.yaml under `capture:`. default_factory,
+    # A config-table row under role `capture`. default_factory,
     # not a plain default, so the location is resolved when a config is built
     # rather than baked in when this module is first imported.
     out_dir:       Path = field(default_factory=config.capture_dir)
@@ -751,7 +751,7 @@ class CaptureRunner:
         cam  = self._cam
         leds = self._leds
 
-        # Naming lives in config/instrument.yaml under `capture:`.
+        # Naming lives in the config table under role `capture`.
         self.suite_id = config.capture_suite_id()
         cfg.out_dir.mkdir(parents=True, exist_ok=True)
         self.out_path = cfg.out_dir / config.capture_archive_name(self.suite_id)

@@ -71,8 +71,8 @@ New SD card
      ├─ /boot/firmware/config.txt   ← peripheral overlays (step 2)
      ├─ ~/pi/Colorimeter/           ← app dir (step 3)
      │    ├─ src/…                   ← firmware (rsync'd from desktop)
-     │    ├─ config/…                ← instrument.yaml
-     │    ├─ src/colorimeter.sqlite  ← reference DB (copied, not built from DDL)
+     │    ├─ config/…                ← focus_cal.json, touch_cal.json (per-unit calibration)
+     │    ├─ src/colorimeter.sqlite  ← reference DB, incl. the `config` table (copied, not built from DDL)
      │    ├─ provisioning/*.sh       ← setup/verify scripts (uploaded)
      │    └─ .venv/                  ← --system-site-packages venv (step 3)
      └─ systemd services
