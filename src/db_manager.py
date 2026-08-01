@@ -5,11 +5,15 @@ Provides simple functions to execute SQL queries. Each transaction opens
 and closes its own connection. Calling code composes raw SQL and parses
 returned values.
 
+The schema lives in src/db_DDL.sql — that file is authoritative and builds a
+complete, seeded, runnable database on its own.  Do not restate it here.
+
 Usage:
-    results = read_all("SELECT colorname, x, y, w, h FROM colorcard WHERE cardid = ?", (1,))
-    row = read_one("SELECT value FROM meterconfig WHERE param=? and = ? and rectid = 2", (1,))
-    val = read_val("SELECT COUNT(*) FROM colorcard")
-    writevals("INSERT INTO colorcard (cardid, cardname) VALUES (?, ?)",
+    results = read_all("SELECT name, x, y, w, h FROM roi WHERE active = 1")
+    row     = read_one("SELECT x, y, w, h FROM roi WHERE name = ? AND active = 1",
+                       ("sample",))
+    val     = read_val("SELECT COUNT(*) FROM samples")
+    write_one("INSERT INTO colorcard (cardid, cardname) VALUES (?, ?)",
               (1, "card1"))
 """
 
@@ -23,43 +27,6 @@ import logging_manager as log
 # overrides it; tests may also reassign DBNAME directly to a scratch copy.
 DBNAME = str(config.db_path())
 print (f"Colorimeter db_manager.py using db: {DBNAME}")
-
-TABLE_DEFINITIONS = """
-----------------------------------
--- Color calibration card table
----------------------------------
-CREATE TABLE colorcard (
-    cardid     INTEGER,         -- Each color card has a unique ID
-    cardname   TEXT,            -- Each color card has a unique NAME
-    rectid     INTEGER,         -- Identifier of an individual rect patch
-    colorname  TEXT,            -- Name of an individual rect patch
-    x          INTEGER,
-    y          INTEGER,
-    w          INTEGER,
-    h          INTEGER,
-    CONSTRAINT UNIQUE (cardid, rectid),
-    CONSTRAINT UNIQUE (cardid, x, y)
-);
------------------------------------
--- Main configuration table
------------------------------------
-CREATE TABLE meterconfig (     -- hardware and software params & constants
-    configid   INTEGER,
-    param      TEXT,
-    value      TEXT,
-    CONSTRAINT UNIQUE (configid, param)
-);
------------------------------------
--- Data configuration table
------------------------------------
-CREATE TABLE data (
-    timestamp  INTEGER,  -- seconds since epoch
-    label      TEXT,     -- user known GUID for the msmt
-    param      TEXT,     -- each msmt may have many params
-    numval     REAL,
-    txtval     TEXT      -- in case there are any text vals
-);
-"""
 
 
 def read_all(sql: str, vals: tuple = None) -> list:

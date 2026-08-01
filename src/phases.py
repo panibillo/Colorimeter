@@ -399,8 +399,23 @@ class ReadPhase(Phase):
         # When merely previewing this step (not the live phase) the slot's timer
         # belongs to another phase, so show a neutral 00:00 elapsed instead.
         is_live = slot.active_phase == self.phase_id
-        pool.put("timer_lbl", "Elapsed")
-        pool["timer_lbl"].size = _TIMER_LBL_SIZE_READ
+        # Tool 2.  The "Elapsed" label's rect carries a "View Sample" button
+        # instead while no capture is running — a look at the sample ROI is
+        # most useful here, right before pressing CAPTURE, to confirm the strip
+        # is seated where the rectangle expects it.
+        #
+        # From the moment CAPTURE is pressed until the last frame is stored,
+        # the button is *replaced by the label*, not merely disabled: the
+        # imaging tools share the camera and LED bank with the capture path, so
+        # there must be nothing to press.  capture_available() covers a capture
+        # started by either slot, and slot.capturing covers this one's.
+        if arb.capture_available() and not slot.capturing:
+            pool.put("view_sample_btn", "View\nSample",
+                     on=lambda: arb.open_image_view(slot=slot,
+                                                    focus_roi="sample"))
+        else:
+            pool.put("timer_lbl", "Elapsed")
+            pool["timer_lbl"].size = _TIMER_LBL_SIZE_READ
         if is_live and slot.timer is not None:
             pool["timer"].bind(slot.timer, interactive=False)
         else:
@@ -645,6 +660,12 @@ if __name__ == "__main__":
             slot.phase, slot.modal_return = (slot.modal_return or "entry"), None
             self.render(slot)
 
+        # image viewer (Tool 2) — records the call so the read phase's
+        # "View Sample" button can be checked without a camera.
+        def open_image_view(self, slot=None, focus_roi=None):
+            self.calls.append(("open_image_view",
+                               slot.name if slot else None, focus_roi))
+
         # capture / analysis
         def capture_available(self):    return self.capturing_slot is None
         def request_capture(self, slot):
@@ -780,11 +801,35 @@ if __name__ == "__main__":
     arb.poll()
     check("advanced to read",  A.phase, "read")
     check("CAPTURE enabled",   pool["run_btn"].enabled, True)
+
+    print("== read: View Sample stands where Elapsed goes (Tool 2) ==")
+    check("View Sample shown",  pool["view_sample_btn"].visible, True)
+    check("its label",          pool["view_sample_btn"].label, "View\nSample")
+    check("Elapsed label hidden", pool["timer_lbl"].visible, False)
+    check("same rect as the label",
+          pool["view_sample_btn"].rect is pool["timer_lbl"].rect, True)
+    press(pool, "view_sample_btn")
+    check("opens the viewer on the sample, returning to this slot",
+          ("open_image_view", "A", "sample") in arb.calls, True)
+
     pool.set("color_fld", "pale blue")             # operator types a reading
     press(pool, "run_btn")                         # CAPTURE
     check("manual read saved",     A.record["manual_read"], "pale blue")
     check("capture_start stamped", A.record["capture_start"], arb.epoch_s)
     check("capturing",             A.capturing, True)
+
+    print("== read: once CAPTURE is pressed, Elapsed replaces View Sample ==")
+    check("View Sample gone",   pool["view_sample_btn"].visible, False)
+    check("Elapsed label back", pool["timer_lbl"].visible, True)
+    check("reads Elapsed",      pool["timer_lbl"].text, "Elapsed")
+    # Not merely disabled — there must be nothing to press, because the imaging
+    # tools share the camera and LED bank with the capture in flight.  Tapping
+    # where the button was must reach nothing at all.
+    n_before = len(arb.calls)
+    _r = pool["view_sample_btn"].rect
+    check("a tap there is not consumed",
+          pool.handle_touch(_r.x + _r.w // 2, _r.y + _r.h // 2, arb.display), False)
+    check("and opens nothing", len(arb.calls), n_before)
 
     print("== capture completes -> analysis -> done ==")
     arb.clock += 30

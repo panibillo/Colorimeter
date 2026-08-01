@@ -15,11 +15,11 @@ Three-phase workflow:
 
 Exposure bracketing targets (50% of 10-bit saturation = 512):
   e0: e3 / E3_RATIO                                    (fixed ratio)
-  e1: 89th-percentile pixel in ROI_SAMPLE → 512
-  e2: 66th-percentile pixel in ROI_SAMPLE → 512
-  e3: 50th-percentile pixel in ROI_SAMPLE → 512  (median)
-  e4: 33rd-percentile pixel in ROI_SAMPLE → 512
-  e5: 11th-percentile pixel in ROI_SAMPLE → 512
+  e1: 89th-percentile pixel in the sample ROI → 512
+  e2: 66th-percentile pixel in the sample ROI → 512
+  e3: 50th-percentile pixel in the sample ROI → 512  (median)
+  e4: 33rd-percentile pixel in the sample ROI → 512
+  e5: 11th-percentile pixel in the sample ROI → 512
   e6: e3 * E3_RATIO                                    (fixed ratio)
 
 Hardware is injected, never constructed here: the caller owns the lifetime of
@@ -59,9 +59,11 @@ import numpy as np
 
 import config_manager as config
 import exposure_repo
+import roi
 from bayer_cam import BayerCam
 from capture_h5 import CaptureSuiteWriter
 from capture_profile import CaptureProfiler
+from rect import Rect
 
 try:
     import libcamera as _libcamera  # type: ignore[import-untyped]
@@ -90,11 +92,23 @@ WAIT_TICK_S          = 0.05         # pump interval while waiting out a warmup
 
 OUT_STEM = "camtest8"
 
-# ROI definitions — image space (x, y, w, h) for 2304×1296 capture
-ROI_SAMPLE = (1150, 790,  68, 68)
-ROI_WHITE  = (1150, 496, 136, 68)
-ROI_BLACK  = ((1150, 380, 68, 68), (1150, 900, 68, 68))
-ROI_BOUND  = (1090, 360, 160, 630)
+# ROI definitions live in the `roi` table and are loaded per run by
+# _load_rois() once the camera has reported its stream size — see roi.py.
+# These are the last-resort fallback for a database with no roi rows at all
+# (an old DB, or one built before the table existed). They are the same
+# numbers roi.py seeds, in stream space for a 2304×1296 imx708 capture.
+FALLBACK_ROIS = {
+    "sample": Rect(1150, 790,  68,  68, name="sample"),
+    "white":  Rect(1150, 496, 136,  68, name="white"),
+    "black1": Rect(1150, 380,  68,  68, name="black1"),
+    "black2": Rect(1150, 900,  68,  68, name="black2"),
+    "bound":  Rect(1090, 360, 196, 630, name="bound"),
+}
+
+# The ROIs this module cannot run without: 'white' drives exposure
+# calibration, 'sample' drives the exposure ladder, 'bound' is the crop the
+# archive stores. ('black1'/'black2' are carried but not yet read.)
+REQUIRED_ROIS = ("sample", "white", "bound")
 
 # Exposure analysis constants (10-bit sensor: 0–1023)
 HALF_SAT        = 512      # target: 50% of full scale
@@ -207,26 +221,100 @@ class LedResult:
 # ROI helpers  (pure functions — no hardware)
 # ---------------------------------------------------------------------------
 
-def _channel_roi(roi: tuple) -> tuple:
-    """Convert image-space (x, y, w, h) to bayer-channel space (÷2 each coord)."""
-    x, y, w, h = roi
-    return (x // 2, y // 2, w // 2, h // 2)
+def _load_rois(cam) -> "dict[str, Rect]":
+    """
+    Load the ROIs in force for this run, in stream space.
+
+    Called once per run, after setup_camera(), so the camera's actual stream
+    size and model can be passed to roi.load_active() — a ROI stored against a
+    different stream is then rescaled or loudly refused rather than silently
+    misapplied.
+
+    Self-heals two degraded cases, in order:
+      1. Table empty (a DB predating the `roi` table) — seed it from roi.py's
+         commissioned defaults and re-read.
+      2. Still empty, or a required ROI missing — fall back to FALLBACK_ROIS
+         for the missing names and log an error. A capture that cannot find
+         its ROIs should still produce an archive.
+
+    Also validates what it returns, because these are the assumptions the
+    Bayer-layer conversions rest on (see roi.py's traps A and B):
+      - every ROI even on all four values, so layer extraction keeps its phase
+      - `sample` and `white` inside `bound`, since `bound` is the crop the
+        archive stores
+
+    Args:
+        cam: The camera, already set up (config_size populated).
+
+    Returns:
+        {name: Rect} in stream space, guaranteed to contain REQUIRED_ROIS.
+    """
+    size  = getattr(cam, "config_size", None) or (None, None)
+    model = getattr(cam, "model", None)
+    rois  = roi.load_active(size[0], size[1], model)
+
+    if not rois:
+        log.warning("capture: the roi table has no active rows — seeding it "
+                    "from roi.py's commissioned defaults")
+        roi.seed_defaults()
+        rois = roi.load_active(size[0], size[1], model)
+
+    for name in REQUIRED_ROIS:
+        if name not in rois:
+            log.error("capture: ROI %r is missing from the roi table; using "
+                      "the built-in fallback %s", name, FALLBACK_ROIS[name])
+            rois[name] = FALLBACK_ROIS[name]
+
+    for name, r in sorted(rois.items()):
+        if not roi.is_bayer_safe(r):
+            log.error("capture: ROI %r is not Bayer-safe (%s) — layer "
+                      "coordinates will be off by up to one mosaic pixel",
+                      name, r.xywh())
+    # Containment in `bound` matters at two different severities. The run
+    # itself measures `white` and `sample` against whole-frame layers, so an
+    # overhang costs this run nothing; what it costs is the archive, which
+    # stores only the bound crop. Losing part of `sample` would make the
+    # reading unrecoverable, so that is an error; losing part of a reference
+    # patch degrades later re-analysis, so that is a warning.
+    bound = rois["bound"]
+    for name, r in sorted(rois.items()):
+        if name == "bound" or roi.contains_rect(bound, r):
+            continue
+        lost = "  ".join(
+            f"{edge} by {px}px" for edge, px in (
+                ("left",   bound.x - r.x),   ("right",  r.x2() - bound.x2()),
+                ("top",    bound.y - r.y),   ("bottom", r.y2() - bound.y2()))
+            if px > 0)
+        emit = log.error if name == "sample" else log.warning
+        emit("capture: ROI %r %s extends outside bound %s (%s) — that part is "
+             "not stored in the archive and cannot be re-measured from it",
+             name, r.xywh(), bound.xywh(), lost)
+
+    log.info("capture: ROIs " + "  ".join(
+        f"{n}={r.xywh()}" for n, r in sorted(rois.items())))
+    return rois
 
 
-def _roi_pixels(layer: np.ndarray, croi: tuple) -> np.ndarray:
-    """Extract and flatten pixels from a channel layer using channel-space ROI."""
-    cx, cy, cw, ch = croi
-    return layer[cy:cy + ch, cx:cx + cw].ravel()
+def _roi_pixels(layer: np.ndarray, lr: Rect) -> np.ndarray:
+    """
+    Extract and flatten one ROI's pixels from a single Bayer layer.
+
+    `lr` must already be in *layer* coordinates — half the stream size — as
+    produced by roi.to_layer_rect() (whole-frame layers) or
+    roi.to_layer_rect_within() (layers of a cropped region). Passing a
+    stream-space rect here reads roughly four times too large an area.
+    """
+    return layer[lr.xyslice()].ravel()
 
 
-def _channel_means(layers: dict, croi: tuple) -> dict:
-    """Return {ch_name: mean} for all channels in the given channel-space ROI."""
-    return {ch: float(_roi_pixels(layers[ch], croi).mean()) for ch in layers}
+def _channel_means(layers: dict, lr: Rect) -> dict:
+    """Return {ch_name: mean} for all channels over one layer-space ROI."""
+    return {ch: float(_roi_pixels(layers[ch], lr).mean()) for ch in layers}
 
 
-def _select_target_channel(layers: dict, white_croi: tuple) -> str:
-    """Return the channel key ('B','Gb','Gr','R') with highest mean in ROI_WHITE."""
-    means = _channel_means(layers, white_croi)
+def _select_target_channel(layers: dict, white_lr: Rect) -> str:
+    """Return the channel key ('B','Gb','Gr','R') with highest mean in white."""
+    means = _channel_means(layers, white_lr)
     chosen = max(means, key=means.__getitem__)
     log.debug(f"    target channel: {chosen}  (means: "
               + "  ".join(f"{k}={v:.1f}" for k, v in sorted(means.items()))
@@ -234,18 +322,18 @@ def _select_target_channel(layers: dict, white_croi: tuple) -> str:
     return chosen
 
 
-def _check_saturated(layers: dict, target_ch: str, white_croi: tuple) -> bool:
-    """Return True if p90 of target channel in ROI_WHITE exceeds SAT_THRESH."""
-    pix = _roi_pixels(layers[target_ch], white_croi)
+def _check_saturated(layers: dict, target_ch: str, white_lr: Rect) -> bool:
+    """Return True if p90 of the target channel in white exceeds SAT_THRESH."""
+    pix = _roi_pixels(layers[target_ch], white_lr)
     p90 = float(np.percentile(pix, 90))
     log.debug(f"    saturation check: p90({target_ch})={p90:.1f}  threshold={SAT_THRESH}")
     return p90 > SAT_THRESH
 
 
-def _check_saturated_any(layers: dict, white_croi: tuple) -> bool:
-    """Return True if p90 of ANY channel in ROI_WHITE exceeds SAT_THRESH."""
+def _check_saturated_any(layers: dict, white_lr: Rect) -> bool:
+    """Return True if p90 of ANY channel in white exceeds SAT_THRESH."""
     return any(
-        float(np.percentile(_roi_pixels(layers[ch], white_croi), 90)) > SAT_THRESH
+        float(np.percentile(_roi_pixels(layers[ch], white_lr), 90)) > SAT_THRESH
         for ch in layers
     )
 
@@ -278,7 +366,7 @@ def _compute_exposures_from_e3(pix_e3: np.ndarray, e3_us: int) -> "tuple[list, l
     """
     pcts = np.percentile(pix_e3, PERCENTILES)    # [p89, p66, p50, p33, p11]
     p89, p66, p50, p33, p11 = [max(float(v), 1.0) for v in pcts]
-    log.debug(f"    ROI_SAMPLE at e3 ({e3_us}µs): "
+    log.debug(f"    sample ROI at e3 ({e3_us}µs): "
               f"p89={p89:.1f}  p66={p66:.1f}  p50={p50:.1f}  p33={p33:.1f}  p11={p11:.1f}")
 
     e0_us = max(1000, int(e3_us / E3_RATIO))
@@ -303,16 +391,30 @@ def _compute_exposures_from_e3(pix_e3: np.ndarray, e3_us: int) -> "tuple[list, l
 # Frame preparation  (in memory — nothing reaches disk except the archive)
 # ---------------------------------------------------------------------------
 
-def _roi_bound_layers(bayer: np.ndarray, pattern: str) -> dict:
+def _roi_bound_layers(bayer: np.ndarray, pattern: str, bound: Rect) -> dict:
     """
-    Crop ROI_BOUND from a full bayer frame and split it into 4 channels.
+    Crop `bound` from a full bayer frame and split it into 4 channels.
+
+    Cropping *before* extracting means the layers' origin is `bound`'s corner,
+    not the frame's — so a ROI indexed into these must be converted with
+    roi.to_layer_rect_within(r, bound), never roi.to_layer_rect(r). That is
+    trap C in roi.py, and it is why this returns the crop's layers under a
+    distinct name.
+
+    `bound` must be even on x and y: an odd origin shifts the Bayer phase, so
+    every layer would be relabelled and the dict key 'R' would not hold red.
+    _load_rois() checks that once per run.
+
+    Args:
+        bayer:   Full mosaic frame, shape (H, W).
+        pattern: "BGGR" or "RGGB" — pass cam.bayer_pattern.
+        bound:   The bounding ROI in stream space.
 
     Returns:
-        {ch_name: ndarray}, each of shape
-        (ROI_BOUND_h//2, ROI_BOUND_w//2) = (315, 80).
+        {ch_name: ndarray}, each of shape (bound.h // 2, bound.w // 2)
+        — (315, 98) for the commissioned bound.
     """
-    x, y, w, h = ROI_BOUND
-    crop = bayer[y:y + h, x:x + w]
+    crop = bayer[roi.to_slices(bound)]
     return BayerCam.extract_bayer_layers(crop, pattern)
 
 
@@ -461,6 +563,12 @@ class CaptureRunner:
         self.suite_id: str = ""
         self.results: list = []
 
+        # ROIs in force for this run, in stream space, keyed by name. Loaded
+        # from the `roi` table by _load_rois() once the camera reports its
+        # stream size, so an edit made in the viewer takes effect on the next
+        # run without a restart.
+        self.rois: "dict[str, Rect]" = dict(FALLBACK_ROIS)
+
         # The archive being written. Unlike the camera and LED bank, this is
         # created and owned by the runner, so the runner also closes it.
         self._writer: "CaptureSuiteWriter | None" = None
@@ -537,9 +645,9 @@ class CaptureRunner:
             return BayerCam.extract_bayer_layers(bayer, pattern)
 
     def _bound_layers(self, bayer: np.ndarray, pattern: str) -> dict:
-        """Crop ROI_BOUND and split into channel layers, timed as cpu.extract."""
+        """Crop the bound ROI and split into channel layers, timed as cpu.extract."""
         with self.prof.time("cpu.extract"):
-            return _roi_bound_layers(bayer, pattern)
+            return _roi_bound_layers(bayer, pattern, self.rois["bound"])
 
     # ── Focus ────────────────────────────────────────────────────────
 
@@ -649,9 +757,6 @@ class CaptureRunner:
         self.out_path = cfg.out_dir / config.capture_archive_name(self.suite_id)
         self.results = []
 
-        white_croi  = _channel_roi(ROI_WHITE)
-        sample_croi = _channel_roi(ROI_SAMPLE)
-
         # ── Camera init ──────────────────────────────────────────────
         cam.set_exposure(cfg.initial_us)
         with self.prof.time("camera.setup"):
@@ -659,6 +764,14 @@ class CaptureRunner:
         pattern = cam.bayer_pattern
         assert cam.config_size is not None, "setup_camera() must set config_size"
         cam_w, cam_h = cam.config_size
+
+        # ROIs come from the DB, and only now is the stream size known. Both
+        # analysis ROIs are converted once, to coordinates in the *whole-frame*
+        # layers that _extract() produces — not the bound-crop layers
+        # _bound_layers() produces. See roi.py, trap C.
+        self.rois   = _load_rois(cam)
+        white_lr    = roi.to_layer_rect(self.rois["white"])
+        sample_lr   = roi.to_layer_rect(self.rois["sample"])
 
         yield self._progress(
             "setup",
@@ -682,9 +795,9 @@ class CaptureRunner:
             _, bayer, _ = self._settle(current_us)
             layers = self._extract(bayer, pattern)
             with self.prof.time("cpu.analyze"):
-                means     = _channel_means(layers, white_croi)
-                saturated = _check_saturated_any(layers, white_croi)
-            log.debug("  ROI_WHITE means: "
+                means     = _channel_means(layers, white_lr)
+                saturated = _check_saturated_any(layers, white_lr)
+            log.debug("  white ROI means: "
                       + "  ".join(f"{k}={v:.1f}" for k, v in sorted(means.items())))
             if not saturated:
                 log.debug(f"  Not saturated — accepting {current_us}µs "
@@ -694,7 +807,7 @@ class CaptureRunner:
             log.debug(f"  Saturated — halving {current_us}µs → {new_us}µs")
             yield self._progress(
                 "calibrate",
-                f"ROI_WHITE saturated — halving {current_us:,} → {new_us:,} µs")
+                f"White ROI saturated — halving {current_us:,} → {new_us:,} µs")
             current_us = new_us
             phase0_retries += 1
 
@@ -748,9 +861,9 @@ class CaptureRunner:
                 _, bayer, _ = self._settle(current_us)
                 layers = self._extract(bayer, pattern)
                 with self.prof.time("cpu.analyze"):
-                    ref_means = _channel_means(layers, white_croi)
-                    target_ch = _select_target_channel(layers, white_croi)
-                    saturated = _check_saturated(layers, target_ch, white_croi)
+                    ref_means = _channel_means(layers, white_lr)
+                    target_ch = _select_target_channel(layers, white_lr)
+                    saturated = _check_saturated(layers, target_ch, white_lr)
                 if not saturated:
                     log.debug(f"  {color}: not saturated — target_ch={target_ch}  "
                               f"exposure={current_us}µs accepted")
@@ -769,11 +882,11 @@ class CaptureRunner:
             means_str = "  ".join(f"{k}={v:.1f}" for k, v in sorted(ref_means.items()))
             log.info(f"  {color}: target_ch={target_ch}  ref_exposure={current_us}µs")
             yield self._progress(
-                "capture", f"Target channel : {target_ch}  (ROI_WHITE: {means_str})")
+                "capture", f"Target channel : {target_ch}  (white ROI: {means_str})")
 
             # ── Stage 1: estimate e3 from reference capture ───────────
             with self.prof.time("cpu.analyze"):
-                pix_ref = _roi_pixels(layers[target_ch], sample_croi)
+                pix_ref = _roi_pixels(layers[target_ch], sample_lr)
                 e3_us   = _estimate_e3(pix_ref, current_us)
             log.info(f"  {color}: initial e3 estimate = {e3_us}µs ({e3_us // 1000}ms)")
 
@@ -792,7 +905,7 @@ class CaptureRunner:
                 _, bayer_e3, _ = self._settle(e3_us)
                 layers_e3  = self._extract(bayer_e3, pattern)
                 with self.prof.time("cpu.analyze"):
-                    pix_e3     = _roi_pixels(layers_e3[target_ch], sample_croi)
+                    pix_e3     = _roi_pixels(layers_e3[target_ch], sample_lr)
                     actual_p50 = float(np.percentile(pix_e3, 50))
                 error      = abs(actual_p50 - HALF_SAT) / HALF_SAT
                 e3_history.append({
@@ -824,7 +937,7 @@ class CaptureRunner:
 
             # ── Stage 3: compute e0…e6 from e3 capture spread ─────────
             with self.prof.time("cpu.analyze"):
-                pix_e3 = _roi_pixels(layers_e3[target_ch], sample_croi)
+                pix_e3 = _roi_pixels(layers_e3[target_ch], sample_lr)
                 exposures_us, pcts = _compute_exposures_from_e3(pix_e3, e3_us)
             e0_us, e1_us, e2_us, _, e4_us, e5_us, e6_us = exposures_us
             exp_summary = ", ".join(

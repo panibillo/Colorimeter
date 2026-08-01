@@ -35,7 +35,7 @@ from typing import Callable, Dict, List, Optional
 
 import layout
 from palette import color
-from widgets import Button, Label, RectWidget, TextBox, Widget
+from widgets import Button, ImageWidget, Label, RectWidget, TextBox, Widget
 from timer import TimerWidget
 
 log = logging.getLogger(__name__)
@@ -113,6 +113,11 @@ class Pool:
         # ── body: timer cluster + instructions ─────────────────────────────────
         #label("timer_lbl", L.TIMER_LBL, "white", "label_coral", 22)
         label("timer_lbl", L.TIMER_LBL, "black", "white", 22)
+        # Shares TIMER_LBL's rect with the label above: the read phase shows
+        # this button in its place, and swaps back to the "Elapsed" label for
+        # the duration of a capture (Tool 2 — see ReadPhase.enter).
+        button("view_sample_btn", L.TIMER_LBL, "btn_text", "btn_gray", 14,
+               text="View\nSample")
         p._add("timer", TimerWidget(L.TIMER, text_color=color("timer_text"),
                                     bg=color("body_dark"), size=30))
         button("run_btn", L.RUN_BTN, "btn_text", "start_green", 24)
@@ -204,6 +209,26 @@ class Pool:
         button("cap_back",  L.CAP_BACK,  "btn_text", "btn_gray",    16, text="Back")
         button("cap_start", L.CAP_START, "btn_text", "start_green", 18, text="START")
 
+        # ── image viewer (Menu → View Image, Read → View Sample) ───────────────
+        # One screen serving both entry points; the Read entry differs only in
+        # the view box it opens at. The canvas carries the ROI overlays itself,
+        # so there are no rect widgets over it.
+        p._add("img_canvas", ImageWidget(L.IMG_CANVAS, bg=color("black")))
+        button("img_zoom_in",  L.IMG_ZOOM_IN,  "btn_text", "btn_gray", 20, text="+")
+        button("img_up",       L.IMG_UP,       "btn_text", "btn_gray", 20, text="▲")
+        button("img_zoom_out", L.IMG_ZOOM_OUT, "btn_text", "btn_gray", 20, text="−")
+        button("img_left",     L.IMG_LEFT,     "btn_text", "btn_gray", 20, text="◀")
+        button("img_fit",      L.IMG_FIT,      "btn_text", "btn_gray", 14, text="Fit")
+        button("img_right",    L.IMG_RIGHT,    "btn_text", "btn_gray", 20, text="▶")
+        button("img_step",     L.IMG_STEP,     "btn_text", "btn_gray", 14, text="1px")
+        button("img_down",     L.IMG_DOWN,     "btn_text", "btn_gray", 20, text="▼")
+        button("img_reimage",  L.IMG_REIMAGE,  "btn_text", "btn_gray", 14, text="Img")
+        label("img_name",      L.IMG_NAME,     "black", "white", 14)
+        button("img_edit",     L.IMG_EDIT,     "btn_text", "btn_gray", 16, text="Edit")
+        button("img_save",     L.IMG_SAVE,     "btn_text", "start_green", 16, text="Save")
+        button("img_cancel",   L.IMG_CANCEL,   "btn_text", "btn_gray", 16, text="Cancel")
+        button("img_exit",     L.IMG_EXIT,     "btn_text", "btn_gray", 16, text="Exit")
+
         # ── modal overlay (drawn last = on top) ────────────────────────────────
         rect("modal_panel", L.MODAL_PANEL, "body_dark")
         label("modal_msg", L.MODAL_MSG, "body_text", "body_dark", 16)
@@ -268,12 +293,18 @@ class Pool:
         return w
 
     def on(self, name: str, callback: Optional[Callable]) -> Widget:
-        """Wire a Button's press handler."""
+        """
+        Wire a widget's press handler.
+
+        Any widget carrying an `on_press` attribute qualifies — Buttons, and
+        the viewer's ImageWidget, whose handler receives the tap position.
+        """
         w = self[name]
-        if isinstance(w, Button):
+        if hasattr(w, "on_press"):
             w.on_press = callback
         else:
-            log.warning("Pool.on: %r (%s) is not a Button", name, type(w).__name__)
+            log.warning("Pool.on: %r (%s) takes no press handler",
+                        name, type(w).__name__)
         return w
 
     def put(self, name: str, text: Optional[str] = None,
@@ -290,7 +321,7 @@ class Pool:
         w = self[name]
         if text is not None:
             self.set(name, text)
-        if on is not None and isinstance(w, Button):
+        if on is not None and hasattr(w, "on_press"):
             w.on_press = on
         w.enabled = enabled
         w.visible = True
@@ -382,6 +413,8 @@ if __name__ == "__main__":
             print(f"    draw_rect ({rect.x:>3},{rect.y:>3} {rect.w:>3}x{rect.h:>2}) #{color:04x}")
         def draw_text(self, text, rect, **kw):
             print(f"    draw_text {text!r:22s} ({rect.x:>3},{rect.y:>3})")
+        def draw_image(self, image, x=0, y=0):
+            print(f"    draw_image {image.size[0]}x{image.size[1]} at ({x:>3},{y:>3})")
 
     disp = _MockDisplay()
     pool = Pool.build()
@@ -434,5 +467,77 @@ if __name__ == "__main__":
     consumed = pool.handle_touch(cx, cy, disp)
     print(f"  consumed={consumed}, on_press fired={bool(pressed)}")
     assert not consumed and not pressed, "hidden run_btn must not react"
+
+    # ── image viewer ─────────────────────────────────────────────────────────
+    # Runs last: it shows its own widgets and leaves them shown, and the viewer
+    # controls share screen space with the reagent-phase cluster above (IMG_FIT
+    # overlaps RUN_BTN), which is fine — the two screens are never both up.
+    from PIL import Image
+
+    _VIEWER = ("img_canvas", "img_zoom_in", "img_up", "img_zoom_out",
+               "img_left", "img_fit", "img_right",
+               "img_step", "img_down", "img_reimage", "img_name",
+               "img_edit", "img_save", "img_cancel", "img_exit")
+
+    print("\n== emulate an image-viewer render (no image yet) ==")
+    pool.hide_all()
+    pool.set("img_name", "sample")
+    pool.show(*_VIEWER)
+    print(f"  visible: {len(pool.visible_names())} widgets")
+    pool.render(disp)     # canvas paints as flat bg until an image arrives
+
+    print("\n== the same render with a composed canvas ==")
+    canvas = layout.IMG_CANVAS
+    pool["img_canvas"].set_image(Image.new("RGB", (canvas.w, canvas.h), "navy"))
+    pool.redraw(disp, "img_canvas")
+
+    print("\n== viewer layout checks ==")
+    # The 13 controls must tile the right column exactly, and none may overlap
+    # the canvas — a control under the image would be unreachable.
+    controls = [pool[n].rect for n in _VIEWER if n != "img_canvas"]
+    covered = sum(r.w * r.h for r in controls)
+    column = (layout.SCREEN_W - canvas.w) * layout.SCREEN_H
+    print(f"  canvas {canvas.w}x{canvas.h}   controls {len(controls)}   "
+          f"covered {covered} of {column} px in the right column")
+    assert covered == column, f"right column not tiled: {covered} != {column}"
+    for r in controls:
+        assert r.x >= canvas.right, f"control at x={r.x} overlaps the canvas"
+        assert r.right <= layout.SCREEN_W and r.bottom <= layout.SCREEN_H, \
+            f"control {r} runs off screen"
+    for i, a in enumerate(controls):
+        for b in controls[i + 1:]:
+            overlap = (a.x < b.right and b.x < a.right
+                       and a.y < b.bottom and b.y < a.bottom)
+            assert not overlap, f"controls overlap: {a} and {b}"
+    # Every control must be big enough to hit with a finger.
+    for name in _VIEWER:
+        if name == "img_canvas" or name == "img_name":
+            continue
+        r = pool[name].rect
+        assert r.w >= 40 and r.h >= 40, f"{name} is only {r.w}x{r.h}"
+    print("  tiled exactly, no overlaps, every button >= 40x40")
+
+    print("\n== touch routing: every viewer control is reachable ==")
+    for name in _VIEWER:
+        if name in ("img_canvas", "img_name"):
+            continue
+        hits = []
+        pool.on(name, lambda n=name: hits.append(n))
+        r = pool[name].rect
+        assert pool.handle_touch(r.x + r.w // 2, r.y + r.h // 2, disp), name
+        assert hits == [name], f"{name} press routed to {hits}"
+    print(f"  all {len(_VIEWER) - 2} buttons route to themselves")
+
+    print("\n== palette: ROI overlay colours unpack to RGB ==")
+    from palette import PALETTE, rgb888, unpack565
+    assert unpack565(0xFFFF) == (255, 255, 255), unpack565(0xFFFF)
+    assert unpack565(0x0000) == (0, 0, 0)
+    roi_names = ("roi_idle", "roi_selected", "roi_edit", "roi_edge")
+    seen = {}
+    for n in roi_names:
+        assert n in PALETTE, f"palette is missing {n}"
+        seen[n] = rgb888(n)
+        print(f"  {n:14s} #{PALETTE[n]:04x} -> {seen[n]}")
+    assert len(set(seen.values())) == 4, "the four ROI colours must be distinct"
 
     print("\n== all pool self-tests passed ==")

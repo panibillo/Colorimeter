@@ -266,8 +266,38 @@ class TestSingleLedRun(RunnerTestCase):
     def test_roi_bound_crop_shape(self):
         with self.archive(self.runner) as f:
             arr = f["/leds/amber/lit/e3/B"][()]
-        _, _, w, h = capture_runner.ROI_BOUND
-        self.assertEqual(arr.shape, (h // 2, w // 2))
+        # The bound the run actually used, loaded from the `roi` table, not a
+        # module constant — so an edited ROI is checked, not a stale copy.
+        bound = self.runner.rois["bound"]
+        self.assertEqual(arr.shape, (bound.h // 2, bound.w // 2))
+
+    def test_rois_are_loaded_and_bayer_safe(self):
+        """Every ROI the run used must be even, or layer extraction shifts phase."""
+        import roi as roi_mod
+        for name in capture_runner.REQUIRED_ROIS:
+            with self.subTest(roi=name):
+                r = self.runner.rois[name]
+                self.assertTrue(roi_mod.is_bayer_safe(r), f"{name}={r.xywh()}")
+
+    def test_every_roi_lies_inside_bound(self):
+        """
+        The archive stores only the bound crop, so anything reaching outside it
+        cannot be re-measured from the archive.
+
+        Regression guard: bound was commissioned at w=160, ending at x=1250,
+        which clipped 36 px off the white patch (x 1150..1286) — 26% of its
+        width. Widened to w=196 on 2026-07-31, changing the archived crop shape
+        from 315x80 to 315x98.
+        """
+        import roi as roi_mod
+        bound = self.runner.rois["bound"]
+        for name, r in sorted(self.runner.rois.items()):
+            if name == "bound":
+                continue
+            with self.subTest(roi=name):
+                self.assertTrue(
+                    roi_mod.contains_rect(bound, r),
+                    f"{name}={r.xywh()} outside bound={bound.xywh()}")
 
     def test_lit_arrays_carry_exposure_attrs(self):
         meta = self.led_metadata(self.runner, "amber")

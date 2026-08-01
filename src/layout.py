@@ -147,6 +147,45 @@ CAP_PROGRESS  = Rect(  8,  56, 304, 120)     # progress / result text
 CAP_BACK      = Rect(  8, 184, 100,  48)     # Cancel (running-capture progress view)
 CAP_START     = Rect( 84, 184, 152,  48)     # "Calibrate Exposures" (run) / done OK
 
+# ── image viewer (Menu → View Image, and Read → View Sample) ────────────────────
+# A 200x240 canvas fills the left of the screen — taller than wide, matching the
+# sample rectangle, so the sample ROI plus a margin fills the view well. The
+# right column carries a 3x3 pad of 40x40 zoom/pan buttons, a strip showing the
+# selected ROI's name, and a 2x2 grid of mode buttons.
+#
+# The viewer draws no header and no footer: the canvas runs the full height, and
+# Exit is one of the mode buttons.
+#
+#        0                200      240      280   320
+#      0 ┌─────────────────┬────────┬────────┬────────┐
+#        │                 │   +    │   ▲    │   −    │  40
+#     40 │                 ├────────┼────────┼────────┤
+#        │                 │   ◀    │  Fit   │   ▶    │  40
+#     80 │                 ├────────┼────────┼────────┤
+#        │   canvas        │  1px   │   ▼    │  Img   │  40
+#    120 │   200 x 240     ├────────┴────────┴────────┤
+#        │                 │      < roi name >        │  26
+#    146 │                 ├────────────┬─────────────┤
+#        │                 │    Edit    │    Save     │  47
+#    193 │                 ├────────────┼─────────────┤
+#        │                 │   Cancel   │    Exit     │  47
+#    240 └─────────────────┴────────────┴─────────────┘
+IMG_CANVAS   = Rect(  0,   0, 200, 240)   # the image + ROI overlays
+IMG_ZOOM_IN  = Rect(200,   0,  40,  40)   # +
+IMG_UP       = Rect(240,   0,  40,  40)   # ▲
+IMG_ZOOM_OUT = Rect(280,   0,  40,  40)   # −
+IMG_LEFT     = Rect(200,  40,  40,  40)   # ◀
+IMG_FIT      = Rect(240,  40,  40,  40)   # Fit — whole frame, the pad's "home"
+IMG_RIGHT    = Rect(280,  40,  40,  40)   # ▶
+IMG_STEP     = Rect(200,  80,  40,  40)   # edit step: 1px ⇄ 10px
+IMG_DOWN     = Rect(240,  80,  40,  40)   # ▼
+IMG_REIMAGE  = Rect(280,  80,  40,  40)   # Img — fresh white-LED exposure
+IMG_NAME     = Rect(200, 120, 120,  26)   # selected ROI name; blank when none
+IMG_EDIT     = Rect(200, 146,  60,  47)
+IMG_SAVE     = Rect(260, 146,  60,  47)
+IMG_CANCEL   = Rect(200, 193,  60,  47)
+IMG_EXIT     = Rect(260, 193,  60,  47)
+
 # ── footer  y 215..239 ─────────────────────────────────────────────────────────
 PRIOR_BTN   = Rect(  0, 217,  58, 21)
 CLOCK       = Rect( 60, 217, 140, 21)   # "Jul 21 14:32:07"

@@ -54,6 +54,14 @@ PALETTE: dict[str, int] = {
     # Visible alarm button: a backgrounded slot's timer expired unattended.
     "alarm_bg":    0xF800,   # red
     "alarm_text":  0xFFE0,   # yellow
+    # ROI overlay outlines in the image viewer, one per selection state.  These
+    # are stroked into a PIL image over a photograph, not drawn as widgets, so
+    # they are reached through rgb888() rather than color().  Chosen saturated
+    # and far apart in hue so they stay legible over a lit sample.
+    "roi_idle":     0x07FF,  # cyan     — present, not selected
+    "roi_selected": 0xFFE0,  # yellow   — selected, not being edited
+    "roi_edit":     0x07E0,  # green    — the rectangle under edit
+    "roi_edge":     0xF81F,  # magenta  — its armed side
 }
 
 
@@ -70,3 +78,51 @@ def color(name: str) -> int:
         log.warning("palette: unknown colour %r (using black)", name)
         return 0x0000
     return value
+
+
+def unpack565(value: int) -> tuple[int, int, int]:
+    """
+    Expand an RGB565 integer to an 8-bit (r, g, b) triple.
+
+    The low bits are replicated from the high bits rather than zero-filled, so
+    full-scale stays full-scale: 0x1F -> 255, not 248.  Without that, "white"
+    would render as (248, 252, 248) and pure colours would read slightly dark.
+
+    Args:
+        value: RGB565 integer, 0x0000..0xFFFF.
+
+    Returns:
+        Tuple (r, g, b), each 0..255.
+
+    Example:
+        >>> unpack565(0xFFFF)
+        (255, 255, 255)
+        >>> unpack565(0x0000)
+        (0, 0, 0)
+    """
+    r5 = (value >> 11) & 0x1F
+    g6 = (value >> 5)  & 0x3F
+    b5 = value         & 0x1F
+    return (r5 << 3) | (r5 >> 2), (g6 << 2) | (g6 >> 4), (b5 << 3) | (b5 >> 2)
+
+
+def rgb888(name: str) -> tuple[int, int, int]:
+    """
+    Resolve a palette name to an 8-bit (r, g, b) triple.
+
+    The PIL-drawing path — the image viewer's ROI overlays — needs real RGB
+    tuples, but the names must stay the single source of truth for colour, so
+    this goes through the same PALETTE as color() rather than duplicating
+    values.  Unknown names fall back to black exactly as color() does.
+
+    Args:
+        name: A key of PALETTE, e.g. "roi_selected".
+
+    Returns:
+        Tuple (r, g, b), each 0..255.
+
+    Example:
+        >>> rgb888("white")
+        (255, 255, 255)
+    """
+    return unpack565(color(name))

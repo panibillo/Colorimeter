@@ -68,6 +68,19 @@ log = logging.getLogger(__name__)
 # and after results) no capture is imminent, so the camera is released.
 _CAMERA_PHASES = ("reagent1", "reagent2", "read", "analysis")
 
+# Image viewer.  The preview is for looking at, not measuring, so the LED
+# settle is a fraction of a capture run's LED_ON_WARMUP_S (2.0 s) — colour
+# accuracy is not required and the operator's wait is what matters.
+_PREVIEW_LED_CH      = 10       # LEDBank channel for the white LED
+_PREVIEW_LED_NAME    = "white"  # its name in the `exposure` table
+_PREVIEW_SETTLE_S    = 0.25     # after switching the LED on, before capturing
+_PREVIEW_FALLBACK_US = 40_000   # when no calibrated white exposure exists
+_VIEW_ZOOM_STEP      = 1.5      # one press of + or −
+_VIEW_PAN_FRACTION   = 0.25     # one press of an arrow, as a fraction of the view
+_EDIT_MARGIN         = 0.5      # Edit zooms to the rectangle plus half its size
+_EDIT_EDGE_TOL_PX    = 12       # canvas px within which a tap arms an edge
+_EDIT_MIN_SIDE       = 16       # smallest ROI a Save will accept, image px
+
 # Bounds for a reagent countdown entered on the Menu → Config screen.  Zero is
 # excluded (a wait that expires the instant it starts is never what was meant)
 # and the ceiling is one hour, well past the longest protocol step.
@@ -175,6 +188,26 @@ class Arbiter:
         # Config screen state (Menu → Config): the reagent countdowns in
         # seconds, staged while the screen is open and written only by its OK.
         self._cfg_secs: dict[str, int] = {"r1": 0, "r2": 0}
+
+        # Image viewer state (Menu → View Image, and later Read → View Sample).
+        # _view_open is read by _camera_wanted(), so the shared camera is held
+        # for as long as the screen is up; without it _maybe_release_camera()
+        # would close the sensor on the very next main-loop pass.
+        self._view_open      = False
+        self._view_frame     = None    # the whole captured frame, numpy BGR
+        self._view_state     = None    # image_view.ViewState over that frame
+        self._view_rois:  dict = {}    # name -> rect.Rect, in image space
+        self._view_selected: str | None = None   # one name, or None
+        self._view_return_slot: Slot | None = None
+        self._view_step      = 1       # edit nudge, image px: 1 or 10
+        self._view_status    = ""      # transient message for the name strip
+        # Edit mode: a working copy of the selected rectangle, and which of its
+        # sides (if any) the arrows move.  The working copy is what the screen
+        # draws and what Save validates; the stored ROI is untouched until then,
+        # so Cancel is free.
+        self._view_mode      = "view"  # "view" | "edit"
+        self._view_editing   = None    # rect.Rect working copy, or None
+        self._view_armed: str | None = None   # left|right|top|bottom, or None
 
     # ── Lifecycle ──────────────────────────────────────────────────────────────
 
@@ -544,11 +577,15 @@ class Arbiter:
         self._pool.put("menu_cancel_btn", "CANCEL", on=self._menu_cancel)
         self._pool.put("menu_title",      "Menu")
         self._pool.put("menu_ok_btn",     "OK",     on=self._menu_ok)
-        # The 3x2 option grid, laid out in layout.py: the two stubs are shown
-        # disabled (no handler wired) so the grid reads as a whole while the
-        # screens behind them are still to come.
+        # The 3x2 option grid, laid out in layout.py: the remaining stub is
+        # shown disabled (no handler wired) so the grid reads as a whole while
+        # the screen behind it is still to come.  "View Image" is disabled
+        # while a capture is in flight — the imaging tools share the camera and
+        # LED bank with the capture path.
         self._pool.put("menu_capture",    "Capture",  on=self._menu_open_capture)
-        self._pool.put("menu_stub1",      "stub1",    enabled=False)
+        self._pool.put("menu_stub1",      "View\nImage",
+                       on=self._menu_open_image_view,
+                       enabled=self.capture_available())
         self._pool.put("menu_defaults",   "Defaults", on=self._menu_open_defaults)
         self._pool.put("menu_stub2",      "stub2",    enabled=False)
         self._pool.put("menu_config",     "Config",   on=self._menu_open_config)
@@ -574,6 +611,15 @@ class Arbiter:
 
     def _menu_power(self) -> None:
         self.shutdown()
+
+    def _menu_open_image_view(self) -> None:
+        """
+        Menu → View Image (Tool 1): the whole frame with every ROI drawn on.
+
+        Exit returns to the Menu, not to the slot, so the menu's OK/CANCEL
+        still get their say over anything staged before the viewer was opened.
+        """
+        self.open_image_view(slot=None)
 
     def _menu_open_defaults(self) -> None:
         """
@@ -1284,9 +1330,17 @@ class Arbiter:
     # ── Shared camera (persistent, borrowed by every capture) ───────────────────
 
     def _camera_wanted(self) -> bool:
-        """True while any slot is in a phase that will soon use the camera."""
-        return any(s.active_phase in _CAMERA_PHASES
-                   for s in self._slots.values())
+        """
+        True while anything on screen needs the shared camera.
+
+        Two claims: a slot in a phase that will soon capture, and the image
+        viewer, which reimages on demand.  The viewer *must* be counted here —
+        it is not a phase, so without it _maybe_release_camera() would close
+        the sensor on the very next main-loop pass and every reimage would pay
+        the full open cost again.
+        """
+        return self._view_open or any(s.active_phase in _CAMERA_PHASES
+                                      for s in self._slots.values())
 
     def _maybe_open_camera(self) -> None:
         """
@@ -1353,6 +1407,596 @@ class Arbiter:
             except Exception:
                 log.exception("Arbiter: error closing shared LED bank")
             self._leds = None
+
+    def preview_frame(self):
+        """
+        Take one briefly-lit frame for the image viewer.
+
+        The white LED is switched on, given a short settle, one frame is
+        captured, and the LED goes off again.  The settle is deliberately far
+        shorter than a capture run's LED_ON_WARMUP_S: this frame is for looking
+        at, and for judging where the ROI rectangles fall, so colour accuracy
+        is not required and the operator's wait matters more.
+
+        The exposure used is the calibrated white exposure when one exists (the
+        middle rung of group '3', or whatever group '1' holds), so the preview
+        looks like what a capture would see; otherwise a fixed fallback.
+
+        Blocks the main loop for roughly a second.  That is acceptable because
+        it only ever runs from an explicit button press, and every alternative
+        (threads, a state machine over the settle) buys nothing here.
+
+        Returns:
+            (frame, error).  `frame` is a numpy BGR array of the full stream on
+            success and None on failure, in which case `error` is a short
+            message for the screen.
+        """
+        hw = self._ensure_camera()
+        if hw is None:
+            return None, "Camera unavailable"
+        cam, leds = hw
+
+        exposure_us = self._preview_exposure_us()
+        lit = False
+        try:
+            if leds is not None:
+                leds.set_channel(_PREVIEW_LED_CH, True)
+                lit = True
+                time.sleep(_PREVIEW_SETTLE_S)
+            cam.set_exposure(exposure_us)
+            rgb, _bayer, _meta = cam.capture_frame()
+        except Exception:
+            log.exception("Arbiter: preview capture failed")
+            return None, "Preview failed"
+        finally:
+            if lit:
+                try:
+                    leds.set_channel(_PREVIEW_LED_CH, False)
+                except Exception:
+                    log.exception("Arbiter: could not switch the preview LED off")
+
+        if rgb is None or getattr(rgb, "ndim", 0) != 3:
+            return None, "No image"
+        log.info("Arbiter: preview frame %dx%d at %d us",
+                 rgb.shape[1], rgb.shape[0], exposure_us)
+        return rgb, ""
+
+    def _preview_exposure_us(self) -> int:
+        """
+        Pick an exposure for the preview: the calibrated white one if there is
+        one, else a fixed fallback.
+
+        Reads the middle of whatever active group the white LED has, so the
+        preview brightness matches what a capture of the same scene would see.
+        Any failure falls back rather than propagating — a preview is never
+        worth failing a screen over.
+        """
+        try:
+            for group in ("1", "3", "5"):
+                us = exposure_repo.read_exposures(_PREVIEW_LED_NAME, group)
+                if us:
+                    return int(us[len(us) // 2])
+        except Exception:
+            log.exception("Arbiter: could not read a calibrated preview exposure")
+        return _PREVIEW_FALLBACK_US
+
+    # ── Image viewer screen (Menu → View Image) ────────────────────────────────
+    # A screen of its own, like Menu and Config: _focused is None while it is
+    # up, it draws no header or footer, and the whole 320x240 belongs to it.
+    #
+    # The full frame is held as a numpy array for the life of the screen and
+    # re-sliced on every repaint (see image_view.compose), which is what lets a
+    # ROI be *enlarged* during editing — the pixels behind the growth are
+    # already there, out to the frame edge.
+
+    def open_image_view(self, slot: Slot | None = None, focus_roi: str | None = None):
+        """
+        Open the image viewer, taking one preview frame first.
+
+        Refused while a capture is in flight: the imaging tools share the
+        camera and the LED bank with the capture path, so they must be
+        unavailable from the moment CAPTURE is pressed until the last frame is
+        stored.  `capture_available()` is the single guard covering both the
+        per-sample Read capture and a standalone Menu capture.
+
+        Args:
+            slot:      Where Exit returns to; None returns to the Menu.
+            focus_roi: A ROI name to open zoomed to (Tool 2's entry point);
+                       None opens on the whole frame.
+        """
+        if not self.capture_available():
+            log.info("Arbiter: image view refused — a capture is in flight")
+            self._toast("Capture running")
+            return
+        self._view_return_slot = slot
+        self._view_open = True
+        self._view_selected = focus_roi
+        self._view_status = ""
+        self._view_mode = "view"
+        self._view_editing = None
+        self._view_armed = None
+        self._focused = None
+        self._view_rois = self._load_view_rois()
+        self._view_reimage(focus_roi=focus_roi)
+
+    def _load_view_rois(self) -> dict:
+        """
+        Read the ROIs in force, for drawing over the preview.
+
+        Failure is survivable: an empty dict just means no rectangles are
+        drawn, and looking at the raw image is still useful.
+        """
+        try:
+            import roi
+            size = getattr(self._camera, "config_size", None) or (None, None)
+            return roi.load_active(size[0], size[1],
+                                   getattr(self._camera, "model", None))
+        except Exception:
+            log.exception("Arbiter: could not load ROIs for the image view")
+            return {}
+
+    def _view_reimage(self, focus_roi: str | None = None) -> None:
+        """Take a fresh preview frame and rebuild the view over it."""
+        if self._pool is not None:
+            self._pool.put("img_name", "Imaging...")
+            self._pool.redraw(self._disp, "img_name")
+        frame, err = self.preview_frame()
+        self._view_status = err
+        if frame is None:
+            self._view_frame = None
+            self._view_state = None
+            self._render_image_view()
+            return
+
+        import image_view
+        prev = self._view_state
+        self._view_frame = frame
+        fh, fw = frame.shape[:2]
+        # Reimaging must not throw away where you were looking — the whole
+        # point of Img mid-edit is to see the effect of a moved edge under a
+        # fresh exposure.  The view is rebuilt only when there is none yet, a
+        # ROI to focus was asked for, or the stream size changed under us.
+        if (prev is None or focus_roi is not None
+                or (prev.frame_w, prev.frame_h) != (fw, fh)):
+            canvas = layout.IMG_CANVAS
+            self._view_state = image_view.ViewState(fw, fh, canvas.w, canvas.h)
+            target = focus_roi or self._view_selected
+            if target and target in self._view_rois:
+                self._view_state.fit_to(self._view_rois[target])
+        self._render_image_view()
+
+    def _render_image_view(self) -> None:
+        """Build (or rebuild) the whole viewer screen."""
+        if self._pool is None:
+            return
+        self._pool.hide_all()
+        self._pool.put("img_canvas", on=self._view_canvas_press)
+        self._pool.put("img_zoom_in",  "+",    on=self._view_zoom_in)
+        self._pool.put("img_up",       "▲",    on=lambda: self._view_arrow(0, -1))
+        self._pool.put("img_zoom_out", "−",    on=self._view_zoom_out)
+        self._pool.put("img_left",     "◀",    on=lambda: self._view_arrow(-1, 0))
+        self._pool.put("img_fit",      "Fit",  on=self._view_fit)
+        self._pool.put("img_right",    "▶",    on=lambda: self._view_arrow(1, 0))
+        self._pool.put("img_step",     f"{self._view_step}px",
+                       on=self._view_toggle_step)
+        self._pool.put("img_down",     "▼",    on=lambda: self._view_arrow(0, 1))
+        self._pool.put("img_reimage",  "Img",  on=self._view_reimage)
+        self._pool.put("img_name",     self._view_name_text())
+        # Edit / Save / Cancel are a mode pair with Exit: editing offers Save
+        # and Cancel and withholds both Edit and Exit, so there is no way to
+        # leave the screen with an unsaved working copy and therefore no
+        # lost-work modal to write.
+        editing = self._view_mode == "edit"
+        self._pool.put("img_edit",   "Edit",   on=self._view_edit,
+                       enabled=not editing and self._view_selected is not None
+                               and self._view_frame is not None)
+        self._pool.put("img_save",   "Save",   on=self._view_save,
+                       enabled=editing)
+        self._pool.put("img_cancel", "Cancel", on=self._view_cancel,
+                       enabled=editing)
+        self._pool.put("img_exit",   "Exit",   on=self._view_exit,
+                       enabled=not editing)
+        self._paint_canvas()
+        self._pool.render(self._disp)
+        self._rebuild_focus()
+
+    def _paint_canvas(self) -> None:
+        """
+        Compose the canvas from the frame, the view box and the ROIs.
+
+        Four colours, as specified: `roi_idle` for a rectangle that is merely
+        present, `roi_selected` for the selected one, `roi_edit` for the
+        working copy under edit, and `roi_edge` for its armed side.
+
+        Overlays are drawn in order, so the interesting one goes last and wins
+        wherever two rectangles overlap.  The armed side is passed as a
+        *degenerate* rectangle — zero width for a vertical edge, zero height
+        for a horizontal one — which `compose` strokes as a line without
+        needing to know anything about edit mode.
+        """
+        if self._view_frame is None or self._view_state is None:
+            self._pool["img_canvas"].set_image(None)
+            return
+        import image_view
+        from palette import rgb888
+
+        editing = self._view_editing
+        overlays = []
+        for name, r in sorted(self._view_rois.items()):
+            if editing is not None and name == editing.name:
+                continue                      # the working copy is drawn instead
+            colour = ("roi_selected"
+                      if editing is None and name == self._view_selected
+                      else "roi_idle")
+            overlays.append((r, rgb888(colour)))
+        # Selected last in view mode, the working copy last in edit mode.
+        overlays.sort(key=lambda pair: pair[0].name == self._view_selected)
+        if editing is not None:
+            overlays.append((editing, rgb888("roi_edit")))
+            edge = self._armed_edge_rect()
+            if edge is not None:
+                overlays.append((edge, rgb888("roi_edge")))
+
+        self._pool["img_canvas"].set_image(
+            image_view.compose(self._view_frame, self._view_state, overlays))
+
+    def _armed_edge_rect(self):
+        """
+        The armed side as a zero-thickness Rect, or None when nothing is armed.
+
+        `compose` draws a rectangle's outline just outside its bounds, so a
+        zero-width rect comes out as a two-pixel vertical line on the edge —
+        which is exactly what marking one side wants, with no special case in
+        the compositor.
+        """
+        r, side = self._view_editing, self._view_armed
+        if r is None or side is None:
+            return None
+        from rect import Rect
+        return {"left":   Rect(r.x,    r.y,    0,   r.h, name=r.name),
+                "right":  Rect(r.x2(), r.y,    0,   r.h, name=r.name),
+                "top":    Rect(r.x,    r.y,    r.w, 0,   name=r.name),
+                "bottom": Rect(r.x,    r.y2(), r.w, 0,   name=r.name)}[side]
+
+    def _repaint_canvas(self) -> None:
+        """Recompose and blit just the canvas — the common case for pan/zoom."""
+        if self._pool is None:
+            return
+        self._paint_canvas()
+        self._pool.redraw(self._disp, "img_canvas")
+        self._pool.put("img_name", self._view_name_text())
+        self._pool.redraw(self._disp, "img_name")
+
+    def _view_name_text(self) -> str:
+        """
+        What the strip between the two button grids shows.
+
+        In edit mode it names the armed side rather than the ROI — while an
+        edge is armed that is the thing the arrows act on, and the ROI's name
+        is already known from having selected it.
+        """
+        if self._view_status:
+            return self._view_status
+        if self._view_editing is not None:
+            r = self._view_editing
+            head = self._view_armed or r.name
+            return f"{head} {r.w}x{r.h}"
+        if self._view_selected:
+            r = self._view_rois.get(self._view_selected)
+            if r is not None:
+                return f"{self._view_selected} {r.w}x{r.h}"
+            return self._view_selected
+        return f"x{self._view_state.scale:.2f}" if self._view_state else ""
+
+    # ── Viewer controls ────────────────────────────────────────────────────────
+
+    def _view_zoom_in(self) -> None:
+        self._view_zoom(_VIEW_ZOOM_STEP)
+
+    def _view_zoom_out(self) -> None:
+        self._view_zoom(1.0 / _VIEW_ZOOM_STEP)
+
+    def _view_zoom(self, factor: float) -> None:
+        if self._view_state is None:
+            return
+        self._view_status = ""
+        self._view_state.zoom(factor)
+        self._repaint_canvas()
+
+    def _view_arrow(self, sx: int, sy: int) -> None:
+        """
+        The arrows do double duty: pan in view mode, nudge in edit mode.
+
+        In edit mode they move the armed side if one is armed, and the whole
+        rectangle if none is — the rule as specified, and it means the same
+        four buttons cover both kinds of adjustment without a mode button.
+        """
+        if self._view_state is None:
+            return
+        self._view_status = ""
+        if self._view_mode == "edit":
+            self._nudge(sx, sy)
+        else:
+            v = self._view_state
+            v.pan(sx * v.w * _VIEW_PAN_FRACTION, sy * v.h * _VIEW_PAN_FRACTION)
+        self._repaint_canvas()
+
+    def _nudge(self, sx: int, sy: int) -> None:
+        """
+        Move the armed side, or the whole rectangle when nothing is armed.
+
+        Steps by `_view_step` image pixels (the 1px/10px toggle).  An arrow
+        perpendicular to the armed side does nothing: with the left edge armed,
+        up and down have no meaning, and moving the whole rectangle instead
+        would be a surprise.
+
+        The result is clamped to the frame and to a minimum side, so a rectangle
+        can neither be pushed off the image nor collapsed to nothing.  The view
+        then follows the armed edge, keeping the thing being moved under the
+        eye.
+        """
+        from rect import Rect
+        r, side, d = self._view_editing, self._view_armed, self._view_step
+        if r is None:
+            return
+        dx, dy = sx * d, sy * d
+        x, y, w, h = r.xywh()
+
+        if side is None:
+            x, y = x + dx, y + dy
+        elif side == "left":
+            x, w = x + dx, w - dx
+        elif side == "right":
+            w = w + dx
+        elif side == "top":
+            y, h = y + dy, h - dy
+        elif side == "bottom":
+            h = h + dy
+
+        # Minimum size first, so shrinking an edge past the far one pins it
+        # rather than inverting the rectangle.
+        if w < _EDIT_MIN_SIDE:
+            if side == "left":
+                x -= _EDIT_MIN_SIDE - w
+            w = _EDIT_MIN_SIDE
+        if h < _EDIT_MIN_SIDE:
+            if side == "top":
+                y -= _EDIT_MIN_SIDE - h
+            h = _EDIT_MIN_SIDE
+        fh, fw = self._view_frame.shape[:2]
+        w, h = min(w, fw), min(h, fh)
+        x = max(0, min(x, fw - w))
+        y = max(0, min(y, fh - h))
+
+        self._view_editing = Rect(x, y, w, h, name=r.name, color=r.color)
+        self._view_editing.role = getattr(r, "role", None)
+        if side is not None:
+            self._view_state.centre_on_edge(self._view_editing, side)
+
+    def _view_fit(self) -> None:
+        if self._view_state is None:
+            return
+        self._view_status = ""
+        self._view_state.fit()
+        self._repaint_canvas()
+
+    def _view_toggle_step(self) -> None:
+        """Toggle the edit nudge between 1 and 10 image px (used in step 8)."""
+        self._view_step = 10 if self._view_step == 1 else 1
+        if self._pool is not None:
+            self._pool.put("img_step", f"{self._view_step}px",
+                           on=self._view_toggle_step)
+            self._pool.redraw(self._disp, "img_step")
+
+    def _view_canvas_press(self, cx: int, cy: int) -> None:
+        """
+        Select a ROI from a tap on the canvas.
+
+        The tap is unprojected into image space and every rectangle containing
+        that point becomes a candidate.  When more than one does — `bound`
+        contains everything, and zoomed out the rectangles are only a few
+        screen pixels apart — the tap is genuinely ambiguous, so rather than
+        guessing it simply picks one, preferring one that is *not* currently
+        selected.  Tapping the same spot again therefore moves on to the next.
+
+        The rule, given the candidates:
+          1. none              -> deselect
+          2. one, already selected -> deselect it (so a lone rectangle can be
+             cleared by touch, which was the original toggle behaviour)
+          3. otherwise         -> order by area, smallest first (ties by name),
+             start scanning just *after* the current selection, wrap, and take
+             the first.  That is the first candidate not currently selected,
+             and it advances by one on each repeat tap.
+
+        Scanning from after the selection rather than from the start is what
+        makes three or more overlapping rectangles cycle through all of them
+        instead of bouncing between the first two.  With two it reduces exactly
+        to a toggle: A -> B -> A -> B.
+        """
+        if self._view_state is None:
+            return
+        import image_view
+        ix, iy = image_view.canvas_to_image(self._view_state, cx, cy)
+
+        if self._view_mode == "edit":
+            self._arm_side_at(ix, iy)
+            return
+
+        candidates = sorted((r for r in self._view_rois.values()
+                             if r.contains(ix, iy)),
+                            key=lambda r: (r.area(), r.name))
+        if not candidates:
+            self._view_selected = None
+        elif len(candidates) == 1 and candidates[0].name == self._view_selected:
+            self._view_selected = None
+        else:
+            names = [r.name for r in candidates]
+            start = names.index(self._view_selected) + 1 if self._view_selected in names else 0
+            self._view_selected = names[start % len(names)]
+
+        self._view_status = ""
+        log.debug("Arbiter: canvas tap (%d,%d) -> image (%.0f,%.0f) -> %r "
+                  "of candidates %s", cx, cy, ix, iy, self._view_selected,
+                  [r.name for r in candidates])
+        self._repaint_canvas()
+
+    def _arm_side_at(self, ix: float, iy: float) -> None:
+        """
+        Arm (or disarm) a side of the rectangle being edited, from a tap.
+
+        A tap within `_EDIT_EDGE_TOL_PX` *canvas* pixels of a side arms it;
+        tapping the armed side again, or anywhere else, disarms.  The tolerance
+        is a screen band converted to image pixels, so it stays a comfortable
+        finger's width at every zoom instead of shrinking with the rectangle.
+
+        Pressing Edit auto-zooms to the rectangle, which is what makes this
+        workable: at fit zoom the whole sample ROI is about six canvas pixels
+        wide and every tap would be within tolerance of every edge.
+        """
+        r = self._view_editing
+        if r is None or self._view_state is None:
+            return
+        tol = _EDIT_EDGE_TOL_PX / self._view_state.scale
+        side = None
+        if (r.x - tol <= ix <= r.x2() + tol and r.y - tol <= iy <= r.y2() + tol):
+            dist = {"left":   abs(ix - r.x),   "right":  abs(ix - r.x2()),
+                    "top":    abs(iy - r.y),   "bottom": abs(iy - r.y2())}
+            nearest = min(dist, key=dist.get)
+            if dist[nearest] <= tol:
+                side = nearest
+        self._view_armed = None if side == self._view_armed else side
+        self._view_status = ""
+        # Follow whatever is now in play: the armed edge, or the whole
+        # rectangle when nothing is.  Without the second half, disarming would
+        # leave the view parked on the old edge with the opposite one off
+        # canvas, and the only way back would be to zoom out.
+        if self._view_armed is not None:
+            self._view_state.centre_on_edge(r, self._view_armed)
+        else:
+            self._view_state.centre_on_rect(r)
+        log.debug("Arbiter: edit tap (%.0f,%.0f) tol=%.1f -> armed %r",
+                  ix, iy, tol, self._view_armed)
+        self._repaint_canvas()
+
+    # ── Edit mode ──────────────────────────────────────────────────────────────
+
+    def _view_edit(self) -> None:
+        """
+        Start editing the selected rectangle.
+
+        Takes a working copy — the stored ROI is not touched until Save — and
+        zooms to it plus half its size again, which is what makes the edges
+        tappable.  Exit is withheld until Save or Cancel, so there is no way to
+        walk away from an unsaved edit.
+        """
+        name = self._view_selected
+        r = self._view_rois.get(name) if name else None
+        if r is None or self._view_state is None:
+            return
+        from rect import Rect
+        self._view_editing = Rect(r.x, r.y, r.w, r.h, name=name, color=r.color)
+        self._view_editing.role = getattr(r, "role", None)
+        self._view_armed = None
+        self._view_mode = "edit"
+        self._view_status = ""
+        self._view_state.fit_to(self._view_editing, _EDIT_MARGIN)
+        log.info("Arbiter: editing ROI %r at %s", name, r.xywh())
+        self._render_image_view()
+
+    def _view_save(self) -> None:
+        """
+        Validate the working copy and write it, superseding the stored ROI.
+
+        Validation, in order:
+          1. `snap_even` — the one that fails silently if skipped.  An odd
+             coordinate shifts the Bayer phase, so which of B/Gb/Gr/R is being
+             sampled changes without anything looking wrong.
+          2. Inside the frame.
+          3. At least `_EDIT_MIN_SIDE` on each side.
+          4. `sample` still inside `bound`, whichever of the two was edited —
+             the archive stores only the bound crop, so a sample outside it
+             could not be re-measured.
+
+        A rejected save leaves edit mode running with the reason in the name
+        strip, so the edit can be corrected rather than lost.
+        """
+        r = self._view_editing
+        if r is None:
+            return
+        import roi
+        snapped = roi.snap_even(r)
+        fh, fw = self._view_frame.shape[:2]
+
+        if snapped.w < _EDIT_MIN_SIDE or snapped.h < _EDIT_MIN_SIDE:
+            return self._view_reject(f"min {_EDIT_MIN_SIDE}px")
+        if snapped.x < 0 or snapped.y < 0 or snapped.x2() > fw or snapped.y2() > fh:
+            return self._view_reject("outside frame")
+
+        proposed = dict(self._view_rois)
+        proposed[snapped.name] = snapped
+        bound, sample = proposed.get("bound"), proposed.get("sample")
+        if bound is not None and sample is not None \
+                and not roi.contains_rect(bound, sample):
+            return self._view_reject("sample outside bound")
+
+        rowid = roi.save(snapped.name, snapped, remark="edited on the instrument")
+        if not rowid:
+            return self._view_reject("save failed")
+        log.info("Arbiter: saved ROI %r as %s (rowid %s)",
+                 snapped.name, snapped.xywh(), rowid)
+        self._view_rois = self._load_view_rois()
+        self._view_end_edit(f"saved {snapped.w}x{snapped.h}")
+
+    def _view_reject(self, why: str) -> None:
+        """Refuse a Save, keeping edit mode running so the edit can be fixed."""
+        log.info("Arbiter: save refused — %s (%s)", why,
+                 self._view_editing.xywh() if self._view_editing else "?")
+        self._view_status = why
+        self._repaint_canvas()
+
+    def _view_cancel(self) -> None:
+        """Discard the working copy and return to view mode."""
+        log.info("Arbiter: edit cancelled")
+        self._view_end_edit("cancelled")
+
+    def _view_end_edit(self, status: str) -> None:
+        """Leave edit mode, keeping the ROI selected so Edit can be pressed again."""
+        self._view_editing = None
+        self._view_armed = None
+        self._view_mode = "view"
+        self._view_status = status
+        self._render_image_view()
+
+    def _view_exit(self) -> None:
+        """Close the viewer, release the frame, and return where we came from."""
+        if self._view_mode == "edit":
+            return                    # Exit is disabled while editing
+        self._view_open = False
+        self._view_frame = None          # ~9 MB; do not hold it past the screen
+        self._view_state = None
+        self._view_rois = {}
+        self._view_selected = None
+        self._view_editing = None
+        self._view_armed = None
+        self._view_mode = "view"
+        slot = self._view_return_slot
+        self._view_return_slot = None
+        if slot is not None:
+            self.focus(slot)
+        else:
+            self._render_menu()
+
+    def _toast(self, message: str) -> None:
+        """Show a one-line message where the current screen has room for it."""
+        if self._pool is None:
+            return
+        for name in ("img_name", "menu_title", "cap_progress"):
+            w = self._pool.get(name)
+            if w is not None and w.visible:
+                self._pool.put(name, message)
+                self._pool.redraw(self._disp, name)
+                return
+        log.info("Arbiter: %s", message)
 
     # ── Focus / keyboard (over the pool) ───────────────────────────────────────
 
@@ -1507,6 +2151,9 @@ def _selftest() -> None:
         def fill_rect(self, *a, **k): pass
         def draw_rect(self, *a, **k): pass
         def draw_text(self, *a, **k): pass
+        def __init__(self): self.images = []
+        def draw_image(self, image, x=0, y=0):
+            self.images.append((image.size, x, y))
 
     class _FakeProgress:
         def __init__(self, i, n):
@@ -1760,12 +2407,13 @@ def _selftest() -> None:
     config.USER_SETTINGS_PATH = Path(_tmpdir) / "user_settings.json"
     config.load(reload=True)
 
-    print("== menu: six options in a 3x2 grid, stubs inert ==")
+    print("== menu: six options in a 3x2 grid ==")
     arb.open_menu(A)
     for _name in ("menu_capture", "menu_stub1", "menu_defaults",
                   "menu_stub2", "menu_config", "menu_power"):
         check(f"{_name} shown", arb._pool[_name].visible, True)
-    check("stub1 inert",   arb._pool["menu_stub1"].enabled, False)
+    # stub1 became "View Image" in step 6; stub2 is the last inert one.
+    check("stub1 is View Image", arb._pool["menu_stub1"].label, "View\nImage")
     check("stub2 inert",   arb._pool["menu_stub2"].enabled, False)
 
     _file_r1 = int(config.configured("protocol", "reagent1_secs"))
@@ -1814,6 +2462,342 @@ def _selftest() -> None:
 
     config.USER_SETTINGS_PATH = _cfg_saved_path
     config.load(reload=True)
+
+    # ── Image viewer (Tool 1) ─────────────────────────────────────────────────
+    print("== image viewer: camera guard ==")
+    import numpy as _np
+    import layout as _L
+
+    class _PreviewCam:
+        """A camera that returns a recognisable synthetic frame."""
+        config_size = (2304, 1296)
+        model = "imx708"
+        def __init__(self):
+            self.stopped = False
+            self.exposures = []
+            self.frames = 0
+        def setup_camera(self): pass
+        def set_exposure(self, us): self.exposures.append(int(us))
+        def capture_frame(self):
+            self.frames += 1
+            f = _np.zeros((1296, 2304, 3), dtype=_np.uint8)
+            f[790:858, 1150:1218] = (0, 200, 250)     # BGR: the sample, orange
+            return f, _np.zeros((1296, 2304), _np.uint16), {}
+        def stop(self): self.stopped = True
+
+    class _PreviewLeds:
+        def __init__(self): self.history = []; self.closed = False
+        def set_channel(self, ch, on): self.history.append((ch, on))
+        def close(self): self.closed = True
+
+    arb._release_camera()
+    pcam, pleds = _PreviewCam(), _PreviewLeds()
+    arb._ensure_camera = lambda: (setattr(arb, "_camera", pcam),
+                                  setattr(arb, "_leds", pleds),
+                                  (pcam, pleds))[-1]
+    A.active_phase = "entry"
+    B.active_phase = "entry"
+    check("no camera wanted while idle", arb._camera_wanted(), False)
+    arb._view_open = True
+    check("viewer alone keeps the camera", arb._camera_wanted(), True)
+    arb._maybe_release_camera()
+    check("and _maybe_release respects it", arb._camera_wanted(), True)
+    arb._view_open = False
+
+    print("== image viewer: Menu → View Image opens on the whole frame ==")
+    arb.open_menu(A)
+    check("menu stub1 is now View Image",
+          arb._pool["menu_stub1"].label, "View\nImage")
+    check("enabled while no capture runs", arb._pool["menu_stub1"].enabled, True)
+    arb.on_touch(_L.MENU_STUB1.x + 5, _L.MENU_STUB1.y + 5)
+    check("viewer open",            arb._view_open, True)
+    check("no slot has focus",      arb._focused is None, True)
+    check("frame captured",         arb._view_frame.shape, (1296, 2304, 3))
+    check("one frame per open",     pcam.frames, 1)
+    check("white LED on then off",  pleds.history[-2:],
+          [(_PREVIEW_LED_CH, True), (_PREVIEW_LED_CH, False)])
+    check("ROIs loaded",            sorted(arb._view_rois),
+          ["black1", "black2", "bound", "sample", "white"])
+    check("opens fitted to the frame",
+          round(arb._view_state.scale, 4), round(_L.IMG_CANVAS.w / 2304, 4))
+    check("canvas image is canvas-sized",
+          arb._pool["img_canvas"].image.size, (_L.IMG_CANVAS.w, _L.IMG_CANVAS.h))
+    check("all 15 viewer widgets shown",
+          len([n for n in arb._pool.visible_names() if n.startswith("img_")]), 15)
+    check("Edit/Save/Cancel wait for step 8",
+          [arb._pool[n].enabled for n in ("img_edit", "img_save", "img_cancel")],
+          [False, False, False])
+
+    print("== image viewer: zoom, pan, fit ==")
+    fit_scale = arb._view_state.scale
+    arb._view_zoom_in()
+    check("+ zooms in",  round(arb._view_state.scale, 4),
+          round(fit_scale * _VIEW_ZOOM_STEP, 4))
+    arb._view_zoom_out()
+    check("− returns",   round(arb._view_state.scale, 4), round(fit_scale, 4))
+    arb._view_zoom_out()
+    check("cannot zoom out past fit", arb._view_state.scale, fit_scale)
+    for _ in range(4):
+        arb._view_zoom_in()
+    cx_before = arb._view_state.cx
+    arb._view_arrow(1, 0)
+    check("▶ pans right", arb._view_state.cx > cx_before, True)
+    arb._view_arrow(-1, 0)
+    check("◀ pans back",  round(arb._view_state.cx), round(cx_before))
+    arb._view_fit()
+    check("Fit restores", arb._view_state.scale, fit_scale)
+
+    print("== image viewer: canvas taps select, ambiguity cycles ==")
+    import image_view as _iv
+    def _tap_on(name):
+        """Tap the centre of a ROI, in screen coordinates."""
+        r = arb._view_rois[name]
+        cx, cy = _iv.image_to_canvas(arb._view_state,
+                                     r.x + r.w / 2, r.y + r.h / 2)
+        arb.on_touch(int(_L.IMG_CANVAS.x + cx), int(_L.IMG_CANVAS.y + cy))
+
+    arb._view_state.fit_to(arb._view_rois["sample"])
+    check("nothing selected initially", arb._view_selected, None)
+    _tap_on("sample")
+    check("tap inside sample selects the smallest", arb._view_selected, "sample")
+    check("name strip shows it",  arb._pool["img_name"].text, "sample 68x68")
+    _tap_on("sample")            # sample and bound both contain this point
+    check("second tap moves to the other candidate", arb._view_selected, "bound")
+    _tap_on("sample")
+    check("third tap returns — a two-way toggle", arb._view_selected, "sample")
+    # A tap on empty image space clears the selection.
+    arb._view_state.fit()
+    arb.on_touch(_L.IMG_CANVAS.x + 3, _L.IMG_CANVAS.y + 3)
+    check("tap on empty space deselects", arb._view_selected, None)
+
+    print("== image viewer: 1px/10px toggle ==")
+    check("starts at 1px",   arb._pool["img_step"].label, "1px")
+    arb._view_toggle_step()
+    check("toggles to 10px", (arb._view_step, arb._pool["img_step"].label),
+          (10, "10px"))
+    arb._view_toggle_step()
+    check("and back",        arb._view_step, 1)
+
+    print("== image viewer: reimage takes a fresh frame ==")
+    n_before = pcam.frames
+    arb._view_reimage()
+    check("one more capture", pcam.frames, n_before + 1)
+    check("LED cycled again", pleds.history[-2:],
+          [(_PREVIEW_LED_CH, True), (_PREVIEW_LED_CH, False)])
+
+    print("== image viewer: Exit returns and frees the frame ==")
+    arb._view_exit()
+    check("closed",            arb._view_open, False)
+    check("frame released",    arb._view_frame, None)
+    check("camera no longer wanted", arb._camera_wanted(), False)
+    check("back on the Menu",  arb._pool["menu_title"].text, "Menu")
+
+    print("== image viewer: locked out while a capture is in flight ==")
+    arb._capture = _FakeCapture()
+    check("capture_available False", arb.capture_available(), False)
+    arb._render_menu()
+    check("View Image disabled", arb._pool["menu_stub1"].enabled, False)
+    frames_before = pcam.frames
+    arb.open_image_view(slot=None)
+    check("open refused",      arb._view_open, False)
+    check("no frame taken",    pcam.frames, frames_before)
+    arb._capture = None
+
+    print("== image viewer: Tool 2 opens zoomed to the sample ==")
+    arb._ensure_camera = lambda: (setattr(arb, "_camera", pcam),
+                                  setattr(arb, "_leds", pleds),
+                                  (pcam, pleds))[-1]
+    A.capturing = False           # cleared after the capture tests above
+    arb.focus(A)                  # the viewer's Exit left the Menu focused
+    arb.goto(A, "read")
+    check("read shows View Sample",
+          arb._pool["view_sample_btn"].visible, True)
+    check("Elapsed label hidden", arb._pool["timer_lbl"].visible, False)
+    _r = _L.TIMER_LBL
+    arb.on_touch(_r.x + _r.w // 2, _r.y + _r.h // 2)
+    check("viewer open",       arb._view_open, True)
+    check("sample preselected", arb._view_selected, "sample")
+    _sample = arb._view_rois["sample"]
+    # fit_to(sample, 0.2): the ROI plus a fifth of its size, so about x2.45 on
+    # a 200-wide canvas, and centred.
+    check("zoomed to the sample + 20%",
+          round(arb._view_state.scale, 2),
+          round(_L.IMG_CANVAS.w / (_sample.w * 1.2), 2))
+    _c = _iv.image_to_canvas(arb._view_state,
+                             _sample.x + _sample.w / 2, _sample.y + _sample.h / 2)
+    check("and centred on it", (round(_c[0]), round(_c[1])),
+          (_L.IMG_CANVAS.w // 2, _L.IMG_CANVAS.h // 2))
+    check("whole ROI fits on the canvas",
+          all(0 <= v <= m for v, m in zip(
+              _iv.rect_to_canvas(arb._view_state, _sample),
+              (_L.IMG_CANVAS.w, _L.IMG_CANVAS.h) * 2)), True)
+    check("name strip names it", arb._pool["img_name"].text, "sample 68x68")
+
+    print("== image viewer: Tool 2's Exit returns to the read screen ==")
+    arb._view_exit()
+    check("focus is back on the slot", arb._focused is A, True)
+    check("still the read phase",      A.phase, "read")
+    check("View Sample offered again", arb._pool["view_sample_btn"].visible, True)
+
+    # ── Edit mode (step 8) ────────────────────────────────────────────────────
+    # Runs against the scratch DB copy, so real roi.save()/restore() are
+    # exercised without touching the live colorimeter.sqlite.
+    print("== edit mode: Edit takes a working copy and zooms to it ==")
+    import roi as _roi
+    arb._view_exit()
+    arb.open_image_view(slot=None, focus_roi="sample")
+    check("Edit enabled with a selection", arb._pool["img_edit"].enabled, True)
+    check("Save/Cancel wait",
+          [arb._pool[n].enabled for n in ("img_save", "img_cancel")], [False, False])
+    _orig = arb._view_rois["sample"].xywh()
+    arb._view_edit()
+    check("in edit mode",     arb._view_mode, "edit")
+    check("working copy matches the stored ROI",
+          arb._view_editing.xywh(), _orig)
+    check("stored ROI untouched", arb._view_rois["sample"].xywh(), _orig)
+    check("nothing armed yet", arb._view_armed, None)
+    check("zoomed to rect + 50%", round(arb._view_state.scale, 2),
+          round(_L.IMG_CANVAS.w / (68 * 1.5), 2))
+    check("Edit now disabled",   arb._pool["img_edit"].enabled, False)
+    check("Save/Cancel offered",
+          [arb._pool[n].enabled for n in ("img_save", "img_cancel")], [True, True])
+    check("Exit withheld while editing", arb._pool["img_exit"].enabled, False)
+    arb._view_exit()
+    check("and Exit really refuses", arb._view_open, True)
+
+    print("== edit mode: arrows move the whole rect when nothing is armed ==")
+    arb._view_step = 10
+    arb._view_arrow(1, 0)
+    check("moved right by the step",
+          arb._view_editing.xywh(), (_orig[0] + 10, _orig[1], 68, 68))
+    arb._view_arrow(0, 1)
+    check("and down",
+          arb._view_editing.xywh(), (_orig[0] + 10, _orig[1] + 10, 68, 68))
+    check("size unchanged", (arb._view_editing.w, arb._view_editing.h), (68, 68))
+    arb._view_arrow(-1, 0); arb._view_arrow(0, -1)
+    check("back where it started", arb._view_editing.xywh(), _orig)
+
+    print("== edit mode: a tap near a side arms it; the view follows ==")
+    def _tap_image(ix, iy):
+        cx, cy = _iv.image_to_canvas(arb._view_state, ix, iy)
+        arb.on_touch(int(_L.IMG_CANVAS.x + cx), int(_L.IMG_CANVAS.y + cy))
+
+    r = arb._view_editing
+    _tap_image(r.x, r.y + r.h / 2)                 # on the left edge
+    check("left armed", arb._view_armed, "left")
+    check("name strip names the side", arb._pool["img_name"].text, "left 68x68")
+    _c = _iv.image_to_canvas(arb._view_state, r.x, r.y + r.h / 2)
+    check("view centred on the armed edge",
+          (round(_c[0]), round(_c[1])),
+          (_L.IMG_CANVAS.w // 2, _L.IMG_CANVAS.h // 2))
+    _tap_image(r.x, r.y + r.h / 2)                 # same edge again
+    check("tapping it again disarms", arb._view_armed, None)
+    _tap_image(arb._view_editing.x2(), arb._view_editing.y + 34)
+    check("right armed", arb._view_armed, "right")
+
+    print("== edit mode: an armed side moves alone ==")
+    arb._view_armed = "right"
+    arb._view_editing = _roi.Rect(*_orig, name="sample")
+    arb._view_arrow(1, 0)
+    check("right edge out by the step",
+          arb._view_editing.xywh(), (_orig[0], _orig[1], 78, 68))
+    arb._view_arrow(0, 1)
+    check("a perpendicular arrow does nothing",
+          arb._view_editing.xywh(), (_orig[0], _orig[1], 78, 68))
+    arb._view_armed = "left"
+    arb._view_arrow(1, 0)
+    check("left edge in shrinks from the left",
+          arb._view_editing.xywh(), (_orig[0] + 10, _orig[1], 68, 68))
+    arb._view_armed = "top"
+    arb._view_arrow(0, -1)
+    check("top edge up grows upward",
+          arb._view_editing.xywh(), (_orig[0] + 10, _orig[1] - 10, 68, 78))
+
+    print("== edit mode: 1px/10px, and the limits ==")
+    arb._view_step = 1
+    arb._view_armed = "bottom"
+    arb._view_editing = _roi.Rect(*_orig, name="sample")
+    arb._view_arrow(0, 1)
+    check("1px step", arb._view_editing.h, 69)
+    arb._view_armed = "right"
+    for _ in range(200):                            # try to collapse it
+        arb._view_step = 10
+        arb._view_arrow(-1, 0)
+    check("cannot shrink past the minimum",
+          arb._view_editing.w, _EDIT_MIN_SIDE)
+    arb._view_armed = None
+    arb._view_editing = _roi.Rect(*_orig, name="sample")
+    for _ in range(500):
+        arb._view_arrow(-1, -1)
+    check("cannot be pushed off the frame",
+          (arb._view_editing.x, arb._view_editing.y), (0, 0))
+
+    print("== edit mode: Cancel discards ==")
+    arb._view_editing = _roi.Rect(9, 9, 30, 30, name="sample")
+    arb._view_cancel()
+    check("back to view mode",  arb._view_mode, "view")
+    check("working copy gone",  arb._view_editing, None)
+    check("stored ROI unchanged", _roi.load_active()["sample"].xywh(), _orig)
+    check("says cancelled",     arb._pool["img_name"].text, "cancelled")
+    check("Exit offered again", arb._pool["img_exit"].enabled, True)
+
+    print("== edit mode: Save validates before writing ==")
+    def _try_save(rect):
+        arb._view_edit()
+        arb._view_editing = rect
+        arb._view_save()
+        return arb._view_mode, arb._pool["img_name"].text
+
+    check("too small is refused",
+          _try_save(_roi.Rect(1150, 790, 8, 8, name="sample")),
+          ("edit", f"min {_EDIT_MIN_SIDE}px"))
+    arb._view_cancel()
+    check("outside the frame is refused",
+          _try_save(_roi.Rect(2290, 790, 40, 40, name="sample")),
+          ("edit", "outside frame"))
+    arb._view_cancel()
+    check("a sample outside bound is refused",
+          _try_save(_roi.Rect(100, 100, 40, 40, name="sample")),
+          ("edit", "sample outside bound"))
+    arb._view_cancel()
+    check("nothing was written by any of them",
+          _roi.load_active()["sample"].xywh(), _orig)
+
+    print("== edit mode: Save writes, snapping to even ==")
+    arb._view_edit()
+    arb._view_editing = _roi.Rect(1151, 791, 41, 41, name="sample")
+    arb._view_save()
+    check("back to view mode",   arb._view_mode, "view")
+    check("snapped even and stored",
+          _roi.load_active()["sample"].xywh(), (1150, 790, 40, 40))
+    check("Bayer-safe",   _roi.is_bayer_safe(_roi.load_active()["sample"]), True)
+    check("the screen reloaded it", arb._view_rois["sample"].xywh(), (1150, 790, 40, 40))
+    check("says what it saved", arb._pool["img_name"].text, "saved 40x40")
+    check("history kept, not overwritten", _db.read_val(
+        "SELECT COUNT(*) FROM roi WHERE name='sample' AND active=0") >= 1, True)
+
+    print("== edit mode: restore puts the commissioned default back ==")
+    _roi.restore("sample")
+    check("default is back", _roi.load_active()["sample"].xywh(), _orig)
+
+    print("== image viewer: reimaging keeps where you were looking ==")
+    arb._view_state.fit_to(arb._view_rois["sample"])
+    _scale_before, _cx_before = arb._view_state.scale, arb._view_state.cx
+    arb._view_reimage()
+    check("scale kept",  arb._view_state.scale, _scale_before)
+    check("centre kept", arb._view_state.cx, _cx_before)
+    arb._view_exit()
+
+    print("== image viewer: a failed preview does not break the screen ==")
+    arb._ensure_camera = lambda: None
+    arb.open_image_view(slot=A)
+    check("still opens",        arb._view_open, True)
+    check("no frame",           arb._view_frame, None)
+    check("canvas cleared",     arb._pool["img_canvas"].image, None)
+    check("says why",           arb._pool["img_name"].text, "Camera unavailable")
+    arb._view_exit()
+    check("Exit returns to the slot", arb._focused is A, True)
+
     shutil.rmtree(_tmpdir, ignore_errors=True)
 
     print("\n== all arbiter self-tests passed ==")

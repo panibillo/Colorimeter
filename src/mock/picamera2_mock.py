@@ -19,31 +19,64 @@ Usage:
         from mock.picamera2_mock import Picamera2
 """
 
+import os
+
 import numpy as np
 from pathlib import Path
 from types import SimpleNamespace as sns
 
-# Mock libcamera enums
-libcamera = sns(controls=sns(draft=sns(NoiseReductionModeEnum=sns(Off=0))))
+# Mock libcamera enums.  Covers every attribute bayer_cam/capture_runner reach
+# for, including the autofocus enums the imx708 path needs — without them the
+# mock could only ever stand in for a fixed-focus imx219.
+libcamera = sns(controls=sns(
+    draft=sns(NoiseReductionModeEnum=sns(Off=0)),
+    AfModeEnum=sns(Manual=0, Auto=1, Continuous=2),
+    AfTriggerEnum=sns(Start=0, Cancel=1),
+))
 
-# Very clear white light image of original calibration card, jpeg only.
-# MOCKIMAGEFILE = "/home/bill/proj/eclipse-workspace1/Colorimeter/images/cfg3_rgb888_02-f135.jpg"
+_REPO = Path(__file__).resolve().parent.parent.parent
 
-# crappy white light image of paint chip card, jpeg, npa, & txt files.
-MOCKIMAGEFILE = "/home/bill/proj/eclipse-workspace1/Colorimeter/images/l1_t11/t11_White_960ms_under"
+# Which image the mock camera returns.  Set $COLORIMETER_MOCK_IMAGE to a stem
+# or a .jpg path to override; otherwise the first of these that exists is used.
+#
+# Repo-relative, because an absolute path baked in here goes stale the moment
+# the project is checked out anywhere else — which is exactly what happened to
+# the previous value (a path under an old eclipse-workspace that no longer
+# exists), leaving the mock camera raising FileNotFoundError on every capture.
+#
+# The first candidate is a real 2304x1296 prototype capture under the white
+# LED, so the mock returns a frame the stored ROI rectangles actually apply
+# to — which is what lets the image viewer be exercised in simulation.
+_MOCK_CANDIDATES = (
+    _REPO / "dev/captures/20260615_2120/camtest8_white_e3",   # 2304x1296, white LED
+    _REPO / "mock_camera/cfg5_sbggr1_rgb_00ccB",              # dual-stream, cfg5
+    _REPO / "mock_camera/cfg2_rgb888_00checkerB",             # colour-card checkerboard
+    _REPO / "images/cfg3_rgb888_02-f135",
+)
 
+MOCKIMAGEFILE = os.environ.get("COLORIMETER_MOCK_IMAGE", "")
 
 
 def _mock_stem() -> Path:
     """
-    Return the MOCKIMAGEFILE path as a stem (no extension).
+    Return the mock image path as a stem (no extension).
 
-    Both MOCKIMAGEFILE styles are supported:
-      - Stem (no suffix):  used as-is, e.g. ".../t11_White_960ms_under"
-      - .jpg path:         suffix stripped, e.g. ".../cfg3_rgb888_02-f135"
+    Resolution order: MOCKIMAGEFILE (which $COLORIMETER_MOCK_IMAGE sets) if it
+    is non-empty, then the first existing entry in _MOCK_CANDIDATES.  If none
+    exists the first candidate is returned anyway, so the caller raises its own
+    FileNotFoundError naming a path that is at least meaningful.
+
+    Both styles are supported for any of them:
+      - Stem (no suffix):  used as-is, e.g. ".../camtest8_white_e3"
+      - .jpg path:         suffix stripped
     """
-    p = Path(MOCKIMAGEFILE)
-    return p.with_suffix("") if p.suffix else p
+    if MOCKIMAGEFILE:
+        p = Path(MOCKIMAGEFILE)
+        return p.with_suffix("") if p.suffix else p
+    for cand in _MOCK_CANDIDATES:
+        if cand.with_suffix(".jpg").exists():
+            return cand
+    return _MOCK_CANDIDATES[0]
 
 
 class MockRequest:
@@ -109,15 +142,27 @@ class Picamera2:
         """
         Return mock camera info list, simulating Picamera2.global_camera_info().
 
-        Returns a single-item list describing an IMX219 (Camera Module 2).
-        Change the Model value here to test IMX708 (Camera Module 3) paths.
+        Reports an IMX219 (Camera Module 2).  $COLORIMETER_MOCK_MODEL
+        overrides — e.g. "imx708" to exercise the Camera Module 3 paths.
+
+        **Known limitation.** The mock synthesizes an *unpacked* uint16 Bayer
+        array when the served image has no .npy beside it, which matches
+        imx219's SBGGR10 but not imx708's packed SBGGR10_CSI2P: selecting
+        imx708 makes `unpack_raw10()` fail on the reshape.  So while the
+        default mock image is a 2304x1296 imx708 capture, the mock still
+        reports imx219, and `roi.load_active()` logs a cross-model mismatch
+        for every ROI in simulation.  That warning is correct and worth
+        leaving loud — the geometry really is being applied to a stream it was
+        not defined against.  Making the mock serve packed raw would fix both,
+        and is the right fix when the mock is next worked on.
 
         Returns:
             List of dicts, one per camera, with keys Id, Model, Location,
             Rotation, Num — the same structure as the real Picamera2.
         """
-        return [{"Id": "mock", "Model": "imx219", "Location": 2,
-                 "Rotation": 180, "Num": 0}]
+        return [{"Id": "mock",
+                 "Model": os.environ.get("COLORIMETER_MOCK_MODEL", "imx219"),
+                 "Location": 2, "Rotation": 180, "Num": 0}]
 
     def __init__(self):
         """Initialize mock camera."""

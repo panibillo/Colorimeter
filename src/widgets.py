@@ -753,6 +753,87 @@ class RectWidget(Widget):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# ImageWidget
+# ─────────────────────────────────────────────────────────────────────────────
+
+class ImageWidget(Widget):
+    """
+    Blits a pre-rendered image into its rect — the image viewer's canvas.
+
+    The widget is a holder, not a renderer: it does no scaling, no cropping and
+    no compositing.  Whatever produced the image (image_view.compose()) is
+    responsible for handing over one that is exactly rect-sized, already carrying
+    its ROI overlays.  That keeps the view maths out of the widget layer, and
+    means the same composed image can go to the panel, to a PNG, or to a web
+    front end unchanged.
+
+    ROI outlines are drawn *into* the image rather than as sibling RectWidgets,
+    for two reasons: a rectangle you are zoomed inside of clips at the canvas
+    edge for free instead of painting over the button column, and the whole
+    canvas reaches the panel in one SPI pass instead of one per rectangle.
+
+    Until an image is set the rect paints as a flat `bg`, so a stale frame from
+    a previous visit never lingers on screen.
+
+    Parameters
+    ----------
+    rect      : position and size on screen; the image must match this size
+    bg        : RGB565 fill shown before the first image arrives
+    on_press  : callable(cx, cy) invoked on a tap, in *canvas* coordinates
+                (relative to the rect's top-left, not the screen)
+    name      : identifier for logging
+    """
+
+    def __init__(
+        self,
+        rect:      Rect,
+        bg:        int = 0x0000,
+        on_press:  Optional[Callable] = None,
+        name:      str = "",
+        widget_id: int = 0,
+    ):
+        super().__init__(rect, name=name, widget_id=widget_id)
+        self.bg       = bg
+        self.on_press = on_press
+        self.image    = None   # a PIL.Image, duck-typed so widgets.py stays PIL-free
+
+    def set_image(self, image) -> None:
+        """
+        Replace the image to blit on the next draw().
+
+        Pass None to clear back to the flat background.  A size mismatch is
+        logged rather than raised — the driver clips, so a wrong-sized image
+        shows up as a visibly wrong canvas instead of a crash mid-render.
+        """
+        if image is not None:
+            size = getattr(image, "size", None)
+            if size is not None and tuple(size) != (self.rect.w, self.rect.h):
+                log.warning("ImageWidget %r: image is %s but rect is %dx%d; "
+                            "the driver will clip it",
+                            self.name or "?", size, self.rect.w, self.rect.h)
+        self.image = image
+
+    def draw(self, display) -> None:
+        if self.image is None:
+            display.fill_rect(self.rect, self.bg)
+            return
+        display.draw_image(self.image, self.rect.x, self.rect.y)
+
+    def handle_touch(self, px: int, py: int, display=None) -> bool:
+        """
+        Route a tap to on_press with coordinates *relative to the canvas*.
+
+        Screen coordinates would force every caller to subtract the rect origin
+        before it could unproject the point back into image space, and getting
+        that wrong is invisible until a ROI selects from the wrong place.
+        """
+        if not self.enabled or self.on_press is None:
+            return False
+        self.on_press(px - self.rect.x, py - self.rect.y)
+        return True
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # DraggableRect  (STUB)
 # ─────────────────────────────────────────────────────────────────────────────
 

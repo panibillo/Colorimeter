@@ -238,9 +238,39 @@ class ILI9341:
 
         self.fig.canvas.draw_idle()
 
-    def draw_image(self, image, x: int, y: int) -> None:
-        """Draw a PIL image at (x, y) [not yet implemented]."""
-        log.warning("ILI9341 (mock): draw_image not yet implemented")
+    def draw_image(self, image, x: int = 0, y: int = 0) -> None:
+        """
+        Blit a PIL image at (x, y), matching the real driver's contract.
+
+        Like the hardware, this does no scaling: the image is placed at its
+        natural size and clipped to the display. `extent` is given as
+        (left, right, bottom, top) with bottom > top, which is the correct
+        order for these axes — init() sets ylim (HEIGHT, 0) so y grows
+        downward — and it makes the image land in screen pixels regardless of
+        its own resolution.
+
+        Implementing this is what lets simulation mode double as the desktop
+        image viewer: the same composed canvas renders here and on the panel.
+        """
+        if image is None or self.ax is None:
+            return
+
+        import numpy as np
+
+        # Clip to the display, exactly as the hardware driver does.
+        iw, ih = image.size
+        x0, y0 = max(0, x), max(0, y)
+        x1, y1 = min(x + iw, self.WIDTH), min(y + ih, self.HEIGHT)
+        if x1 <= x0 or y1 <= y0:
+            return
+        if (x0, y0, x1, y1) != (x, y, x + iw, y + ih):
+            image = image.crop((x0 - x, y0 - y, x1 - x, y1 - y))
+
+        self.ax.imshow(np.asarray(image.convert("RGB")),
+                       extent=(x0, x1, y1, y0),      # left, right, bottom, top
+                       interpolation="nearest",
+                       zorder=self._next_z())
+        self.fig.canvas.draw_idle()
 
     def register_key_handler(self, handler) -> None:
         """Register a callback for keyboard events."""

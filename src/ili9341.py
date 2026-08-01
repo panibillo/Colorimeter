@@ -30,11 +30,82 @@ Or as a context manager:
 
 import time
 import struct
-import spidev
-from gpiozero import DigitalOutputDevice
+
 from PIL import Image, ImageDraw, ImageFont
 
 from geometry import Rect
+
+# Hardware-only imports.  They are guarded so that the pure pixel-format
+# helpers below (pack_rgb565) stay importable on a desktop for testing and
+# benchmarking; init() raises a clear error if the driver is actually used
+# without them.  On a Pi both are present and nothing changes.
+try:
+    import spidev
+except ImportError:                                  # pragma: no cover
+    spidev = None
+try:
+    from gpiozero import DigitalOutputDevice
+except ImportError:                                  # pragma: no cover
+    DigitalOutputDevice = None
+
+# numpy packs a whole canvas at once; without it the driver still works, just
+# slowly.  See pack_rgb565().
+try:
+    import numpy as np
+except ImportError:                                  # pragma: no cover
+    np = None
+
+
+def pack_rgb565(img: "Image.Image") -> bytes:
+    """
+    Pack an RGB image into the big-endian RGB565 bytes the panel expects.
+
+    Two pixels-worth of work per pixel, done for a 200x240 canvas 48,000 times,
+    is the dominant cost of a repaint — so this uses numpy when it is available
+    and falls back to the original per-pixel loop when it is not.  Both paths
+    produce identical bytes; the self-test at the bottom of this module asserts
+    that on random images.
+
+    The packing is the same as ILI9341.rgb():
+
+        RRRRRGGG GGGBBBBB      (r >> 3) << 11 | (g >> 2) << 5 | b >> 3
+
+    written as masks so numpy can do it in three shifts on whole arrays.
+    Output is big-endian (`>u2`), which is high byte first — the order the
+    controller clocks in.
+
+    Args:
+        img: A PIL image; converted to RGB if it is not already.
+
+    Returns:
+        `2 * width * height` bytes, row-major, ready for writebytes2().
+
+    Example:
+        >>> len(pack_rgb565(Image.new("RGB", (10, 4))))
+        80
+    """
+    if img.mode != "RGB":
+        img = img.convert("RGB")
+
+    if np is not None:
+        a = np.asarray(img, dtype=np.uint8)
+        r = a[:, :, 0].astype(np.uint16)
+        g = a[:, :, 1].astype(np.uint16)
+        b = a[:, :, 2].astype(np.uint16)
+        packed = ((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3)
+        return packed.astype(">u2").tobytes()
+
+    # Fallback: no numpy.  Correct, and about 30x slower.
+    pixels = img.tobytes()
+    buf = bytearray(len(pixels) // 3 * 2)
+    for i in range(0, len(pixels), 3):
+        c        = (((pixels[i] >> 3) << 11)
+                    | ((pixels[i + 1] >> 2) << 5)
+                    | (pixels[i + 2] >> 3))
+        j        = (i // 3) * 2
+        buf[j]   = c >> 8
+        buf[j + 1] = c & 0xFF
+    return bytes(buf)
 
 
 # ── RPi model detection ───────────────────────────────────────────────────────
@@ -157,6 +228,16 @@ class ILI9341:
         """
         if self._initialised:
             return
+
+        missing = [n for n, mod in (("spidev", spidev),
+                                    ("gpiozero", DigitalOutputDevice))
+                   if mod is None]
+        if missing:
+            raise RuntimeError(
+                f"ILI9341 needs {' and '.join(missing)}, which "
+                f"{'is' if len(missing) == 1 else 'are'} not installed. "
+                "This driver only runs on the Pi; set COLORIMETER_SIMULATION=1 "
+                "to use the mock display instead.")
 
         self._dc_dev  = DigitalOutputDevice(self._dc,  initial_value=True)
         self._rst_dev = DigitalOutputDevice(self._rst, initial_value=True)
@@ -351,15 +432,8 @@ class ILI9341:
             img = img.crop((crop_x, crop_y, crop_x + crop_w, crop_y + crop_h))
 
         self._set_window(x0, y0, x1, y1)
-        pixels = img.tobytes()
         self._dc_dev.on()
-        buf = bytearray(len(pixels) // 3 * 2)
-        for i in range(0, len(pixels), 3):
-            c       = self.rgb(pixels[i], pixels[i+1], pixels[i+2])
-            j       = (i // 3) * 2
-            buf[j]  = c >> 8
-            buf[j+1]= c & 0xFF
-        self._spi.writebytes2(buf)
+        self._spi.writebytes2(pack_rgb565(img))
 
     # ── Text rendering ────────────────────────────────────────────────────────
 
@@ -480,3 +554,85 @@ class ILI9341:
             except OSError:
                 continue
         return ""   # Pillow default will be used
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Self-test — pixel-format only, so it runs on a desktop without spidev.
+#
+#     python3 src/ili9341.py
+#
+# Checks the numpy fast path byte-for-byte against the per-pixel reference, and
+# times both on a viewer-canvas-sized image.
+# ─────────────────────────────────────────────────────────────────────────────
+
+if __name__ == "__main__":
+    import sys
+
+    def _reference_pack(img):
+        """The original per-pixel loop, kept here as the correctness oracle."""
+        img = img.convert("RGB")
+        pixels = img.tobytes()
+        buf = bytearray(len(pixels) // 3 * 2)
+        for i in range(0, len(pixels), 3):
+            c = (((pixels[i] >> 3) << 11)
+                 | ((pixels[i + 1] >> 2) << 5)
+                 | (pixels[i + 2] >> 3))
+            j = (i // 3) * 2
+            buf[j] = c >> 8
+            buf[j + 1] = c & 0xFF
+        return bytes(buf)
+
+    def check(label, got, want):
+        ok = "OK " if got == want else "XX "
+        print(f"  {ok}{label}")
+        assert got == want, f"{label}: {got!r} != {want!r}"
+
+    if np is None:
+        print("numpy is not installed — only the fallback path exists here.")
+        sys.exit(0)
+
+    print("== pack_rgb565 matches the per-pixel reference ==")
+    # Extremes first: these are where a mask-vs-shift mistake shows up.
+    for name, colour in (("black", (0, 0, 0)), ("white", (255, 255, 255)),
+                         ("red", (255, 0, 0)), ("green", (0, 255, 0)),
+                         ("blue", (0, 0, 255)), ("mid", (128, 128, 128)),
+                         ("odd bits", (0x13, 0x57, 0x9B))):
+        im = Image.new("RGB", (7, 5), colour)
+        check(f"solid {name:9s} {colour}", pack_rgb565(im), _reference_pack(im))
+
+    rng = np.random.default_rng(0)
+    for w, h in ((1, 1), (3, 2), (200, 240), (320, 240)):
+        arr = rng.integers(0, 256, (h, w, 3), dtype=np.uint8)
+        im = Image.fromarray(arr, "RGB")
+        check(f"random {w}x{h}", pack_rgb565(im), _reference_pack(im))
+
+    check("non-RGB input is converted",
+          pack_rgb565(Image.new("L", (4, 4), 200)),
+          _reference_pack(Image.new("L", (4, 4), 200).convert("RGB")))
+    check("byte length is 2 per pixel",
+          len(pack_rgb565(Image.new("RGB", (200, 240)))), 2 * 200 * 240)
+
+    print("== byte order is big-endian (high byte first) ==")
+    # Pure red = 0xF800, so the first byte must be 0xF8 and the second 0x00.
+    red = pack_rgb565(Image.new("RGB", (1, 1), (255, 0, 0)))
+    check("red packs to F8 00", (red[0], red[1]), (0xF8, 0x00))
+    blue = pack_rgb565(Image.new("RGB", (1, 1), (0, 0, 255)))
+    check("blue packs to 00 1F", (blue[0], blue[1]), (0x00, 0x1F))
+
+    print("== timing: the 200x240 viewer canvas ==")
+    canvas = Image.fromarray(
+        rng.integers(0, 256, (240, 200, 3), dtype=np.uint8), "RGB")
+    reps = 20
+    t0 = time.perf_counter()
+    for _ in range(reps):
+        pack_rgb565(canvas)
+    fast_ms = (time.perf_counter() - t0) / reps * 1000
+    t0 = time.perf_counter()
+    for _ in range(3):
+        _reference_pack(canvas)
+    slow_ms = (time.perf_counter() - t0) / 3 * 1000
+    print(f"  per-pixel loop : {slow_ms:8.2f} ms   ({200 * 240:,} iterations)")
+    print(f"  numpy          : {fast_ms:8.2f} ms")
+    print(f"  speed-up       : {slow_ms / fast_ms:8.1f}x")
+
+    print("\n== all ili9341 pixel-format self-tests passed ==")

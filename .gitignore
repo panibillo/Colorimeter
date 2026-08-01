@@ -13,6 +13,8 @@
 **.npy
 **.h5
 **.sqlite
+**.sqlite.bak-*
+image_view_check.png
 **.prof
 **.log
 docs/.~lock.*
