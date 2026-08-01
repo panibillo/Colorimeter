@@ -237,6 +237,33 @@ else
     fail "no venv at ${VENV}"; reenter "3e (./provisioning/make_venv.sh)"
 fi
 
+# ── Step 3e — hardware group membership ─────────────────────────────────────
+# bootstrap_system.sh puts the user in these; the Imager's first user already is.
+# A hand-created account is NOT (see 00_reentry.md § 4a), and every one of these
+# fails silently — the app starts and the affected hardware is simply dead.
+# `input` is the one that bites: src/kb_reader.py reads /dev/input/eventX via
+# evdev, and a non-member gets an EMPTY device list rather than an error.
+echo "Step 3e — hardware group membership (${ME}):"
+mygroups="$(id -nG)"
+for spec in \
+    "input|USB keyboard (kb_reader/evdev)" \
+    "spi|SPI0 display + SPI1 LED driver" \
+    "i2c|TSC2007 touch" \
+    "gpio|backlight, beeper, touch IRQ" \
+    "video|camera"
+do
+    g="${spec%%|*}"; label="${spec##*|}"
+    if ! getent group "${g}" >/dev/null 2>&1; then
+        info "'${g}' group does not exist on this system — skipping (${label})"
+    elif echo "${mygroups}" | tr ' ' '\n' | grep -qx "${g}"; then
+        pass "${g} — ${label}"
+    else
+        fail "NOT in '${g}' — ${label} will not work"
+        reenter "3e (sudo usermod -aG input,spi,i2c,gpio,video,dialout,plugdev ${ME}; then log out/in)"
+    fi
+done
+info "evdev/numpy/cv2 imports are verified by make_venv.sh, not here."
+
 n="$(grep -c 'colorimeter login env' "${HOME}/.bashrc" 2>/dev/null)"
 case "${n:-0}" in
     2) pass "~/.bashrc login-env block present" ;;

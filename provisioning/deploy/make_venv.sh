@@ -78,6 +78,7 @@ mods = [
     ("lgpio",     "lgpio"),
     ("smbus2",    "smbus2"),
     ("picamera2", "picamera2"),
+    ("evdev",     "evdev"),
 ]
 
 ok = True

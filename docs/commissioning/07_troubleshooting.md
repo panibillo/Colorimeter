@@ -42,6 +42,7 @@ issues specific to commissioning (venv, services, DB).
 | Backlight stays off | GPIO13 / J1-9 wiring; 1651 LITE jumper soldered? `gpiozero` importing (needs `python3-lgpio` as its pin factory)? |
 | Beeper silent / `import lgpio` fails | `sudo apt install python3-lgpio` (src/beeper.py imports `lgpio` directly); GPIO12 / MMBT3904 wiring. |
 | Camera not found | `rpicam-hello --list-cameras`; `camera_auto_detect=1` in `config.txt`; ribbon seated. |
+| Keyboard ignored (touch still works) | `python3 -c 'import evdev'` and `groups \| grep input` — needs `python3-evdev` **and** the `input` group; both fail silently (below). |
 
 Query one pin at a time: `pinctrl get <n>` (`raspi-gpio` is not installed).
 
@@ -59,11 +60,51 @@ Query one pin at a time: `pinctrl get <n>` (`raspi-gpio` is not installed).
 - Verify inside the venv:
   `~/pi/Colorimeter/.venv/bin/python3 -c "import h5py, cv2, yaml; print('ok')"`.
 
+### Keyboard does nothing (app runs, touch works, keystrokes ignored)
+
+`src/kb_reader.py` reads `/dev/input/eventX` directly via `evdev` — not stdin —
+so it works under systemd and over SSH. It has two prerequisites, and **both
+fail silently**: `KbReader.open()` returns `False`, the app carries on, and no
+key is ever delivered.
+
+```bash
+# On the Pi — the two-line diagnosis:
+python3 -c 'import evdev; print(evdev.list_devices())'
+groups | tr ' ' '\n' | grep -x input
+```
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| `ModuleNotFoundError: evdev` | package never installed | `sudo apt install -y python3-evdev` |
+| imports, but list is `[]`, `grep -x input` prints nothing | user not in the `input` group | `sudo usermod -aG input "$(whoami)"`, then **log out and back in** |
+| imports, in `input`, list still `[]` | keyboard genuinely absent | check the USB cable / OTG adapter; `lsusb`, `dmesg \| tail` |
+
+`evdev.list_devices()` needs r/w on the nodes and silently skips ones it cannot
+open, which is why a permissions problem looks identical to unplugged hardware —
+always check `groups` first. Confirm from the app's own side in the log:
+
+```bash
+journalctl -u colorimeter -b --no-pager | grep KbReader
+# healthy:  KbReader: selected <name> (/dev/input/eventN)
+# broken:   KbReader.open: no keyboard device found — check: …
+```
+
+Group membership is fixed at login, so a `usermod` while the service is running
+does nothing until the unit restarts — `sudo reboot` is the reliable move.
+Both prerequisites are handled by `provisioning/bootstrap_system.sh`
+(step [3e](03_upload_firmware_db_venv.md)) and checked by
+`verify_peripherals.sh` and `commissioning_status.sh`.
+
 ### Database looks empty / app errors on missing rows
 
-- `colorcard` (ROI patches) must have rows. If it is empty you copied a blank or
-  wrong `colorimeter.sqlite` — recopy the reference DB (step 3c). Do **not**
-  rebuild from `src/db_DDL.sql` (incomplete).
+- The app needs the `default_gui_vals` view and one row each in `defaults`,
+  `device`, `users`, `testkit`, `testlot`. It will not start without them.
+- `colorcard` (colour-card patch geometry) is *not* read at runtime — an empty
+  `colorcard` is normal and is not the cause of a startup error. It is still a
+  useful tell that you copied a blank DB.
+- To rebuild a working schema + seed rows:
+  `sqlite3 src/colorimeter.sqlite < src/db_DDL.sql` (idempotent; safe to
+  re-run). Recopying the reference DB (step 3c) is still preferred.
 - Validate: the schema-count snippet in [03_upload_firmware_db_venv.md](03_upload_firmware_db_venv.md#step-3c--upload-the-reference-database-on-local).
 
 ### App won't start under systemd but runs by hand

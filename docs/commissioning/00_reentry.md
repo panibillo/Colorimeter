@@ -62,7 +62,7 @@ what state it is in — you **observe the artifacts** each step leaves behind.
 | 3b — Firmware | `~/pi/Colorimeter/src/*.py`, `config/*.yaml` |
 | 3c — Database | `~/pi/Colorimeter/src/colorimeter.sqlite` **with a populated `colorcard` table** |
 | 3d — Scripts | `~/pi/Colorimeter/provisioning/*.sh` |
-| 3e — System pkgs + venv | apt packages installed; `~/pi/Colorimeter/.venv/`; the `colorimeter login env` block in `~/.bashrc` |
+| 3e — System pkgs + venv | apt packages installed; `~/pi/Colorimeter/.venv/`; the `colorimeter login env` block in `~/.bashrc`; the user in `input,spi,i2c,gpio,video` (`groups`) |
 | 4 — SSH | `~/.ssh/authorized_keys` on the Pi; a `Host` stanza in **your local** `~/.ssh/config` |
 | 5b — gpio-init service | `/usr/local/bin/colorimeter-gpio-init.sh` + `/etc/systemd/system/colorimeter-gpio-init.service`, enabled |
 | 5d — App service | `/etc/systemd/system/colorimeter.service`, enabled |
@@ -85,8 +85,9 @@ naming the step(s) to re-enter at, and there is no paste to mangle:
 It needs no `sudo`, changes nothing, works on a unit that has never been
 commissioned at all, and exits non-zero if it found gaps. It reports on steps
 1–6, flags **duplicated** `config.txt` overlay lines, and specifically detects
-the two artifacts a username or home-directory change invalidates — a relocated
-`.venv` and a stale `colorimeter.service`. It deliberately leaves venv imports to
+the three artifacts a username or home-directory change invalidates — a relocated
+`.venv`, a stale `colorimeter.service`, and missing **hardware group membership**
+(`input`, `spi`, `i2c`, `gpio`, `video`). It deliberately leaves venv imports to
 `make_venv.sh` and peripheral health to `verify_peripherals.sh`.
 
 Use the paste-able block below instead when `provisioning/` on the Pi is itself
@@ -137,6 +138,9 @@ echo "--- path baked into activate ---"
 grep VIRTUAL_ENV= "$APP/.venv/bin/activate" 2>&1
 echo "--- bashrc login block (expect 2) ---"
 grep -c 'colorimeter login env' "$HOME/.bashrc" 2>&1
+echo "--- hardware groups (expect input spi i2c gpio video) ---"
+id -nG | tr ' ' '\n' | grep -xE 'input|spi|i2c|gpio|video' | sort | tr '\n' ' '
+echo ""
 
 echo "===== step 5 - services ============================"
 systemctl is-enabled colorimeter.service 2>&1
@@ -389,7 +393,10 @@ sudo chown -R "$(whoami):$(whoami)" ~/pi/Colorimeter
 #    that the Imager's first user gets automatically. Compare against a known
 #    good account (or the old one, if it still exists) and fix:
 groups
-sudo usermod -aG sudo,spi,i2c,gpio,video,dialout,plugdev "$(whoami)"
+sudo usermod -aG sudo,input,spi,i2c,gpio,video,dialout,plugdev "$(whoami)"
+#    `input` is easy to miss and fails SILENTLY: src/kb_reader.py reads the USB
+#    keyboard from /dev/input/eventX via evdev, and a non-member just gets an
+#    empty device list — the app runs, the keyboard never responds.
 #    Log out and back in for new groups to take effect.
 
 # 3. Rebuild the venv — REQUIRED. make_venv.sh will NOT do this for you.

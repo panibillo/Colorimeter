@@ -21,8 +21,8 @@ stop and fix anything that fails before moving on.
 
 Run the bundled checker on the Pi. It confirms SPI0, SPI1, I2C (+ the TSC2007 at
 `0x48`), 1-Wire (+ a `28-*` probe and a temperature read), the GPIO character
-device (`gpiozero`/`lgpio` backends — no daemon), and the camera, printing a
-✓/✗ line for each.
+device (`gpiozero`/`lgpio` backends — no daemon), the camera, and the USB
+keyboard (`evdev` + `input` group), printing a ✓/✗ line for each.
 
 ```bash
 # On the Pi:
@@ -45,7 +45,14 @@ pinctrl get 20                                     # SPI1 MOSI → ALT-func (not
 ls /dev/gpiochip0                                  # GPIO char device (gpiozero/lgpio)
 python3 -c 'import gpiozero, lgpio'                # backlight + beeper libs import
 rpicam-hello --list-cameras                        # camera detected
+python3 -c 'import evdev; print(evdev.list_devices())'   # keyboard node visible
+groups | tr ' ' '\n' | grep -x input               # in the input group (keyboard)
 ```
+
+> ⚠ An empty list from `evdev.list_devices()` is ambiguous: it means either no
+> keyboard is plugged in **or** you are not in the `input` group — `evdev` needs
+> r/w on the nodes and silently skips those it cannot open. Check `groups`
+> before suspecting the hardware.
 
 ---
 

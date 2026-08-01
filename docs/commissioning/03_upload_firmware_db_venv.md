@@ -76,9 +76,12 @@ the color-card ROI rectangles (`colorcard`), the device/user/testkit rows, and
 the entry-screen defaults. It is **not** in Git (`.sqlite` is gitignored) and is
 **not** in the sync list.
 
-> **Do not build it from `src/db_DDL.sql`.** That DDL is incomplete — it defines
-> 6 of the 9 live tables (no `colorcard`, `exposure`, or `data`) and carries no
-> seed rows. The authoritative database is a working `colorimeter.sqlite`.
+> **`src/db_DDL.sql` will build a runnable database** (all 10 tables, the
+> `default_gui_vals` view, and seed rows) if you have no reference copy to hand:
+> `sqlite3 src/colorimeter.sqlite < src/db_DDL.sql`. It is idempotent, so
+> re-running it is safe. Prefer copying a working `colorimeter.sqlite` anyway —
+> that is what carries this fleet's reference data. *(Before 2026-07-31 the DDL
+> was incomplete and could not be used at all.)*
 
 > 🔴 **On a unit that has already been used, this step destroys data.** The DB is
 > not just seed rows once the instrument has run: it holds measurement results,
@@ -144,14 +147,34 @@ board is slow and often runs out of memory. The venv then inherits them with
 ```bash
 # On the Pi:
 cd ~/pi/Colorimeter
-./provisioning/bootstrap_system.sh     # apt packages (no daemon)
+./provisioning/bootstrap_system.sh     # apt packages + hardware groups (no daemon)
 ./provisioning/make_venv.sh            # create .venv, verify key imports
 ```
 
 `make_venv.sh` finishes by importing `numpy`, `cv2`, `h5py`, `yaml`, `spidev`,
-`gpiozero`, `lgpio`, `smbus2`, and `picamera2` **from inside the venv** and
-printing their versions. If any import fails, fix it before continuing — the app
-will not start otherwise.
+`gpiozero`, `lgpio`, `smbus2`, `picamera2`, and `evdev` **from inside the venv**
+and printing their versions. If any import fails, fix it before continuing — the
+app will not start otherwise.
+
+### Group membership (the `input` group)
+
+`bootstrap_system.sh` also adds you to the **`input`** group if you are not
+already in it. `src/kb_reader.py` reads the USB keyboard from `/dev/input/eventX`
+via `evdev` rather than stdin — that is what lets it work under systemd (no TTY)
+and over SSH (stdin is the remote terminal, not the local keyboard) — and those
+nodes are group-`input`.
+
+The Imager's first user is in `input` already, so this is usually a no-op; a
+**hand-created account is not** (see [00_reentry.md § 4b](00_reentry.md)). Both
+this and a missing `python3-evdev` fail *silently*: the app runs normally and the
+keyboard is simply dead.
+
+```bash
+groups | tr ' ' '\n' | grep -x input    # → input
+```
+
+If the group was just added, **log out and back in** (or reboot) before it takes
+effect — group membership is fixed at login.
 
 ### Interactive-login convenience (automatic)
 

@@ -113,6 +113,7 @@ Quick reference; wiring detail lives in the electronics docs under `edocs/`.
 | Backlight | GPIO13 (on/off via `gpiozero`) | 1651 LITE | `/dev/gpiochip0`, backlight toggles |
 | Buzzer | GPIO12 (PWM via `lgpio`) | magnetic buzzer (`src/beeper.py`) | audible |
 | Camera | CSI | IMX219 (Cam Module 2) / IMX708 (Module 3) | `rpicam-hello --list-cameras` |
+| Keyboard | USB (no `config.txt` entry) | any USB keyboard, read via `evdev` (`src/kb_reader.py`) | `python3 -c 'import evdev; print(evdev.list_devices())'` — needs `python3-evdev` **and** the `input` group |
 
 ---
 
@@ -124,9 +125,9 @@ Low-risk, repeatable steps are provided as scripts. The **Pi-run** set lives in
 
 | Script (in `provisioning/deploy/`) | Does | Repeat? |
 |---|---|---|
-| `bootstrap_system.sh` | Install apt system packages (`gpiozero`/`lgpio`/`spidev`/`smbus2`/camera/…); **no daemon** | 🟢 |
+| `bootstrap_system.sh` | Install apt system packages (`gpiozero`/`lgpio`/`spidev`/`smbus2`/`evdev`/camera/…) and add the user to the hardware groups (incl. `input`); **no daemon** | 🟢 |
 | `make_venv.sh` | Create `.venv` (`--system-site-packages`), verify imports, add the `~/.bashrc` login helper | 🟡 reuses an existing `.venv` |
-| `verify_peripherals.sh` | Check SPI0/I2C/1-Wire/SPI1/GPIO/camera after reboot | 🟡 stop the app first |
+| `verify_peripherals.sh` | Check SPI0/I2C/1-Wire/SPI1/GPIO/camera/keyboard after reboot | 🟡 stop the app first |
 | `commissioning_status.sh` | Report which commissioning steps this unit has had, and where to re-enter | 🟢 |
 | `install_colorimeter_service.sh` | Install + enable the boot-launch service | 🟢 |
 | `uninstall_colorimeter_service.sh` | Remove the boot-launch service | 🟢 |
@@ -146,9 +147,10 @@ The **`/boot/firmware/config.txt` edit is deliberately *not* scripted** — a ba
 `config.txt` can stop the Pi from booting, so step 2 walks through it manually
 with a backup.
 
-There is intentionally **no `seed_db.sh`**: the runtime database cannot be
-rebuilt from `src/db_DDL.sql` (that file is incomplete — see below). The DB is
-commissioned by copying a working `colorimeter.sqlite`; see step 3.
+There is intentionally **no `seed_db.sh`**. Since 2026-07-31 `src/db_DDL.sql`
+*can* build a complete, seeded, runnable database in one command — but
+commissioning still copies a working `colorimeter.sqlite` so the new unit
+starts from the same reference data as the others; see step 3.
 
 ---
 
@@ -167,7 +169,7 @@ retired deliberately. **None of these files have been edited by this guide.**
 | `edocs/rpi_configuration_guide_for_cal8.md` | Excellent deep reference for cal8 peripherals and the `colorimeter-gpio-init` service, but written for the **original Zero W / Bookworm**; carries Bullseye/Bookworm branching this guide drops. Also its Step 7 adds `dtoverlay=spi0-1cs` (to free GPIO7 for LED channel 9) which the committed cal8 config file omits. ⚠ Its PWM sections (11e, install step) install **`pigpio`/`pigpiod`** for GPIO12/13 — **obsolete**: the code now uses `gpiozero` (backlight) and `lgpio` (beeper) with **no daemon**, per [CODING_GUIDELINES.md](../CODING_GUIDELINES.md). | Keep as the authoritative reference for the **gpio-init service** (step 5 links to it), but **ignore its pigpio/pigpiod steps**. Reconcile the `spi0-1cs` discrepancy on real hardware (step 2). |
 | `provisioning/reference/Rpi-zero-W-2-for-mainboard_C-config.txt` | A **different board** (5-LED stripboard, `spi=off`, direct-GPIO LEDs), not the colorimeter. | Keep only as the stock Zero 2 W `config.txt` skeleton. Not the cal8 config. |
 | `provisioning/reference/Rpi-zero-W-for-main_board_cal8-config.txt` | The cal8 `[all]` block, but for the **original Zero W** and missing `spi0-1cs`. | Basis for step 2's canonical block; verify `spi0-1cs`. |
-| `src/db_DDL.sql` | **Incomplete.** Defines 6 tables but the live DB has 9 (missing `colorcard`, `exposure`, `data`); all seed `INSERT`s are commented out. `src/db_manager.py:TABLE_DEFINITIONS` is a third, also-incomplete schema. | Do **not** build the DB from it. Treat a working `colorimeter.sqlite` as the source of truth. Regenerate the DDL from the live DB if a clean schema is needed. |
+| `src/db_DDL.sql` | ✅ **Fixed 2026-07-31.** Was incomplete: 6 tables against the live DB's 9, and every seed `INSERT` plus the `default_gui_vals` view sat inside an unterminated `/* … */`, so a DB built from it could not run the app. Now defines all 10 tables (incl. the new `roi`), the view, and the seed rows, and is idempotent on re-run. Verified: the app boots on a DB built from it alone. The redundant `src/db_manager.py:TABLE_DEFINITIONS` string has been removed. | Usable as the schema source. `src/db_DDL_reset.sql` is the separate destructive drop script. Commissioning still copies a working `colorimeter.sqlite` (step 3) to carry reference data across units. |
 | `project_setup.md` (repo root) | Older dual-environment notes assuming Pi Zero **v1** / ARMv6, `raspi-config nonint do_*`, and `/etc/dhcpcd.conf` static IP. | Superseded by this guide for the Zero 2 W / Trixie target. Retain for the `sync_pi_files.txt` maintenance notes. |
 
 ---

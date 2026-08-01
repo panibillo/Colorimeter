@@ -150,6 +150,24 @@ temperature read, PWM blink, and the shift-register walk test) is in
 
 ---
 
+## Note — peripherals that need *no* `config.txt` entry
+
+Two of the instrument's peripherals are not configured here, which makes them
+easy to forget when auditing "peripherals":
+
+| Peripheral | Where it is set up |
+|---|---|
+| **Camera** (IMX219/IMX708) | Auto-detected (`camera_auto_detect=1`, stock). Needs `python3-picamera2` — step [3e](03_upload_firmware_db_venv.md#step-3e--install-system-packages-then-build-the-venv-on-the-pi). |
+| **USB keyboard** | Plug-and-play at the kernel level, but the app needs `python3-evdev` **and** membership in the `input` group — both from `bootstrap_system.sh` in step [3e](03_upload_firmware_db_venv.md#step-3e--install-system-packages-then-build-the-venv-on-the-pi). |
+
+⚠ The keyboard is the trap: `src/kb_reader.py` reads `/dev/input/eventX` directly
+via `evdev` (not stdin, so it works under systemd and over SSH). If either
+prerequisite is missing it degrades **silently** — the app starts, everything
+else works, and keystrokes are simply ignored. `verify_peripherals.sh` checks
+both.
+
+---
+
 ## Note — boot-time LED safe state
 
 On the cal8 board the LEDs sit behind the 74HC595, so `config.txt` `gpio=` lines

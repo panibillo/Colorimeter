@@ -8,7 +8,7 @@
 #
 # Checks SPI0, SPI1, I2C bus 1 (+ TSC2007 @0x48), 1-Wire (+ a DS18B20 and a
 # temperature read), the GPIO character device (gpiozero/lgpio backends —
-# there is no daemon), the SPI1 pin function, and the camera.
+# there is no daemon), the SPI1 pin function, the camera, and the USB keyboard.
 # It changes nothing and is safe to run repeatedly. A ✗ means investigate;
 # see docs/commissioning/07_troubleshooting.md.
 
@@ -95,6 +95,50 @@ if command -v rpicam-hello >/dev/null 2>&1; then
     fi
 else
     warn "rpicam-hello not installed — check manually with picamera2, or install rpicam-apps"
+fi
+
+# ── USB keyboard (evdev on /dev/input) ──────────────────────────────────────
+# src/kb_reader.py reads /dev/input/eventX directly instead of stdin, so it works
+# under systemd and over SSH. Two things must be true, and BOTH fail silently —
+# the app starts normally and the keyboard simply never responds:
+#   • python3-evdev installed
+#   • the user is in the `input` group (evdev.list_devices() needs r/w on the
+#     nodes, so a non-member sees an EMPTY device list, not a permission error)
+echo "USB keyboard (evdev, src/kb_reader.py):"
+if python3 -c 'import evdev' 2>/dev/null; then
+    pass "python3 can import evdev"
+
+    if id -nG | tr ' ' '\n' | grep -qx input; then
+        pass "user $(whoami) is in the 'input' group"
+    else
+        fail "user $(whoami) is NOT in the 'input' group — run: sudo usermod -aG input \"\$(whoami)\" (then log out/in)"
+    fi
+
+    kb=$(python3 - <<'PY' 2>/dev/null
+import evdev
+from evdev import ecodes
+found = []
+for path in evdev.list_devices():
+    try:
+        dev = evdev.InputDevice(path)
+    except Exception:
+        continue
+    caps = dev.capabilities()
+    # Same filter kb_reader.KbReader.open() uses: EV_KEY + KEY_A excludes mice
+    # and other HID devices that report keys but are not keyboards.
+    if ecodes.EV_KEY in caps and ecodes.KEY_A in caps[ecodes.EV_KEY]:
+        found.append(f"{dev.name} ({path})")
+    dev.close()
+print("; ".join(found))
+PY
+)
+    if [[ -n "$kb" ]]; then
+        pass "keyboard visible: ${kb}"
+    else
+        warn "no keyboard device found — unplugged, or the 'input' group add has not taken effect yet (log out/in)"
+    fi
+else
+    fail "python3 cannot import evdev — sudo apt install python3-evdev (src/kb_reader.py needs it)"
 fi
 
 # ── Summary ─────────────────────────────────────────────────────────────────
