@@ -118,7 +118,12 @@ PERCENTILES     = [89, 66, 50, 33, 11]    # e1, e2, e3, e4, e5 percentile target
 EXP_LABELS      = ["e0", "e1", "e2", "e3", "e4", "e5", "e6"]  # ordered capture sequence
 
 WHITE_LED_CH   = 10    # LEDBank channel for white LED
-MAX_AF_DIOPTER = 7.5   # cap autofocus: if result exceeds this, set manually to this
+MAX_AF_DIOPTER = 12.0  # cap autofocus: if result exceeds this, set manually to this.
+                        # 12.0 is the IMX708 AF algorithm's own "normal" range
+                        # ceiling (imx708.json rpi.af.ranges.normal.max) — not
+                        # an arbitrary guess, so a real close-focus result
+                        # (e.g. 8.1 diopters for this rig's cuvette distance)
+                        # is never silently clipped to a shallower focus.
 
 # e3 convergence: iterate until |p50 - HALF_SAT| / HALF_SAT < E3_TOLERANCE
 E3_TOLERANCE = 0.10    # 10 % tolerance for p50 convergence
