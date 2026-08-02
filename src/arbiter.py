@@ -1420,6 +1420,14 @@ class Arbiter:
             cam = self._camera or BayerCam()
             cam.setup_camera()          # idempotent; opens + settles the sensor
             leds = self._leds or LEDBank()
+            if cam.lens_position is None:
+                # Freshly opened: the sensor has no meaningful lens position
+                # yet (setup_camera() locks AfMode Manual without one), so
+                # restore the saved focus_cal.json calibration now — the same
+                # thing CaptureRunner._set_focus() does before every real
+                # capture — instead of leaving previews unfocused until an
+                # explicit Auto/Reread action.
+                cam.focus(force=False, leds=leds)
             self._camera, self._leds = cam, leds
             log.info("Arbiter: shared camera opened")
             return self._camera, self._leds
