@@ -115,6 +115,10 @@ SEED_PARAMS: Tuple[Tuple[str, str, str, str, str, str], ...] = (
      "last LED channel a capture run sweeps (inclusive)"),
     ("capture", "fallback_exposure_group", "str", "3", "",
      "exposure group preselected when the saved one is missing or inactive"),
+    ("capture", "inspection_exposure_us", "int", "10000", "",
+     "operator-saved exposure from the viewer's Img recapture dialog"),
+    ("capture", "default_focus_diopter", "float", "0.0", "",
+     "operator-saved focus diopter from the viewer's Img recapture dialog"),
 
     # Timed protocol steps, in seconds.  The simulation rows shorten the
     # reagent waits so a run is quick to test, but only in simulation; a
@@ -557,6 +561,16 @@ def capture_led_end() -> int:
 def fallback_exposure_group() -> str:
     """Exposure group to preselect when the saved one is missing or inactive."""
     return str(get("capture", "fallback_exposure_group"))
+
+
+def inspection_exposure_us() -> int:
+    """Operator-saved exposure from the viewer's Img recapture dialog."""
+    return int(get("capture", "inspection_exposure_us"))
+
+
+def default_focus_diopter() -> float:
+    """Operator-saved focus diopter from the viewer's Img recapture dialog."""
+    return float(get("capture", "default_focus_diopter"))
 
 
 # ── Protocol timing ─────────────────────────────────────────────────────────

@@ -246,6 +246,12 @@ class Arbiter:
         self._view_editing   = None    # rect.Rect working copy, or None
         self._view_armed: str | None = None   # left|right|top|bottom, or None
 
+        # Recapture options dialog (opened by the viewer's Img button).
+        self._recap_focus: str | None = None   # None | "auto" | "reread"
+        self._recap_exp        = "sample"      # "sample" | "whole"
+        self._recap_save_focus = False
+        self._recap_save_exp   = False
+
     # ── Lifecycle ──────────────────────────────────────────────────────────────
 
     def start(self) -> None:
@@ -1446,13 +1452,13 @@ class Arbiter:
                 log.exception("Arbiter: error closing shared LED bank")
             self._leds = None
 
-    def preview_frame(self):
+    def preview_frame(self, region: str = "sample"):
         """
-        Take a briefly-lit, sample-metered frame for the image viewer.
+        Take a briefly-lit, metered frame for the image viewer.
 
         The white LED is switched on, given a short settle, the exposure is
-        metered on the sample ROI (see `_auto_expose`), and the LED goes off
-        again.  The LED settle is deliberately far shorter than a capture run's
+        metered (see `_auto_expose`), and the LED goes off again.  The LED
+        settle is deliberately far shorter than a capture run's
         LED_ON_WARMUP_S: this frame is for looking at, and for judging where
         the ROI rectangles fall, so colour accuracy is not required and the
         operator's wait matters more.
@@ -1461,6 +1467,10 @@ class Arbiter:
         That is acceptable because it only ever runs from an explicit button
         press, and every alternative (threads, a state machine over the settle)
         buys nothing here.
+
+        Args:
+            region: "sample" (default, meters the sample ROI) or "whole"
+                    (meters the entire frame) — see `_auto_expose`.
 
         Returns:
             (frame, error).  `frame` is a numpy BGR array of the full stream on
@@ -1478,7 +1488,7 @@ class Arbiter:
                 leds.set_channel(_PREVIEW_LED_CH, True)
                 lit = True
                 time.sleep(_PREVIEW_SETTLE_S)
-            rgb, exposure_us = self._auto_expose(cam)
+            rgb, exposure_us = self._auto_expose(cam, region=region)
         except Exception:
             log.exception("Arbiter: preview capture failed")
             return None, "Preview failed"
@@ -1495,27 +1505,28 @@ class Arbiter:
                  rgb.shape[1], rgb.shape[0], exposure_us)
         return rgb, ""
 
-    def _auto_expose(self, cam):
+    def _auto_expose(self, cam, region: str = "sample"):
         """
-        Capture the preview, metering the exposure on the sample ROI alone.
+        Capture the preview, metering the exposure on the sample ROI or the
+        whole frame.
 
         Each pass sets an exposure, waits for the pipeline to actually adopt it
         (`capture_runner._set_and_settle` — without that wait the frame read
         back still carries the *previous* exposure, which is the older bug this
-        replaces), then measures the sample.  The measurement is the median of
-        the brightest raw Bayer channel inside the sample rectangle, and the
-        next exposure is the linear scaling that would put that median on
-        `_PREVIEW_TARGET`.  Raw, not the ISP's 8-bit output, because only the
-        raw values are linear in exposure — scaling against gamma-encoded
-        pixels under-corrects and would need many more frames to converge.
+        replaces), then measures the chosen region. The measurement is the
+        median of the brightest raw Bayer channel, and the next exposure is
+        the linear scaling that would put that median on `_PREVIEW_TARGET`.
+        Raw, not the ISP's 8-bit output, because only the raw values are
+        linear in exposure — scaling against gamma-encoded pixels
+        under-corrects and would need many more frames to converge.
 
         At most `_PREVIEW_AE_MAX_FRAMES` frames are taken, so a scene that
         cannot be brought into range (the LED failed, the cuvette is opaque)
         costs a bounded wait and returns the best frame it managed.
 
         Every pass is logged at INFO with the exposure in µs and what the
-        sample measured, so an over- or under-exposed preview can be diagnosed
-        from the log alone.
+        region measured, so an over- or under-exposed preview can be
+        diagnosed from the log alone.
 
         Also updates `_view_exposure_us`, the starting point for the next
         preview: the exposure that worked when the metering converged, and the
@@ -1523,7 +1534,9 @@ class Arbiter:
         the next preview starts from the best estimate this one reached.
 
         Args:
-            cam: The shared camera, already started.
+            cam:    The shared camera, already started.
+            region: "sample" (default, meters the sample ROI alone) or "whole"
+                    (meters the entire frame).
 
         Returns:
             (rgb, exposure_us) — the BGR frame and the exposure it was actually
@@ -1538,7 +1551,8 @@ class Arbiter:
             rgb, bayer, meta = capture_runner._set_and_settle(
                 cam, us, max_frames=_PREVIEW_SETTLE_FRAMES)
             applied = int(meta.get("ExposureTime") or us)
-            level = self._meter_sample_level(bayer, cam)
+            level = (self._meter_sample_level(bayer, cam) if region == "sample"
+                     else self._meter_whole_frame_level(bayer, cam))
             if level is None:
                 log.info("Arbiter: preview exposure %d us (sample not metered)",
                          applied)
@@ -1631,6 +1645,35 @@ class Arbiter:
             log.exception("Arbiter: could not meter the sample ROI")
             return None
 
+    def _meter_whole_frame_level(self, bayer, cam) -> "float | None":
+        """
+        Measure the whole frame: the median of its brightest raw Bayer channel.
+
+        Same brightest-channel rationale as `_meter_sample_level`, just
+        without cropping to any ROI — used when the operator asks the
+        recapture dialog to meter on the whole image instead of the sample.
+
+        Args:
+            bayer: The raw (H, W) uint16 mosaic from the same capture.
+            cam:   The camera, for its Bayer pattern.
+
+        Returns:
+            The median in 10-bit counts, or None when there is no raw stream
+            to measure.
+        """
+        if bayer is None or getattr(bayer, "ndim", 0) != 2:
+            return None
+        try:
+            import numpy as np
+            from bayer_cam import BayerCam
+
+            layers = BayerCam.extract_bayer_layers(
+                bayer, getattr(cam, "bayer_pattern", "BGGR"))
+            return max(float(np.median(layer)) for layer in layers.values())
+        except Exception:
+            log.exception("Arbiter: could not meter the whole frame")
+            return None
+
     # ── Image viewer screen (Menu → View Image) ────────────────────────────────
     # A screen of its own, like Menu and Config: _focused is None while it is
     # up, it draws no header or footer, and the whole 320x240 belongs to it.
@@ -1696,17 +1739,24 @@ class Arbiter:
         if frame is None:
             self._view_frame = None
             self._view_state = None
-            self._render_image_view()
-            return
+        else:
+            self._view_install_frame(frame, focus_roi=focus_roi)
+        self._render_image_view()
 
+    def _view_install_frame(self, frame, focus_roi: str | None = None) -> None:
+        """
+        Adopt a newly captured frame as the viewer's current image.
+
+        Shared by `_view_reimage` and the recapture dialog's Capture button.
+        The view is rebuilt only when there is none yet, a ROI to focus was
+        asked for, or the stream size changed under us — reimaging must not
+        throw away where you were looking, since the whole point of Img
+        mid-edit is to see the effect of a moved edge under a fresh exposure.
+        """
         import image_view
         prev = self._view_state
         self._view_frame = frame
         fh, fw = frame.shape[:2]
-        # Reimaging must not throw away where you were looking — the whole
-        # point of Img mid-edit is to see the effect of a moved edge under a
-        # fresh exposure.  The view is rebuilt only when there is none yet, a
-        # ROI to focus was asked for, or the stream size changed under us.
         if (prev is None or focus_roi is not None
                 or (prev.frame_w, prev.frame_h) != (fw, fh)):
             canvas = layout.IMG_CANVAS
@@ -1714,7 +1764,6 @@ class Arbiter:
             target = focus_roi or self._view_selected
             if target and target in self._view_rois:
                 self._view_state.fit_to(self._view_rois[target])
-        self._render_image_view()
 
     def _render_image_view(self) -> None:
         """Build (or rebuild) the whole viewer screen."""
@@ -1731,7 +1780,7 @@ class Arbiter:
         self._pool.put("img_step",     f"{self._view_step}px",
                        on=self._view_toggle_step)
         self._pool.put("img_down",     "▼",    on=lambda: self._view_arrow(0, 1))
-        self._pool.put("img_reimage",  "Img",  on=self._view_reimage)
+        self._pool.put("img_reimage",  "Img",  on=self._recap_open)
         self._pool.put("img_name",     self._view_name_text())
         # Edit / Save / Cancel are a mode pair with Exit: editing offers Save
         # and Cancel and withholds both Edit and Exit, so there is no way to
@@ -1750,6 +1799,110 @@ class Arbiter:
         self._paint_canvas()
         self._pool.render(self._disp)
         self._rebuild_focus()
+
+    # ── Recapture options dialog (viewer's Img button) ─────────────────────────
+    # A second screen swapped in over the viewer, following the same ad hoc
+    # "hide_all + put() everything + render" pattern as _render_capture_choice
+    # and friends — not a ModalPhase, which is bound to a Slot the viewer
+    # doesn't have. Cancel returns to the viewer untouched (no camera calls);
+    # Capture applies the chosen focus/exposure actions, takes one frame, and
+    # installs it into the still-open viewer.
+
+    def _recap_open(self) -> None:
+        if not self.capture_available():
+            self._toast("Capture running")
+            return
+        self._recap_render()
+
+    def _recap_render(self) -> None:
+        if self._pool is None:
+            return
+        from palette import color
+        sel, unsel = color("start_green"), color("btn_gray")
+        p = self._pool
+        p.hide_all()
+        p.put("menu_cancel_btn", "Cancel", on=self._recap_cancel)
+        p.put("menu_title",      "Recapture")
+        p.put("menu_ok_btn",     "Capture", on=self._recap_capture)
+        p.put("recap_focus_lbl", "Focus")
+        p.put("recap_focus_auto", "Auto Focus",
+              on=lambda: self._recap_set_focus("auto"))
+        p["recap_focus_auto"].color = sel if self._recap_focus == "auto" else unsel
+        p.put("recap_focus_cfg", "Reread Cfg",
+              on=lambda: self._recap_set_focus("reread"))
+        p["recap_focus_cfg"].color = sel if self._recap_focus == "reread" else unsel
+        p.put("recap_exp_lbl", "Exposure")
+        p.put("recap_exp_sample", "Sample Rect",
+              on=lambda: self._recap_set_exp("sample"))
+        p["recap_exp_sample"].color = sel if self._recap_exp == "sample" else unsel
+        p.put("recap_exp_whole", "Whole Image",
+              on=lambda: self._recap_set_exp("whole"))
+        p["recap_exp_whole"].color = sel if self._recap_exp == "whole" else unsel
+        p.put("recap_save_focus", "Save Focus", on=self._recap_toggle_save_focus)
+        p["recap_save_focus"].color = sel if self._recap_save_focus else unsel
+        p.put("recap_save_exp", "Save Exposure", on=self._recap_toggle_save_exp)
+        p["recap_save_exp"].color = sel if self._recap_save_exp else unsel
+        p.render(self._disp)
+        self._rebuild_focus()
+
+    def _recap_set_focus(self, mode: str) -> None:
+        # Tri-state: tapping the already-selected option clears it to None
+        # (neither checked = leave focus untouched), unlike an ordinary radio.
+        self._recap_focus = None if self._recap_focus == mode else mode
+        self._recap_render()
+
+    def _recap_set_exp(self, region: str) -> None:
+        self._recap_exp = region
+        self._recap_render()
+
+    def _recap_toggle_save_focus(self) -> None:
+        self._recap_save_focus = not self._recap_save_focus
+        self._recap_render()
+
+    def _recap_toggle_save_exp(self) -> None:
+        self._recap_save_exp = not self._recap_save_exp
+        self._recap_render()
+
+    def _recap_cancel(self) -> None:
+        """Discard the pending choices and return to the viewer untouched."""
+        self._render_image_view()
+
+    def _recap_capture(self) -> None:
+        """Apply the chosen focus/exposure actions and install a fresh frame."""
+        hw = self._ensure_camera()
+        if hw is None:
+            log.error("Arbiter: recapture — camera unavailable")
+            self._render_image_view()
+            return
+        cam, leds = hw
+
+        if self._recap_focus == "auto":
+            cam.focus(force=True, leds=leds)
+        elif self._recap_focus == "reread":
+            cam.reread_focus_cal()
+        # else: neither checked — leave focus exactly as it is.
+
+        frame, err = self.preview_frame(region=self._recap_exp)
+        self._view_status = err
+
+        diopter = cam.lens_position
+        log.info("Arbiter: recapture — focus=%s diopter=%s exposure=%s us "
+                 "region=%s", self._recap_focus or "unchanged",
+                 f"{diopter:.4f}" if diopter is not None else "n/a",
+                 self._view_exposure_us, self._recap_exp)
+
+        if self._recap_save_focus and diopter is not None:
+            config.save("capture", "default_focus_diopter", diopter)
+        if self._recap_save_exp and self._view_exposure_us is not None:
+            config.save("capture", "inspection_exposure_us",
+                        self._view_exposure_us)
+
+        if frame is None:
+            self._view_frame = None
+            self._view_state = None
+        else:
+            self._view_install_frame(frame)
+        self._render_image_view()
 
     def _paint_canvas(self) -> None:
         """
@@ -1972,6 +2125,8 @@ class Arbiter:
         self._view_editing.role = getattr(r, "role", None)
         if side is not None:
             self._view_state.centre_on_edge(self._view_editing, side)
+        else:
+            self._view_state.centre_on_rect(self._view_editing)
 
     def _view_fit(self) -> None:
         if self._view_state is None:

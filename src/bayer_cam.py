@@ -422,6 +422,36 @@ class BayerCam:
         log.info(f"Focus cal saved: {self.lens_position:.4f} diopters → "
                  f"{self._focus_cal_path}")
 
+    def reread_focus_cal(self) -> "float | None":
+        """
+        Re-read focus_cal.json and apply its saved LensPosition, no AF sweep.
+
+        Unlike `focus(force=False)`, this never falls back to an autofocus
+        sweep when the file is absent — the caller explicitly asked to reread
+        the file, not to refocus, so a missing file is reported (None) rather
+        than silently substituted with a sweep.
+
+        Returns:
+            The lens position applied (diopters), or None if focus_cal.json
+            is absent/unreadable or this camera has no autofocus.
+        """
+        if not self.has_autofocus or self.camera is None:
+            return None
+        saved = self._load_focus_cal()
+        if saved is None:
+            log.warning(f"Focus: no focus_cal.json to reread at "
+                        f"{self._focus_cal_path}")
+            return None
+        self.camera.set_controls({
+            "AfMode":       libcamera.controls.AfModeEnum.Manual,
+            "LensPosition": saved,
+        })
+        self.lens_position = saved
+        time.sleep(0.3)   # allow VCM to settle
+        log.info(f"Focus: reread {saved:.4f} diopters from "
+                 f"{self._focus_cal_path}")
+        return saved
+
     def focus(self, force: bool = False, leds=None) -> float:
         """
         Focus the camera, using a saved position when available.
