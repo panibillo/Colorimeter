@@ -218,7 +218,7 @@ class Pool:
         button("img_up",       L.IMG_UP,       "btn_text", "btn_gray", 20, text="▲")
         button("img_zoom_out", L.IMG_ZOOM_OUT, "btn_text", "btn_gray", 20, text="−")
         button("img_left",     L.IMG_LEFT,     "btn_text", "btn_gray", 20, text="◀")
-        button("img_fit",      L.IMG_FIT,      "btn_text", "btn_gray", 14, text="Fit")
+        button("img_fit",      L.IMG_FIT,      "btn_text", "btn_gray", 14, text="Home")
         button("img_right",    L.IMG_RIGHT,    "btn_text", "btn_gray", 20, text="▶")
         button("img_step",     L.IMG_STEP,     "btn_text", "btn_gray", 14, text="1px")
         button("img_down",     L.IMG_DOWN,     "btn_text", "btn_gray", 20, text="▼")
@@ -228,6 +228,25 @@ class Pool:
         button("img_save",     L.IMG_SAVE,     "btn_text", "start_green", 16, text="Save")
         button("img_cancel",   L.IMG_CANCEL,   "btn_text", "btn_gray", 16, text="Cancel")
         button("img_exit",     L.IMG_EXIT,     "btn_text", "btn_gray", 16, text="Exit")
+
+        # ── recapture options dialog (viewer's Img button) ──────────────────────
+        # Cancel/Capture reuse menu_cancel_btn/menu_ok_btn (top-corner chrome).
+        label("recap_focus_lbl",   L.RECAP_FOCUS_LBL,  "black", "white", 14,
+              align="left", text="Focus")
+        button("recap_focus_auto", L.RECAP_FOCUS_AUTO, "btn_text", "btn_gray", 14,
+               text="Auto Focus")
+        button("recap_focus_cfg",  L.RECAP_FOCUS_CFG,  "btn_text", "btn_gray", 14,
+               text="Reread Cfg")
+        label("recap_exp_lbl",     L.RECAP_EXP_LBL,    "black", "white", 14,
+              align="left", text="Exposure")
+        button("recap_exp_sample", L.RECAP_EXP_SAMPLE, "btn_text", "btn_gray", 14,
+               text="Sample Rect")
+        button("recap_exp_whole",  L.RECAP_EXP_WHOLE,  "btn_text", "btn_gray", 14,
+               text="Whole Image")
+        button("recap_save_focus", L.RECAP_SAVE_FOCUS, "btn_text", "btn_gray", 14,
+               text="Save Focus")
+        button("recap_save_exp",   L.RECAP_SAVE_EXP,   "btn_text", "btn_gray", 14,
+               text="Save Exposure")
 
         # ── modal overlay (drawn last = on top) ────────────────────────────────
         rect("modal_panel", L.MODAL_PANEL, "body_dark")

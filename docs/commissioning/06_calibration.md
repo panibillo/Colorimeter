@@ -55,8 +55,8 @@ mechanically.
 The capture pipeline has two paths — a **Calibration path** that measures the
 exposure ladder and a **Normal path** that reuses saved exposures (stored in the
 `exposure` table, seeded per exposure group). On a fresh DB the `exposure` table
-is empty and the app falls back to `capture.fallback_exposure_group` from
-`config/instrument.yaml` (default group `"3"`).
+is empty and the app falls back to the config table's `capture.fallback_exposure_group`
+row (default group `"3"`).
 
 The operator-facing "Calibrate Exposures" flow is **still being wired up** (UI +
 persistence). Until it lands, a new unit runs on the fallback group, which is

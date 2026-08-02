@@ -542,7 +542,7 @@ def build_phases(reagent1_secs: int = 120, reagent2_secs: int = 420) -> dict:
     Return {phase_id: Phase}, the whole protocol.
 
     reagent1_secs / reagent2_secs let the caller set the reagent countdowns; the
-    arbiter passes the configured durations (config_manager.reagent{1,2}_secs),
+    arbiter passes the configured durations (config_repo.reagent{1,2}_secs),
     which the simulation profile shortens so runs are quick to test and the
     Menu -> Config screen overrides on the instrument itself.  That screen
     rebuilds the phases through this function, so a new duration takes effect

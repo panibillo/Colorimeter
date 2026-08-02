@@ -145,10 +145,9 @@ if [[ -f "${APP}/src/main.py" ]]; then
 else
     fail "src/main.py missing"; reenter "3b (./sync_to_pi.sh <host>)"
 fi
-for y in instrument.yaml palette.yaml; do
-    if [[ -f "${APP}/config/${y}" ]]; then pass "config/${y}"
-    else fail "config/${y} missing"; reenter "3b (./sync_to_pi.sh <host>)"; fi
-done
+# config/ now holds only per-instrument calibration written by the device
+# (focus_cal.json, touch_cal.json); instrument settings moved into the
+# database's `config` table in 2026-08, checked alongside colorcard below.
 
 # ── Step 3c — database ──────────────────────────────────────────────────────
 echo "Step 3c — database:"
@@ -163,19 +162,25 @@ try:
         "select name from sqlite_master where type='table'")]
     n = c.execute("select count(*) from colorcard").fetchone()[0] \
         if "colorcard" in tables else -1
-    print(f"OK {len(tables)} {n}")
+    cfg = c.execute("select count(*) from config where active = 1").fetchone()[0] \
+        if "config" in tables else -1
+    print(f"OK {len(tables)} {n} {cfg}")
 except Exception as e:
     print(f"ERR {e}")
 PY
 )"
-    read -r tag a b <<<"${db_report}"
+    read -r tag a b cfg <<<"${db_report}"
     if [[ "${tag}" == "OK" ]]; then
-        if [[ "${a}" -eq 9 ]]; then pass "${a} tables (expected 9)"
-        else warn "${a} tables — the live schema has 9"; fi
+        if [[ "${a}" -eq 11 ]]; then pass "${a} tables (expected 11)"
+        else warn "${a} tables — the live schema has 11"; fi
         if   [[ "${b}" -gt 0 ]]; then pass "colorcard seeded (${b} rows)"
         elif [[ "${b}" -eq 0 ]]; then fail "colorcard is EMPTY — blank or wrong DB was copied"
                                     reenter "3c (⚠ overwrites data — back up first)"
         else fail "no colorcard table — wrong DB"; reenter "3c (⚠ overwrites data — back up first)"; fi
+        if   [[ "${cfg}" -gt 0 ]]; then pass "config table seeded (${cfg} active rows)"
+        elif [[ "${cfg}" -eq 0 ]]; then fail "config table is EMPTY — run provisioning/config_defaults.sql"
+                                       reenter "3c (sqlite3 src/colorimeter.sqlite < provisioning/config_defaults.sql)"
+        else fail "no config table — wrong or pre-2026-08 DB"; reenter "3c (⚠ overwrites data — back up first)"; fi
     else
         fail "cannot read the database: ${a} ${b}"; reenter "3c (⚠ overwrites data — back up first)"
     fi

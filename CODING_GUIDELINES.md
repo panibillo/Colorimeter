@@ -24,7 +24,7 @@
   - Camera operation (`colorcam.py`)
   - Analysis (`color_analysis.py`, `roi_analysis.py`, `color_map.py`)
   - Web interface (`web_interface.py`)
-  - Configuration management (`config_manager.py`)
+  - Configuration management (`config_repo.py`)
   - Database operations (`db_manager.py`)
   - Testing (`test/` directory)
 
@@ -223,10 +223,11 @@ No daemon setup steps. No `sudo systemctl enable` required.
 
 ### Configuration Loading
 
-- All configuration loaded at startup via `config_manager.py`
-- Configuration is read-only after initialization
-- Writing configuration changes uses `db_interface.py`
-- No module should read configuration files directly
+- All configuration loaded at startup via `config_repo.py`, from the database's
+  `config` table
+- Configuration is read-only after initialization, except through `config_repo`'s
+  own `save()` / `restore()` (Menu -> Config)
+- No other module should read the `config` table directly
 
 ### Import Pattern for Hardware Abstraction
 

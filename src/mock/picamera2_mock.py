@@ -265,6 +265,20 @@ class Picamera2:
         self.controls.update(controls)
         print(f"[mock] set_controls: {controls}")
 
+    def autofocus_cycle(self, wait=None, signal_function=None):
+        """
+        Mock autofocus cycle: immediately reports Focused with no lens
+        movement — the mock serves a static image, so there is no scene to
+        actually focus on. Stores AfState/LensPosition into self.controls so
+        the following capture_metadata() in autofocus_once() sees them via
+        the usual overlay, exercising the real call path without simulating
+        AF physics.
+        """
+        self.controls["AfState"] = 2  # Focused
+        self.controls.setdefault("LensPosition", 1.0)
+        print("[mock] autofocus_cycle: reporting Focused")
+        return True
+
     def _current_metadata(self):
         """
         Metadata for a capture: the .txt file values with any values set via

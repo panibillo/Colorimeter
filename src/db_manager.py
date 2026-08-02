@@ -8,6 +8,10 @@ returned values.
 The schema lives in src/db_DDL.sql — that file is authoritative and builds a
 complete, seeded, runnable database on its own.  Do not restate it here.
 
+This module also settles where the database *is* (DBNAME / db_path), because
+config_repo reads the instrument's settings out of the database and so cannot
+be the one to say where it lives.  Nothing here imports config_repo.
+
 Usage:
     results = read_all("SELECT name, x, y, w, h FROM roi WHERE active = 1")
     row     = read_one("SELECT x, y, w, h FROM roi WHERE name = ? AND active = 1",
@@ -17,15 +21,43 @@ Usage:
               (1, "card1"))
 """
 
+import os
 import sqlite3
-import config_manager as config
+from pathlib import Path
+
 import logging_manager as log
 
-# The database location comes from config (database.path, default
-# src/colorimeter.sqlite, so the path is independent of the working directory —
-# the app launches from src/, tools from the repo root). $COLORIMETER_DB
-# overrides it; tests may also reassign DBNAME directly to a scratch copy.
-DBNAME = str(config.db_path())
+# The database location is settled here rather than in config_repo, because
+# config_repo reads its parameters *out of* this database — it cannot be asked
+# where the database is.  This is the one setting that must live outside the
+# config table.
+#
+# The path is resolved against the project root (the directory holding src/ and
+# config/) so it is independent of the working directory — the app launches
+# from src/, tools from the repo root.  $COLORIMETER_DB overrides it for one
+# process; tests may also reassign DBNAME directly to a scratch copy.
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+DB_PATH_ENV  = "COLORIMETER_DB"
+DEFAULT_DB   = PROJECT_ROOT / "src" / "colorimeter.sqlite"
+
+
+def db_path() -> Path:
+    """
+    Return the SQLite database path.
+
+    $COLORIMETER_DB wins if set; otherwise DEFAULT_DB.  A relative override is
+    resolved against the project root.
+
+    Returns:
+        The database path, with ~ expanded.
+    """
+    configured = Path(os.environ.get(DB_PATH_ENV) or DEFAULT_DB).expanduser()
+    if configured.is_absolute():
+        return configured
+    return PROJECT_ROOT / configured
+
+
+DBNAME = str(db_path())
 print (f"Colorimeter db_manager.py using db: {DBNAME}")
 
 

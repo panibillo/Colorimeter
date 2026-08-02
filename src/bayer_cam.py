@@ -31,6 +31,7 @@ Copyright: William C Olsen
 
 import json
 import time
+from concurrent.futures import TimeoutError as FutureTimeoutError
 from pathlib import Path
 from typing import Dict, Tuple, Union
 
@@ -335,15 +336,25 @@ class BayerCam:
         """
         Trigger a single autofocus sweep, wait for completion, then lock focus.
 
-        Switches the IMX708 to Auto AfMode, starts a focus sweep, polls
-        AfState until scanning completes or timeout_s elapses, then returns
-        to Manual mode locked at the settled lens position.
+        Delegates the actual sweep to Picamera2.autofocus_cycle(), which
+        switches the IMX708 to Auto AfMode, starts the scan, and blocks until
+        AfState is first seen entering Scanning and then leaving it (Focused,
+        Failed, or cancelled back to Idle). That two-stage wait matters: a
+        naive poll loop started right after set_controls() can read the
+        pre-trigger Idle state on its very first sample — set_controls()
+        only takes effect on the next completed request — and mistake that
+        for a finished scan, locking focus at whatever LensPosition happened
+        to be set already instead of the just-measured one.  Once the cycle
+        returns, a fresh capture_metadata() reads the settled LensPosition
+        before relocking to Manual mode.
 
         Only valid on cameras with has_autofocus == True (IMX708).
         Camera must be started (setup_camera() called) before calling this.
 
         Args:
             timeout_s: Maximum seconds to wait for AF to settle (default 5.0).
+                       Raised as `concurrent.futures.TimeoutError` internally;
+                       caught here and logged as a failed/incomplete scan.
 
         Returns:
             LensPosition at which focus was locked (diopters; 0.0 = infinity).
@@ -366,24 +377,18 @@ class BayerCam:
             )
 
         log.info("Starting autofocus sweep...")
-        self.camera.set_controls({
-            "AfMode":    libcamera.controls.AfModeEnum.Auto,
-            "AfTrigger": libcamera.controls.AfTriggerEnum.Start,
-        })
+        try:
+            focused = self.camera.autofocus_cycle(wait=timeout_s)
+        except FutureTimeoutError:
+            log.warning(f"Autofocus: cycle did not settle within {timeout_s}s")
+            focused = False
 
-        deadline = time.monotonic() + timeout_s
-        meta = {}
-        while time.monotonic() < deadline:
-            time.sleep(0.1)
-            meta = self.camera.capture_metadata()
-            af_state = meta.get("AfState", 1)
-            if af_state != 1:   # 1 = Scanning; 0 = Idle, 2 = Focused, 3 = Failed
-                break
-
+        meta       = self.camera.capture_metadata()
         af_state   = meta.get("AfState", -1)
-        lens_pos   = meta.get("LensPosition", 1.0)
+        lens_pos   = meta.get("LensPosition", self.lens_position or 0.0)
         af_outcome = {0: "idle", 2: "focused", 3: "failed"}.get(af_state, f"state={af_state}")
-        log.info(f"Autofocus complete: {af_outcome}, LensPosition={lens_pos:.3f}")
+        log.info(f"Autofocus complete: {af_outcome} (success={focused}), "
+                 f"LensPosition={lens_pos:.3f}")
 
         # Lock focus at the settled position
         self.camera.set_controls({
@@ -421,6 +426,36 @@ class BayerCam:
             )
         log.info(f"Focus cal saved: {self.lens_position:.4f} diopters → "
                  f"{self._focus_cal_path}")
+
+    def reread_focus_cal(self) -> "float | None":
+        """
+        Re-read focus_cal.json and apply its saved LensPosition, no AF sweep.
+
+        Unlike `focus(force=False)`, this never falls back to an autofocus
+        sweep when the file is absent — the caller explicitly asked to reread
+        the file, not to refocus, so a missing file is reported (None) rather
+        than silently substituted with a sweep.
+
+        Returns:
+            The lens position applied (diopters), or None if focus_cal.json
+            is absent/unreadable or this camera has no autofocus.
+        """
+        if not self.has_autofocus or self.camera is None:
+            return None
+        saved = self._load_focus_cal()
+        if saved is None:
+            log.warning(f"Focus: no focus_cal.json to reread at "
+                        f"{self._focus_cal_path}")
+            return None
+        self.camera.set_controls({
+            "AfMode":       libcamera.controls.AfModeEnum.Manual,
+            "LensPosition": saved,
+        })
+        self.lens_position = saved
+        time.sleep(0.3)   # allow VCM to settle
+        log.info(f"Focus: reread {saved:.4f} diopters from "
+                 f"{self._focus_cal_path}")
+        return saved
 
     def focus(self, force: bool = False, leds=None) -> float:
         """

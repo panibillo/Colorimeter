@@ -7,15 +7,12 @@ sudo apt install python3-rpi-lgpio  # Python test: import RPi.GPIO as GPIO (lega
 sudo apt install python3-gpiozero   # Python test:
 sudo apt install python3-opencv     # Python test: import cv2
 sudo apt install python3-h5py       # Python test: import h5py
-sudo apt install python3-yaml       # Python test: import yaml
 
 # python3-h5py: capture archives (src/hdf5write.py, src/capture_h5.py).
 #   Never pip install h5py here — it builds from source against the HDF5
 #   headers, which on a Zero takes hours and usually exhausts memory. The
 #   apt package is prebuilt against the system libhdf5 and pulls it in.
-# python3-yaml: reads config/instrument.yaml (src/config_manager.py).
-#   Usually already present on Raspberry Pi OS.
 #
-# Verify both from inside the venv, which must have been created with
-# --system-site-packages for these to be visible:
-#   python3 -c "import h5py, yaml; print(h5py.__version__, yaml.__version__)"
+# Verify from inside the venv, which must have been created with
+# --system-site-packages for this to be visible:
+#   python3 -c "import h5py; print(h5py.__version__)"

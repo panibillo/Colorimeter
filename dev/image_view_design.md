@@ -761,7 +761,7 @@ running well off the bright patch into dark background.
 
 | Control | Effect |
 |---|---|
-| ▲ ▼ ◀ ▶ | pan the view |
+| ▲ ▼ ◀ ▶ | pan the view — 5 % of the view box on `1px`, 25 % on `10px` |
 | `+` `−` | zoom, clamped between fit and MAX_SCALE |
 | `Fit` | whole frame |
 | `Img` | reimage (fresh white-LED exposure) |
@@ -952,13 +952,14 @@ photometric accuracy, which this does not need.
 - Borrows the arbiter's persistent camera via `_ensure_camera()`; never opens
   its own. Returns `(frame, error)` — a failed preview leaves the screen up
   with the reason in the name strip rather than refusing to open.
-- **Exposure comes from the `exposure` table, not a new config value.**
-  `_preview_exposure_us()` takes the middle rung of whatever active group the
-  white LED has (trying '1', '3', '5'), falling back to 40 000 µs. That way the
-  preview looks like what a capture of the same scene would see, with no new
-  knob to keep in step. Restoring the previous exposure afterwards proved
-  unnecessary: `capture_runner` sets its own exposure at the start of every
-  run.
+- **Exposure is metered on the sample ROI** (step 9 — see below). It began as
+  "the middle rung of whatever active group the white LED has in the `exposure`
+  table, falling back to 40 000 µs", which overexposed the sample on the
+  instrument: those exposures are calibrated against the **white** patch, which
+  is far brighter than the sample. That value is now only the *starting guess*
+  (`_start_exposure_us()`), and `_auto_expose()` corrects it against the sample
+  itself. Restoring the previous exposure afterwards proved unnecessary:
+  `capture_runner` sets its own exposure at the start of every run.
 - ⚠️ **`_camera_wanted()` includes `self._view_open`.** Without it
   `_maybe_release_camera()` closes the camera on the very next main-loop pass
   (no slot is in a `_CAMERA_PHASES` phase when the viewer is opened from the
@@ -1100,6 +1101,70 @@ Each step is independently verifiable.
 | 6 | ✅ Arbiter viewer screen, `preview_frame()`, camera guards, Menu/stub1 | ✅ **Tool 1 works** — 45 arbiter self-test checks + simulation screenshots |
 | 7 | ✅ Read phase "View Sample" button | ✅ **Tool 2 works** — phases + arbiter self-tests, simulation screenshots |
 | 8 | ✅ Edit mode | ✅ 46 arbiter self-test checks incl. real `roi.save`/`restore`; simulation screenshots |
+| 9 | ✅ On-instrument fixes: dead `Edit`, the arrow step, sample metering | ✅ 15 further arbiter self-test checks; found by running Tool 1 on the Pi |
+
+## What was built (step 9) — what the instrument found  ✅ 2026-08-01
+
+Three faults that only appear on the real screen, with the real camera.
+
+**`Edit` did nothing after selecting a rectangle by touch.** Opening from the
+Menu selects nothing, so `Edit` was rendered *disabled*; selecting a rectangle
+calls `_repaint_canvas()`, which repaints only the canvas and the name strip,
+so the button kept its stale disabled state — and `Pool.handle_touch` skips
+disabled widgets, swallowing the press with no trace. Fixed with
+`_sync_edit_button()`, called from `_repaint_canvas()`: it re-`put`s and
+redraws the button *only when the wanted state differs*, so an ordinary pan
+does not pay an extra SPI blit. It also refreshes the tab list through
+`_refresh_focusables()` rather than `_rebuild_focus()`, which would drag the
+focus ring back to the first control on every selection.
+
+The general lesson: **any widget whose enabled state depends on viewer state
+must be re-synced by the partial repaint**, not only by the full render. `Edit`
+is the only one today.
+
+**The arrows ignored the `1px`/`10px` toggle.** In view mode they panned a
+fixed 25 % of the view box; the toggle only ever reached the edit nudge. A
+literal 1-image-pixel pan was considered and rejected: at fit zoom it is 0.09
+canvas pixels, and at every zoom where panning is possible at all it would take
+hundreds of presses to cross the frame. The toggle is therefore a **fine/coarse
+switch for panning** (`_VIEW_PAN_FINE` 5 %, `_VIEW_PAN_COARSE` 25 %) and a
+literal pixel step for the edit nudge, which is what its label states.
+
+**The preview was overexposed.** Two causes, both fixed in `_auto_expose()`:
+
+1. `preview_frame()` called `set_exposure()` and then `capture_frame()`
+   immediately. The Picamera2 pipeline needs a frame or more to adopt a new
+   `ExposureTime`, so the frame shown was taken at *whatever the sensor was
+   last set to* — the requested value was never applied and never checked.
+   It now goes through `capture_runner._set_and_settle()`, which waits for the
+   metadata to confirm the exposure, with a small frame budget
+   (`max_frames=_PREVIEW_SETTLE_FRAMES`, 4) so a preview cannot freeze the
+   screen for a dozen full-res captures the way a capture run may.
+2. The exposure came from the stored white calibration, which is metered on the
+   **white** patch. The sample is much darker than white, so an exposure that
+   suits white leaves the sample clipped.
+
+Metering now reads the **sample ROI alone**: the median of the brightest raw
+Bayer channel inside it, scaled so that median lands on `_PREVIEW_TARGET`
+(512 — `capture_runner.HALF_SAT`, the same convention e3 uses), accepted within
+±20 %, at most 3 frames. Raw rather than the ISP's 8-bit output because only
+raw values are linear in exposure. Brightest channel rather than the mean for
+the same reason `_select_target_channel` exists — a coloured sample leaves one
+channel near the floor, and metering the average would clip the bright one.
+
+The exposure it settles on is remembered in `_view_exposure_us` and starts the
+next preview, so `Img` normally converges on its first frame. Every pass logs
+at INFO with the exposure in µs and what the sample measured, so an
+over- or under-exposed preview can be diagnosed from the log alone:
+
+    Arbiter: preview AE [1/3] 40000 us -> sample median 1023 of 512 (+100%) -> retry at 20019 us
+    Arbiter: preview AE [2/3] 20019 us -> sample median 1000 of 512 (+95%) -> retry at 10249 us
+    Arbiter: preview AE [3/3] 10249 us -> sample median 512 of 512 (+0%)
+    Arbiter: preview frame 2304x1296 at 10249 us
+
+Metering is skipped — the starting exposure is used unchanged, and the log says
+so — when there is no `sample` ROI loaded, no raw stream, or the rectangle does
+not lie inside the mosaic. A preview is never worth failing a screen over.
 
 ## Deferred
 
