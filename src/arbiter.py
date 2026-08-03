@@ -720,7 +720,8 @@ class Arbiter:
         self._pool.put("modal_panel")
         self._pool.put("modal_msg", msg)
         names = self._pool.layout_modal_buttons(2)
-        self._pool.put(names[0], "Select", on=self._menu_select_defaults)
+        self._pool.put(names[0], "Select", on=self._menu_select_defaults,
+                       enabled=not self._any_slot_active())
         self._pool.put(names[1], "Back",   on=self._render_menu)
         self._pool.render(self._disp)
         self._rebuild_focus()
@@ -750,6 +751,10 @@ class Arbiter:
         if self._pool is None:
             return
         p = self._pool
+        # A slot mid-protocol already read these durations; editing them now
+        # would change a running countdown out from under it. Viewing stays
+        # available — only the editable controls are locked.
+        editable = not self._any_slot_active()
         p.hide_all()
         # Top-corner chrome like the Menu and Capture screens.
         p.put("menu_cancel_btn", "CANCEL", on=self._cfg_cancel)
@@ -759,11 +764,12 @@ class Arbiter:
             p.put(f"cfg_{row}_lbl", f"Reagent {n}")
             for step in _CFG_STEPS:
                 p.put(self._cfg_step_widget(row, step), f"{step:+d}",
-                      on=(lambda r=row, d=step: self._cfg_step(r, d)))
-        p.put("cfg_r1_fld")
-        p.put("cfg_r2_fld")
+                      on=(lambda r=row, d=step: self._cfg_step(r, d)),
+                      enabled=editable)
+        p.put("cfg_r1_fld", enabled=editable)
+        p.put("cfg_r2_fld", enabled=editable)
         p.put("cfg_hint")
-        p.put("cfg_restore", "Restore", on=self._cfg_restore)
+        p.put("cfg_restore", "Restore", on=self._cfg_restore, enabled=editable)
         self._cfg_paint_values(redraw=False)
         p.render(self._disp)
         self._rebuild_focus()
@@ -1106,6 +1112,16 @@ class Arbiter:
 
     def capture_available(self) -> bool:
         return self._capture is None
+
+    def _any_slot_active(self) -> bool:
+        """True while slot A or B is past entry — a sample is live in it.
+
+        Editable configuration (reagent seconds, ROI geometry, defaults)
+        must not change out from under a slot that has already read it, so
+        every editor screen gates its editable state on this.
+        """
+        return any(s.active_phase not in ("entry", "entry2")
+                   for s in self._slots.values())
 
     @property
     def cap_mode(self) -> str:
@@ -1999,7 +2015,8 @@ class Arbiter:
         editing = self._view_mode == "edit"
         self._pool.put("img_edit",   "Edit",   on=self._view_edit,
                        enabled=not editing and self._view_selected is not None
-                               and self._view_frame is not None)
+                               and self._view_frame is not None
+                               and not self._any_slot_active())
         self._pool.put("img_save",   "Save",   on=self._view_save,
                        enabled=editing)
         self._pool.put("img_cancel", "Cancel", on=self._view_cancel,
@@ -2202,7 +2219,8 @@ class Arbiter:
             return
         want = (self._view_mode != "edit"
                 and self._view_selected is not None
-                and self._view_frame is not None)
+                and self._view_frame is not None
+                and not self._any_slot_active())
         if w.enabled == want:
             return
         self._pool.put("img_edit", "Edit", on=self._view_edit, enabled=want)
