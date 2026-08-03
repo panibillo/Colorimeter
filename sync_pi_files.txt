@@ -130,6 +130,10 @@ system_requirements.txt
 # dev/*.py other than camtest8.py
 #     Earlier experiments. Add a line when you need one on the Pi.
 #
+# devdesk/
+#     Desktop-only inspection tools (matplotlib, ad hoc HDF5 browsing).
+#     Never intended to run on the Pi.
+#
 # ── Regenerating this list ───────────────────────────────────────────────
 # After adding or removing imports, re-derive the module set and compare:
 #
