@@ -1186,6 +1186,13 @@ class CaptureRunner:
             self._pattern = cam.bayer_pattern
             assert cam.config_size is not None, "setup_camera() must set config_size"
             self._cam_w, self._cam_h = cam.config_size
+
+            # ROIs come from the DB, and only now is the stream size known —
+            # same as run()'s calibration path. Without this, the normal path
+            # silently kept __init__'s FALLBACK_ROIS instead of picking up
+            # on-instrument edits to the active row.
+            self.rois = _load_rois(cam)
+
             yield self._progress(
                 "setup",
                 f"Camera {cam.model_description}  pattern={self._pattern}  "
