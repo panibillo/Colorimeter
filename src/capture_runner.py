@@ -595,9 +595,31 @@ class CaptureRunner:
         self._current_color  = ""
         self._lit_on_channel: "int | None" = None
         # Captures per LED, for the completion estimate. The calibration path
-        # does a fixed lit+dark bracket; the normal path does lit+dark of the
-        # chosen group, set when that run starts.
+        # does a fixed lit+dark bracket; the normal path does lit of the
+        # chosen group only (darks are batched separately), set when that
+        # run starts.
         self._captures_per_led = _CAPTURES_PER_LED
+        # Overrides config.led_count for the completion estimate when set —
+        # the normal path sweeps a config-driven color list, not a channel
+        # range, so led_start/led_end no longer describe its true LED count.
+        # None (the calibration path's default) falls back to config.led_count.
+        self._led_total_override: "int | None" = None
+
+        # Normal-path prefetch/capture state, populated by run_prefetch() and
+        # read by run_capture() — see the "Normal path" section below for how
+        # the two share a single instance across an arbitrary-length pause.
+        self._pattern: str = ""
+        self._cam_w: int = 0
+        self._cam_h: int = 0
+        self._focus_pos: float = 0.0
+        self._focus_mode: str = ""
+        self._raw_af_pos: "float | None" = None
+        self._group: str = ""
+        self._color_order: "list[str]" = []
+        self._color_exposures: "dict[str, list[int]]" = {}
+        self._color_labels: "dict[str, list[str]]" = {}
+        self._color_fallback: "dict[str, bool]" = {}
+        self._distinct_dark_us: "list[int]" = []
 
         # Wall-clock profiler (on unless COLORIMETER_PROFILE is false-y). Records
         # every frame, wait, numpy block, and archive write; its summary is
@@ -606,9 +628,15 @@ class CaptureRunner:
 
     # ── Progress helpers ─────────────────────────────────────────────
 
+    def _led_total(self) -> int:
+        """LED count for progress reporting — see _led_total_override."""
+        if self._led_total_override is not None:
+            return self._led_total_override
+        return self.config.led_count
+
     def _fraction(self) -> float:
         """Monotonic completion estimate over the whole run."""
-        total = self.config.led_count
+        total = self._led_total()
         if total <= 0:
             return 0.0
         done = (self._led_index - 1) + (self._captures_done / self._captures_per_led)
@@ -623,7 +651,7 @@ class CaptureRunner:
             phase=phase,
             message=message,
             led_index=self._led_index,
-            led_total=self.config.led_count,
+            led_total=self._led_total(),
             color=color,
             fraction=self._fraction(),
             **kwargs,
@@ -720,7 +748,12 @@ class CaptureRunner:
         """
         try:
             if str(self.config.mode).lower() == MODE_NORMAL:
-                yield from self._run_normal()
+                # Chained fallback: a caller that never split the run across
+                # the reagent2 pause (camera contention, a short debug timer)
+                # still gets the new capture order and dark-frame dedup, just
+                # without the latency-hiding — see run_prefetch()/run_capture().
+                yield from self.run_prefetch()
+                yield from self.run_capture()
             else:
                 yield from self._run()
         finally:
@@ -728,6 +761,21 @@ class CaptureRunner:
             self._close_writer()
             if self.prof.enabled:
                 log.info("capture profile:\n%s", self.prof.summary())
+
+    def close_prefetch(self) -> None:
+        """
+        Close a parked prefetch's archive/LED state without resuming it.
+
+        Only meaningful after run_prefetch() has returned normally — parked,
+        waiting for run_capture() — since there is then no live generator
+        left to abandon: run_prefetch()'s own GeneratorExit handler only
+        fires while it is still suspended on a yield, not after it has
+        already returned. A caller that wants to cancel a parked prefetch
+        (rather than resume it) calls this directly instead. Safe to call
+        even if nothing is open — both underlying calls are no-ops then.
+        """
+        self._all_off()
+        self._close_writer()
 
     def _close_writer(self) -> None:
         """Close the archive if one is open. Never raises."""
@@ -1049,7 +1097,7 @@ class CaptureRunner:
                 # captured for an earlier LED is reused rather than restored.
                 layers_out = self._bound_layers(bayer, pattern)
                 with self.prof.time("io.hdf5"):
-                    stored = w.add_dark(exp_label, layers_out, exposure_us=exp_us)
+                    stored = w.add_dark(layers_out, exposure_us=exp_us)
                     w.link_dark(color, exp_label, exposure_us=exp_us)
 
                 self._captures_done += 1
@@ -1099,149 +1147,242 @@ class CaptureRunner:
     # table for the chosen group, so the strip is lit the minimum number of
     # times. Focus still runs (it is not stored). If a LED has no rows for the
     # group, one fallback exposure is used so the run still completes.
+    #
+    # Split into two generators sharing this instance's state, so a caller
+    # (CaptureSession/Arbiter) can run run_prefetch() unattended during the
+    # reagent2 countdown — no LED needs to be lit for a dark frame — then
+    # pause for an arbitrary, user-controlled length of time before resuming
+    # run_capture() when CAPTURE is pressed. All dark frames are captured in
+    # two batches ("before" here, "after" at the end of run_capture()) rather
+    # than once per LED, so the many LED-off settle waits the old per-LED
+    # scheme paid collapse into one. A caller that never splits the run
+    # (camera contention, a short debug timer) still gets this benefit: run()
+    # chains the two back-to-back for MODE_NORMAL.
 
-    def _run_normal(self) -> Iterator[Progress]:
+    def run_prefetch(self) -> Iterator[Progress]:
+        """
+        Normal-path stage 1: camera init, focus, and the "before" dark batch.
+
+        On successful completion, deliberately leaves the camera, LED bank,
+        and archive open — NOT cleaned up — so run_capture() can pick up
+        exactly where this left off after however long the caller pauses.
+        Abandonment (GeneratorExit) or a failure DOES clean up: there is
+        nothing left to hand off in either case.
+        """
         cfg  = self.config
         cam  = self._cam
-        leds = self._leds
-        group = str(cfg.exposure_group)
+        try:
+            self._group = group = str(cfg.exposure_group)
 
-        self.suite_id = config.capture_suite_id()
-        cfg.out_dir.mkdir(parents=True, exist_ok=True)
-        self.out_path = cfg.out_dir / config.capture_archive_name(self.suite_id)
-        self.results = []
+            self.suite_id = config.capture_suite_id()
+            cfg.out_dir.mkdir(parents=True, exist_ok=True)
+            self.out_path = cfg.out_dir / config.capture_archive_name(self.suite_id)
+            self.results = []
 
-        # ── Camera init ──────────────────────────────────────────────
-        cam.set_exposure(cfg.initial_us)
-        with self.prof.time("camera.setup"):
-            cam.setup_camera()
-        pattern = cam.bayer_pattern
-        assert cam.config_size is not None, "setup_camera() must set config_size"
-        cam_w, cam_h = cam.config_size
-        yield self._progress(
-            "setup",
-            f"Camera {cam.model_description}  pattern={pattern}  {cam_w}×{cam_h}  "
-            f"(normal, group {group})")
+            # ── Camera init ──────────────────────────────────────────
+            cam.set_exposure(cfg.initial_us)
+            with self.prof.time("camera.setup"):
+                cam.setup_camera()
+            self._pattern = cam.bayer_pattern
+            assert cam.config_size is not None, "setup_camera() must set config_size"
+            self._cam_w, self._cam_h = cam.config_size
+            yield self._progress(
+                "setup",
+                f"Camera {cam.model_description}  pattern={self._pattern}  "
+                f"{self._cam_w}×{self._cam_h}  (normal, group {group})")
 
-        # ── Focus (still needed; exposures are stored, focus is not) ──
-        self.prof.set_section("focus")
-        yield self._progress("focus", "Phase 1: focus")
-        with self.prof.time("focus"):
-            focus_pos, focus_mode, raw_af_pos = self._set_focus()
-        yield self._progress("focus", f"Focus: {focus_pos:.2f} diopters ({focus_mode})")
+            # ── Focus (still needed; exposures are stored, focus is not) ──
+            self.prof.set_section("focus")
+            yield self._progress("focus", "Phase 1: focus")
+            with self.prof.time("focus"):
+                self._focus_pos, self._focus_mode, self._raw_af_pos = self._set_focus()
+            yield self._progress(
+                "focus", f"Focus: {self._focus_pos:.2f} diopters ({self._focus_mode})")
 
-        # ── Per-LED capture of the stored exposures ──────────────────
-        yield self._progress(
-            "capture", f"Normal capture — exposure group {group}")
-        w = self._writer = CaptureSuiteWriter(self.out_path, suite_id=self.suite_id)
+            # ── Resolve the color order and each color's exposures ────
+            self._color_order = config.capture_led_color_order()
+            self._led_total_override = len(self._color_order)
+            self._color_exposures = {}
+            self._color_labels    = {}
+            self._color_fallback  = {}
+            distinct_us: set = set()
 
-        for led in range(cfg.led_start, cfg.led_end + 1):
-            self._led_index    += 1
-            self._captures_done = 0
-            color = leds.color_name(led)
-            self._current_color = color
-            self.prof.set_section(color)
+            for color in self._color_order:
+                exposures_us = exposure_repo.read_exposures(color, group)
+                used_fallback = not exposures_us
+                if used_fallback:
+                    exposures_us = [cfg.initial_us]
+                    log.warning("LED %s has no exposures for group %s — "
+                                "falling back to %d µs", color, group, cfg.initial_us)
+                self._color_exposures[color] = exposures_us
+                self._color_labels[color]    = [f"e{i}" for i in range(len(exposures_us))]
+                self._color_fallback[color]  = used_fallback
+                distinct_us.update(exposures_us)
 
-            exposures_us = exposure_repo.read_exposures(color, group)
-            used_fallback = not exposures_us
-            if used_fallback:
-                exposures_us = [cfg.initial_us]
-                log.warning("LED %s has no exposures for group %s — "
-                            "falling back to %d µs", color, group, cfg.initial_us)
-            labels = [f"e{i}" for i in range(len(exposures_us))]
-            self._captures_per_led = max(1, 2 * len(exposures_us))
-            log.info(f"=== LED {led}: {color} ({group} exposure(s)"
-                     f"{', fallback' if used_fallback else ''}) ===")
+            self._distinct_dark_us = sorted(distinct_us)
 
-            note = "  [no calibration — fallback]" if used_fallback else ""
-            yield self._progress("capture", f"--- {leds.label(led)} ---{note}")
+            # ── "before" dark batch — LED stays off throughout ────────
+            log.info(f"=== Dark prefetch (before): {len(self._distinct_dark_us)} "
+                     f"distinct exposure(s) — {self._distinct_dark_us} µs ===")
+            yield self._progress(
+                "capture",
+                f"Dark prefetch (before): {len(self._distinct_dark_us)} exposure(s)")
+            w = self._writer = CaptureSuiteWriter(self.out_path, suite_id=self.suite_id)
 
-            self._led_on(led)
-            yield from self._wait(LED_ON_WARMUP_S, f"{color} LED on, warming up")
-
-            # ── Lit frames ────────────────────────────────────────────
-            yield self._progress("capture", "Lit captures:")
-            mid_idx = len(exposures_us) // 2       # keep the middle frame's JPEG
-            mid_frame: "tuple | None" = None
-            applied_us: dict = {}
-
-            for i, (label, exp_us) in enumerate(zip(labels, exposures_us)):
-                rgb, bayer, meta = self._settle(exp_us)
-                applied_us[label] = int(meta.get("ExposureTime", 0))
-                layers_out = self._bound_layers(bayer, pattern)
-                with self.prof.time("io.hdf5"):
-                    w.add_lit(color, label, layers_out, exposure_us=exp_us)
-                if i == mid_idx:
-                    mid_frame = (rgb, bayer, meta)
-                self._captures_done += 1
-                yield self._progress(
-                    "capture", f"    stored lit {label} ({exp_us // 1000}ms)",
-                    step=label)
-
-            # ── Dark frames at the same exposures ─────────────────────
-            self._led_off(led)
-            yield from self._wait(LED_OFF_SETTLE_S, f"{color} LED off, settling")
-
-            yield self._progress("capture", "Dark captures:")
-            for label, exp_us in zip(labels, exposures_us):
+            for exp_us in self._distinct_dark_us:
                 _, bayer, _ = self._settle(exp_us)
-                layers_out = self._bound_layers(bayer, pattern)
+                layers_out = self._bound_layers(bayer, self._pattern)
                 with self.prof.time("io.hdf5"):
-                    stored = w.add_dark(label, layers_out, exposure_us=exp_us)
-                    w.link_dark(color, label, exposure_us=exp_us)
-                self._captures_done += 1
+                    stored = w.add_dark(layers_out, exposure_us=exp_us, when="before")
                 yield self._progress(
                     "capture",
-                    f"    {'stored' if stored else 'reused'} dark {label} "
-                    f"({exp_us // 1000}ms)",
-                    step=f"dark {label}")
+                    f"    {'stored' if stored else 'reused'} dark before "
+                    f"({exp_us}µs)", step="dark before")
 
-            # ── Per-LED metadata, statistics and JPEG ─────────────────
-            meta_json: dict = {
-                "mode": MODE_NORMAL,
-                "timestamp": self.suite_id,
-                "led_channel": led,
-                "led_color": color,
-                "led_label": leds.label(led),
-                "camera_model": cam.model_description,
-                "bayer_pattern": pattern,
-                "config_size": [cam_w, cam_h],
-                "focus_diopters": focus_pos,
-                "focus_mode": focus_mode,
-                "autofocus_raw_diopters": raw_af_pos,
-                "exposure_group": group,
-                "exposure_source": "fallback" if used_fallback else "exposure_table",
-                "exposures_us": {lbl: int(us) for lbl, us in zip(labels, exposures_us)},
-                "applied_exposures_us": applied_us,
-            }
-            with self.prof.time("io.hdf5"):
-                w.add_led(color, meta_json, led_channel=led)
-            if mid_frame is not None:
-                rgb_m, bayer_m, meta_m = mid_frame
-                info = _build_capture_info(
-                    rgb_m, bayer_m, meta_m, lens_position=cam.lens_position)
-                with self.prof.time("io.jpeg"):
-                    jpeg = _encode_jpeg(rgb_m)
+            for color in self._color_order:
+                for label, exp_us in zip(self._color_labels[color],
+                                         self._color_exposures[color]):
+                    w.link_dark(color, label, exposure_us=exp_us, when="before")
+
+            yield self._progress(
+                "capture", "Ready — press CAPTURE to begin the LED sweep.",
+                step="prefetch-done")
+
+        except (GeneratorExit, Exception):
+            self._all_off()
+            self._close_writer()
+            raise
+
+    def run_capture(self) -> Iterator[Progress]:
+        """
+        Normal-path stage 2: the lit-LED sweep, then the "after" dark batch.
+
+        Assumes run_prefetch() already ran on this same instance — the
+        archive is open, the camera is set up and focused, and the color
+        order / per-color exposures / distinct dark exposure set are
+        resolved. Always cleans up (LED off, archive closed) on completion,
+        abandonment, or failure — unlike run_prefetch(), there is no pause
+        left to preserve after this.
+        """
+        leds = self._leds
+        w    = self._writer
+        try:
+            yield self._progress(
+                "capture", f"Normal capture — exposure group {self._group}")
+
+            for color in self._color_order:
+                self._led_index    += 1
+                self._captures_done = 0
+                self._current_color = color
+                self.prof.set_section(color)
+
+                exposures_us  = self._color_exposures[color]
+                labels        = self._color_labels[color]
+                used_fallback = self._color_fallback[color]
+                self._captures_per_led = max(1, len(exposures_us))
+                led = leds.channel_of(color)
+
+                log.info(f"=== LED {led}: {color} ({self._group} exposure(s)"
+                         f"{', fallback' if used_fallback else ''}) ===")
+
+                note = "  [no calibration — fallback]" if used_fallback else ""
+                yield self._progress("capture", f"--- {leds.label(led)} ---{note}")
+
+                self._led_on(led)
+                yield from self._wait(LED_ON_WARMUP_S, f"{color} LED on, warming up")
+
+                # ── Lit frames ────────────────────────────────────────
+                yield self._progress("capture", "Lit captures:")
+                mid_idx = len(exposures_us) // 2   # keep the middle frame's JPEG
+                mid_frame: "tuple | None" = None
+                applied_us: dict = {}
+
+                for i, (label, exp_us) in enumerate(zip(labels, exposures_us)):
+                    rgb, bayer, meta = self._settle(exp_us)
+                    applied_us[label] = int(meta.get("ExposureTime", 0))
+                    layers_out = self._bound_layers(bayer, self._pattern)
+                    with self.prof.time("io.hdf5"):
+                        w.add_lit(color, label, layers_out, exposure_us=exp_us)
+                    if i == mid_idx:
+                        mid_frame = (rgb, bayer, meta)
+                    self._captures_done += 1
+                    yield self._progress(
+                        "capture", f"    stored lit {label} ({exp_us // 1000}ms)",
+                        step=label)
+
+                # Darks are already batched (before) and will be again
+                # (after) — no per-LED settle wait needed here.
+                self._led_off(led)
+
+                # ── Per-LED metadata, statistics and JPEG ──────────────
+                meta_json: dict = {
+                    "mode": MODE_NORMAL,
+                    "timestamp": self.suite_id,
+                    "led_channel": led,
+                    "led_color": color,
+                    "led_label": leds.label(led),
+                    "camera_model": self._cam.model_description,
+                    "bayer_pattern": self._pattern,
+                    "config_size": [self._cam_w, self._cam_h],
+                    "focus_diopters": self._focus_pos,
+                    "focus_mode": self._focus_mode,
+                    "autofocus_raw_diopters": self._raw_af_pos,
+                    "exposure_group": self._group,
+                    "exposure_source": "fallback" if used_fallback else "exposure_table",
+                    "exposures_us": {lbl: int(us) for lbl, us in zip(labels, exposures_us)},
+                    "applied_exposures_us": applied_us,
+                }
                 with self.prof.time("io.hdf5"):
-                    w.add_capture_info(color, info)
-                    w.add_jpeg(color, jpeg,
-                               filename=f"{OUT_STEM}_{color}_{labels[mid_idx]}.jpg")
-            yield self._progress("capture", f"    stored metadata for {color}")
+                    w.add_led(color, meta_json, led_channel=led)
+                if mid_frame is not None:
+                    rgb_m, bayer_m, meta_m = mid_frame
+                    info = _build_capture_info(
+                        rgb_m, bayer_m, meta_m, lens_position=self._cam.lens_position)
+                    with self.prof.time("io.jpeg"):
+                        jpeg = _encode_jpeg(rgb_m)
+                    with self.prof.time("io.hdf5"):
+                        w.add_capture_info(color, info)
+                        w.add_jpeg(color, jpeg,
+                                   filename=f"{OUT_STEM}_{color}_{labels[mid_idx]}.jpg")
+                yield self._progress("capture", f"    stored metadata for {color}")
 
-            self.results.append(LedResult(
-                color=color,
-                led_channel=led,
-                target_channel="",
-                exposures_us=list(exposures_us),
-                metadata=meta_json,
-            ))
+                self.results.append(LedResult(
+                    color=color,
+                    led_channel=led,
+                    target_channel="",
+                    exposures_us=list(exposures_us),
+                    metadata=meta_json,
+                ))
 
-        self._close_writer()
-        self._current_color = ""
-        yield Progress(
-            phase="done",
-            message=f"Done. Output: {self.out_path}",
-            led_index=self._led_index,
-            led_total=cfg.led_count,
-            fraction=1.0,
-        )
+            # ── "after" dark batch — LED stays off throughout ─────────
+            log.info(f"=== Dark prefetch (after): {len(self._distinct_dark_us)} "
+                     f"distinct exposure(s) — {self._distinct_dark_us} µs ===")
+            yield self._progress(
+                "capture",
+                f"Dark prefetch (after): {len(self._distinct_dark_us)} exposure(s)")
+            for exp_us in self._distinct_dark_us:
+                _, bayer, _ = self._settle(exp_us)
+                layers_out = self._bound_layers(bayer, self._pattern)
+                with self.prof.time("io.hdf5"):
+                    stored = w.add_dark(layers_out, exposure_us=exp_us, when="after")
+                yield self._progress(
+                    "capture",
+                    f"    {'stored' if stored else 'reused'} dark after "
+                    f"({exp_us}µs)", step="dark after")
+
+            for color in self._color_order:
+                for label, exp_us in zip(self._color_labels[color],
+                                         self._color_exposures[color]):
+                    w.link_dark(color, label, exposure_us=exp_us, when="after")
+
+            self._current_color = ""
+            yield Progress(
+                phase="done",
+                message=f"Done. Output: {self.out_path}",
+                led_index=self._led_index,
+                led_total=self._led_total(),
+                fraction=1.0,
+            )
+        finally:
+            self._all_off()
+            self._close_writer()

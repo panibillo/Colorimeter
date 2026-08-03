@@ -63,10 +63,16 @@ from phases import build_phases, EntryPhase, Entry2Phase
 
 log = logging.getLogger(__name__)
 
-# Phases during which the shared camera is kept open: a run from its first
-# reagent wait through capture and analysis.  Outside this set (entry/entry2,
-# and after results) no capture is imminent, so the camera is released.
-_CAMERA_PHASES = ("reagent1", "reagent2", "read", "analysis")
+# Phases during which the shared camera is unconditionally kept open: once a
+# run reaches read (CAPTURE imminent) through analysis. reagent1 is
+# deliberately NOT here — the camera should stay off as much as possible
+# (it is believed to heat up and drift), on only long enough beforehand to be
+# thermally stable. reagent2 is also absent from this tuple: whether the
+# camera is wanted during reagent2 is a countdown threshold, not a blanket
+# phase membership — see _reagent2_within()/_camera_wanted()/
+# _maybe_open_camera(). Outside all of this (entry/entry2, and after results)
+# no capture is imminent, so the camera is released.
+_CAMERA_PHASES = ("read", "analysis")
 
 # Image viewer.  The preview is for looking at, not measuring, so the LED
 # settle is a fraction of a capture run's LED_ON_WARMUP_S (2.0 s) — colour
@@ -169,18 +175,42 @@ class Arbiter:
         self._capture: CaptureSession | None = None
         self._capture_slot: Slot | None = None
 
+        # The normal path's dark-frame prefetch (CaptureRunner.run_prefetch()),
+        # started automatically near the end of a slot's reagent2 countdown —
+        # see _maybe_start_prefetch(). Parked (not pumped further) once done,
+        # holding the camera/archive open, until request_capture() promotes it
+        # into self._capture or it is cancelled. At most one at a time, mirroring
+        # self._capture — a second slot nearing its own reagent2 threshold
+        # while this is in flight/parked simply defers (see _maybe_start_prefetch()).
+        self._prefetch: CaptureSession | None = None
+        self._prefetch_slot: Slot | None = None
+        # self._camera_epoch as it stood when the parked prefetch's own session
+        # was created — see _new_session(). request_capture() only promotes a
+        # parked prefetch whose stamp still matches the CURRENT _camera_epoch;
+        # a mismatch means some other session (the other slot's run, an image
+        # viewer preview, a forced refocus) touched the shared camera's focus
+        # or exposure since this one parked, so its "before" darks and
+        # whatever run_capture() would do next could silently disagree about
+        # camera state — safer to discard it and fall back to a fresh run.
+        self._prefetch_epoch: int | None = None
+
         # Set once the capture subsystem's heavy first-imports (picamera2,
         # libcamera, numpy, cv2) have been warmed — see prewarm_capture().
         self._capture_prewarmed = False
 
         # The persistent camera + LED bank, owned by the Arbiter and shared by
-        # every capture.  Opened once a run reaches its reagent wait (so the
-        # ~1s sensor-start settle overlaps the countdown) and reused across
-        # captures; released when no slot needs them and at cleanup.  Each
-        # CaptureSession *borrows* these rather than opening its own.  None
-        # until opened — see _ensure_camera()/_maybe_open_camera().
+        # every capture.  Opened within a lead window before a slot's reagent2
+        # countdown expires (so the sensor-start settle AND the dark-frame
+        # prefetch batch both complete before CAPTURE is reachable) and reused
+        # across captures; released when no slot needs them and at cleanup.
+        # Each CaptureSession *borrows* these rather than opening its own.
+        # None until opened — see _ensure_camera()/_maybe_open_camera().
         self._camera = None
         self._leds   = None
+        # Bumped by _new_session() every time it hands a brand-new session the
+        # shared camera — the counter a parked prefetch's _prefetch_epoch is
+        # checked against before being promoted (see above).
+        self._camera_epoch: int = 0
 
         # Placeholder analysis timer: (slot, started_at) or None.
         self._analysis: tuple | None = None
@@ -351,6 +381,15 @@ class Arbiter:
             except Exception:
                 log.exception("Arbiter: cleanup: capture.cancel failed")
             self._capture = None
+
+        if self._prefetch is not None:
+            try:
+                self._prefetch.cancel()
+            except Exception:
+                log.exception("Arbiter: cleanup: prefetch.cancel failed")
+            self._prefetch = None
+            self._prefetch_slot = None
+            self._prefetch_epoch = None
 
         # Sessions borrow the shared camera without stopping it, so the Arbiter
         # (its owner) releases it here.
@@ -1079,6 +1118,36 @@ class Arbiter:
             log.info("Arbiter: capture denied — camera busy (slot %s)",
                      self._capture_slot.name if self._capture_slot else "?")
             return False
+
+        if self._prefetch is not None and self._prefetch_slot is slot:
+            # A prefetch already exists for exactly this slot — resume it if
+            # it finished and nothing else has touched the shared camera
+            # since; otherwise (still running, or stale) abandon it and fall
+            # through to a fresh, fully-synchronous run either way. No fancy
+            # recovery beyond that — this is still an experimental workflow.
+            session = self._prefetch
+            ready = (session.prefetch_done
+                    and self._prefetch_epoch == self._camera_epoch)
+            self._prefetch = None
+            self._prefetch_slot = None
+            self._prefetch_epoch = None
+            if ready:
+                if session.start_capture():
+                    self._capture = session
+                    self._capture_slot = slot
+                    slot.progress = "Starting camera..."
+                    self.persist(slot, capture_start=self.epoch(),
+                                manual_read=slot.record.get("manual_read", ""))
+                    log.info("Arbiter: capture resumed from prefetch for slot "
+                            "%s (mode=%s, group=%s)",
+                            slot.name, self._cap_mode, self._cap_group)
+                    return True
+                log.error("Arbiter: failed to resume prefetch into capture "
+                         "for slot %s: %s", slot.name, session.error)
+                slot.progress = "Camera failed"
+                return False
+            session.cancel()
+
         # Use the Menu -> Capture screen's staged path + images choice, same
         # as the standalone menu capture — a sample's Read-phase capture must
         # not silently fall back to a full calibration sweep.
@@ -1122,6 +1191,10 @@ class Arbiter:
         hw = self._ensure_camera()
         if hw is not None:
             cam, leds = hw
+            # A brand-new session is about to drive the shared camera's focus
+            # and exposure — invalidate any prefetch parked from an earlier
+            # session (see _prefetch_epoch and request_capture()'s promotion).
+            self._camera_epoch += 1
             return CaptureSession(cfg, cam=cam, leds=leds)
         return CaptureSession(cfg)
 
@@ -1152,6 +1225,11 @@ class Arbiter:
             self._capture.cancel()
             self._capture = None
             self._capture_slot = None
+        if self._prefetch_slot is slot and self._prefetch is not None:
+            self._prefetch.cancel()
+            self._prefetch = None
+            self._prefetch_slot = None
+            self._prefetch_epoch = None
         if delete:
             rowid = slot.record.get("db_rowid")
             if rowid is not None:
@@ -1296,6 +1374,85 @@ class Arbiter:
                 and self._focused.phase == "read"):
             self.render(self._focused)
 
+    # ── Dark-frame prefetch (normal path only) ──────────────────────────────────
+
+    def _reagent2_within(self, slot: Slot, threshold_s: float) -> bool:
+        """True if `slot` is in reagent2 with `threshold_s` seconds or less
+        left on its countdown. False if it is not in reagent2, or has no
+        timer (armed-but-not-started, or just reset) to measure against."""
+        if slot.active_phase != "reagent2" or slot.timer is None:
+            return False
+        return slot.timer.value(self.now()) <= threshold_s
+
+    def _maybe_start_prefetch(self) -> None:
+        """
+        Automatically begin the normal path's dark-frame prefetch once a
+        slot's reagent2 countdown is within its budget of expiring — no user
+        action; the operator is still watching the countdown, not yet at
+        CAPTURE. Only applies to the normal capture path (self._cap_mode) —
+        the calibration path has no prefetch stage to run.
+
+        At most one prefetch in flight/parked at a time: if the camera is
+        already busy (a capture in progress, or another slot's prefetch),
+        this is a no-op — that slot's own eventual CAPTURE press falls back
+        to a fresh, fully-synchronous run instead (see request_capture()).
+        """
+        if self._capture is not None or self._prefetch is not None:
+            return
+        if self._cap_mode != "normal":
+            return
+        budget = config.capture_dark_prefetch_budget_s()
+        for slot in self._slots.values():
+            if self._reagent2_within(slot, budget):
+                self._start_prefetch(slot)
+                return
+
+    def _start_prefetch(self, slot: Slot) -> None:
+        """Build a session and begin run_prefetch() for `slot`'s upcoming capture."""
+        from capture_runner import CaptureConfig
+        cfg = CaptureConfig(mode=self._cap_mode, exposure_group=self._cap_group,
+                            led_start=config.capture_led_start(),
+                            led_end=config.capture_led_end())
+        session = self._new_session(cfg)
+        if not session.start_prefetch():
+            log.error("Arbiter: dark-frame prefetch failed to start for slot "
+                     "%s: %s", slot.name, session.error)
+            return
+        self._prefetch = session
+        self._prefetch_slot = slot
+        log.info("Arbiter: dark-frame prefetch started for slot %s", slot.name)
+
+    def pump_prefetch(self) -> None:
+        """
+        Drive the in-flight prefetch forward, like pump_capture() does for a
+        full capture — called every main-loop pass, a no-op unless
+        _maybe_start_prefetch() has armed one.
+
+        A step that yields None means run_prefetch() finished: the session
+        parks itself (camera/archive left open — see CaptureSession.step()),
+        and this stamps _prefetch_epoch so request_capture() can later tell
+        whether anything else touched the shared camera before promoting it.
+        A failure clears the slot the same way pump_capture() does, so the
+        eventual CAPTURE press falls back to a fresh run.
+        """
+        session = self._prefetch
+        if session is None or not session.active:
+            return
+        session.step()
+        if session.active:
+            return
+        if session.prefetch_done:
+            self._prefetch_epoch = self._camera_epoch
+            log.info("Arbiter: dark-frame prefetch parked for slot %s",
+                     self._prefetch_slot.name if self._prefetch_slot else "?")
+            return
+        log.error("Arbiter: dark-frame prefetch failed for slot %s: %s",
+                 self._prefetch_slot.name if self._prefetch_slot else "?",
+                 session.error)
+        self._prefetch = None
+        self._prefetch_slot = None
+        self._prefetch_epoch = None
+
     def pump_analysis(self) -> None:
         """
         Advance the pending analysis and, when it finishes, record the result on
@@ -1373,25 +1530,54 @@ class Arbiter:
 
     # ── Shared camera (persistent, borrowed by every capture) ───────────────────
 
+    def _camera_open_lead_s(self) -> float:
+        """
+        Seconds before a slot's reagent2 countdown expires within which the
+        shared camera should be open: camera_warmup_s (thermal-stability
+        margin, on but idle) plus dark_prefetch_budget_s (the dark-frame
+        prefetch batch itself, scheduled to start dark_prefetch_budget_s
+        before expiry — see _maybe_start_prefetch()). Shared by
+        _camera_wanted() and _maybe_open_camera() so the two agree on when
+        the camera should be open: were _camera_wanted()'s threshold any
+        narrower than the one that opened it, the camera would open, then
+        immediately read as "not wanted" and get released again on the very
+        same main-loop pass, thrashing for the camera_warmup_s gap between
+        the two thresholds.
+        """
+        return config.capture_camera_warmup_s() + config.capture_dark_prefetch_budget_s()
+
     def _camera_wanted(self) -> bool:
         """
-        True while anything on screen needs the shared camera.
+        True while anything on screen needs the shared camera to STAY open.
 
-        Two claims: a slot in a phase that will soon capture, and the image
-        viewer, which reimages on demand.  The viewer *must* be counted here —
-        it is not a phase, so without it _maybe_release_camera() would close
-        the sensor on the very next main-loop pass and every reimage would pay
-        the full open cost again.
+        Three claims: a slot already at read/analysis (_CAMERA_PHASES), a
+        slot in reagent2 within its camera-open lead window (see
+        _camera_open_lead_s()), and the image viewer, which reimages on
+        demand. The viewer *must* be counted here — it is not a phase, so
+        without it _maybe_release_camera() would close the sensor on the
+        very next main-loop pass and every reimage would pay the full open
+        cost again.
         """
-        return self._view_open or any(s.active_phase in _CAMERA_PHASES
-                                      for s in self._slots.values())
+        if self._view_open:
+            return True
+        lead = self._camera_open_lead_s()
+        return any(s.active_phase in _CAMERA_PHASES or self._reagent2_within(s, lead)
+                   for s in self._slots.values())
 
     def _maybe_open_camera(self) -> None:
         """
-        Open the shared camera once a run reaches its reagent wait, so the
-        ~1s sensor-start settle is paid during the (minutes-long) countdown
-        rather than at CAPTURE.  Gated on prewarm so the picamera2 import cost
-        is already absorbed; a failure is logged and left for capture time.
+        Open the shared camera within its lead window (_camera_open_lead_s())
+        before a slot's reagent2 countdown expires — long enough for the
+        sensor to settle AND the dark-frame prefetch batch to run to
+        completion before CAPTURE becomes reachable. Gated on prewarm so the
+        picamera2 import cost is already absorbed; a failure is logged and
+        left for capture time.
+
+        Deliberately NOT opened as soon as reagent1 (or even reagent2) starts:
+        the user believes the camera heats up over time and that affects
+        image stability, so it should stay off as much as possible while
+        still on long enough beforehand to be thermally stable — see
+        _CAMERA_PHASES' comment.
 
         Like _maybe_prewarm, this is polled from the main loop (not phase
         entry) so the reagent screen has rendered first and only a background
@@ -1437,10 +1623,21 @@ class Arbiter:
             return None
 
     def _maybe_release_camera(self) -> None:
-        """Close the shared camera once no slot needs it and no capture is live."""
+        """
+        Close the shared camera once no slot needs it and no capture or
+        prefetch is live.
+
+        The prefetch check matters even though a parked prefetch's slot is
+        (by definition) within _camera_wanted()'s own reagent2 threshold: an
+        operator can RESET the reagent2 timer while a prefetch is in flight
+        or parked, which clears slot.timer without changing active_phase —
+        _reagent2_within() then reads False for that slot, so this guard is
+        what actually keeps the camera from being pulled out from under it.
+        """
         if self._camera is None and self._leds is None:
             return
-        if self._capture is not None or self._camera_wanted():
+        if (self._capture is not None or self._prefetch is not None
+                or self._camera_wanted()):
             return
         log.info("Arbiter: no slot needs the camera — releasing it")
         self._release_camera()
@@ -1489,6 +1686,11 @@ class Arbiter:
         if hw is None:
             return None, "Camera unavailable"
         cam, leds = hw
+        # Metering here (and _recap_capture()'s forced-refocus just before
+        # calling this) mutates the shared camera's exposure/focus — a parked
+        # prefetch's assumption that nothing else touched the camera since it
+        # parked no longer holds, so invalidate it (see _prefetch_epoch).
+        self._camera_epoch += 1
 
         lit = False
         try:
@@ -2471,6 +2673,8 @@ class Arbiter:
             self.poll_timers()
             self._maybe_prewarm()
             self._maybe_open_camera()
+            self._maybe_start_prefetch()
+            self.pump_prefetch()
             self.pump_capture()
             self.pump_analysis()
             self._maybe_release_camera()
@@ -2541,19 +2745,41 @@ def _selftest() -> None:
             self.suite_id = "TESTSUITE"; self.results = []
 
     class _FakeCapture:
-        """Completes after `steps` step() calls."""
+        """
+        Completes after `steps` step() calls.  Also stands in for the
+        prefetch/capture split (start_prefetch()/prefetch_done/
+        start_capture()), mirroring CaptureSession's external contract:
+        run_prefetch() takes one step, then parks without releasing anything;
+        start_capture() resumes the same fake into its ordinary step() count.
+        """
         def __init__(self, config=None, steps=3):
             self.active = False; self.error = None
             self.out_path = Path("fake.h5")
             self.runner = _FakeRunner()
             self._i = 0; self._n = steps
+            self.prefetch_done = False
+            self._prefetching = False
         def start(self): self.active = True; return True
+        def start_prefetch(self):
+            self.active = True; self._prefetching = True
+            return True
+        def start_capture(self):
+            if not self.prefetch_done:
+                return False
+            self.prefetch_done = False
+            self.active = True; self._prefetching = False
+            self._i = 0
+            return True
         def step(self):
+            if self._prefetching:
+                self.active = False
+                self.prefetch_done = True
+                return None
             if self._i >= self._n:
                 self.active = False; return None
             self._i += 1
             return _FakeProgress(self._i, self._n)
-        def cancel(self): self.active = False
+        def cancel(self): self.active = False; self.prefetch_done = False
 
     def check(label, got, want):
         ok = "OK " if got == want else "XX "
@@ -2578,7 +2804,10 @@ def _selftest() -> None:
     arb.prewarm_capture()                         # idempotent — must not raise
     A.active_phase = "entry"                       # restore for the checks below
 
-    print("== shared camera: opens on reagent, released when idle ==")
+    print("== shared camera: opens near reagent2 expiry (not on reagent1), "
+          "released when idle ==")
+
+    from timer import TimerState
 
     class _FakeCam:
         def __init__(self):  self.stopped = False
@@ -2596,20 +2825,86 @@ def _selftest() -> None:
         return arb._camera, arb._leds
     arb._ensure_camera = _fake_ensure
 
+    open_lead = (config.capture_camera_warmup_s()
+                + config.capture_dark_prefetch_budget_s())
+
     check("no camera while idle",   arb._camera_wanted(), False)
     arb._maybe_open_camera()
     check("idle → camera stays shut", arb._camera is None, True)
-    A.active_phase = "reagent2"
+
+    A.active_phase = "reagent1"     # believed to heat the camera — stays off
     arb._maybe_open_camera()
-    check("reagent → camera opened", arb._camera is not None, True)
+    check("reagent1 → camera stays shut", arb._camera is None, True)
+
+    A.active_phase = "reagent2"
+    A.timer = TimerState.down(open_lead * 10, arb.now())   # far from expiry
+    arb._maybe_open_camera()
+    check("reagent2 far from expiry → camera stays shut", arb._camera is None, True)
+
+    A.timer = TimerState.down(open_lead - 1, arb.now())    # within the lead window
+    arb._maybe_open_camera()
+    check("reagent2 near expiry → camera opened", arb._camera is not None, True)
     fake_cam, fake_leds = arb._camera, arb._leds
-    arb._maybe_release_camera()                    # still wanted (A in reagent2)
+    arb._maybe_release_camera()                    # still wanted (A within budget)
     check("kept open while wanted",  arb._camera is fake_cam, True)
-    A.active_phase = "entry"                        # both slots idle now
+    A.active_phase = "entry"; A.timer = None        # both slots idle now
     arb._maybe_release_camera()
     check("idle → camera released",  arb._camera is None, True)
     check("camera stopped",          fake_cam.stopped, True)
     check("leds closed",             fake_leds.closed, True)
+
+    print("== dark-frame prefetch: scheduled near reagent2 expiry, "
+          "promoted at CAPTURE ==")
+    arb._cap_mode = "normal"
+    budget = config.capture_dark_prefetch_budget_s()
+
+    A.active_phase = "reagent2"
+    A.timer = TimerState.down(budget * 10, arb.now())      # far from budget
+    arb._maybe_start_prefetch()
+    check("far from expiry → no prefetch yet", arb._prefetch is None, True)
+
+    A.timer = TimerState.down(budget - 1, arb.now())       # within budget
+    arb._maybe_start_prefetch()
+    check("within budget → prefetch started", arb._prefetch is not None, True)
+    check("prefetch owner is A",              arb._prefetch_slot is A, True)
+
+    B.active_phase = "reagent2"
+    B.timer = TimerState.down(budget - 1, arb.now())
+    arb._maybe_start_prefetch()
+    check("second slot's prefetch deferred (camera busy)",
+         arb._prefetch_slot is A, True)
+    B.active_phase = "entry"; B.timer = None       # tidy up
+
+    for _ in range(5):
+        arb.pump_prefetch()
+    check("prefetch parked (not active)", arb._prefetch.active, False)
+    check("prefetch_done",                arb._prefetch.prefetch_done, True)
+    check("camera stays wanted while parked", arb._camera_wanted(), True)
+
+    print("== stale prefetch (camera touched since parking) falls back ==")
+    arb._camera_epoch += 1     # simulate another session using the camera meanwhile
+    ok = arb.request_capture(A)
+    check("stale prefetch still grants a fresh run", ok, True)
+    check("stale prefetch was discarded", arb._prefetch is None, True)
+    for _ in range(10):
+        arb.pump_capture()
+    check("fresh run completes", arb.capture_available(), True)
+
+    print("== fresh prefetch: promoted (not restarted) at CAPTURE ==")
+    A.active_phase = "reagent2"
+    A.timer = TimerState.down(budget - 1, arb.now())
+    arb._maybe_start_prefetch()
+    for _ in range(5):
+        arb.pump_prefetch()
+    check("second prefetch parked", arb._prefetch.prefetch_done, True)
+    ok = arb.request_capture(A)
+    check("fresh prefetch promoted",          ok, True)
+    check("prefetch cleared after promotion", arb._prefetch is None, True)
+    check("capture now in flight (promoted)", arb._capture is not None, True)
+    for _ in range(5):
+        arb.pump_capture()
+    check("promoted capture completes", arb.capture_available(), True)
+    A.active_phase = "entry"; A.timer = None
 
     print("== render draws only the focused slot ==")
     arb.goto(A, "entry")
@@ -2619,7 +2914,6 @@ def _selftest() -> None:
     arb.focus(A)
     B.record["samp_no"] = "BX9"; B.phase = B.active_phase = "reagent1"
     B.running = True
-    from timer import TimerState
     B.timer = TimerState.down(120, arb.now())
     arb.render(B)                                   # background: must be a no-op
     check("pool still shows A entry title", arb._pool["title"].text, "New Test")

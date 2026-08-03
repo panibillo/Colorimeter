@@ -205,10 +205,10 @@ def build(capture_dir: Path, output_h5: Path) -> None:
             w.add_lit(color, label, _load_layers(paths_by_ch),
                       exposure_us=exp["exposure_us"])
 
-        # ── Shared dark frames, keyed by exposure — not by color ───────
+        # ── Shared dark frames, keyed by exposure — not by color or label ──
         # Legacy filenames carry only whole milliseconds, so scale back up.
         for (label, ms), paths_by_ch in _group_channels(files["dark"]).items():
-            w.add_dark(label, _load_layers(paths_by_ch), exposure_us=ms * 1000)
+            w.add_dark(_load_layers(paths_by_ch), exposure_us=ms * 1000)
 
         # Link every color+label whose own exposure matches a dark group.
         for color in colors:

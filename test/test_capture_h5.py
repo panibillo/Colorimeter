@@ -104,10 +104,11 @@ class TestDarkDedup(CaptureSuiteWriterTestCase):
 
     def test_first_dark_is_written(self):
         with self.writer() as w:
-            self.assertTrue(w.add_dark("e3", _layers(10), exposure_us=45691))
+            self.assertTrue(w.add_dark(_layers(10), exposure_us=45691))
         with h5py.File(self.path, "r") as f:
-            self.assertIn("/dark/e3_45ms", f)
-            self.assertEqual(f["/dark/e3_45ms/B"].attrs["exposure_ms"], 45)
+            self.assertIn("/dark/after_45691us", f)
+            self.assertEqual(f["/dark/after_45691us/B"].attrs["exposure_us"], 45691)
+            self.assertEqual(f["/dark/after_45691us/B"].attrs["exposure_ms"], 45)
 
     def test_repeat_dark_is_skipped_not_raised(self):
         """A second LED offering the same exposure must be a silent no-op.
@@ -116,37 +117,59 @@ class TestDarkDedup(CaptureSuiteWriterTestCase):
         existing name, so the writer must suppress the repeat itself.
         """
         with self.writer() as w:
-            self.assertTrue(w.add_dark("e3", _layers(10), exposure_us=45691))
-            self.assertFalse(w.add_dark("e3", _layers(99), exposure_us=45691))
+            self.assertTrue(w.add_dark(_layers(10), exposure_us=45691))
+            self.assertFalse(w.add_dark(_layers(99), exposure_us=45691))
         with h5py.File(self.path, "r") as f:
             # The first write wins; the repeat did not overwrite it.
-            np.testing.assert_array_equal(f["/dark/e3_45ms/B"][()], _layers(10)["B"])
+            np.testing.assert_array_equal(
+                f["/dark/after_45691us/B"][()], _layers(10)["B"])
 
-    def test_dark_dedup_is_by_truncated_milliseconds(self):
-        """Exposures differing by sub-millisecond collapse to one group.
+    def test_microsecond_precision_no_longer_collapses(self):
+        """Exposures differing by sub-millisecond no longer collide.
 
-        This is the known precision loss of the current ms-based naming:
-        45691 and 45999 us are stored once, under e3_45ms.
+        Naming switched from truncated milliseconds to whole microseconds
+        specifically to stop the precision loss the old ms-based naming had:
+        45691 and 45999 us are now two distinct groups, not one.
         """
         with self.writer() as w:
-            self.assertTrue(w.add_dark("e3", _layers(10), exposure_us=45691))
-            self.assertFalse(w.add_dark("e3", _layers(99), exposure_us=45999))
+            self.assertTrue(w.add_dark(_layers(10), exposure_us=45691))
+            self.assertTrue(w.add_dark(_layers(99), exposure_us=45999))
         with h5py.File(self.path, "r") as f:
-            self.assertEqual([k for k in f["/dark"]], ["e3_45ms"])
+            self.assertEqual(sorted(f["/dark"]), ["after_45691us", "after_45999us"])
 
-    def test_different_labels_do_not_collide(self):
+    def test_labels_no_longer_affect_dedup_only_exposure_does(self):
+        """Two different labels sharing an exposure now correctly dedup.
+
+        A dark frame's noise floor depends only on exposure time, not on
+        which label asked for it, so label is deliberately not part of the
+        shared group's key (unlike the legacy schema, which kept them
+        separate purely because label happened to be in the name).
+        """
         with self.writer() as w:
-            self.assertTrue(w.add_dark("e3", _layers(10), exposure_us=45691))
-            self.assertTrue(w.add_dark("e4", _layers(20), exposure_us=45691))
+            self.assertTrue(w.add_dark(_layers(10), exposure_us=45691))
+            self.assertFalse(w.add_dark(_layers(20), exposure_us=45691))
         with h5py.File(self.path, "r") as f:
-            self.assertEqual(sorted(f["/dark"]), ["e3_45ms", "e4_45ms"])
+            self.assertEqual([k for k in f["/dark"]], ["after_45691us"])
 
     def test_different_exposures_do_not_collide(self):
         with self.writer() as w:
-            self.assertTrue(w.add_dark("e3", _layers(10), exposure_us=45691))
-            self.assertTrue(w.add_dark("e3", _layers(20), exposure_us=30000))
+            self.assertTrue(w.add_dark(_layers(10), exposure_us=45691))
+            self.assertTrue(w.add_dark(_layers(20), exposure_us=30000))
         with h5py.File(self.path, "r") as f:
-            self.assertEqual(sorted(f["/dark"]), ["e3_30ms", "e3_45ms"])
+            self.assertEqual(sorted(f["/dark"]), ["after_30000us", "after_45691us"])
+
+    def test_before_and_after_batches_do_not_collide(self):
+        """The same exposure captured in both batches gets two groups."""
+        with self.writer() as w:
+            self.assertTrue(w.add_dark(_layers(10), exposure_us=45691, when="before"))
+            self.assertTrue(w.add_dark(_layers(99), exposure_us=45691, when="after"))
+        with h5py.File(self.path, "r") as f:
+            self.assertEqual(
+                sorted(f["/dark"]), ["after_45691us", "before_45691us"])
+            np.testing.assert_array_equal(
+                f["/dark/before_45691us/B"][()], _layers(10)["B"])
+            np.testing.assert_array_equal(
+                f["/dark/after_45691us/B"][()], _layers(99)["B"])
 
 
 # ---------------------------------------------------------------------------
@@ -157,31 +180,44 @@ class TestDarkLinking(CaptureSuiteWriterTestCase):
 
     def test_link_resolves_to_shared_group(self):
         with self.writer() as w:
-            w.add_dark("e3", _layers(10), exposure_us=45691)
+            w.add_dark(_layers(10), exposure_us=45691)
             self.assertTrue(w.link_dark("amber", "e3", exposure_us=45691))
         with h5py.File(self.path, "r") as f:
-            self.assertIsNotNone(f["/leds/amber/dark/e3"])
+            self.assertIsNotNone(f["/leds/amber/dark/after_e3"])
             np.testing.assert_array_equal(
-                f["/leds/amber/dark/e3/B"][()], f["/dark/e3_45ms/B"][()])
+                f["/leds/amber/dark/after_e3/B"][()], f["/dark/after_45691us/B"][()])
 
     def test_two_leds_share_one_dark_group(self):
         with self.writer() as w:
-            w.add_dark("e3", _layers(10), exposure_us=45691)
-            w.add_dark("e3", _layers(99), exposure_us=45691)   # skipped
+            w.add_dark(_layers(10), exposure_us=45691)
+            w.add_dark(_layers(99), exposure_us=45691)   # skipped
             self.assertTrue(w.link_dark("amber", "e3", exposure_us=45691))
             self.assertTrue(w.link_dark("blue", "e3", exposure_us=45691))
         with h5py.File(self.path, "r") as f:
-            self.assertEqual([k for k in f["/dark"]], ["e3_45ms"])
+            self.assertEqual([k for k in f["/dark"]], ["after_45691us"])
             np.testing.assert_array_equal(
-                f["/leds/amber/dark/e3/B"][()], f["/leds/blue/dark/e3/B"][()])
+                f["/leds/amber/dark/after_e3/B"][()],
+                f["/leds/blue/dark/after_e3/B"][()])
 
     def test_link_without_matching_dark_is_refused(self):
         """An LED whose exposure has no dark group must not get a broken link."""
         with self.writer() as w:
-            w.add_dark("e3", _layers(10), exposure_us=45691)
+            w.add_dark(_layers(10), exposure_us=45691)
             self.assertFalse(w.link_dark("amber", "e3", exposure_us=30000))
         with h5py.File(self.path, "r") as f:
-            self.assertNotIn("/leds/amber/dark/e3", f)
+            self.assertNotIn("/leds/amber/dark/after_e3", f)
+
+    def test_link_when_selects_matching_batch(self):
+        """A before-batch link must not resolve against the after batch."""
+        with self.writer() as w:
+            w.add_dark(_layers(10), exposure_us=45691, when="before")
+            self.assertTrue(
+                w.link_dark("amber", "e3", exposure_us=45691, when="before"))
+            self.assertFalse(
+                w.link_dark("amber", "e3", exposure_us=45691, when="after"))
+        with h5py.File(self.path, "r") as f:
+            self.assertIn("/leds/amber/dark/before_e3", f)
+            self.assertNotIn("/leds/amber/dark/after_e3", f)
 
 
 if __name__ == "__main__":

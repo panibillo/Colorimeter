@@ -26,9 +26,16 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from ili9341 import ILI9341
 from bayer_cam import BayerCam
-from lighting_cal8 import LEDBank
 from geometry import Rect
 from utils import install_exit_signals
+
+# Hardware-only import (real branch needs gpiozero/spidev). Guarded so this
+# module stays importable on a desktop for test discovery; LEDBank() itself
+# raises a clear error if actually constructed without them.
+try:
+    from lighting_cal8 import LEDBank
+except ImportError:                                  # pragma: no cover
+    LEDBank = None
 
 
 DEFAULT_EXPOSURE_MS = 20
