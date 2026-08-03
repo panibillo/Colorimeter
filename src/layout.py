@@ -190,15 +190,21 @@ IMG_EXIT     = Rect(260, 193,  60,  47)
 # Replaces the viewer's canvas+pad while open; reuses the Menu header chrome
 # (menu_cancel_btn/menu_title/menu_ok_btn) for Cancel / title / Capture, so no
 # corner buttons are defined here. Two radio pairs (Focus, tri-state: either
-# button or neither; Exposure, two-state) plus two on/off save toggles.
-RECAP_FOCUS_LBL  = Rect(  8,  54,  96,  36)   # "Focus"
-RECAP_FOCUS_AUTO = Rect(106,  54, 102,  36)   # "Auto Focus"
-RECAP_FOCUS_CFG  = Rect(212,  54, 100,  36)   # "Reread Cfg"
-RECAP_EXP_LBL    = Rect(  8, 100,  96,  36)   # "Exposure"
-RECAP_EXP_SAMPLE = Rect(106, 100, 102,  36)   # "Sample Rect"
-RECAP_EXP_WHOLE  = Rect(212, 100, 100,  36)   # "Whole Image"
-RECAP_SAVE_FOCUS = Rect(  8, 150, 148,  40)   # toggle
-RECAP_SAVE_EXP   = Rect(164, 150, 148,  40)   # toggle
+# button or neither; Exposure, two-state) each with an on/off save toggle in
+# a fourth column, plus a third row of two non-exclusive save-image toggles
+# (Bound ROI, Whole Image — either, neither, or both; no toggle column of its
+# own, the buttons themselves carry the on/off state).
+RECAP_FOCUS_LBL  = Rect(  8,  54,  96,  46)   # "Focus"
+RECAP_FOCUS_AUTO = Rect(106,  54,  75,  46)   # "Auto Focus"
+RECAP_FOCUS_CFG  = Rect(185,  54,  75,  46)   # "Reread Cfg"
+RECAP_SAVE_FOCUS = Rect(270,  54,  42,  46)   # toggle
+RECAP_EXP_LBL    = Rect(  8, 110,  96,  46)   # "Exposure"
+RECAP_EXP_SAMPLE = Rect(106, 110,  75,  46)   # "Sample Rect"
+RECAP_EXP_WHOLE  = Rect(185, 110,  75,  46)   # "Whole Image"
+RECAP_SAVE_EXP   = Rect(270, 110,  42,  46)   # toggle
+RECAP_IMAGE_LBL  = Rect(  8, 166,  96,  46)   # "Save Image"
+RECAP_IMAGE_ROI  = Rect(106, 166,  75,  46)   # "Bound ROI"
+RECAP_IMAGE_WHOLE= Rect(185, 166,  75,  46)   # "Whole Image"
 
 # ── footer  y 215..239 ─────────────────────────────────────────────────────────
 PRIOR_BTN   = Rect(  0, 217,  58, 21)

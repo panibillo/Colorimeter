@@ -257,6 +257,7 @@ class Arbiter:
         # would close the sensor on the very next main-loop pass.
         self._view_open      = False
         self._view_frame     = None    # the whole captured frame, numpy BGR
+        self._view_bayer     = None    # that frame's raw mosaic, for recap saves
         self._view_state     = None    # image_view.ViewState over that frame
         self._view_rois:  dict = {}    # name -> rect.Rect, in image space
         self._view_selected: str | None = None   # one name, or None
@@ -281,6 +282,9 @@ class Arbiter:
         self._recap_exp        = "sample"      # "sample" | "whole"
         self._recap_save_focus = False
         self._recap_save_exp   = False
+        # Non-exclusive: either, neither, or both may be armed at once.
+        self._recap_save_roi   = False   # save the bound ROI as jpeg+bayer h5
+        self._recap_save_whole = False   # save the whole frame as jpeg+bayer h5
 
     # ── Lifecycle ──────────────────────────────────────────────────────────────
 
@@ -1758,6 +1762,8 @@ class Arbiter:
         preview: the exposure that worked when the metering converged, and the
         correction it was about to try when it ran out of frames.  Either way
         the next preview starts from the best estimate this one reached.
+        Likewise stashes the raw mosaic behind the returned frame in
+        `_view_bayer`, for the recapture dialog's save-to-h5 options.
 
         Args:
             cam:    The shared camera, already started.
@@ -1783,6 +1789,7 @@ class Arbiter:
                 log.info("Arbiter: preview exposure %d us (sample not metered)",
                          applied)
                 self._view_exposure_us = applied
+                self._view_bayer = bayer
                 return rgb, applied
 
             error = abs(level - _PREVIEW_TARGET) / _PREVIEW_TARGET
@@ -1797,6 +1804,7 @@ class Arbiter:
                 # `wanted == us` means the correction is pinned at a limit;
                 # another frame would only ask for the same exposure again.
                 self._view_exposure_us = applied
+                self._view_bayer = bayer
                 return rgb, applied
             us = wanted
 
@@ -1804,6 +1812,7 @@ class Arbiter:
                     "showing the frame taken at %d us; next preview starts at "
                     "%d us", _PREVIEW_AE_MAX_FRAMES, applied, us)
         self._view_exposure_us = us
+        self._view_bayer = bayer
         return rgb, applied
 
     def _start_exposure_us(self) -> int:
@@ -1964,6 +1973,7 @@ class Arbiter:
         self._view_status = err
         if frame is None:
             self._view_frame = None
+            self._view_bayer = None
             self._view_state = None
         else:
             self._view_install_frame(frame, focus_roi=focus_roi)
@@ -2052,23 +2062,28 @@ class Arbiter:
         p.put("menu_title",      "Recapture")
         p.put("menu_ok_btn",     "Capture", on=self._recap_capture)
         p.put("recap_focus_lbl", "Focus")
-        p.put("recap_focus_auto", "Auto Focus",
+        p.put("recap_focus_auto", "Auto\nFocus",
               on=lambda: self._recap_set_focus("auto"))
         p["recap_focus_auto"].color = sel if self._recap_focus == "auto" else unsel
-        p.put("recap_focus_cfg", "Reread Cfg",
+        p.put("recap_focus_cfg", "Reread\nCfg",
               on=lambda: self._recap_set_focus("reread"))
         p["recap_focus_cfg"].color = sel if self._recap_focus == "reread" else unsel
+        p.put("recap_save_focus", "Save\nFocus", on=self._recap_toggle_save_focus)
+        p["recap_save_focus"].color = sel if self._recap_save_focus else unsel
         p.put("recap_exp_lbl", "Exposure")
-        p.put("recap_exp_sample", "Sample Rect",
+        p.put("recap_exp_sample", "Sample\nRect",
               on=lambda: self._recap_set_exp("sample"))
         p["recap_exp_sample"].color = sel if self._recap_exp == "sample" else unsel
-        p.put("recap_exp_whole", "Whole Image",
+        p.put("recap_exp_whole", "Whole\nImage",
               on=lambda: self._recap_set_exp("whole"))
         p["recap_exp_whole"].color = sel if self._recap_exp == "whole" else unsel
-        p.put("recap_save_focus", "Save Focus", on=self._recap_toggle_save_focus)
-        p["recap_save_focus"].color = sel if self._recap_save_focus else unsel
-        p.put("recap_save_exp", "Save Exposure", on=self._recap_toggle_save_exp)
+        p.put("recap_save_exp", "Save\nExp", on=self._recap_toggle_save_exp)
         p["recap_save_exp"].color = sel if self._recap_save_exp else unsel
+        p.put("recap_image_lbl", "Save Image")
+        p.put("recap_image_roi", "Bound\nROI", on=self._recap_toggle_save_roi)
+        p["recap_image_roi"].color = sel if self._recap_save_roi else unsel
+        p.put("recap_image_whole", "Whole\nImage", on=self._recap_toggle_save_whole)
+        p["recap_image_whole"].color = sel if self._recap_save_whole else unsel
         p.render(self._disp)
         self._rebuild_focus()
 
@@ -2088,6 +2103,16 @@ class Arbiter:
 
     def _recap_toggle_save_exp(self) -> None:
         self._recap_save_exp = not self._recap_save_exp
+        self._recap_render()
+
+    def _recap_toggle_save_roi(self) -> None:
+        # Non-exclusive: independent of _recap_toggle_save_whole.
+        self._recap_save_roi = not self._recap_save_roi
+        self._recap_render()
+
+    def _recap_toggle_save_whole(self) -> None:
+        # Non-exclusive: independent of _recap_toggle_save_roi.
+        self._recap_save_whole = not self._recap_save_whole
         self._recap_render()
 
     def _recap_cancel(self) -> None:
@@ -2126,10 +2151,61 @@ class Arbiter:
 
         if frame is None:
             self._view_frame = None
+            self._view_bayer = None
             self._view_state = None
         else:
+            if self._recap_save_whole:
+                self._recap_save_snapshot(frame, self._view_bayer, cam, "img")
+            if self._recap_save_roi:
+                bound = self._view_rois.get("bound")
+                if bound is None:
+                    log.warning("Arbiter: recapture — no bound ROI to save")
+                else:
+                    self._recap_save_snapshot(frame, self._view_bayer, cam,
+                                              "bound", crop_rect=bound)
             self._view_install_frame(frame)
         self._render_image_view()
+
+    def _recap_save_snapshot(self, rgb, bayer, cam, suffix: str,
+                              crop_rect=None) -> None:
+        """
+        Write one recapture snapshot — a JPEG plus the four Bayer layers
+        behind it — into the captures directory as "<timestamp>_<suffix>.h5".
+
+        `suffix` is "img" for the whole frame or "bound" for the bound-ROI
+        crop (`crop_rect`). Reuses capture_runner's private jpeg/layer
+        helpers so this ad hoc snapshot encodes the same inputs the same way
+        a normal suite archive would.
+        """
+        if bayer is None or getattr(bayer, "ndim", 0) != 2:
+            log.warning("Arbiter: recapture — no raw frame to save (%s)", suffix)
+            return
+        import capture_runner
+        from bayer_cam import BayerCam
+        from hdf5write import Hdf5Writer
+
+        pattern = getattr(cam, "bayer_pattern", "BGGR")
+        if crop_rect is not None:
+            rgb_out = BayerCam.crop_rgb(rgb, crop_rect)
+            layers = capture_runner._roi_bound_layers(bayer, pattern, crop_rect)
+        else:
+            rgb_out = rgb
+            layers = BayerCam.extract_bayer_layers(bayer, pattern)
+
+        out_dir = config.capture_dir()
+        out_dir.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.datetime.now().strftime("%Y-%m-%d_%H%M%S")
+        path = out_dir / f"{stamp}_{suffix}.h5"
+        try:
+            with Hdf5Writer(path) as w:
+                w.set_attrs("/", {"suite_id": stamp})
+                w.write_bytes("/", "jpeg", capture_runner._encode_jpeg(rgb_out),
+                              attrs={"format": "jpeg"})
+                for ch, arr in layers.items():
+                    w.write_array("/bayer", ch, arr)
+            log.info("Arbiter: recapture — saved %s", path)
+        except Exception:
+            log.exception("Arbiter: recapture — could not save %s", path)
 
     def _paint_canvas(self) -> None:
         """
@@ -2566,6 +2642,7 @@ class Arbiter:
             return                    # Exit is disabled while editing
         self._view_open = False
         self._view_frame = None          # ~9 MB; do not hold it past the screen
+        self._view_bayer = None          # ~6 MB raw mosaic behind that frame
         self._view_state = None
         self._view_rois = {}
         self._view_selected = None

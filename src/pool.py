@@ -231,22 +231,31 @@ class Pool:
 
         # ── recapture options dialog (viewer's Img button) ──────────────────────
         # Cancel/Capture reuse menu_cancel_btn/menu_ok_btn (top-corner chrome).
+        # The main row buttons are narrow (75px) so their labels wrap to two
+        # lines; the save toggles are narrower still (42px) and use a smaller
+        # size for the same reason.
         label("recap_focus_lbl",   L.RECAP_FOCUS_LBL,  "black", "white", 14,
               align="left", text="Focus")
         button("recap_focus_auto", L.RECAP_FOCUS_AUTO, "btn_text", "btn_gray", 14,
-               text="Auto Focus")
+               text="Auto\nFocus")
         button("recap_focus_cfg",  L.RECAP_FOCUS_CFG,  "btn_text", "btn_gray", 14,
-               text="Reread Cfg")
+               text="Reread\nCfg")
+        button("recap_save_focus", L.RECAP_SAVE_FOCUS, "btn_text", "btn_gray", 10,
+               text="Save\nFocus")
         label("recap_exp_lbl",     L.RECAP_EXP_LBL,    "black", "white", 14,
               align="left", text="Exposure")
         button("recap_exp_sample", L.RECAP_EXP_SAMPLE, "btn_text", "btn_gray", 14,
-               text="Sample Rect")
+               text="Sample\nRect")
         button("recap_exp_whole",  L.RECAP_EXP_WHOLE,  "btn_text", "btn_gray", 14,
-               text="Whole Image")
-        button("recap_save_focus", L.RECAP_SAVE_FOCUS, "btn_text", "btn_gray", 14,
-               text="Save Focus")
-        button("recap_save_exp",   L.RECAP_SAVE_EXP,   "btn_text", "btn_gray", 14,
-               text="Save Exposure")
+               text="Whole\nImage")
+        button("recap_save_exp",   L.RECAP_SAVE_EXP,   "btn_text", "btn_gray", 10,
+               text="Save\nExp")
+        label("recap_image_lbl",   L.RECAP_IMAGE_LBL,  "black", "white", 14,
+              align="left", text="Save Image")
+        button("recap_image_roi",   L.RECAP_IMAGE_ROI,   "btn_text", "btn_gray", 14,
+               text="Bound\nROI")
+        button("recap_image_whole", L.RECAP_IMAGE_WHOLE, "btn_text", "btn_gray", 14,
+               text="Whole\nImage")
 
         # ── modal overlay (drawn last = on top) ────────────────────────────────
         rect("modal_panel", L.MODAL_PANEL, "body_dark")
