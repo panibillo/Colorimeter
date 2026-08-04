@@ -205,6 +205,7 @@ RECAP_SAVE_EXP   = Rect(270, 110,  42,  46)   # toggle
 RECAP_IMAGE_LBL  = Rect(  8, 166,  96,  46)   # "Save Image"
 RECAP_IMAGE_ROI  = Rect(106, 166,  75,  46)   # "Bound ROI"
 RECAP_IMAGE_WHOLE= Rect(185, 166,  75,  46)   # "Whole Image"
+RECAP_IMAGE_DARK = Rect(270, 166,  42,  46)   # "Dark"
 
 # ── footer  y 215..239 ─────────────────────────────────────────────────────────
 PRIOR_BTN   = Rect(  0, 217,  58, 21)

@@ -285,6 +285,9 @@ class Arbiter:
         # Non-exclusive: either, neither, or both may be armed at once.
         self._recap_save_roi   = False   # save the bound ROI as jpeg+bayer h5
         self._recap_save_whole = False   # save the whole frame as jpeg+bayer h5
+        # When True, Capture takes a white-LED-off frame instead of the usual
+        # briefly-lit one — for a dark reference at the same exposure.
+        self._recap_dark       = False
 
     # ── Lifecycle ──────────────────────────────────────────────────────────────
 
@@ -1677,7 +1680,7 @@ class Arbiter:
                 log.exception("Arbiter: error closing shared LED bank")
             self._leds = None
 
-    def preview_frame(self, region: str = "sample"):
+    def preview_frame(self, region: str = "sample", lit: bool = True):
         """
         Take a briefly-lit, metered frame for the image viewer.
 
@@ -1695,7 +1698,14 @@ class Arbiter:
 
         Args:
             region: "sample" (default, meters the sample ROI) or "whole"
-                    (meters the entire frame) — see `_auto_expose`.
+                    (meters the entire frame) — see `_auto_expose`. Unused
+                    when `lit` is False, since there is nothing to meter.
+            lit: True (default) briefly lights the white LED and auto-exposes
+                 against `region`, as above. False leaves the LED off and
+                 takes a single frame at the last known exposure instead —
+                 the recapture dialog's "Dark" option, a reference frame at
+                 the same exposure a lit one would use, with no signal to
+                 converge metering against.
 
         Returns:
             (frame, error).  `frame` is a numpy BGR array of the full stream on
@@ -1712,18 +1722,35 @@ class Arbiter:
         # parked no longer holds, so invalidate it (see _prefetch_epoch).
         self._camera_epoch += 1
 
-        lit = False
+        if not lit:
+            import capture_runner
+            us = self._view_exposure_us or self._start_exposure_us()
+            try:
+                rgb, bayer, meta = capture_runner._set_and_settle(
+                    cam, us, max_frames=_PREVIEW_SETTLE_FRAMES)
+            except Exception:
+                log.exception("Arbiter: dark preview capture failed")
+                return None, "Preview failed"
+            if rgb is None or getattr(rgb, "ndim", 0) != 3:
+                return None, "No image"
+            self._view_exposure_us = int(meta.get("ExposureTime") or us)
+            self._view_bayer = bayer
+            log.info("Arbiter: dark preview frame %dx%d at %d us",
+                     rgb.shape[1], rgb.shape[0], self._view_exposure_us)
+            return rgb, ""
+
+        led_on = False
         try:
             if leds is not None:
                 leds.set_channel(_PREVIEW_LED_CH, True)
-                lit = True
+                led_on = True
                 time.sleep(_PREVIEW_SETTLE_S)
             rgb, exposure_us = self._auto_expose(cam, region=region)
         except Exception:
             log.exception("Arbiter: preview capture failed")
             return None, "Preview failed"
         finally:
-            if lit:
+            if led_on:
                 try:
                     leds.set_channel(_PREVIEW_LED_CH, False)
                 except Exception:
@@ -2084,6 +2111,8 @@ class Arbiter:
         p["recap_image_roi"].color = sel if self._recap_save_roi else unsel
         p.put("recap_image_whole", "Whole\nImage", on=self._recap_toggle_save_whole)
         p["recap_image_whole"].color = sel if self._recap_save_whole else unsel
+        p.put("recap_image_dark", "Dark", on=self._recap_toggle_dark)
+        p["recap_image_dark"].color = sel if self._recap_dark else unsel
         p.render(self._disp)
         self._rebuild_focus()
 
@@ -2115,6 +2144,10 @@ class Arbiter:
         self._recap_save_whole = not self._recap_save_whole
         self._recap_render()
 
+    def _recap_toggle_dark(self) -> None:
+        self._recap_dark = not self._recap_dark
+        self._recap_render()
+
     def _recap_cancel(self) -> None:
         """Discard the pending choices and return to the viewer untouched."""
         self._render_image_view()
@@ -2134,14 +2167,15 @@ class Arbiter:
             cam.reread_focus_cal()
         # else: neither checked — leave focus exactly as it is.
 
-        frame, err = self.preview_frame(region=self._recap_exp)
+        frame, err = self.preview_frame(region=self._recap_exp,
+                                        lit=not self._recap_dark)
         self._view_status = err
 
         diopter = cam.lens_position
         log.info("Arbiter: recapture — focus=%s diopter=%s exposure=%s us "
-                 "region=%s", self._recap_focus or "unchanged",
+                 "region=%s lit=%s", self._recap_focus or "unchanged",
                  f"{diopter:.4f}" if diopter is not None else "n/a",
-                 self._view_exposure_us, self._recap_exp)
+                 self._view_exposure_us, self._recap_exp, not self._recap_dark)
 
         if self._recap_save_focus and diopter is not None:
             config.save("capture", "default_focus_diopter", diopter)

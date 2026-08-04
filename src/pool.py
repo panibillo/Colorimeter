@@ -256,6 +256,8 @@ class Pool:
                text="Bound\nROI")
         button("recap_image_whole", L.RECAP_IMAGE_WHOLE, "btn_text", "btn_gray", 14,
                text="Whole\nImage")
+        button("recap_image_dark", L.RECAP_IMAGE_DARK, "btn_text", "btn_gray", 10,
+               text="Dark")
 
         # ── modal overlay (drawn last = on top) ────────────────────────────────
         rect("modal_panel", L.MODAL_PANEL, "body_dark")
