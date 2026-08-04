@@ -112,6 +112,7 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 from hdf5read import Hdf5Reader  # noqa: E402
+from rect import Rect  # noqa: E402
 import roi as roi_mod  # noqa: E402
 
 DEFAULT_CAPTURES_DIR = Path(__file__).resolve().parent.parent / "captures"
@@ -361,7 +362,9 @@ class Patches:
         return len(self.rects)
 
 
-def load_patches(shape: Tuple[int, int]) -> Patches:
+def load_patches(shape: Tuple[int, int],
+                 bound_override: Optional[Tuple[int, int, int, int]] = None,
+                 ) -> Patches:
     """
     Return the active ROIs as (x, y, w, h) in bound-crop layer coordinates.
 
@@ -370,33 +373,61 @@ def load_patches(shape: Tuple[int, int]) -> Patches:
     picked up here without touching this file.  `bound` itself is dropped —
     it is the crop, not a patch inside it.
 
+    The archive records no ROI geometry of its own (see the `--bound` note in
+    the module docstring), so the `bound` in force has to be taken on trust
+    and is checked against the stored layer shape.  When the check fails the
+    usual cause is that this desktop's `src/colorimeter.sqlite` is an older
+    copy than the instrument's: `sync_captures_from_pi.sh` copies `captures/`
+    but not the database, so an ROI edited on the Pi does not arrive here.
+
     Args:
         shape: (rows, cols) of the stored layer arrays, used to verify that
-            the archive really was cropped to the `bound` currently in force.
+            the archive really was cropped to the `bound` being used.
+        bound_override: (x, y, w, h) in stream space to use instead of the
+            table's `bound` row.  For archives captured against a `bound`
+            this database has never seen.
 
     Returns:
         A Patches record; ROIs not wholly inside `bound` are dropped, since
         the archive holds no pixels for them.
 
     Raises:
-        ValueError: The table has no `bound` row, or `bound` disagrees with
-            the archive's array shape (the ROI was edited after the capture).
+        ValueError: The table has no `bound` row, or the `bound` in force
+            disagrees with the archive's array shape.
 
     Example:
         >>> load_patches((330, 98)).rects['sample']    # doctest: +SKIP
         (34, 81, 34, 34)
     """
     rois = roi_mod.load_active(STREAM_W, STREAM_H, STREAM_MODEL)
-    bound = rois.get("bound")
+    if bound_override is not None:
+        bound = Rect(*bound_override, name="bound")
+    else:
+        bound = rois.get("bound")
     if bound is None:
         raise ValueError("the roi table has no active 'bound' row")
 
     rows, cols = shape
     if (bound.h // 2, bound.w // 2) != (rows, cols):
+        source = ("--bound" if bound_override is not None
+                  else "the active roi row")
+        arch_w, arch_h = cols * 2, rows * 2
         raise ValueError(
-            f"active bound {bound.xywh()} implies layers of "
+            f"bound mismatch: {source} is {bound.xywh()}, implying layers of "
             f"{bound.h // 2}x{bound.w // 2}, but the archive stores "
-            f"{rows}x{cols} — the ROI was edited after this capture"
+            f"{rows}x{cols}.\n\n"
+            f"The archive was cropped to a bound {arch_w} wide by {arch_h} "
+            f"tall. Width and height read\nback from the layer shape like "
+            f"this; x and y cannot — nothing in the file\nrecords them.\n\n"
+            f"Most likely this desktop's src/colorimeter.sqlite is older "
+            f"than the instrument's:\nsync_captures_from_pi.sh copies "
+            f"captures/ but not the database, so an ROI edited\non the Pi "
+            f"never arrives here. Copy the Pi's colorimeter.sqlite over, or "
+            f"pass the\ngeometry explicitly:\n\n"
+            f"    --bound X,Y,{arch_w},{arch_h}\n\n"
+            f"The {STREAM_W}x{STREAM_H} stream bounds the unknowns: "
+            f"0 <= x <= {STREAM_W - arch_w}, 0 <= y <= {STREAM_H - arch_h}, "
+            f"both even."
         )
 
     rects, roles = {}, {}
@@ -1338,7 +1369,8 @@ def cmd_noise_floor(reader: Hdf5Reader, colors: List[str]) -> None:
 
 
 def cmd_compare(reader: Hdf5Reader, h5_path: Path, colors: List[str],
-                labels: List[str]) -> None:
+                labels: List[str],
+                bound: Optional[Tuple[int, int, int, int]] = None) -> None:
     """
     Score the extent x degree ladder on one suite and print the table.
 
@@ -1365,7 +1397,7 @@ def cmd_compare(reader: Hdf5Reader, h5_path: Path, colors: List[str],
         print(f"{h5_path.name}: no usable (unclipped) frames.")
         return
 
-    patches = load_patches(frames[0].signal.shape)
+    patches = load_patches(frames[0].signal.shape, bound)
     print(f"\n{h5_path.name}: in-sample ladder over {len(frames)} frames "
           f"(best unclipped exposure per LED x channel)")
     cmd_noise_floor(reader, colors)
@@ -1519,7 +1551,8 @@ def find_anomalous_leds(pairs: List[Tuple[Frame, Frame]],
 
 
 def cmd_transfer(src: Hdf5Reader, dst: Hdf5Reader, src_path: Path,
-                 dst_path: Path, colors: List[str], labels: List[str]) -> None:
+                 dst_path: Path, colors: List[str], labels: List[str],
+                 bound: Optional[Tuple[int, int, int, int]] = None) -> None:
     """
     Fit fields on one suite, apply them to another, and report the error.
 
@@ -1549,7 +1582,7 @@ def cmd_transfer(src: Hdf5Reader, dst: Hdf5Reader, src_path: Path,
         print("no LED/channel pairs usable in both archives.")
         return
 
-    patches = load_patches(pairs[0][0].signal.shape)
+    patches = load_patches(pairs[0][0].signal.shape, bound)
     print(f"\ntransfer: fit on {src_path.name} -> apply to {dst_path.name}")
     print(f"  {len(pairs)} LED x channel pairs, both unclipped; "
           f"reference patch: {patches.reference}")
@@ -1665,7 +1698,8 @@ def cmd_transfer(src: Hdf5Reader, dst: Hdf5Reader, src_path: Path,
 
 def cmd_plot(reader: Hdf5Reader, h5_path: Path, led: str, channel: str,
              label: Optional[str], deg_y: int, deg_x: int,
-             out_png: Optional[Path]) -> None:
+             out_png: Optional[Path],
+             bound: Optional[Tuple[int, int, int, int]] = None) -> None:
     """
     Draw the four diagnostics that make a fit's behaviour legible.
 
@@ -1709,7 +1743,7 @@ def cmd_plot(reader: Hdf5Reader, h5_path: Path, led: str, channel: str,
             f"no unclipped {led}/{channel} frame in {h5_path.name}")
     frame = max(candidates, key=lambda f: f.mean)
 
-    patches = load_patches(frame.signal.shape)
+    patches = load_patches(frame.signal.shape, bound)
     ff = fit_field(frame, deg_y, deg_x, "bound", patches.rects)
     surface = ff.evaluate()
     corrected = ff.correct(frame)
@@ -1826,7 +1860,9 @@ CREATE TABLE IF NOT EXISTS flatfield (
 
 def cmd_write(reader: Hdf5Reader, h5_path: Path, colors: List[str],
               labels: List[str], deg_y: int, deg_x: int,
-              db_path: Path, gain_dir: Path) -> None:
+              db_path: Path, gain_dir: Path,
+              bound_override: Optional[Tuple[int, int, int, int]] = None,
+              ) -> None:
     """
     Fit the chosen model and persist coefficients plus derived gain maps.
 
@@ -1859,9 +1895,10 @@ def cmd_write(reader: Hdf5Reader, h5_path: Path, colors: List[str],
         print(f"{h5_path.name}: no usable (unclipped) frames to write.")
         return
 
-    patches = load_patches(frames[0].signal.shape)
-    rois = roi_mod.load_active(STREAM_W, STREAM_H, STREAM_MODEL)
-    bound = rois["bound"]
+    patches = load_patches(frames[0].signal.shape, bound_override)
+    bound = (Rect(*bound_override, name="bound") if bound_override
+             else roi_mod.load_active(STREAM_W, STREAM_H,
+                                      STREAM_MODEL)["bound"])
     suite_id = reader.attrs("/").get("suite_id", h5_path.stem)
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
@@ -1946,7 +1983,7 @@ def verify_roundtrip(db_path: Path, gain_dir: Path) -> int:
             window=(0, drows, 0, dcols), covers=(0, drows, 0, dcols),
             norm_mean=norm, led=led, label="", channel=ch,
             n_fit=0, n_masked=0, fit_rms_pct=0.0)
-        patches = load_patches((drows, dcols))
+        patches = load_patches((drows, dcols), (bx, by, bw, bh))
         for name, rect in patches.rects.items():
             path = gain_dir / str(suite) / f"{led}_{ch}_{name}_gain.npy"
             if not path.exists():
@@ -2152,7 +2189,21 @@ def _parse_args(argv=None) -> argparse.Namespace:
     parser.add_argument("--captures-dir", type=Path,
                         default=DEFAULT_CAPTURES_DIR,
                         help="directory bare filenames resolve against")
-    return parser.parse_args(argv)
+    parser.add_argument("--bound", metavar="X,Y,W,H",
+                        help="bound ROI in stream space, overriding the roi "
+                             "table; for archives captured against a bound "
+                             "this database has not got")
+    args = parser.parse_args(argv)
+
+    if args.bound:
+        try:
+            parts = tuple(int(v) for v in args.bound.split(","))
+        except ValueError:
+            parser.error("--bound wants four integers, X,Y,W,H")
+        if len(parts) != 4:
+            parser.error(f"--bound wants four integers, got {len(parts)}")
+        args.bound = parts
+    return args
 
 
 def main() -> int:
@@ -2181,30 +2232,43 @@ def main() -> int:
 
     any_mode = (args.compare or args.transfer or args.write
                 or args.plot is not None)
+    try:
+        return _run_modes(args, h5_path, any_mode)
+    except ValueError as e:
+        # A bound/ROI mismatch is an operator problem with a stated remedy,
+        # not a crash; a traceback would bury the remedy.
+        print(f"\nerror: {e}", file=sys.stderr)
+        return 1
+
+
+def _run_modes(args: argparse.Namespace, h5_path: Path,
+               any_mode: bool) -> int:
+    """Open the archive and run whichever modes were asked for."""
     with Hdf5Reader(h5_path) as reader:
         colors = args.led or list_led_colors(reader)
         if not colors:
             print(f"{h5_path.name}: no /leds group found.", file=sys.stderr)
             return 1
         if args.compare:
-            cmd_compare(reader, h5_path, colors, args.exp)
+            cmd_compare(reader, h5_path, colors, args.exp, args.bound)
         if args.transfer:
             dst_path = resolve_h5_path(args.file2, args.captures_dir)
             with Hdf5Reader(dst_path) as dst:
-                cmd_transfer(reader, dst, h5_path, dst_path, colors, args.exp)
+                cmd_transfer(reader, dst, h5_path, dst_path, colors,
+                             args.exp, args.bound)
         if args.plot is not None:
             pled = args.plot[0] if len(args.plot) > 0 else "green"
             pch = args.plot[1] if len(args.plot) > 1 else "Gr"
             try:
                 cmd_plot(reader, h5_path, pled, pch,
                          args.exp[0] if args.exp else None,
-                         args.deg_y, args.deg_x, args.output)
+                         args.deg_y, args.deg_x, args.output, args.bound)
             except ValueError as e:
                 print(f"error: {e}", file=sys.stderr)
                 return 1
         if args.write:
             cmd_write(reader, h5_path, colors, args.exp, args.deg_y,
-                      args.deg_x, args.db, args.gain_dir)
+                      args.deg_x, args.db, args.gain_dir, args.bound)
             verify_roundtrip(args.db, args.gain_dir)
         if args.fit or not any_mode:
             cmd_fit(reader, h5_path, colors, args.exp, args.deg_y, args.deg_x)
