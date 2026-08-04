@@ -362,6 +362,47 @@ class Patches:
         return len(self.rects)
 
 
+def archive_bound(reader: Hdf5Reader) -> Optional[Tuple[int, int, int, int]]:
+    """
+    Return the `bound` an archive records for itself, or None if it has none.
+
+    Archives written at capture_h5 schema_version 2 and later stamp their ROI
+    geometry into the root attributes (and in full under `/meta`), so they can
+    be interpreted without consulting any database — which matters because the
+    analysis machine's colorimeter.sqlite is a copy that an instrument-side ROI
+    edit never reaches.  Version-1 archives predate that and return None; the
+    caller then falls back to the `roi` table with no way to verify it.
+
+    Args:
+        reader: Open Hdf5Reader for the archive.
+
+    Returns:
+        (x, y, w, h) in stream space, or None when the archive does not say.
+
+    Example:
+        >>> archive_bound(reader)                      # doctest: +SKIP
+        (1082, 478, 196, 660)
+    """
+    try:
+        attrs = reader.attrs("/")
+    except (KeyError, OSError):
+        return None
+    keys = ("bound_x", "bound_y", "bound_w", "bound_h")
+    if all(k in attrs for k in keys):
+        x, y, w, h = (int(attrs[k]) for k in keys)
+        return (x, y, w, h)
+
+    # Fall back to the full record: root attrs are a convenience, /meta is the
+    # source of truth, and an archive could carry one without the other.
+    try:
+        bound = reader.read_metadata("/", "meta").get("roi", {}).get("bound")
+    except (KeyError, OSError, ValueError):
+        return None
+    if not bound:
+        return None
+    return (int(bound["x"]), int(bound["y"]), int(bound["w"]), int(bound["h"]))
+
+
 def load_patches(shape: Tuple[int, int],
                  bound_override: Optional[Tuple[int, int, int, int]] = None,
                  ) -> Patches:
@@ -2241,10 +2282,42 @@ def main() -> int:
         return 1
 
 
+def resolve_bound(reader: Hdf5Reader,
+                  override: Optional[Tuple[int, int, int, int]],
+                  ) -> Optional[Tuple[int, int, int, int]]:
+    """
+    Decide which `bound` to use, and say where it came from.
+
+    Precedence: an explicit --bound wins, then the archive's own record, then
+    None (meaning fall back to the `roi` table).  The archive is preferred over
+    the table because it cannot be stale — it was written by the run that
+    produced the pixels.
+
+    Args:
+        reader: Open Hdf5Reader for the archive.
+        override: The --bound value, or None.
+
+    Returns:
+        (x, y, w, h) or None. Prints a one-line note about the source.
+    """
+    if override is not None:
+        print(f"  bound {override} from --bound (overriding the archive)")
+        return override
+    stamped = archive_bound(reader)
+    if stamped is not None:
+        print(f"  bound {stamped} from the archive's own metadata")
+        return stamped
+    print("  bound from the roi table — this archive does not record its own "
+          "geometry\n  (schema_version 1); the table cannot be verified "
+          "against it.")
+    return None
+
+
 def _run_modes(args: argparse.Namespace, h5_path: Path,
                any_mode: bool) -> int:
     """Open the archive and run whichever modes were asked for."""
     with Hdf5Reader(h5_path) as reader:
+        args.bound = resolve_bound(reader, args.bound)
         colors = args.led or list_led_colors(reader)
         if not colors:
             print(f"{h5_path.name}: no /leds group found.", file=sys.stderr)
@@ -2254,6 +2327,19 @@ def _run_modes(args: argparse.Namespace, h5_path: Path,
         if args.transfer:
             dst_path = resolve_h5_path(args.file2, args.captures_dir)
             with Hdf5Reader(dst_path) as dst:
+                # Transfer compares two archives pixel for pixel, so they must
+                # be crops of the same rectangle. Two different bounds would
+                # silently compare different parts of the stage.
+                dst_bound = archive_bound(dst)
+                if (dst_bound is not None and args.bound is not None
+                        and dst_bound != tuple(args.bound)):
+                    raise ValueError(
+                        f"the two archives were cropped to different bounds:\n"
+                        f"  {h5_path.name}: {tuple(args.bound)}\n"
+                        f"  {dst_path.name}: {dst_bound}\n"
+                        f"Transfer compares them pixel for pixel, so it would "
+                        f"be comparing different\nparts of the stage. "
+                        f"Re-capture both against one bound.")
                 cmd_transfer(reader, dst, h5_path, dst_path, colors,
                              args.exp, args.bound)
         if args.plot is not None:

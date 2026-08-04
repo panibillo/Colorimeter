@@ -17,6 +17,7 @@ or with unittest discovery:
     python -m unittest test.test_capture_h5
 """
 
+import json
 import sys
 import tempfile
 import unittest
@@ -27,7 +28,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
-from capture_h5 import CaptureSuiteWriter
+from capture_h5 import SCHEMA_VERSION, CaptureSuiteWriter
 
 
 def _layers(fill: int) -> dict:
@@ -61,8 +62,34 @@ class TestRootAndLayout(CaptureSuiteWriterTestCase):
             pass
         with h5py.File(self.path, "r") as f:
             self.assertEqual(f.attrs["suite_id"], "20260615_2120")
-            self.assertEqual(f.attrs["schema_version"], 1)
+            self.assertEqual(f.attrs["schema_version"], SCHEMA_VERSION)
             self.assertIn("description", f.attrs)
+
+    def test_metadata_round_trips(self):
+        """/meta carries the record; root attrs carry the essentials."""
+        meta = {"roi": {"bound": {"x": 1082, "y": 478, "w": 196, "h": 660}},
+                "camera": {"model": "imx708"},
+                "sample": {"samp_no": "ZZ1001"}}
+        with self.writer() as w:
+            w.add_metadata(meta, {"bound_x": 1082, "bound_y": 478,
+                                  "bound_w": 196, "bound_h": 660})
+        with h5py.File(self.path, "r") as f:
+            stored = json.loads(f["meta"][()])
+            self.assertEqual(stored["roi"]["bound"]["w"], 196)
+            self.assertEqual(stored["sample"]["samp_no"], "ZZ1001")
+            # The whole point: bound's x and y are unrecoverable from the
+            # layer shape, so they have to survive as attributes.
+            self.assertEqual(f.attrs["bound_x"], 1082)
+            self.assertEqual(f.attrs["bound_y"], 478)
+
+    def test_metadata_root_attrs_optional(self):
+        """add_metadata works with no attrs, leaving the stamped ones alone."""
+        with self.writer() as w:
+            w.add_metadata({"meta_version": 1})
+        with h5py.File(self.path, "r") as f:
+            self.assertEqual(json.loads(f["meta"][()])["meta_version"], 1)
+            self.assertEqual(f.attrs["suite_id"], "20260615_2120")
+            self.assertNotIn("bound_x", f.attrs)
 
     def test_add_led_writes_metadata_and_attrs(self):
         meta = {"led_color": "amber", "led_channel": 1, "nested": {"a": [1, 2]}}

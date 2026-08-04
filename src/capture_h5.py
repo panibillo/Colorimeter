@@ -13,7 +13,12 @@ cannot drift apart.
 
 Layout:
     /                                     attrs: suite_id, description,
-                                                 schema_version
+                                                 schema_version, plus the
+                                                 flattened essentials from
+                                                 capture_meta.root_attrs()
+                                                 (bound_x/y/w/h, frame_w/h,
+                                                 sensor_model, hardware_sn, …)
+    /meta                                 JSON text: the full metadata record
     /leds/<color>                         attrs: led_color, led_channel
     /leds/<color>/led_metadata            JSON text
     /leds/<color>/capture_info            JSON text  (optional)
@@ -21,6 +26,15 @@ Layout:
     /leds/<color>/lit/<label>/<ch>        attrs: exposure_us, exposure_ms
     /leds/<color>/dark/<when>_<label>     soft link → /dark/<when>_<us>us
     /dark/<when>_<us>us/<ch>              attrs: exposure_us, exposure_ms
+
+`/meta` carries the ROI geometry, camera configuration, instrument identity
+and sample record, so an archive can be interpreted without consulting any
+database. That matters because the analysis machine's colorimeter.sqlite is a
+*copy*: `sync_captures_from_pi.sh` brings `captures/` across but not the
+database, so an ROI edited on the instrument never reaches it. `bound`'s width
+and height can be recovered from the stored layer shape, but its x and y
+cannot — they are only in `/meta` (and the root attrs). See capture_meta.py,
+which decides what goes in; this module only writes what it is handed.
 
 Dark frames are captured with the LED off, so they depend only on the
 exposure time — not on which label or LED asked for it — and are shared
@@ -34,6 +48,8 @@ Usage:
     from capture_h5 import CaptureSuiteWriter
 
     with CaptureSuiteWriter("suite.h5", suite_id="20260615_2120") as w:
+        meta = capture_meta.collect(cam, cfg, sample_rowid=7)
+        w.add_metadata(meta, capture_meta.root_attrs(meta))
         w.add_led("amber", led_metadata, led_channel=1)
         w.add_lit("amber", "e3", layers, exposure_us=45691)
         w.add_dark(layers_dark, exposure_us=45691, when="before")
@@ -42,8 +58,13 @@ Usage:
 
 from hdf5write import Hdf5Writer
 
-SCHEMA_VERSION    = 1
+# 1 -> 2: added /meta and the flattened root attrs. A version-1 archive has
+# no ROI geometry of its own; a reader must fall back to its `roi` table and
+# cannot verify the result. Readers should treat /meta as optional and check
+# schema_version before relying on it.
+SCHEMA_VERSION    = 2
 SUITE_DESCRIPTION = "Colorimeter camtest8 capture suite"
+METADATA_NAME     = "meta"
 
 
 class CaptureSuiteWriter:
@@ -88,6 +109,38 @@ class CaptureSuiteWriter:
 
     def __exit__(self, *_):
         self.close()
+
+    # ── Archive-wide metadata ────────────────────────────────────────
+
+    def add_metadata(self, meta: dict, root_attrs: dict = None) -> None:
+        """
+        Store the archive-wide metadata record, and its flattened essentials.
+
+        Write this once, before the LED content, so a reader that stops early
+        or a run that aborts partway still yields an interpretable file — the
+        ROI geometry is what makes the arrays mean anything.
+
+        This module does not decide what metadata is; capture_meta.collect()
+        does. Keeping the two apart means a new field is a one-line edit there
+        and no change here.
+
+        Args:
+            meta: JSON-serializable metadata dict, from capture_meta.collect().
+            root_attrs: Flat scalars to set on "/" for readers that should not
+                have to parse JSON, from capture_meta.root_attrs(). HDF5
+                attributes cannot hold None, so that helper omits absent
+                values rather than writing placeholders.
+
+        Returns:
+            None
+
+        Example:
+            >>> attrs = capture_meta.root_attrs(meta)   # doctest: +SKIP
+            >>> w.add_metadata(meta, attrs)            # doctest: +SKIP
+        """
+        self._w.write_metadata("/", METADATA_NAME, meta)
+        if root_attrs:
+            self._w.set_attrs("/", root_attrs)
 
     # ── Path construction (the schema lives here) ────────────────────
 

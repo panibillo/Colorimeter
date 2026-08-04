@@ -57,6 +57,7 @@ from typing import Iterator
 
 import numpy as np
 
+import capture_meta
 import config_repo as config
 import exposure_repo
 import roi
@@ -172,6 +173,10 @@ class CaptureConfig:
     # not a plain default, so the location is resolved when a config is built
     # rather than baked in when this module is first imported.
     out_dir:       Path = field(default_factory=config.capture_dir)
+    # `samples.rowid` this capture belongs to, recorded in the archive's
+    # metadata. None for a menu-launched capture, which belongs to no
+    # protocol run — a normal state, not an error.
+    sample_rowid:  "int | None" = None
 
     @property
     def initial_us(self) -> int:
@@ -693,6 +698,26 @@ class CaptureRunner:
         with self.prof.time("cpu.extract"):
             return _roi_bound_layers(bayer, pattern, self.rois["bound"])
 
+    def _write_metadata(self, w: CaptureSuiteWriter) -> None:
+        """
+        Stamp the archive with its ROI geometry, camera, device and sample.
+
+        Called immediately after the writer is opened, before any image data,
+        so an aborted run still leaves an interpretable file — the layers are
+        a crop of `bound`, and without `bound`'s x and y nothing else in the
+        file can be located. capture_meta.collect() never raises, so this
+        cannot cost a capture.
+
+        Args:
+            w: The freshly opened CaptureSuiteWriter.
+
+        Returns:
+            None
+        """
+        meta = capture_meta.collect(cam=self._cam, cfg=self.config,
+                                    sample_rowid=self.config.sample_rowid)
+        w.add_metadata(meta, capture_meta.root_attrs(meta))
+
     # ── Focus ────────────────────────────────────────────────────────
 
     def _set_focus(self) -> "tuple[float, str, float | None]":
@@ -899,6 +924,7 @@ class CaptureRunner:
         # Opened here rather than at the top of the run so a failure during
         # calibration or focus leaves no empty archive behind.
         w = self._writer = CaptureSuiteWriter(self.out_path, suite_id=self.suite_id)
+        self._write_metadata(w)
 
         for led in range(cfg.led_start, cfg.led_end + 1):
             self._led_index     += 1
@@ -1235,6 +1261,7 @@ class CaptureRunner:
                 "capture",
                 f"Dark prefetch (before): {len(self._distinct_dark_us)} exposure(s)")
             w = self._writer = CaptureSuiteWriter(self.out_path, suite_id=self.suite_id)
+            self._write_metadata(w)
 
             for exp_us in self._distinct_dark_us:
                 _, bayer, _ = self._settle(exp_us)

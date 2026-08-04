@@ -1177,7 +1177,8 @@ class Arbiter:
         from capture_runner import CaptureConfig
         cfg = CaptureConfig(mode=self._cap_mode, exposure_group=self._cap_group,
                             led_start=config.capture_led_start(),
-                            led_end=config.capture_led_end())
+                            led_end=config.capture_led_end(),
+                            sample_rowid=slot.record.get("db_rowid"))
         session = self._new_session(cfg)
         if not session.start():
             log.error("Arbiter: capture failed to start: %s", session.error)
@@ -1435,7 +1436,8 @@ class Arbiter:
         from capture_runner import CaptureConfig
         cfg = CaptureConfig(mode=self._cap_mode, exposure_group=self._cap_group,
                             led_start=config.capture_led_start(),
-                            led_end=config.capture_led_end())
+                            led_end=config.capture_led_end(),
+                            sample_rowid=slot.record.get("db_rowid"))
         session = self._new_session(cfg)
         if not session.start_prefetch():
             log.error("Arbiter: dark-frame prefetch failed to start for slot "
