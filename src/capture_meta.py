@@ -214,10 +214,11 @@ def _roi_block(ctx: MetaContext) -> Dict[str, Any]:
     Record every active ROI in stream space, plus the space they live in.
 
     This is the block that closes the failure this module was written for.
-    `bound` is called out separately as well as appearing in `rects`, because
-    it is the one rectangle a reader cannot do without: it is the crop the
-    stored layers were taken from, so without its x and y no other ROI can be
-    located within them.
+    The ROI filling ROLE_BOUND is called out separately as well as appearing
+    in `rects`, because it is the one rectangle a reader cannot do without: it
+    is the crop the stored layers were taken from, so without its x and y no
+    other ROI can be located within them.  Found by role, not by the name
+    'bound', for the reason set out in roi.py.
 
     Geometry is stored in stream space, exactly as the `roi` table holds it,
     so a reader converts with the same roi.to_layer_rect_within() the capture
@@ -236,7 +237,7 @@ def _roi_block(ctx: MetaContext) -> Dict[str, Any]:
         model = ctx.cam.model
 
     rois = roi_mod.load_active(frame_w, frame_h, model)
-    bound = rois.get("bound")
+    bound = roi_mod.by_role(rois, roi_mod.ROLE_BOUND)
     return {
         "frame_w": frame_w,
         "frame_h": frame_h,

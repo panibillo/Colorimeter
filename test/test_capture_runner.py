@@ -274,15 +274,19 @@ class TestSingleLedRun(RunnerTestCase):
             arr = f["/leds/amber/lit/e3/B"][()]
         # The bound the run actually used, loaded from the `roi` table, not a
         # module constant — so an edited ROI is checked, not a stale copy.
-        bound = self.runner.rois["bound"]
+        import roi as roi_mod
+        bound = roi_mod.by_role(self.runner.rois, roi_mod.ROLE_BOUND)
         self.assertEqual(arr.shape, (bound.h // 2, bound.w // 2))
 
     def test_rois_are_loaded_and_bayer_safe(self):
         """Every ROI the run used must be even, or layer extraction shifts phase."""
         import roi as roi_mod
-        for name in capture_runner.REQUIRED_ROIS:
+        self.assertEqual(
+            roi_mod.missing_roles(self.runner.rois,
+                                  capture_runner.REQUIRED_ROLES), [],
+            "a role the capture path cannot run without is unfilled")
+        for name, r in sorted(self.runner.rois.items()):
             with self.subTest(roi=name):
-                r = self.runner.rois[name]
                 self.assertTrue(roi_mod.is_bayer_safe(r), f"{name}={r.xywh()}")
 
     def test_every_roi_lies_inside_bound(self):
@@ -296,9 +300,9 @@ class TestSingleLedRun(RunnerTestCase):
         from 315x80 to 315x98.
         """
         import roi as roi_mod
-        bound = self.runner.rois["bound"]
+        bound = roi_mod.by_role(self.runner.rois, roi_mod.ROLE_BOUND)
         for name, r in sorted(self.runner.rois.items()):
-            if name == "bound":
+            if r is bound:
                 continue
             with self.subTest(roi=name):
                 self.assertTrue(

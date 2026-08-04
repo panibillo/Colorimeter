@@ -1885,7 +1885,8 @@ class Arbiter:
             does not lie inside the mosaic) — the caller then keeps the
             exposure it has rather than guessing.
         """
-        r = self._view_rois.get("sample")
+        import roi as _roi
+        r = _roi.by_role(self._view_rois, _roi.ROLE_SAMPLE)
         if r is None or bayer is None or getattr(bayer, "ndim", 0) != 2:
             return None
         try:
@@ -1947,7 +1948,8 @@ class Arbiter:
     # ROI be *enlarged* during editing — the pixels behind the growth are
     # already there, out to the frame edge.
 
-    def open_image_view(self, slot: Slot | None = None, focus_roi: str | None = None):
+    def open_image_view(self, slot: Slot | None = None,
+                        focus_role: str | None = None):
         """
         Open the image viewer, taking one preview frame first.
 
@@ -1958,24 +1960,37 @@ class Arbiter:
         per-sample Read capture and a standalone Menu capture.
 
         Args:
-            slot:      Where Exit returns to; None returns to the Menu.
-            focus_roi: A ROI name to open zoomed to (Tool 2's entry point);
-                       None opens on the whole frame.
+            slot:       Where Exit returns to; None returns to the Menu.
+            focus_role: A ROI *role* to open zoomed to (Tool 2's entry point),
+                        e.g. roi.ROLE_SAMPLE; None opens on the whole frame.
+                        A role, not a name, because the caller means "the
+                        sample patch", not whatever the operator last called
+                        it — see the note in roi.py.
         """
         if not self.capture_available():
             log.info("Arbiter: image view refused — a capture is in flight")
             self._toast("Capture running")
             return
+        import roi as _roi
         self._view_return_slot = slot
         self._view_open = True
-        self._view_selected = focus_roi
         self._view_status = ""
         self._view_mode = "view"
         self._view_editing = None
         self._view_armed = None
         self._focused = None
         self._view_rois = self._load_view_rois()
-        self._view_reimage(focus_roi=focus_roi)
+        # Resolve the requested role to the name the rest of the viewer keys
+        # on — tap selection and the edit path both work in names. An
+        # unfilled role simply opens on the whole frame.
+        target = (_roi.by_role(self._view_rois, focus_role)
+                  if focus_role else None)
+        if focus_role and target is None:
+            log.warning("Arbiter: image view asked to focus role %r, which no "
+                        "active ROI fills; opening on the whole frame",
+                        focus_role)
+        self._view_selected = target.name if target is not None else None
+        self._view_reimage(focus_roi=self._view_selected)
 
     def _load_view_rois(self) -> dict:
         """
@@ -2193,7 +2208,8 @@ class Arbiter:
             if self._recap_save_whole:
                 self._recap_save_snapshot(frame, self._view_bayer, cam, "img")
             if self._recap_save_roi:
-                bound = self._view_rois.get("bound")
+                import roi as _roi
+                bound = _roi.by_role(self._view_rois, _roi.ROLE_BOUND)
                 if bound is None:
                     log.warning("Arbiter: recapture — no bound ROI to save")
                 else:
@@ -2639,10 +2655,11 @@ class Arbiter:
 
         proposed = dict(self._view_rois)
         proposed[snapped.name] = snapped
-        bound, sample = proposed.get("bound"), proposed.get("sample")
+        bound  = roi.by_role(proposed, roi.ROLE_BOUND)
+        sample = roi.by_role(proposed, roi.ROLE_SAMPLE)
         if bound is not None and sample is not None \
                 and not roi.contains_rect(bound, sample):
-            return self._view_reject("sample outside bound")
+            return self._view_reject(f"{sample.name} outside {bound.name}")
 
         rowid = roi.save(snapped.name, snapped, remark="edited on the instrument")
         if not rowid:
@@ -3267,6 +3284,7 @@ def _selftest() -> None:
     print("== image viewer: camera guard ==")
     import numpy as _np
     import layout as _L
+    import roi as _roi
 
     class _PreviewCam:
         """
@@ -3331,8 +3349,24 @@ def _selftest() -> None:
     check("metering is bounded",    pcam.frames <= _PREVIEW_AE_MAX_FRAMES, True)
     check("white LED on then off",  pleds.history[-2:],
           [(_PREVIEW_LED_CH, True), (_PREVIEW_LED_CH, False)])
-    check("ROIs loaded",            sorted(arb._view_rois),
-          ["black1", "black2", "bound", "sample", "white"])
+    # Bound from roles, never spelled out: the operator renames ROIs from the
+    # instrument (black1/black2 are already chip1/chip2), and a literal list
+    # here would fail on their machine while passing on a freshly seeded one.
+    check("ROIs loaded",            len(arb._view_rois) > 0, True)
+    check("the roles the viewer needs are filled",
+          _roi.missing_roles(arb._view_rois,
+                             (_roi.ROLE_SAMPLE, _roi.ROLE_BOUND)), [])
+    _SAMPLE = _roi.by_role(arb._view_rois, _roi.ROLE_SAMPLE).name
+    _BOUND  = _roi.by_role(arb._view_rois, _roi.ROLE_BOUND).name
+    def _sample_label():
+        """What the name strip should read for the sample, as it stands now.
+
+        Computed on demand rather than captured once: the edit tests resize
+        the ROI, so a constant would go stale halfway through.
+        """
+        r = arb._view_rois[_SAMPLE]
+        return f"{_SAMPLE} {r.w}x{r.h}"
+    print(f"     (sample role -> {_SAMPLE!r}, bound role -> {_BOUND!r})")
     check("opens fitted to the frame",
           round(arb._view_state.scale, 4), round(_L.IMG_CANVAS.w / 2304, 4))
     check("canvas image is canvas-sized",
@@ -3371,15 +3405,15 @@ def _selftest() -> None:
                                      r.x + r.w / 2, r.y + r.h / 2)
         arb.on_touch(int(_L.IMG_CANVAS.x + cx), int(_L.IMG_CANVAS.y + cy))
 
-    arb._view_state.fit_to(arb._view_rois["sample"])
+    arb._view_state.fit_to(arb._view_rois[_SAMPLE])
     check("nothing selected initially", arb._view_selected, None)
-    _tap_on("sample")
-    check("tap inside sample selects the smallest", arb._view_selected, "sample")
-    check("name strip shows it",  arb._pool["img_name"].text, "sample 68x68")
-    _tap_on("sample")            # sample and bound both contain this point
-    check("second tap moves to the other candidate", arb._view_selected, "bound")
-    _tap_on("sample")
-    check("third tap returns — a two-way toggle", arb._view_selected, "sample")
+    _tap_on(_SAMPLE)
+    check("tap inside sample selects the smallest", arb._view_selected, _SAMPLE)
+    check("name strip shows it",  arb._pool["img_name"].text, _sample_label())
+    _tap_on(_SAMPLE)            # sample and bound both contain this point
+    check("second tap moves to the other candidate", arb._view_selected, _BOUND)
+    _tap_on(_SAMPLE)
+    check("third tap returns — a two-way toggle", arb._view_selected, _SAMPLE)
     # A tap on empty image space clears the selection.
     arb._view_state.fit()
     arb.on_touch(_L.IMG_CANVAS.x + 3, _L.IMG_CANVAS.y + 3)
@@ -3399,19 +3433,19 @@ def _selftest() -> None:
           f"sample median {_lvl} of {_PREVIEW_TARGET}")
     # Metering reads only the sample: a ROI outside the mosaic is refused
     # rather than silently metered on something else.
-    _saved_sample = arb._view_rois["sample"]
+    _saved_sample = arb._view_rois[_SAMPLE]
     from rect import Rect as _Rect
-    arb._view_rois["sample"] = _Rect(9000, 9000, 68, 68, name="sample")
+    arb._view_rois[_SAMPLE] = _Rect(9000, 9000, 68, 68, name=_SAMPLE)
     check("an off-frame sample is not metered",
           arb._meter_sample_level(_np.zeros((1296, 2304), _np.uint16), pcam), None)
-    arb._view_rois.pop("sample")
+    arb._view_rois.pop(_SAMPLE)
     check("no sample ROI at all is not metered",
           arb._meter_sample_level(_np.zeros((1296, 2304), _np.uint16), pcam), None)
-    arb._view_rois["sample"] = _saved_sample
+    arb._view_rois[_SAMPLE] = _saved_sample
 
     print("== image viewer: 1px/10px toggle drives both modes ==")
     check("starts at 1px",   arb._pool["img_step"].label, "1px")
-    arb._view_state.fit_to(arb._view_rois["sample"])   # zoomed in, so pan bites
+    arb._view_state.fit_to(arb._view_rois[_SAMPLE])   # zoomed in, so pan bites
     _w_before = arb._view_state.w
     _cx0 = arb._view_state.cx
     arb._view_arrow(1, 0)
@@ -3436,8 +3470,8 @@ def _selftest() -> None:
     arb._view_selected = None
     arb._repaint_canvas()
     check("nothing selected -> Edit disabled", arb._pool["img_edit"].enabled, False)
-    _tap_on("sample")
-    check("tap selects",       arb._view_selected, "sample")
+    _tap_on(_SAMPLE)
+    check("tap selects",       arb._view_selected, _SAMPLE)
     check("Edit is now live",  arb._pool["img_edit"].enabled, True)
     check("and the pool routes a press to it",
           arb._pool.handle_touch(_L.IMG_EDIT.x + 5, _L.IMG_EDIT.y + 5), True)
@@ -3488,8 +3522,8 @@ def _selftest() -> None:
     _r = _L.TIMER_LBL
     arb.on_touch(_r.x + _r.w // 2, _r.y + _r.h // 2)
     check("viewer open",       arb._view_open, True)
-    check("sample preselected", arb._view_selected, "sample")
-    _sample = arb._view_rois["sample"]
+    check("sample preselected", arb._view_selected, _SAMPLE)
+    _sample = arb._view_rois[_SAMPLE]
     # fit_to(sample, 0.2): the ROI plus a fifth of its size, so about x2.45 on
     # a 200-wide canvas, and centred.
     check("zoomed to the sample + 20%",
@@ -3503,7 +3537,7 @@ def _selftest() -> None:
           all(0 <= v <= m for v, m in zip(
               _iv.rect_to_canvas(arb._view_state, _sample),
               (_L.IMG_CANVAS.w, _L.IMG_CANVAS.h) * 2)), True)
-    check("name strip names it", arb._pool["img_name"].text, "sample 68x68")
+    check("name strip names it", arb._pool["img_name"].text, _sample_label())
 
     print("== image viewer: Tool 2's Exit returns to the read screen ==")
     arb._view_exit()
@@ -3515,18 +3549,17 @@ def _selftest() -> None:
     # Runs against the scratch DB copy, so real roi.save()/restore() are
     # exercised without touching the live colorimeter.sqlite.
     print("== edit mode: Edit takes a working copy and zooms to it ==")
-    import roi as _roi
     arb._view_exit()
-    arb.open_image_view(slot=None, focus_roi="sample")
+    arb.open_image_view(slot=None, focus_role=_roi.ROLE_SAMPLE)
     check("Edit enabled with a selection", arb._pool["img_edit"].enabled, True)
     check("Save/Cancel wait",
           [arb._pool[n].enabled for n in ("img_save", "img_cancel")], [False, False])
-    _orig = arb._view_rois["sample"].xywh()
+    _orig = arb._view_rois[_SAMPLE].xywh()
     arb._view_edit()
     check("in edit mode",     arb._view_mode, "edit")
     check("working copy matches the stored ROI",
           arb._view_editing.xywh(), _orig)
-    check("stored ROI untouched", arb._view_rois["sample"].xywh(), _orig)
+    check("stored ROI untouched", arb._view_rois[_SAMPLE].xywh(), _orig)
     check("nothing armed yet", arb._view_armed, None)
     check("zoomed to rect + 50%", round(arb._view_state.scale, 2),
           round(_L.IMG_CANVAS.w / (68 * 1.5), 2))
@@ -3569,7 +3602,7 @@ def _selftest() -> None:
 
     print("== edit mode: an armed side moves alone ==")
     arb._view_armed = "right"
-    arb._view_editing = _roi.Rect(*_orig, name="sample")
+    arb._view_editing = _roi.Rect(*_orig, name=_SAMPLE)
     arb._view_arrow(1, 0)
     check("right edge out by the step",
           arb._view_editing.xywh(), (_orig[0], _orig[1], 78, 68))
@@ -3588,7 +3621,7 @@ def _selftest() -> None:
     print("== edit mode: 1px/10px, and the limits ==")
     arb._view_step = 1
     arb._view_armed = "bottom"
-    arb._view_editing = _roi.Rect(*_orig, name="sample")
+    arb._view_editing = _roi.Rect(*_orig, name=_SAMPLE)
     arb._view_arrow(0, 1)
     check("1px step", arb._view_editing.h, 69)
     arb._view_armed = "right"
@@ -3598,18 +3631,18 @@ def _selftest() -> None:
     check("cannot shrink past the minimum",
           arb._view_editing.w, _EDIT_MIN_SIDE)
     arb._view_armed = None
-    arb._view_editing = _roi.Rect(*_orig, name="sample")
+    arb._view_editing = _roi.Rect(*_orig, name=_SAMPLE)
     for _ in range(500):
         arb._view_arrow(-1, -1)
     check("cannot be pushed off the frame",
           (arb._view_editing.x, arb._view_editing.y), (0, 0))
 
     print("== edit mode: Cancel discards ==")
-    arb._view_editing = _roi.Rect(9, 9, 30, 30, name="sample")
+    arb._view_editing = _roi.Rect(9, 9, 30, 30, name=_SAMPLE)
     arb._view_cancel()
     check("back to view mode",  arb._view_mode, "view")
     check("working copy gone",  arb._view_editing, None)
-    check("stored ROI unchanged", _roi.load_active()["sample"].xywh(), _orig)
+    check("stored ROI unchanged", _roi.load_active()[_SAMPLE].xywh(), _orig)
     check("says cancelled",     arb._pool["img_name"].text, "cancelled")
     check("Exit offered again", arb._pool["img_exit"].enabled, True)
 
@@ -3621,39 +3654,40 @@ def _selftest() -> None:
         return arb._view_mode, arb._pool["img_name"].text
 
     check("too small is refused",
-          _try_save(_roi.Rect(1150, 790, 8, 8, name="sample")),
+          _try_save(_roi.Rect(1150, 790, 8, 8, name=_SAMPLE)),
           ("edit", f"min {_EDIT_MIN_SIDE}px"))
     arb._view_cancel()
     check("outside the frame is refused",
-          _try_save(_roi.Rect(2290, 790, 40, 40, name="sample")),
+          _try_save(_roi.Rect(2290, 790, 40, 40, name=_SAMPLE)),
           ("edit", "outside frame"))
     arb._view_cancel()
     check("a sample outside bound is refused",
-          _try_save(_roi.Rect(100, 100, 40, 40, name="sample")),
+          _try_save(_roi.Rect(100, 100, 40, 40, name=_SAMPLE)),
           ("edit", "sample outside bound"))
     arb._view_cancel()
     check("nothing was written by any of them",
-          _roi.load_active()["sample"].xywh(), _orig)
+          _roi.load_active()[_SAMPLE].xywh(), _orig)
 
     print("== edit mode: Save writes, snapping to even ==")
     arb._view_edit()
-    arb._view_editing = _roi.Rect(1151, 791, 41, 41, name="sample")
+    arb._view_editing = _roi.Rect(1151, 791, 41, 41, name=_SAMPLE)
     arb._view_save()
     check("back to view mode",   arb._view_mode, "view")
     check("snapped even and stored",
-          _roi.load_active()["sample"].xywh(), (1150, 790, 40, 40))
-    check("Bayer-safe",   _roi.is_bayer_safe(_roi.load_active()["sample"]), True)
-    check("the screen reloaded it", arb._view_rois["sample"].xywh(), (1150, 790, 40, 40))
+          _roi.load_active()[_SAMPLE].xywh(), (1150, 790, 40, 40))
+    check("Bayer-safe",   _roi.is_bayer_safe(_roi.load_active()[_SAMPLE]), True)
+    check("the screen reloaded it",
+          arb._view_rois[_SAMPLE].xywh(), (1150, 790, 40, 40))
     check("says what it saved", arb._pool["img_name"].text, "saved 40x40")
     check("history kept, not overwritten", _db.read_val(
         "SELECT COUNT(*) FROM roi WHERE name='sample' AND active=0") >= 1, True)
 
     print("== edit mode: restore puts the commissioned default back ==")
-    _roi.restore("sample")
-    check("default is back", _roi.load_active()["sample"].xywh(), _orig)
+    _roi.restore(_SAMPLE)
+    check("default is back", _roi.load_active()[_SAMPLE].xywh(), _orig)
 
     print("== image viewer: reimaging keeps where you were looking ==")
-    arb._view_state.fit_to(arb._view_rois["sample"])
+    arb._view_state.fit_to(arb._view_rois[_SAMPLE])
     _scale_before, _cx_before = arb._view_state.scale, arb._view_state.cx
     arb._view_reimage()
     check("scale kept",  arb._view_state.scale, _scale_before)

@@ -95,21 +95,24 @@ OUT_STEM = "camtest8"
 
 # ROI definitions live in the `roi` table and are loaded per run by
 # _load_rois() once the camera has reported its stream size — see roi.py.
-# These are the last-resort fallback for a database with no roi rows at all
-# (an old DB, or one built before the table existed). They are the same
-# numbers roi.py seeds, in stream space for a 2304×1296 imx708 capture.
-FALLBACK_ROIS = {
-    "sample": Rect(1150, 790,  68,  68, name="sample"),
-    "white":  Rect(1150, 496, 136,  68, name="white"),
-    "black1": Rect(1150, 380,  68,  68, name="black1"),
-    "black2": Rect(1150, 900,  68,  68, name="black2"),
-    "bound":  Rect(1090, 360, 196, 630, name="bound"),
-}
+# The last-resort fallback for a database with no roi rows at all (an old DB,
+# or one built before the table existed) is roi.SEED_ROIS itself, keyed by
+# role: copying those numbers here would be a second source of truth that
+# could drift from the seed block and from db_DDL.sql.
+def _fallback_by_role() -> dict:
+    """Return {role: Rect} built from roi.SEED_ROIS, first seed per role."""
+    out = {}
+    for name, role, x, y, w, h in roi.SEED_ROIS:
+        out.setdefault(role, Rect(x, y, w, h, name=name))
+    return out
 
-# The ROIs this module cannot run without: 'white' drives exposure
-# calibration, 'sample' drives the exposure ladder, 'bound' is the crop the
-# archive stores. ('black1'/'black2' are carried but not yet read.)
-REQUIRED_ROIS = ("sample", "white", "bound")
+
+# The roles this module cannot run without: ROLE_WHITE drives exposure
+# calibration, ROLE_SAMPLE drives the exposure ladder, ROLE_BOUND is the crop
+# the archive stores. Roles, not names — a name is an operator-editable label
+# ('black1'/'black2' are already 'chip1'/'chip2'), so matching on one would
+# stop working silently. See the note in roi.py.
+REQUIRED_ROLES = (roi.ROLE_SAMPLE, roi.ROLE_WHITE, roi.ROLE_BOUND)
 
 # Exposure analysis constants (10-bit sensor: 0–1023)
 HALF_SAT        = 512      # target: 50% of full scale
@@ -243,21 +246,21 @@ def _load_rois(cam) -> "dict[str, Rect]":
     Self-heals two degraded cases, in order:
       1. Table empty (a DB predating the `roi` table) — seed it from roi.py's
          commissioned defaults and re-read.
-      2. Still empty, or a required ROI missing — fall back to FALLBACK_ROIS
-         for the missing names and log an error. A capture that cannot find
-         its ROIs should still produce an archive.
+      2. Still empty, or a required *role* unfilled — fall back to the
+         matching roi.SEED_ROIS entry and log an error. A capture that cannot
+         find its ROIs should still produce an archive.
 
     Also validates what it returns, because these are the assumptions the
     Bayer-layer conversions rest on (see roi.py's traps A and B):
       - every ROI even on all four values, so layer extraction keeps its phase
-      - `sample` and `white` inside `bound`, since `bound` is the crop the
-        archive stores
+      - every other ROI inside the ROLE_BOUND one, since that is the crop
+        the archive stores
 
     Args:
         cam: The camera, already set up (config_size populated).
 
     Returns:
-        {name: Rect} in stream space, guaranteed to contain REQUIRED_ROIS.
+        {name: Rect} in stream space, guaranteed to fill REQUIRED_ROLES.
     """
     size  = getattr(cam, "config_size", None) or (None, None)
     model = getattr(cam, "model", None)
@@ -269,11 +272,15 @@ def _load_rois(cam) -> "dict[str, Rect]":
         roi.seed_defaults()
         rois = roi.load_active(size[0], size[1], model)
 
-    for name in REQUIRED_ROIS:
-        if name not in rois:
-            log.error("capture: ROI %r is missing from the roi table; using "
-                      "the built-in fallback %s", name, FALLBACK_ROIS[name])
-            rois[name] = FALLBACK_ROIS[name]
+    fallback = _fallback_by_role()
+    for role in REQUIRED_ROLES:
+        if roi.by_role(rois, role) is None:
+            spare = fallback[role]
+            log.error("capture: no active ROI fills role %r; using the "
+                      "commissioned seed %s as %r",
+                      role, spare.xywh(), spare.name)
+            spare.role = role
+            rois[spare.name] = spare
 
     for name, r in sorted(rois.items()):
         if not roi.is_bayer_safe(r):
@@ -286,16 +293,17 @@ def _load_rois(cam) -> "dict[str, Rect]":
     # stores only the bound crop. Losing part of `sample` would make the
     # reading unrecoverable, so that is an error; losing part of a reference
     # patch degrades later re-analysis, so that is a warning.
-    bound = rois["bound"]
+    bound = roi.by_role(rois, roi.ROLE_BOUND)
     for name, r in sorted(rois.items()):
-        if name == "bound" or roi.contains_rect(bound, r):
+        if r is bound or roi.contains_rect(bound, r):
             continue
         lost = "  ".join(
             f"{edge} by {px}px" for edge, px in (
                 ("left",   bound.x - r.x),   ("right",  r.x2() - bound.x2()),
                 ("top",    bound.y - r.y),   ("bottom", r.y2() - bound.y2()))
             if px > 0)
-        emit = log.error if name == "sample" else log.warning
+        emit = (log.error if getattr(r, "role", None) == roi.ROLE_SAMPLE
+                else log.warning)
         emit("capture: ROI %r %s extends outside bound %s (%s) — that part is "
              "not stored in the archive and cannot be re-measured from it",
              name, r.xywh(), bound.xywh(), lost)
@@ -588,7 +596,8 @@ class CaptureRunner:
         # from the `roi` table by _load_rois() once the camera reports its
         # stream size, so an edit made in the viewer takes effect on the next
         # run without a restart.
-        self.rois: "dict[str, Rect]" = dict(FALLBACK_ROIS)
+        self.rois: "dict[str, Rect]" = {
+            r.name: r for r in _fallback_by_role().values()}
 
         # The archive being written. Unlike the camera and LED bank, this is
         # created and owned by the runner, so the runner also closes it.
@@ -696,7 +705,8 @@ class CaptureRunner:
     def _bound_layers(self, bayer: np.ndarray, pattern: str) -> dict:
         """Crop the bound ROI and split into channel layers, timed as cpu.extract."""
         with self.prof.time("cpu.extract"):
-            return _roi_bound_layers(bayer, pattern, self.rois["bound"])
+            return _roi_bound_layers(bayer, pattern,
+                                     roi.by_role(self.rois, roi.ROLE_BOUND))
 
     def _write_metadata(self, w: CaptureSuiteWriter) -> None:
         """
@@ -859,8 +869,8 @@ class CaptureRunner:
         # layers that _extract() produces — not the bound-crop layers
         # _bound_layers() produces. See roi.py, trap C.
         self.rois   = _load_rois(cam)
-        white_lr    = roi.to_layer_rect(self.rois["white"])
-        sample_lr   = roi.to_layer_rect(self.rois["sample"])
+        white_lr    = roi.to_layer_rect(roi.by_role(self.rois, roi.ROLE_WHITE))
+        sample_lr   = roi.to_layer_rect(roi.by_role(self.rois, roi.ROLE_SAMPLE))
 
         yield self._progress(
             "setup",
@@ -1215,7 +1225,7 @@ class CaptureRunner:
 
             # ROIs come from the DB, and only now is the stream size known —
             # same as run()'s calibration path. Without this, the normal path
-            # silently kept __init__'s FALLBACK_ROIS instead of picking up
+            # silently kept __init__'s seed fallback instead of picking up
             # on-instrument edits to the active row.
             self.rois = _load_rois(cam)
 
