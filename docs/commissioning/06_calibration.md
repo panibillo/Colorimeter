@@ -79,6 +79,30 @@ standard.*
 
 ---
 
+## 6e — Illumination flat field 🟡
+
+Measures each LED's illumination pattern across the imaging area and fits a
+polynomial, so a sample ROI and a reference ROI at different places in the
+frame can be compared without the gradient biasing the result. **Per-unit** —
+the lightboard, lens and stage geometry differ between units.
+
+Captures are taken on the Pi; the analysis runs on the desktop from the synced
+archives. Full procedure, including the capture protocol and how to read the
+results:
+
+→ **[../flatfield_calibration.md](../flatfield_calibration.md)**
+
+```bash
+# desktop, from the repo root — verify the harness first
+.venv/bin/python3 devdesk/flatfield.py --selftest
+```
+
+Result lands in `devdesk/devdesk.sqlite` table `flatfield` plus `.npy` gain maps
+under `devdesk/flatfield/<suite_id>/`. Getting those onto the instrument is not
+yet designed.
+
+---
+
 ## Summary
 
 | Calibration | Artifact | State |
@@ -87,5 +111,6 @@ standard.*
 | Camera focus | `config/focus_cal.json` (on Pi, IMX708) | 🟡 via bench tooling |
 | Exposure ladder | `exposure` table | 🚧 UI/runner in progress |
 | Color/measurement | analysis output | 🚧 engine not implemented |
+| Illumination flat field | `flatfield` table + `.npy` gain maps | 🟡 analysis works; delivery to instrument undesigned |
 
 ← [05_testing.md](05_testing.md) · Next → [07_troubleshooting.md](07_troubleshooting.md)

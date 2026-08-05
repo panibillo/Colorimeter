@@ -489,6 +489,36 @@ def load_defaults(frame_w: Optional[int] = None, frame_h: Optional[int] = None,
     return _load("WHERE isdefault = 1", frame_w, frame_h, model)
 
 
+def load_calibration(frame_w: Optional[int] = None,
+                     frame_h: Optional[int] = None,
+                     model: Optional[str] = None) -> Dict[str, Rect]:
+    """
+    Return the calibration patch set (active=2), keyed by name.
+
+    A calibration capture images a uniform card through a `bound` chosen wider
+    than the measurement one, so that different sub-bounds can be tried without
+    re-imaging, and samples it at patches spread across that bound.  Those rows
+    describe a card on the stage rather than the instrument's own targets, so
+    they must not be in force during a run — hence active=2 rather than 1.
+    Both sets live in the same table because they share the stream space and
+    the same `bound` semantics.
+
+    The set is expected to hold one `bound`, one `sample` role at the centre,
+    and several `white` roles spread to the corners; nothing here enforces that,
+    since which patches a card carries is the operator's choice.
+
+    Args:
+        frame_w: Live stream width in pixels, or None to skip the check.
+        frame_h: Live stream height in pixels, or None to skip the check.
+        model:   Live sensor model, or None to skip the check.
+
+    Returns:
+        {name: Rect}, same shape as load_active().  Empty dict when no
+        calibration capture has been set up.
+    """
+    return _load("WHERE active = 2", frame_w, frame_h, model)
+
+
 def _insert(name: str, role: Optional[str], r: Rect,
             frame_w: int, frame_h: int, model: Optional[str],
             color: Optional[str], remark: Optional[str],
