@@ -67,11 +67,21 @@ import logging
 import time
 import json
 import os
-import smbus2
-from gpiozero import DigitalInputDevice
 
 from geometry import Rect
 from utils import install_exit_signals
+
+# Hardware-only imports.  Guarded so this module stays importable on a
+# desktop for testing; init() raises a clear error if actually used
+# without them.  On a Pi both are present and nothing changes.
+try:
+    import smbus2
+except ImportError:                                  # pragma: no cover
+    smbus2 = None
+try:
+    from gpiozero import DigitalInputDevice
+except ImportError:                                  # pragma: no cover
+    DigitalInputDevice = None
 
 log = logging.getLogger(__name__)
 
@@ -219,6 +229,16 @@ class TSC2007:
         """
         if self._initialised:
             return
+
+        missing = [n for n, mod in (("smbus2", smbus2),
+                                    ("gpiozero", DigitalInputDevice))
+                   if mod is None]
+        if missing:
+            raise RuntimeError(
+                f"TSC2007 needs {' and '.join(missing)}, which "
+                f"{'is' if len(missing) == 1 else 'are'} not installed. "
+                "This driver only runs on the Pi; set COLORIMETER_SIMULATION=1 "
+                "to use the mock touch driver instead.")
 
         install_exit_signals()
         self._irq_dev = DigitalInputDevice(self._irq, pull_up=True)

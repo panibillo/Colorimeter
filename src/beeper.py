@@ -40,9 +40,16 @@ Run tests:
     python3 test/test_beeper.py
 """
 
-import lgpio
 import math
 import time
+
+# Hardware-only import.  Guarded so this module stays importable on a
+# desktop for testing; _open() raises a clear error if actually used
+# without it.  On a Pi it is present and nothing changes.
+try:
+    import lgpio
+except ImportError:                                  # pragma: no cover
+    lgpio = None
 
 # ── Hardware / table constants (private) ──────────────────────────────────────
 _PIN            = 12       # BCM GPIO — MMBT3904 base driver
@@ -73,6 +80,11 @@ class Beeper:
         
     def _open(self) -> None:
         if self._h is None:
+            if lgpio is None:
+                raise RuntimeError(
+                    "Beeper needs lgpio, which is not installed. This "
+                    "driver only runs on the Pi; set COLORIMETER_SIMULATION=1 "
+                    "to use the mock beeper instead.")
             self._h = lgpio.gpiochip_open(_CHIP)
             lgpio.gpio_claim_output(self._h, _PIN)
 

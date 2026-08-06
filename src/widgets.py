@@ -556,16 +556,17 @@ class TextBox(Widget):
             self.draw(display, force=True)
 
     def draw(self, display, force: bool = False) -> None:
-        state = (self.value, self.focused, self.editing)
+        state = (self.value, self.focused, self.editing, self.enabled)
         if not force and state == self._last_drawn:
             return
         self._last_drawn = state
         widget_id_str = str(self.widget_id) if self.widget_id else ""
+        color = self.color if self.enabled else _darken(self.color)
         # Fill the background first so edits/backspaces erase the old value
         # (draw_text renders glyphs only).  The border is drawn after, on top.
         display.fill_rect(self.rect, self.bg)
         display.draw_text(self.value, self.rect,
-                          color=self.color, bg=self.bg,
+                          color=color, bg=self.bg,
                           size=self.size,
                           align=self.align, valign=self.valign,
                           widget_id=widget_id_str)

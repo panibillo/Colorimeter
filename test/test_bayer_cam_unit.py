@@ -46,7 +46,7 @@ class TestInit(unittest.TestCase):
 
     def test_default_config_is_config5(self):
         cam = BayerCam()
-        self.assertEqual(cam.config, BayerCam.CONFIG_5)
+        self.assertEqual(cam.config, cam.CONFIG_5)
         self.assertEqual(cam.config["size"], (1640, 1232))
 
 

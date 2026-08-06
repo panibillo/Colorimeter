@@ -53,6 +53,7 @@ Public surface
 
     capture_dir() / capture_suite_id() / capture_archive_name()
     capture_led_start() / capture_led_end() / fallback_exposure_group()
+    capture_led_color_order() / capture_camera_warmup_s() / capture_dark_prefetch_budget_s()
     reagent1_secs() / reagent2_secs() / analysis_secs()
     main_loop_poll_s() / shutdown_timeout_s()
     default_rowid() / backlight_pin()
@@ -119,6 +120,14 @@ SEED_PARAMS: Tuple[Tuple[str, str, str, str, str, str], ...] = (
      "operator-saved exposure from the viewer's Img recapture dialog"),
     ("capture", "default_focus_diopter", "float", "0.0", "",
      "operator-saved focus diopter from the viewer's Img recapture dialog"),
+    # Normal-path capture optimization: dark-frame prefetch during reagent2 countdown.
+    ("capture", "led_color_order", "str",
+     "photo_red,red,red_orange,amber,green,cyan,blue,royal_blue,violet,white", "",
+     "LED color-name sweep order for normal captures (comma-separated, user-editable)"),
+    ("capture", "camera_warmup_s", "float", "5.0", "",
+     "seconds to warm the camera before captures (thermal-stability margin)"),
+    ("capture", "dark_prefetch_budget_s", "float", "20.0", "",
+     "reserved time for dark-frame prefetch batch to run during reagent2 countdown"),
 
     # Timed protocol steps, in seconds.  The simulation rows shorten the
     # reagent waits so a run is quick to test, but only in simulation; a
@@ -573,6 +582,21 @@ def default_focus_diopter() -> float:
     return float(get("capture", "default_focus_diopter"))
 
 
+def capture_led_color_order() -> list:
+    """LED color-name sweep order for normal captures, as a list."""
+    return [c.strip() for c in str(get("capture", "led_color_order")).split(",") if c.strip()]
+
+
+def capture_camera_warmup_s() -> float:
+    """Seconds to warm the camera before captures (thermal-stability margin)."""
+    return float(get("capture", "camera_warmup_s"))
+
+
+def capture_dark_prefetch_budget_s() -> float:
+    """Reserved time for dark-frame prefetch batch during reagent2 countdown."""
+    return float(get("capture", "dark_prefetch_budget_s"))
+
+
 # ── Protocol timing ─────────────────────────────────────────────────────────
 # Durations of the timed steps, in seconds.  The simulation profile shortens
 # the reagent waits, and the Menu -> Config screen overrides both (saved
@@ -767,6 +791,10 @@ if __name__ == "__main__":
     db.DBNAME = str(_tmpdb)
     os.environ.pop(SIMULATION_ENV, None)
     load(reload=True)
+    
+    print('capture_led_color_order()')
+    s = capture_led_color_order()
+    print(s)
 
     print("== db_DDL.sql agrees with SEED_PARAMS ==")
     check("seed block matches", _ddl_seed_block(), seed_sql())

@@ -410,9 +410,10 @@ class ReadPhase(Phase):
         # there must be nothing to press.  capture_available() covers a capture
         # started by either slot, and slot.capturing covers this one's.
         if arb.capture_available() and not slot.capturing:
+            import roi as _roi
             pool.put("view_sample_btn", "View\nSample",
-                     on=lambda: arb.open_image_view(slot=slot,
-                                                    focus_roi="sample"))
+                     on=lambda: arb.open_image_view(
+                         slot=slot, focus_role=_roi.ROLE_SAMPLE))
         else:
             pool.put("timer_lbl", "Elapsed")
             pool["timer_lbl"].size = _TIMER_LBL_SIZE_READ
@@ -662,9 +663,9 @@ if __name__ == "__main__":
 
         # image viewer (Tool 2) — records the call so the read phase's
         # "View Sample" button can be checked without a camera.
-        def open_image_view(self, slot=None, focus_roi=None):
+        def open_image_view(self, slot=None, focus_role=None):
             self.calls.append(("open_image_view",
-                               slot.name if slot else None, focus_roi))
+                               slot.name if slot else None, focus_role))
 
         # capture / analysis
         def capture_available(self):    return self.capturing_slot is None
@@ -809,8 +810,9 @@ if __name__ == "__main__":
     check("same rect as the label",
           pool["view_sample_btn"].rect is pool["timer_lbl"].rect, True)
     press(pool, "view_sample_btn")
-    check("opens the viewer on the sample, returning to this slot",
-          ("open_image_view", "A", "sample") in arb.calls, True)
+    import roi as _roi
+    check("opens the viewer on the sample role, returning to this slot",
+          ("open_image_view", "A", _roi.ROLE_SAMPLE) in arb.calls, True)
 
     pool.set("color_fld", "pale blue")             # operator types a reading
     press(pool, "run_btn")                         # CAPTURE

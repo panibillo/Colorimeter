@@ -179,5 +179,84 @@ class TestFailures(CaptureSessionTestCase):
         self.assertEqual(self.leds.lit_channels(), set())
 
 
+class TestPrefetchCaptureSplit(CaptureSessionTestCase):
+    """
+    The normal path's two-stage session API: start_prefetch()/step() runs
+    run_prefetch() only, parking the session (hardware left open) instead of
+    releasing it; start_capture() later resumes the same runner into
+    run_capture(). No exposure data is seeded — every LED falls back to
+    cfg.initial_us, which exercises the session plumbing without needing a
+    real exposure table (see test_capture_runner.TestNormalModePrefetchSplit
+    for the archive-content-level assertions).
+    """
+
+    def setUp(self):
+        super().setUp()
+        self._real_color_order = capture_runner.config.capture_led_color_order
+        capture_runner.config.capture_led_color_order = lambda: ["amber"]
+
+    def tearDown(self):
+        capture_runner.config.capture_led_color_order = self._real_color_order
+        super().tearDown()
+
+    def make_session(self, **kwargs) -> CaptureSession:
+        return super().make_session(mode="normal", **kwargs)
+
+    def test_prefetch_parks_without_releasing_hardware(self):
+        session = self.make_session()
+        self.assertTrue(session.start_prefetch())
+        self.drain(session)
+        self.assertIsNone(session.error)
+        self.assertTrue(session.prefetch_done)
+        self.assertFalse(self.cam.stopped)
+        self.assertFalse(self.leds.closed)
+
+    def test_start_capture_resumes_and_completes_normally(self):
+        session = self.make_session()
+        session.start_prefetch()
+        self.drain(session)
+        self.assertTrue(session.start_capture())
+        self.assertFalse(session.prefetch_done)
+        self.drain(session)
+        self.assertIsNone(session.error)
+        self.assertIsNotNone(session.out_path)
+        self.assertTrue(session.out_path.exists())
+        self.assertTrue(self.cam.stopped)
+        self.assertTrue(self.leds.closed)
+
+    def test_start_capture_without_a_completed_prefetch_is_refused(self):
+        session = self.make_session()
+        self.assertFalse(session.start_capture())
+        session.start_prefetch()   # active, but not yet parked
+        self.assertFalse(session.start_capture())
+
+    def test_cancel_while_parked_closes_archive_and_releases_hardware(self):
+        session = self.make_session()
+        session.start_prefetch()
+        self.drain(session)
+        self.assertTrue(session.prefetch_done)
+        session.cancel()
+        self.assertFalse(session.active)
+        self.assertFalse(session.prefetch_done)
+        self.assertTrue(self.cam.stopped)
+        self.assertIsNotNone(session.out_path)
+        import h5py
+        with h5py.File(session.out_path, "r"):
+            pass   # must open cleanly — cancel() left a valid, closed archive
+
+    def test_progress_is_exposed_while_prefetching(self):
+        session = self.make_session()
+        session.start_prefetch()
+        first = session.step()
+        self.assertIsNotNone(first)
+        self.assertIs(session.progress, first)
+
+    def test_second_start_prefetch_while_active_is_refused(self):
+        session = self.make_session()
+        session.start_prefetch()
+        session.step()
+        self.assertFalse(session.start_prefetch())
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

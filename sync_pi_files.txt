@@ -49,6 +49,7 @@ src/capture_runner.py
 src/capture_profile.py
 src/capture_session.py
 src/capture_h5.py
+src/capture_meta.py
 src/exposure_repo.py
 src/hdf5write.py
 src/bayer_cam.py
@@ -129,6 +130,10 @@ system_requirements.txt
 #
 # dev/*.py other than camtest8.py
 #     Earlier experiments. Add a line when you need one on the Pi.
+#
+# devdesk/
+#     Desktop-only inspection tools (matplotlib, ad hoc HDF5 browsing).
+#     Never intended to run on the Pi.
 #
 # ── Regenerating this list ───────────────────────────────────────────────
 # After adding or removing imports, re-derive the module set and compare:

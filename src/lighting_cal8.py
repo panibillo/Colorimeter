@@ -201,6 +201,21 @@ class LEDBank:
         color_name, _ = self._LED_DEFS[ch - 1]
         return color_name
 
+    def channel_of(self, name: str) -> int:
+        """
+        Return the channel number for a color name (reverse of color_name()).
+
+        Args:
+            name: str color name (case-insensitive).
+
+        Returns:
+            Integer channel number 1-10.
+
+        Raises:
+            ValueError: If the name is unknown.
+        """
+        return self._resolve(name)
+
     # ── Low-level SPI ─────────────────────────────────────────
 
     def _write_sr(self, byte_val: int) -> None:

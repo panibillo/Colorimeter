@@ -10,7 +10,7 @@ rather than an exception escaping into the event loop.
 A UI polls step() from its main loop and repaints from the returned Progress.
 Nothing here knows about screens or widgets.
 
-Usage:
+Usage (a full run in one go):
     session = CaptureSession(CaptureConfig(led_start=1, led_end=10))
     session.start()
     while session.active:            # in reality, once per event-loop pass
@@ -21,6 +21,20 @@ Usage:
         display(f"Capture failed: {session.error}")
     else:
         display(f"Saved {session.out_path}")
+
+Usage (split across a pause — the normal path's dark-frame prefetch):
+    session.start_prefetch()
+    while session.active:
+        session.step()               # drives run_prefetch() only
+    # session.prefetch_done is now True; camera/archive stay open.
+    # ... arbitrary pause here (a reagent countdown, a user's own pace) ...
+    session.start_capture()          # resumes the SAME runner
+    while session.active:
+        session.step()               # drives run_capture() to completion
+    if session.error is None:
+        display(f"Saved {session.out_path}")
+    # Cancelling instead of resuming, at any point after start_prefetch():
+    #     session.cancel()
 
 Hardware is created through factories so tests can substitute fakes; the
 defaults build the real BayerCam and LEDBank, both of which fall back to
@@ -51,11 +65,15 @@ class CaptureSession:
     One capture run, advanced a step at a time.
 
     Attributes:
-        active:   True between a successful start() and the run finishing.
-        progress: The most recent Progress, or None before the first step.
-        error:    The exception that ended the run, or None.
-        out_path: Path of the archive written, set once the run completes.
-        runner:   The underlying CaptureRunner, or None before start().
+        active:        True between a successful start()/start_prefetch()/
+                       start_capture() and that stage finishing.
+        progress:      The most recent Progress, or None before the first step.
+        error:         The exception that ended the run, or None.
+        out_path:      Path of the archive written, set once the run completes.
+        runner:        The underlying CaptureRunner, or None before start().
+        prefetch_done: True once run_prefetch() has completed and parked,
+                       waiting for start_capture() to resume it. False after
+                       start()/start_capture(), or before any start.
     """
 
     def __init__(self, config: "CaptureConfig | None" = None,
@@ -78,11 +96,12 @@ class CaptureSession:
         self._cam_factory  = cam_factory
         self._leds_factory = leds_factory
 
-        self.active   = False
-        self.progress = None
+        self.active        = False
+        self.progress       = None
         self.error: "Exception | None" = None
-        self.out_path = None
+        self.out_path       = None
         self.runner: "CaptureRunner | None" = None
+        self.prefetch_done  = False
 
         # Borrowed hardware is used as-is and never released here; only hardware
         # this session builds itself (cam/leds left None) is stopped at the end.
@@ -91,13 +110,25 @@ class CaptureSession:
         self._owns_cam  = cam is None
         self._owns_leds = leds is None
         self._gen  = None
+        # True while _gen is driving run_prefetch() rather than run()/
+        # run_capture() — changes how step() treats that generator's
+        # StopIteration (park, don't release hardware) and _finish()'s
+        # bookkeeping. See start_prefetch()/start_capture().
+        self._in_prefetch = False
 
     # ── Lifecycle ────────────────────────────────────────────────────
 
-    def start(self) -> bool:
+    def _start(self, make_gen, in_prefetch: bool) -> bool:
         """
-        Acquire hardware and prepare the run. No frames are captured yet;
-        the first step() does that.
+        Shared setup for start()/start_prefetch(): acquire hardware, build
+        the runner, and point the generator at whichever entry point the
+        caller asked for. No frames are captured yet; the first step() does.
+
+        Args:
+            make_gen:    Callable(runner) -> generator, e.g. CaptureRunner.run
+                         or CaptureRunner.run_prefetch.
+            in_prefetch: Whether the generator is run_prefetch() — see
+                         self._in_prefetch.
 
         Returns:
             True if the session is ready to step, False if setup failed —
@@ -117,7 +148,8 @@ class CaptureSession:
             if self._leds is None:
                 self._leds = self._leds_factory()
             self.runner = CaptureRunner(self._cam, self._leds, self.config)
-            self._gen = self.runner.run()
+            self._gen = make_gen(self.runner)
+            self._in_prefetch = in_prefetch
         except Exception as exc:      # hardware may be missing or in use
             log.exception("CaptureSession: failed to start")
             self.error = exc
@@ -125,8 +157,65 @@ class CaptureSession:
             return False
 
         self.active = True
-        log.info("CaptureSession: started (LEDs %d–%d, mode=%s, group=%s)",
-                 self.config.led_start, self.config.led_end,
+        return True
+
+    def start(self) -> bool:
+        """
+        Acquire hardware and prepare a full, unsplit run. No frames are
+        captured yet; the first step() does that.
+
+        Returns:
+            True if the session is ready to step, False if setup failed —
+            in which case .error holds the reason and hardware is released.
+        """
+        ok = self._start(lambda r: r.run(), in_prefetch=False)
+        if ok:
+            log.info("CaptureSession: started (LEDs %d–%d, mode=%s, group=%s)",
+                     self.config.led_start, self.config.led_end,
+                     self.config.mode, self.config.exposure_group)
+        return ok
+
+    def start_prefetch(self) -> bool:
+        """
+        Acquire hardware and begin the normal path's "before" dark-frame
+        prefetch (CaptureRunner.run_prefetch()) — camera init, focus, and
+        the shared dark batch, with no LED lit. On completion the camera,
+        LED bank, and archive are deliberately left open (see step()) for
+        start_capture() to resume into after however long the caller pauses.
+
+        Returns:
+            True if the session is ready to step, False if setup failed —
+            in which case .error holds the reason and hardware is released.
+        """
+        self.prefetch_done = False
+        ok = self._start(lambda r: r.run_prefetch(), in_prefetch=True)
+        if ok:
+            log.info("CaptureSession: prefetch started (mode=%s, group=%s)",
+                     self.config.mode, self.config.exposure_group)
+        return ok
+
+    def start_capture(self) -> bool:
+        """
+        Resume a completed prefetch into the lit-LED sweep and "after" dark
+        batch (CaptureRunner.run_capture()), reusing the same runner/camera/
+        LED bank/archive run_prefetch() left open.
+
+        Returns:
+            True if capture resumed, False if there is no completed prefetch
+            to resume — the caller should fall back to a fresh start().
+        """
+        if self.runner is None or not self.prefetch_done:
+            log.warning("CaptureSession: start_capture ignored, "
+                        "no completed prefetch to resume")
+            return False
+
+        self.progress      = None
+        self.error         = None
+        self.prefetch_done = False
+        self._gen          = self.runner.run_capture()
+        self._in_prefetch  = False
+        self.active        = True
+        log.info("CaptureSession: resuming into capture (mode=%s, group=%s)",
                  self.config.mode, self.config.exposure_group)
         return True
 
@@ -137,7 +226,8 @@ class CaptureSession:
         Returns:
             The Progress just reached, or None if the session is not active
             or has just finished. Check .active and .error afterwards to tell
-            a normal completion from a failure.
+            a normal completion from a failure — and .prefetch_done to tell
+            a parked prefetch (call start_capture() next) from either.
         """
         if not self.active or self._gen is None:
             return None
@@ -146,6 +236,17 @@ class CaptureSession:
             self.progress = next(self._gen)
             return self.progress
         except StopIteration:
+            if self._in_prefetch:
+                # run_prefetch() returned normally: it deliberately left the
+                # camera/LED bank/archive open for start_capture() to resume
+                # into, so — unlike a full run's completion — nothing here
+                # is released.
+                log.info("CaptureSession: prefetch complete, parked — %s",
+                         self.runner.out_path)
+                self.active        = False
+                self.prefetch_done = True
+                self._gen          = None
+                return None
             log.info("CaptureSession: complete — %s", self.runner.out_path)
             self.out_path = self.runner.out_path
             self._finish()
@@ -159,21 +260,30 @@ class CaptureSession:
 
     def cancel(self) -> None:
         """
-        Abandon the run. The runner turns off any lit LED and closes the
-        archive, leaving whatever was captured so far readable.
+        Abandon the run — whether currently stepping, or parked after a
+        completed prefetch awaiting start_capture(). The runner turns off
+        any lit LED and closes the archive, leaving whatever was captured so
+        far readable.
         """
-        if not self.active:
+        if not self.active and not self.prefetch_done:
             return
         log.info("CaptureSession: cancelled")
         if self.runner is not None:
             self.out_path = self.runner.out_path
+            if self.prefetch_done:
+                # run_prefetch() already returned normally — there is no
+                # live generator left to abandon via _gen.close(), so close
+                # the parked archive/LED state directly instead.
+                self.runner.close_prefetch()
         self._finish()
 
     # ── Internals ────────────────────────────────────────────────────
 
     def _finish(self) -> None:
         """End the run and release hardware. Never raises."""
-        self.active = False
+        self.active        = False
+        self.prefetch_done = False
+        self._in_prefetch  = False
         if self._gen is not None:
             try:
                 self._gen.close()     # runs the runner's own cleanup

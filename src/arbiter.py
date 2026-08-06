@@ -63,10 +63,16 @@ from phases import build_phases, EntryPhase, Entry2Phase
 
 log = logging.getLogger(__name__)
 
-# Phases during which the shared camera is kept open: a run from its first
-# reagent wait through capture and analysis.  Outside this set (entry/entry2,
-# and after results) no capture is imminent, so the camera is released.
-_CAMERA_PHASES = ("reagent1", "reagent2", "read", "analysis")
+# Phases during which the shared camera is unconditionally kept open: once a
+# run reaches read (CAPTURE imminent) through analysis. reagent1 is
+# deliberately NOT here — the camera should stay off as much as possible
+# (it is believed to heat up and drift), on only long enough beforehand to be
+# thermally stable. reagent2 is also absent from this tuple: whether the
+# camera is wanted during reagent2 is a countdown threshold, not a blanket
+# phase membership — see _reagent2_within()/_camera_wanted()/
+# _maybe_open_camera(). Outside all of this (entry/entry2, and after results)
+# no capture is imminent, so the camera is released.
+_CAMERA_PHASES = ("read", "analysis")
 
 # Image viewer.  The preview is for looking at, not measuring, so the LED
 # settle is a fraction of a capture run's LED_ON_WARMUP_S (2.0 s) — colour
@@ -169,18 +175,42 @@ class Arbiter:
         self._capture: CaptureSession | None = None
         self._capture_slot: Slot | None = None
 
+        # The normal path's dark-frame prefetch (CaptureRunner.run_prefetch()),
+        # started automatically near the end of a slot's reagent2 countdown —
+        # see _maybe_start_prefetch(). Parked (not pumped further) once done,
+        # holding the camera/archive open, until request_capture() promotes it
+        # into self._capture or it is cancelled. At most one at a time, mirroring
+        # self._capture — a second slot nearing its own reagent2 threshold
+        # while this is in flight/parked simply defers (see _maybe_start_prefetch()).
+        self._prefetch: CaptureSession | None = None
+        self._prefetch_slot: Slot | None = None
+        # self._camera_epoch as it stood when the parked prefetch's own session
+        # was created — see _new_session(). request_capture() only promotes a
+        # parked prefetch whose stamp still matches the CURRENT _camera_epoch;
+        # a mismatch means some other session (the other slot's run, an image
+        # viewer preview, a forced refocus) touched the shared camera's focus
+        # or exposure since this one parked, so its "before" darks and
+        # whatever run_capture() would do next could silently disagree about
+        # camera state — safer to discard it and fall back to a fresh run.
+        self._prefetch_epoch: int | None = None
+
         # Set once the capture subsystem's heavy first-imports (picamera2,
         # libcamera, numpy, cv2) have been warmed — see prewarm_capture().
         self._capture_prewarmed = False
 
         # The persistent camera + LED bank, owned by the Arbiter and shared by
-        # every capture.  Opened once a run reaches its reagent wait (so the
-        # ~1s sensor-start settle overlaps the countdown) and reused across
-        # captures; released when no slot needs them and at cleanup.  Each
-        # CaptureSession *borrows* these rather than opening its own.  None
-        # until opened — see _ensure_camera()/_maybe_open_camera().
+        # every capture.  Opened within a lead window before a slot's reagent2
+        # countdown expires (so the sensor-start settle AND the dark-frame
+        # prefetch batch both complete before CAPTURE is reachable) and reused
+        # across captures; released when no slot needs them and at cleanup.
+        # Each CaptureSession *borrows* these rather than opening its own.
+        # None until opened — see _ensure_camera()/_maybe_open_camera().
         self._camera = None
         self._leds   = None
+        # Bumped by _new_session() every time it hands a brand-new session the
+        # shared camera — the counter a parked prefetch's _prefetch_epoch is
+        # checked against before being promoted (see above).
+        self._camera_epoch: int = 0
 
         # Placeholder analysis timer: (slot, started_at) or None.
         self._analysis: tuple | None = None
@@ -227,6 +257,7 @@ class Arbiter:
         # would close the sensor on the very next main-loop pass.
         self._view_open      = False
         self._view_frame     = None    # the whole captured frame, numpy BGR
+        self._view_bayer     = None    # that frame's raw mosaic, for recap saves
         self._view_state     = None    # image_view.ViewState over that frame
         self._view_rois:  dict = {}    # name -> rect.Rect, in image space
         self._view_selected: str | None = None   # one name, or None
@@ -251,6 +282,12 @@ class Arbiter:
         self._recap_exp        = "sample"      # "sample" | "whole"
         self._recap_save_focus = False
         self._recap_save_exp   = False
+        # Non-exclusive: either, neither, or both may be armed at once.
+        self._recap_save_roi   = False   # save the bound ROI as jpeg+bayer h5
+        self._recap_save_whole = False   # save the whole frame as jpeg+bayer h5
+        # When True, Capture takes a white-LED-off frame instead of the usual
+        # briefly-lit one — for a dark reference at the same exposure.
+        self._recap_dark       = False
 
     # ── Lifecycle ──────────────────────────────────────────────────────────────
 
@@ -351,6 +388,15 @@ class Arbiter:
             except Exception:
                 log.exception("Arbiter: cleanup: capture.cancel failed")
             self._capture = None
+
+        if self._prefetch is not None:
+            try:
+                self._prefetch.cancel()
+            except Exception:
+                log.exception("Arbiter: cleanup: prefetch.cancel failed")
+            self._prefetch = None
+            self._prefetch_slot = None
+            self._prefetch_epoch = None
 
         # Sessions borrow the shared camera without stopping it, so the Arbiter
         # (its owner) releases it here.
@@ -681,7 +727,8 @@ class Arbiter:
         self._pool.put("modal_panel")
         self._pool.put("modal_msg", msg)
         names = self._pool.layout_modal_buttons(2)
-        self._pool.put(names[0], "Select", on=self._menu_select_defaults)
+        self._pool.put(names[0], "Select", on=self._menu_select_defaults,
+                       enabled=not self._any_slot_active())
         self._pool.put(names[1], "Back",   on=self._render_menu)
         self._pool.render(self._disp)
         self._rebuild_focus()
@@ -711,6 +758,10 @@ class Arbiter:
         if self._pool is None:
             return
         p = self._pool
+        # A slot mid-protocol already read these durations; editing them now
+        # would change a running countdown out from under it. Viewing stays
+        # available — only the editable controls are locked.
+        editable = not self._any_slot_active()
         p.hide_all()
         # Top-corner chrome like the Menu and Capture screens.
         p.put("menu_cancel_btn", "CANCEL", on=self._cfg_cancel)
@@ -720,11 +771,12 @@ class Arbiter:
             p.put(f"cfg_{row}_lbl", f"Reagent {n}")
             for step in _CFG_STEPS:
                 p.put(self._cfg_step_widget(row, step), f"{step:+d}",
-                      on=(lambda r=row, d=step: self._cfg_step(r, d)))
-        p.put("cfg_r1_fld")
-        p.put("cfg_r2_fld")
+                      on=(lambda r=row, d=step: self._cfg_step(r, d)),
+                      enabled=editable)
+        p.put("cfg_r1_fld", enabled=editable)
+        p.put("cfg_r2_fld", enabled=editable)
         p.put("cfg_hint")
-        p.put("cfg_restore", "Restore", on=self._cfg_restore)
+        p.put("cfg_restore", "Restore", on=self._cfg_restore, enabled=editable)
         self._cfg_paint_values(redraw=False)
         p.render(self._disp)
         self._rebuild_focus()
@@ -1068,6 +1120,16 @@ class Arbiter:
     def capture_available(self) -> bool:
         return self._capture is None
 
+    def _any_slot_active(self) -> bool:
+        """True while slot A or B is past entry — a sample is live in it.
+
+        Editable configuration (reagent seconds, ROI geometry, defaults)
+        must not change out from under a slot that has already read it, so
+        every editor screen gates its editable state on this.
+        """
+        return any(s.active_phase not in ("entry", "entry2")
+                   for s in self._slots.values())
+
     @property
     def cap_mode(self) -> str:
         """Current Menu -> Capture path selection: 'calibration' | 'normal'."""
@@ -1079,13 +1141,44 @@ class Arbiter:
             log.info("Arbiter: capture denied — camera busy (slot %s)",
                      self._capture_slot.name if self._capture_slot else "?")
             return False
+
+        if self._prefetch is not None and self._prefetch_slot is slot:
+            # A prefetch already exists for exactly this slot — resume it if
+            # it finished and nothing else has touched the shared camera
+            # since; otherwise (still running, or stale) abandon it and fall
+            # through to a fresh, fully-synchronous run either way. No fancy
+            # recovery beyond that — this is still an experimental workflow.
+            session = self._prefetch
+            ready = (session.prefetch_done
+                    and self._prefetch_epoch == self._camera_epoch)
+            self._prefetch = None
+            self._prefetch_slot = None
+            self._prefetch_epoch = None
+            if ready:
+                if session.start_capture():
+                    self._capture = session
+                    self._capture_slot = slot
+                    slot.progress = "Starting camera..."
+                    self.persist(slot, capture_start=self.epoch(),
+                                manual_read=slot.record.get("manual_read", ""))
+                    log.info("Arbiter: capture resumed from prefetch for slot "
+                            "%s (mode=%s, group=%s)",
+                            slot.name, self._cap_mode, self._cap_group)
+                    return True
+                log.error("Arbiter: failed to resume prefetch into capture "
+                         "for slot %s: %s", slot.name, session.error)
+                slot.progress = "Camera failed"
+                return False
+            session.cancel()
+
         # Use the Menu -> Capture screen's staged path + images choice, same
         # as the standalone menu capture — a sample's Read-phase capture must
         # not silently fall back to a full calibration sweep.
         from capture_runner import CaptureConfig
         cfg = CaptureConfig(mode=self._cap_mode, exposure_group=self._cap_group,
                             led_start=config.capture_led_start(),
-                            led_end=config.capture_led_end())
+                            led_end=config.capture_led_end(),
+                            sample_rowid=slot.record.get("db_rowid"))
         session = self._new_session(cfg)
         if not session.start():
             log.error("Arbiter: capture failed to start: %s", session.error)
@@ -1122,6 +1215,10 @@ class Arbiter:
         hw = self._ensure_camera()
         if hw is not None:
             cam, leds = hw
+            # A brand-new session is about to drive the shared camera's focus
+            # and exposure — invalidate any prefetch parked from an earlier
+            # session (see _prefetch_epoch and request_capture()'s promotion).
+            self._camera_epoch += 1
             return CaptureSession(cfg, cam=cam, leds=leds)
         return CaptureSession(cfg)
 
@@ -1152,6 +1249,11 @@ class Arbiter:
             self._capture.cancel()
             self._capture = None
             self._capture_slot = None
+        if self._prefetch_slot is slot and self._prefetch is not None:
+            self._prefetch.cancel()
+            self._prefetch = None
+            self._prefetch_slot = None
+            self._prefetch_epoch = None
         if delete:
             rowid = slot.record.get("db_rowid")
             if rowid is not None:
@@ -1296,6 +1398,86 @@ class Arbiter:
                 and self._focused.phase == "read"):
             self.render(self._focused)
 
+    # ── Dark-frame prefetch (normal path only) ──────────────────────────────────
+
+    def _reagent2_within(self, slot: Slot, threshold_s: float) -> bool:
+        """True if `slot` is in reagent2 with `threshold_s` seconds or less
+        left on its countdown. False if it is not in reagent2, or has no
+        timer (armed-but-not-started, or just reset) to measure against."""
+        if slot.active_phase != "reagent2" or slot.timer is None:
+            return False
+        return slot.timer.value(self.now()) <= threshold_s
+
+    def _maybe_start_prefetch(self) -> None:
+        """
+        Automatically begin the normal path's dark-frame prefetch once a
+        slot's reagent2 countdown is within its budget of expiring — no user
+        action; the operator is still watching the countdown, not yet at
+        CAPTURE. Only applies to the normal capture path (self._cap_mode) —
+        the calibration path has no prefetch stage to run.
+
+        At most one prefetch in flight/parked at a time: if the camera is
+        already busy (a capture in progress, or another slot's prefetch),
+        this is a no-op — that slot's own eventual CAPTURE press falls back
+        to a fresh, fully-synchronous run instead (see request_capture()).
+        """
+        if self._capture is not None or self._prefetch is not None:
+            return
+        if self._cap_mode != "normal":
+            return
+        budget = config.capture_dark_prefetch_budget_s()
+        for slot in self._slots.values():
+            if self._reagent2_within(slot, budget):
+                self._start_prefetch(slot)
+                return
+
+    def _start_prefetch(self, slot: Slot) -> None:
+        """Build a session and begin run_prefetch() for `slot`'s upcoming capture."""
+        from capture_runner import CaptureConfig
+        cfg = CaptureConfig(mode=self._cap_mode, exposure_group=self._cap_group,
+                            led_start=config.capture_led_start(),
+                            led_end=config.capture_led_end(),
+                            sample_rowid=slot.record.get("db_rowid"))
+        session = self._new_session(cfg)
+        if not session.start_prefetch():
+            log.error("Arbiter: dark-frame prefetch failed to start for slot "
+                     "%s: %s", slot.name, session.error)
+            return
+        self._prefetch = session
+        self._prefetch_slot = slot
+        log.info("Arbiter: dark-frame prefetch started for slot %s", slot.name)
+
+    def pump_prefetch(self) -> None:
+        """
+        Drive the in-flight prefetch forward, like pump_capture() does for a
+        full capture — called every main-loop pass, a no-op unless
+        _maybe_start_prefetch() has armed one.
+
+        A step that yields None means run_prefetch() finished: the session
+        parks itself (camera/archive left open — see CaptureSession.step()),
+        and this stamps _prefetch_epoch so request_capture() can later tell
+        whether anything else touched the shared camera before promoting it.
+        A failure clears the slot the same way pump_capture() does, so the
+        eventual CAPTURE press falls back to a fresh run.
+        """
+        session = self._prefetch
+        if session is None or not session.active:
+            return
+        session.step()
+        if session.active:
+            return
+        if session.prefetch_done:
+            self._prefetch_epoch = self._camera_epoch
+            log.info("Arbiter: dark-frame prefetch parked for slot %s",
+                     self._prefetch_slot.name if self._prefetch_slot else "?")
+            return
+        log.error("Arbiter: dark-frame prefetch failed for slot %s: %s",
+                 self._prefetch_slot.name if self._prefetch_slot else "?",
+                 session.error)
+        self._prefetch = None
+        self._prefetch_slot = None
+        self._prefetch_epoch = None
+
     def pump_analysis(self) -> None:
         """
         Advance the pending analysis and, when it finishes, record the result on
@@ -1373,25 +1555,54 @@ class Arbiter:
 
     # ── Shared camera (persistent, borrowed by every capture) ───────────────────
 
+    def _camera_open_lead_s(self) -> float:
+        """
+        Seconds before a slot's reagent2 countdown expires within which the
+        shared camera should be open: camera_warmup_s (thermal-stability
+        margin, on but idle) plus dark_prefetch_budget_s (the dark-frame
+        prefetch batch itself, scheduled to start dark_prefetch_budget_s
+        before expiry — see _maybe_start_prefetch()). Shared by
+        _camera_wanted() and _maybe_open_camera() so the two agree on when
+        the camera should be open: were _camera_wanted()'s threshold any
+        narrower than the one that opened it, the camera would open, then
+        immediately read as "not wanted" and get released again on the very
+        same main-loop pass, thrashing for the camera_warmup_s gap between
+        the two thresholds.
+        """
+        return config.capture_camera_warmup_s() + config.capture_dark_prefetch_budget_s()
+
     def _camera_wanted(self) -> bool:
         """
-        True while anything on screen needs the shared camera.
+        True while anything on screen needs the shared camera to STAY open.
 
-        Two claims: a slot in a phase that will soon capture, and the image
-        viewer, which reimages on demand.  The viewer *must* be counted here —
-        it is not a phase, so without it _maybe_release_camera() would close
-        the sensor on the very next main-loop pass and every reimage would pay
-        the full open cost again.
+        Three claims: a slot already at read/analysis (_CAMERA_PHASES), a
+        slot in reagent2 within its camera-open lead window (see
+        _camera_open_lead_s()), and the image viewer, which reimages on
+        demand. The viewer *must* be counted here — it is not a phase, so
+        without it _maybe_release_camera() would close the sensor on the
+        very next main-loop pass and every reimage would pay the full open
+        cost again.
         """
-        return self._view_open or any(s.active_phase in _CAMERA_PHASES
-                                      for s in self._slots.values())
+        if self._view_open:
+            return True
+        lead = self._camera_open_lead_s()
+        return any(s.active_phase in _CAMERA_PHASES or self._reagent2_within(s, lead)
+                   for s in self._slots.values())
 
     def _maybe_open_camera(self) -> None:
         """
-        Open the shared camera once a run reaches its reagent wait, so the
-        ~1s sensor-start settle is paid during the (minutes-long) countdown
-        rather than at CAPTURE.  Gated on prewarm so the picamera2 import cost
-        is already absorbed; a failure is logged and left for capture time.
+        Open the shared camera within its lead window (_camera_open_lead_s())
+        before a slot's reagent2 countdown expires — long enough for the
+        sensor to settle AND the dark-frame prefetch batch to run to
+        completion before CAPTURE becomes reachable. Gated on prewarm so the
+        picamera2 import cost is already absorbed; a failure is logged and
+        left for capture time.
+
+        Deliberately NOT opened as soon as reagent1 (or even reagent2) starts:
+        the user believes the camera heats up over time and that affects
+        image stability, so it should stay off as much as possible while
+        still on long enough beforehand to be thermally stable — see
+        _CAMERA_PHASES' comment.
 
         Like _maybe_prewarm, this is polled from the main loop (not phase
         entry) so the reagent screen has rendered first and only a background
@@ -1437,10 +1648,21 @@ class Arbiter:
             return None
 
     def _maybe_release_camera(self) -> None:
-        """Close the shared camera once no slot needs it and no capture is live."""
+        """
+        Close the shared camera once no slot needs it and no capture or
+        prefetch is live.
+
+        The prefetch check matters even though a parked prefetch's slot is
+        (by definition) within _camera_wanted()'s own reagent2 threshold: an
+        operator can RESET the reagent2 timer while a prefetch is in flight
+        or parked, which clears slot.timer without changing active_phase —
+        _reagent2_within() then reads False for that slot, so this guard is
+        what actually keeps the camera from being pulled out from under it.
+        """
         if self._camera is None and self._leds is None:
             return
-        if self._capture is not None or self._camera_wanted():
+        if (self._capture is not None or self._prefetch is not None
+                or self._camera_wanted()):
             return
         log.info("Arbiter: no slot needs the camera — releasing it")
         self._release_camera()
@@ -1460,7 +1682,7 @@ class Arbiter:
                 log.exception("Arbiter: error closing shared LED bank")
             self._leds = None
 
-    def preview_frame(self, region: str = "sample"):
+    def preview_frame(self, region: str = "sample", lit: bool = True):
         """
         Take a briefly-lit, metered frame for the image viewer.
 
@@ -1478,7 +1700,14 @@ class Arbiter:
 
         Args:
             region: "sample" (default, meters the sample ROI) or "whole"
-                    (meters the entire frame) — see `_auto_expose`.
+                    (meters the entire frame) — see `_auto_expose`. Unused
+                    when `lit` is False, since there is nothing to meter.
+            lit: True (default) briefly lights the white LED and auto-exposes
+                 against `region`, as above. False leaves the LED off and
+                 takes a single frame at the last known exposure instead —
+                 the recapture dialog's "Dark" option, a reference frame at
+                 the same exposure a lit one would use, with no signal to
+                 converge metering against.
 
         Returns:
             (frame, error).  `frame` is a numpy BGR array of the full stream on
@@ -1489,19 +1718,41 @@ class Arbiter:
         if hw is None:
             return None, "Camera unavailable"
         cam, leds = hw
+        # Metering here (and _recap_capture()'s forced-refocus just before
+        # calling this) mutates the shared camera's exposure/focus — a parked
+        # prefetch's assumption that nothing else touched the camera since it
+        # parked no longer holds, so invalidate it (see _prefetch_epoch).
+        self._camera_epoch += 1
 
-        lit = False
+        if not lit:
+            import capture_runner
+            us = self._view_exposure_us or self._start_exposure_us()
+            try:
+                rgb, bayer, meta = capture_runner._set_and_settle(
+                    cam, us, max_frames=_PREVIEW_SETTLE_FRAMES)
+            except Exception:
+                log.exception("Arbiter: dark preview capture failed")
+                return None, "Preview failed"
+            if rgb is None or getattr(rgb, "ndim", 0) != 3:
+                return None, "No image"
+            self._view_exposure_us = int(meta.get("ExposureTime") or us)
+            self._view_bayer = bayer
+            log.info("Arbiter: dark preview frame %dx%d at %d us",
+                     rgb.shape[1], rgb.shape[0], self._view_exposure_us)
+            return rgb, ""
+
+        led_on = False
         try:
             if leds is not None:
                 leds.set_channel(_PREVIEW_LED_CH, True)
-                lit = True
+                led_on = True
                 time.sleep(_PREVIEW_SETTLE_S)
             rgb, exposure_us = self._auto_expose(cam, region=region)
         except Exception:
             log.exception("Arbiter: preview capture failed")
             return None, "Preview failed"
         finally:
-            if lit:
+            if led_on:
                 try:
                     leds.set_channel(_PREVIEW_LED_CH, False)
                 except Exception:
@@ -1540,6 +1791,8 @@ class Arbiter:
         preview: the exposure that worked when the metering converged, and the
         correction it was about to try when it ran out of frames.  Either way
         the next preview starts from the best estimate this one reached.
+        Likewise stashes the raw mosaic behind the returned frame in
+        `_view_bayer`, for the recapture dialog's save-to-h5 options.
 
         Args:
             cam:    The shared camera, already started.
@@ -1565,6 +1818,7 @@ class Arbiter:
                 log.info("Arbiter: preview exposure %d us (sample not metered)",
                          applied)
                 self._view_exposure_us = applied
+                self._view_bayer = bayer
                 return rgb, applied
 
             error = abs(level - _PREVIEW_TARGET) / _PREVIEW_TARGET
@@ -1579,6 +1833,7 @@ class Arbiter:
                 # `wanted == us` means the correction is pinned at a limit;
                 # another frame would only ask for the same exposure again.
                 self._view_exposure_us = applied
+                self._view_bayer = bayer
                 return rgb, applied
             us = wanted
 
@@ -1586,6 +1841,7 @@ class Arbiter:
                     "showing the frame taken at %d us; next preview starts at "
                     "%d us", _PREVIEW_AE_MAX_FRAMES, applied, us)
         self._view_exposure_us = us
+        self._view_bayer = bayer
         return rgb, applied
 
     def _start_exposure_us(self) -> int:
@@ -1629,7 +1885,8 @@ class Arbiter:
             does not lie inside the mosaic) — the caller then keeps the
             exposure it has rather than guessing.
         """
-        r = self._view_rois.get("sample")
+        import roi as _roi
+        r = _roi.by_role(self._view_rois, _roi.ROLE_SAMPLE)
         if r is None or bayer is None or getattr(bayer, "ndim", 0) != 2:
             return None
         try:
@@ -1691,7 +1948,8 @@ class Arbiter:
     # ROI be *enlarged* during editing — the pixels behind the growth are
     # already there, out to the frame edge.
 
-    def open_image_view(self, slot: Slot | None = None, focus_roi: str | None = None):
+    def open_image_view(self, slot: Slot | None = None,
+                        focus_role: str | None = None):
         """
         Open the image viewer, taking one preview frame first.
 
@@ -1702,24 +1960,37 @@ class Arbiter:
         per-sample Read capture and a standalone Menu capture.
 
         Args:
-            slot:      Where Exit returns to; None returns to the Menu.
-            focus_roi: A ROI name to open zoomed to (Tool 2's entry point);
-                       None opens on the whole frame.
+            slot:       Where Exit returns to; None returns to the Menu.
+            focus_role: A ROI *role* to open zoomed to (Tool 2's entry point),
+                        e.g. roi.ROLE_SAMPLE; None opens on the whole frame.
+                        A role, not a name, because the caller means "the
+                        sample patch", not whatever the operator last called
+                        it — see the note in roi.py.
         """
         if not self.capture_available():
             log.info("Arbiter: image view refused — a capture is in flight")
             self._toast("Capture running")
             return
+        import roi as _roi
         self._view_return_slot = slot
         self._view_open = True
-        self._view_selected = focus_roi
         self._view_status = ""
         self._view_mode = "view"
         self._view_editing = None
         self._view_armed = None
         self._focused = None
         self._view_rois = self._load_view_rois()
-        self._view_reimage(focus_roi=focus_roi)
+        # Resolve the requested role to the name the rest of the viewer keys
+        # on — tap selection and the edit path both work in names. An
+        # unfilled role simply opens on the whole frame.
+        target = (_roi.by_role(self._view_rois, focus_role)
+                  if focus_role else None)
+        if focus_role and target is None:
+            log.warning("Arbiter: image view asked to focus role %r, which no "
+                        "active ROI fills; opening on the whole frame",
+                        focus_role)
+        self._view_selected = target.name if target is not None else None
+        self._view_reimage(focus_roi=self._view_selected)
 
     def _load_view_rois(self) -> dict:
         """
@@ -1746,6 +2017,7 @@ class Arbiter:
         self._view_status = err
         if frame is None:
             self._view_frame = None
+            self._view_bayer = None
             self._view_state = None
         else:
             self._view_install_frame(frame, focus_roi=focus_roi)
@@ -1797,7 +2069,8 @@ class Arbiter:
         editing = self._view_mode == "edit"
         self._pool.put("img_edit",   "Edit",   on=self._view_edit,
                        enabled=not editing and self._view_selected is not None
-                               and self._view_frame is not None)
+                               and self._view_frame is not None
+                               and not self._any_slot_active())
         self._pool.put("img_save",   "Save",   on=self._view_save,
                        enabled=editing)
         self._pool.put("img_cancel", "Cancel", on=self._view_cancel,
@@ -1833,23 +2106,30 @@ class Arbiter:
         p.put("menu_title",      "Recapture")
         p.put("menu_ok_btn",     "Capture", on=self._recap_capture)
         p.put("recap_focus_lbl", "Focus")
-        p.put("recap_focus_auto", "Auto Focus",
+        p.put("recap_focus_auto", "Auto\nFocus",
               on=lambda: self._recap_set_focus("auto"))
         p["recap_focus_auto"].color = sel if self._recap_focus == "auto" else unsel
-        p.put("recap_focus_cfg", "Reread Cfg",
+        p.put("recap_focus_cfg", "Reread\nCfg",
               on=lambda: self._recap_set_focus("reread"))
         p["recap_focus_cfg"].color = sel if self._recap_focus == "reread" else unsel
+        p.put("recap_save_focus", "Save\nFocus", on=self._recap_toggle_save_focus)
+        p["recap_save_focus"].color = sel if self._recap_save_focus else unsel
         p.put("recap_exp_lbl", "Exposure")
-        p.put("recap_exp_sample", "Sample Rect",
+        p.put("recap_exp_sample", "Sample\nRect",
               on=lambda: self._recap_set_exp("sample"))
         p["recap_exp_sample"].color = sel if self._recap_exp == "sample" else unsel
-        p.put("recap_exp_whole", "Whole Image",
+        p.put("recap_exp_whole", "Whole\nImage",
               on=lambda: self._recap_set_exp("whole"))
         p["recap_exp_whole"].color = sel if self._recap_exp == "whole" else unsel
-        p.put("recap_save_focus", "Save Focus", on=self._recap_toggle_save_focus)
-        p["recap_save_focus"].color = sel if self._recap_save_focus else unsel
-        p.put("recap_save_exp", "Save Exposure", on=self._recap_toggle_save_exp)
+        p.put("recap_save_exp", "Save\nExp", on=self._recap_toggle_save_exp)
         p["recap_save_exp"].color = sel if self._recap_save_exp else unsel
+        p.put("recap_image_lbl", "Save Image")
+        p.put("recap_image_roi", "Bound\nROI", on=self._recap_toggle_save_roi)
+        p["recap_image_roi"].color = sel if self._recap_save_roi else unsel
+        p.put("recap_image_whole", "Whole\nImage", on=self._recap_toggle_save_whole)
+        p["recap_image_whole"].color = sel if self._recap_save_whole else unsel
+        p.put("recap_image_dark", "Dark", on=self._recap_toggle_dark)
+        p["recap_image_dark"].color = sel if self._recap_dark else unsel
         p.render(self._disp)
         self._rebuild_focus()
 
@@ -1871,6 +2151,20 @@ class Arbiter:
         self._recap_save_exp = not self._recap_save_exp
         self._recap_render()
 
+    def _recap_toggle_save_roi(self) -> None:
+        # Non-exclusive: independent of _recap_toggle_save_whole.
+        self._recap_save_roi = not self._recap_save_roi
+        self._recap_render()
+
+    def _recap_toggle_save_whole(self) -> None:
+        # Non-exclusive: independent of _recap_toggle_save_roi.
+        self._recap_save_whole = not self._recap_save_whole
+        self._recap_render()
+
+    def _recap_toggle_dark(self) -> None:
+        self._recap_dark = not self._recap_dark
+        self._recap_render()
+
     def _recap_cancel(self) -> None:
         """Discard the pending choices and return to the viewer untouched."""
         self._render_image_view()
@@ -1890,14 +2184,15 @@ class Arbiter:
             cam.reread_focus_cal()
         # else: neither checked — leave focus exactly as it is.
 
-        frame, err = self.preview_frame(region=self._recap_exp)
+        frame, err = self.preview_frame(region=self._recap_exp,
+                                        lit=not self._recap_dark)
         self._view_status = err
 
         diopter = cam.lens_position
         log.info("Arbiter: recapture — focus=%s diopter=%s exposure=%s us "
-                 "region=%s", self._recap_focus or "unchanged",
+                 "region=%s lit=%s", self._recap_focus or "unchanged",
                  f"{diopter:.4f}" if diopter is not None else "n/a",
-                 self._view_exposure_us, self._recap_exp)
+                 self._view_exposure_us, self._recap_exp, not self._recap_dark)
 
         if self._recap_save_focus and diopter is not None:
             config.save("capture", "default_focus_diopter", diopter)
@@ -1907,10 +2202,62 @@ class Arbiter:
 
         if frame is None:
             self._view_frame = None
+            self._view_bayer = None
             self._view_state = None
         else:
+            if self._recap_save_whole:
+                self._recap_save_snapshot(frame, self._view_bayer, cam, "img")
+            if self._recap_save_roi:
+                import roi as _roi
+                bound = _roi.by_role(self._view_rois, _roi.ROLE_BOUND)
+                if bound is None:
+                    log.warning("Arbiter: recapture — no bound ROI to save")
+                else:
+                    self._recap_save_snapshot(frame, self._view_bayer, cam,
+                                              "bound", crop_rect=bound)
             self._view_install_frame(frame)
         self._render_image_view()
+
+    def _recap_save_snapshot(self, rgb, bayer, cam, suffix: str,
+                              crop_rect=None) -> None:
+        """
+        Write one recapture snapshot — a JPEG plus the four Bayer layers
+        behind it — into the captures directory as "<timestamp>_<suffix>.h5".
+
+        `suffix` is "img" for the whole frame or "bound" for the bound-ROI
+        crop (`crop_rect`). Reuses capture_runner's private jpeg/layer
+        helpers so this ad hoc snapshot encodes the same inputs the same way
+        a normal suite archive would.
+        """
+        if bayer is None or getattr(bayer, "ndim", 0) != 2:
+            log.warning("Arbiter: recapture — no raw frame to save (%s)", suffix)
+            return
+        import capture_runner
+        from bayer_cam import BayerCam
+        from hdf5write import Hdf5Writer
+
+        pattern = getattr(cam, "bayer_pattern", "BGGR")
+        if crop_rect is not None:
+            rgb_out = BayerCam.crop_rgb(rgb, crop_rect)
+            layers = capture_runner._roi_bound_layers(bayer, pattern, crop_rect)
+        else:
+            rgb_out = rgb
+            layers = BayerCam.extract_bayer_layers(bayer, pattern)
+
+        out_dir = config.capture_dir()
+        out_dir.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.datetime.now().strftime("%Y-%m-%d_%H%M%S")
+        path = out_dir / f"{stamp}_{suffix}.h5"
+        try:
+            with Hdf5Writer(path) as w:
+                w.set_attrs("/", {"suite_id": stamp})
+                w.write_bytes("/", "jpeg", capture_runner._encode_jpeg(rgb_out),
+                              attrs={"format": "jpeg"})
+                for ch, arr in layers.items():
+                    w.write_array("/bayer", ch, arr)
+            log.info("Arbiter: recapture — saved %s", path)
+        except Exception:
+            log.exception("Arbiter: recapture — could not save %s", path)
 
     def _paint_canvas(self) -> None:
         """
@@ -2000,7 +2347,8 @@ class Arbiter:
             return
         want = (self._view_mode != "edit"
                 and self._view_selected is not None
-                and self._view_frame is not None)
+                and self._view_frame is not None
+                and not self._any_slot_active())
         if w.enabled == want:
             return
         self._pool.put("img_edit", "Edit", on=self._view_edit, enabled=want)
@@ -2307,10 +2655,11 @@ class Arbiter:
 
         proposed = dict(self._view_rois)
         proposed[snapped.name] = snapped
-        bound, sample = proposed.get("bound"), proposed.get("sample")
+        bound  = roi.by_role(proposed, roi.ROLE_BOUND)
+        sample = roi.by_role(proposed, roi.ROLE_SAMPLE)
         if bound is not None and sample is not None \
                 and not roi.contains_rect(bound, sample):
-            return self._view_reject("sample outside bound")
+            return self._view_reject(f"{sample.name} outside {bound.name}")
 
         rowid = roi.save(snapped.name, snapped, remark="edited on the instrument")
         if not rowid:
@@ -2346,6 +2695,7 @@ class Arbiter:
             return                    # Exit is disabled while editing
         self._view_open = False
         self._view_frame = None          # ~9 MB; do not hold it past the screen
+        self._view_bayer = None          # ~6 MB raw mosaic behind that frame
         self._view_state = None
         self._view_rois = {}
         self._view_selected = None
@@ -2471,6 +2821,8 @@ class Arbiter:
             self.poll_timers()
             self._maybe_prewarm()
             self._maybe_open_camera()
+            self._maybe_start_prefetch()
+            self.pump_prefetch()
             self.pump_capture()
             self.pump_analysis()
             self._maybe_release_camera()
@@ -2541,19 +2893,41 @@ def _selftest() -> None:
             self.suite_id = "TESTSUITE"; self.results = []
 
     class _FakeCapture:
-        """Completes after `steps` step() calls."""
+        """
+        Completes after `steps` step() calls.  Also stands in for the
+        prefetch/capture split (start_prefetch()/prefetch_done/
+        start_capture()), mirroring CaptureSession's external contract:
+        run_prefetch() takes one step, then parks without releasing anything;
+        start_capture() resumes the same fake into its ordinary step() count.
+        """
         def __init__(self, config=None, steps=3):
             self.active = False; self.error = None
             self.out_path = Path("fake.h5")
             self.runner = _FakeRunner()
             self._i = 0; self._n = steps
+            self.prefetch_done = False
+            self._prefetching = False
         def start(self): self.active = True; return True
+        def start_prefetch(self):
+            self.active = True; self._prefetching = True
+            return True
+        def start_capture(self):
+            if not self.prefetch_done:
+                return False
+            self.prefetch_done = False
+            self.active = True; self._prefetching = False
+            self._i = 0
+            return True
         def step(self):
+            if self._prefetching:
+                self.active = False
+                self.prefetch_done = True
+                return None
             if self._i >= self._n:
                 self.active = False; return None
             self._i += 1
             return _FakeProgress(self._i, self._n)
-        def cancel(self): self.active = False
+        def cancel(self): self.active = False; self.prefetch_done = False
 
     def check(label, got, want):
         ok = "OK " if got == want else "XX "
@@ -2578,7 +2952,10 @@ def _selftest() -> None:
     arb.prewarm_capture()                         # idempotent — must not raise
     A.active_phase = "entry"                       # restore for the checks below
 
-    print("== shared camera: opens on reagent, released when idle ==")
+    print("== shared camera: opens near reagent2 expiry (not on reagent1), "
+          "released when idle ==")
+
+    from timer import TimerState
 
     class _FakeCam:
         def __init__(self):  self.stopped = False
@@ -2596,20 +2973,86 @@ def _selftest() -> None:
         return arb._camera, arb._leds
     arb._ensure_camera = _fake_ensure
 
+    open_lead = (config.capture_camera_warmup_s()
+                + config.capture_dark_prefetch_budget_s())
+
     check("no camera while idle",   arb._camera_wanted(), False)
     arb._maybe_open_camera()
     check("idle → camera stays shut", arb._camera is None, True)
-    A.active_phase = "reagent2"
+
+    A.active_phase = "reagent1"     # believed to heat the camera — stays off
     arb._maybe_open_camera()
-    check("reagent → camera opened", arb._camera is not None, True)
+    check("reagent1 → camera stays shut", arb._camera is None, True)
+
+    A.active_phase = "reagent2"
+    A.timer = TimerState.down(open_lead * 10, arb.now())   # far from expiry
+    arb._maybe_open_camera()
+    check("reagent2 far from expiry → camera stays shut", arb._camera is None, True)
+
+    A.timer = TimerState.down(open_lead - 1, arb.now())    # within the lead window
+    arb._maybe_open_camera()
+    check("reagent2 near expiry → camera opened", arb._camera is not None, True)
     fake_cam, fake_leds = arb._camera, arb._leds
-    arb._maybe_release_camera()                    # still wanted (A in reagent2)
+    arb._maybe_release_camera()                    # still wanted (A within budget)
     check("kept open while wanted",  arb._camera is fake_cam, True)
-    A.active_phase = "entry"                        # both slots idle now
+    A.active_phase = "entry"; A.timer = None        # both slots idle now
     arb._maybe_release_camera()
     check("idle → camera released",  arb._camera is None, True)
     check("camera stopped",          fake_cam.stopped, True)
     check("leds closed",             fake_leds.closed, True)
+
+    print("== dark-frame prefetch: scheduled near reagent2 expiry, "
+          "promoted at CAPTURE ==")
+    arb._cap_mode = "normal"
+    budget = config.capture_dark_prefetch_budget_s()
+
+    A.active_phase = "reagent2"
+    A.timer = TimerState.down(budget * 10, arb.now())      # far from budget
+    arb._maybe_start_prefetch()
+    check("far from expiry → no prefetch yet", arb._prefetch is None, True)
+
+    A.timer = TimerState.down(budget - 1, arb.now())       # within budget
+    arb._maybe_start_prefetch()
+    check("within budget → prefetch started", arb._prefetch is not None, True)
+    check("prefetch owner is A",              arb._prefetch_slot is A, True)
+
+    B.active_phase = "reagent2"
+    B.timer = TimerState.down(budget - 1, arb.now())
+    arb._maybe_start_prefetch()
+    check("second slot's prefetch deferred (camera busy)",
+         arb._prefetch_slot is A, True)
+    B.active_phase = "entry"; B.timer = None       # tidy up
+
+    for _ in range(5):
+        arb.pump_prefetch()
+    check("prefetch parked (not active)", arb._prefetch.active, False)
+    check("prefetch_done",                arb._prefetch.prefetch_done, True)
+    check("camera stays wanted while parked", arb._camera_wanted(), True)
+
+    print("== stale prefetch (camera touched since parking) falls back ==")
+    arb._camera_epoch += 1     # simulate another session using the camera meanwhile
+    ok = arb.request_capture(A)
+    check("stale prefetch still grants a fresh run", ok, True)
+    check("stale prefetch was discarded", arb._prefetch is None, True)
+    for _ in range(10):
+        arb.pump_capture()
+    check("fresh run completes", arb.capture_available(), True)
+
+    print("== fresh prefetch: promoted (not restarted) at CAPTURE ==")
+    A.active_phase = "reagent2"
+    A.timer = TimerState.down(budget - 1, arb.now())
+    arb._maybe_start_prefetch()
+    for _ in range(5):
+        arb.pump_prefetch()
+    check("second prefetch parked", arb._prefetch.prefetch_done, True)
+    ok = arb.request_capture(A)
+    check("fresh prefetch promoted",          ok, True)
+    check("prefetch cleared after promotion", arb._prefetch is None, True)
+    check("capture now in flight (promoted)", arb._capture is not None, True)
+    for _ in range(5):
+        arb.pump_capture()
+    check("promoted capture completes", arb.capture_available(), True)
+    A.active_phase = "entry"; A.timer = None
 
     print("== render draws only the focused slot ==")
     arb.goto(A, "entry")
@@ -2619,7 +3062,6 @@ def _selftest() -> None:
     arb.focus(A)
     B.record["samp_no"] = "BX9"; B.phase = B.active_phase = "reagent1"
     B.running = True
-    from timer import TimerState
     B.timer = TimerState.down(120, arb.now())
     arb.render(B)                                   # background: must be a no-op
     check("pool still shows A entry title", arb._pool["title"].text, "New Test")
@@ -2842,6 +3284,7 @@ def _selftest() -> None:
     print("== image viewer: camera guard ==")
     import numpy as _np
     import layout as _L
+    import roi as _roi
 
     class _PreviewCam:
         """
@@ -2906,8 +3349,24 @@ def _selftest() -> None:
     check("metering is bounded",    pcam.frames <= _PREVIEW_AE_MAX_FRAMES, True)
     check("white LED on then off",  pleds.history[-2:],
           [(_PREVIEW_LED_CH, True), (_PREVIEW_LED_CH, False)])
-    check("ROIs loaded",            sorted(arb._view_rois),
-          ["black1", "black2", "bound", "sample", "white"])
+    # Bound from roles, never spelled out: the operator renames ROIs from the
+    # instrument (black1/black2 are already chip1/chip2), and a literal list
+    # here would fail on their machine while passing on a freshly seeded one.
+    check("ROIs loaded",            len(arb._view_rois) > 0, True)
+    check("the roles the viewer needs are filled",
+          _roi.missing_roles(arb._view_rois,
+                             (_roi.ROLE_SAMPLE, _roi.ROLE_BOUND)), [])
+    _SAMPLE = _roi.by_role(arb._view_rois, _roi.ROLE_SAMPLE).name
+    _BOUND  = _roi.by_role(arb._view_rois, _roi.ROLE_BOUND).name
+    def _sample_label():
+        """What the name strip should read for the sample, as it stands now.
+
+        Computed on demand rather than captured once: the edit tests resize
+        the ROI, so a constant would go stale halfway through.
+        """
+        r = arb._view_rois[_SAMPLE]
+        return f"{_SAMPLE} {r.w}x{r.h}"
+    print(f"     (sample role -> {_SAMPLE!r}, bound role -> {_BOUND!r})")
     check("opens fitted to the frame",
           round(arb._view_state.scale, 4), round(_L.IMG_CANVAS.w / 2304, 4))
     check("canvas image is canvas-sized",
@@ -2946,15 +3405,15 @@ def _selftest() -> None:
                                      r.x + r.w / 2, r.y + r.h / 2)
         arb.on_touch(int(_L.IMG_CANVAS.x + cx), int(_L.IMG_CANVAS.y + cy))
 
-    arb._view_state.fit_to(arb._view_rois["sample"])
+    arb._view_state.fit_to(arb._view_rois[_SAMPLE])
     check("nothing selected initially", arb._view_selected, None)
-    _tap_on("sample")
-    check("tap inside sample selects the smallest", arb._view_selected, "sample")
-    check("name strip shows it",  arb._pool["img_name"].text, "sample 68x68")
-    _tap_on("sample")            # sample and bound both contain this point
-    check("second tap moves to the other candidate", arb._view_selected, "bound")
-    _tap_on("sample")
-    check("third tap returns — a two-way toggle", arb._view_selected, "sample")
+    _tap_on(_SAMPLE)
+    check("tap inside sample selects the smallest", arb._view_selected, _SAMPLE)
+    check("name strip shows it",  arb._pool["img_name"].text, _sample_label())
+    _tap_on(_SAMPLE)            # sample and bound both contain this point
+    check("second tap moves to the other candidate", arb._view_selected, _BOUND)
+    _tap_on(_SAMPLE)
+    check("third tap returns — a two-way toggle", arb._view_selected, _SAMPLE)
     # A tap on empty image space clears the selection.
     arb._view_state.fit()
     arb.on_touch(_L.IMG_CANVAS.x + 3, _L.IMG_CANVAS.y + 3)
@@ -2974,19 +3433,19 @@ def _selftest() -> None:
           f"sample median {_lvl} of {_PREVIEW_TARGET}")
     # Metering reads only the sample: a ROI outside the mosaic is refused
     # rather than silently metered on something else.
-    _saved_sample = arb._view_rois["sample"]
+    _saved_sample = arb._view_rois[_SAMPLE]
     from rect import Rect as _Rect
-    arb._view_rois["sample"] = _Rect(9000, 9000, 68, 68, name="sample")
+    arb._view_rois[_SAMPLE] = _Rect(9000, 9000, 68, 68, name=_SAMPLE)
     check("an off-frame sample is not metered",
           arb._meter_sample_level(_np.zeros((1296, 2304), _np.uint16), pcam), None)
-    arb._view_rois.pop("sample")
+    arb._view_rois.pop(_SAMPLE)
     check("no sample ROI at all is not metered",
           arb._meter_sample_level(_np.zeros((1296, 2304), _np.uint16), pcam), None)
-    arb._view_rois["sample"] = _saved_sample
+    arb._view_rois[_SAMPLE] = _saved_sample
 
     print("== image viewer: 1px/10px toggle drives both modes ==")
     check("starts at 1px",   arb._pool["img_step"].label, "1px")
-    arb._view_state.fit_to(arb._view_rois["sample"])   # zoomed in, so pan bites
+    arb._view_state.fit_to(arb._view_rois[_SAMPLE])   # zoomed in, so pan bites
     _w_before = arb._view_state.w
     _cx0 = arb._view_state.cx
     arb._view_arrow(1, 0)
@@ -3011,8 +3470,8 @@ def _selftest() -> None:
     arb._view_selected = None
     arb._repaint_canvas()
     check("nothing selected -> Edit disabled", arb._pool["img_edit"].enabled, False)
-    _tap_on("sample")
-    check("tap selects",       arb._view_selected, "sample")
+    _tap_on(_SAMPLE)
+    check("tap selects",       arb._view_selected, _SAMPLE)
     check("Edit is now live",  arb._pool["img_edit"].enabled, True)
     check("and the pool routes a press to it",
           arb._pool.handle_touch(_L.IMG_EDIT.x + 5, _L.IMG_EDIT.y + 5), True)
@@ -3063,8 +3522,8 @@ def _selftest() -> None:
     _r = _L.TIMER_LBL
     arb.on_touch(_r.x + _r.w // 2, _r.y + _r.h // 2)
     check("viewer open",       arb._view_open, True)
-    check("sample preselected", arb._view_selected, "sample")
-    _sample = arb._view_rois["sample"]
+    check("sample preselected", arb._view_selected, _SAMPLE)
+    _sample = arb._view_rois[_SAMPLE]
     # fit_to(sample, 0.2): the ROI plus a fifth of its size, so about x2.45 on
     # a 200-wide canvas, and centred.
     check("zoomed to the sample + 20%",
@@ -3078,7 +3537,7 @@ def _selftest() -> None:
           all(0 <= v <= m for v, m in zip(
               _iv.rect_to_canvas(arb._view_state, _sample),
               (_L.IMG_CANVAS.w, _L.IMG_CANVAS.h) * 2)), True)
-    check("name strip names it", arb._pool["img_name"].text, "sample 68x68")
+    check("name strip names it", arb._pool["img_name"].text, _sample_label())
 
     print("== image viewer: Tool 2's Exit returns to the read screen ==")
     arb._view_exit()
@@ -3090,18 +3549,17 @@ def _selftest() -> None:
     # Runs against the scratch DB copy, so real roi.save()/restore() are
     # exercised without touching the live colorimeter.sqlite.
     print("== edit mode: Edit takes a working copy and zooms to it ==")
-    import roi as _roi
     arb._view_exit()
-    arb.open_image_view(slot=None, focus_roi="sample")
+    arb.open_image_view(slot=None, focus_role=_roi.ROLE_SAMPLE)
     check("Edit enabled with a selection", arb._pool["img_edit"].enabled, True)
     check("Save/Cancel wait",
           [arb._pool[n].enabled for n in ("img_save", "img_cancel")], [False, False])
-    _orig = arb._view_rois["sample"].xywh()
+    _orig = arb._view_rois[_SAMPLE].xywh()
     arb._view_edit()
     check("in edit mode",     arb._view_mode, "edit")
     check("working copy matches the stored ROI",
           arb._view_editing.xywh(), _orig)
-    check("stored ROI untouched", arb._view_rois["sample"].xywh(), _orig)
+    check("stored ROI untouched", arb._view_rois[_SAMPLE].xywh(), _orig)
     check("nothing armed yet", arb._view_armed, None)
     check("zoomed to rect + 50%", round(arb._view_state.scale, 2),
           round(_L.IMG_CANVAS.w / (68 * 1.5), 2))
@@ -3144,7 +3602,7 @@ def _selftest() -> None:
 
     print("== edit mode: an armed side moves alone ==")
     arb._view_armed = "right"
-    arb._view_editing = _roi.Rect(*_orig, name="sample")
+    arb._view_editing = _roi.Rect(*_orig, name=_SAMPLE)
     arb._view_arrow(1, 0)
     check("right edge out by the step",
           arb._view_editing.xywh(), (_orig[0], _orig[1], 78, 68))
@@ -3163,7 +3621,7 @@ def _selftest() -> None:
     print("== edit mode: 1px/10px, and the limits ==")
     arb._view_step = 1
     arb._view_armed = "bottom"
-    arb._view_editing = _roi.Rect(*_orig, name="sample")
+    arb._view_editing = _roi.Rect(*_orig, name=_SAMPLE)
     arb._view_arrow(0, 1)
     check("1px step", arb._view_editing.h, 69)
     arb._view_armed = "right"
@@ -3173,18 +3631,18 @@ def _selftest() -> None:
     check("cannot shrink past the minimum",
           arb._view_editing.w, _EDIT_MIN_SIDE)
     arb._view_armed = None
-    arb._view_editing = _roi.Rect(*_orig, name="sample")
+    arb._view_editing = _roi.Rect(*_orig, name=_SAMPLE)
     for _ in range(500):
         arb._view_arrow(-1, -1)
     check("cannot be pushed off the frame",
           (arb._view_editing.x, arb._view_editing.y), (0, 0))
 
     print("== edit mode: Cancel discards ==")
-    arb._view_editing = _roi.Rect(9, 9, 30, 30, name="sample")
+    arb._view_editing = _roi.Rect(9, 9, 30, 30, name=_SAMPLE)
     arb._view_cancel()
     check("back to view mode",  arb._view_mode, "view")
     check("working copy gone",  arb._view_editing, None)
-    check("stored ROI unchanged", _roi.load_active()["sample"].xywh(), _orig)
+    check("stored ROI unchanged", _roi.load_active()[_SAMPLE].xywh(), _orig)
     check("says cancelled",     arb._pool["img_name"].text, "cancelled")
     check("Exit offered again", arb._pool["img_exit"].enabled, True)
 
@@ -3196,39 +3654,40 @@ def _selftest() -> None:
         return arb._view_mode, arb._pool["img_name"].text
 
     check("too small is refused",
-          _try_save(_roi.Rect(1150, 790, 8, 8, name="sample")),
+          _try_save(_roi.Rect(1150, 790, 8, 8, name=_SAMPLE)),
           ("edit", f"min {_EDIT_MIN_SIDE}px"))
     arb._view_cancel()
     check("outside the frame is refused",
-          _try_save(_roi.Rect(2290, 790, 40, 40, name="sample")),
+          _try_save(_roi.Rect(2290, 790, 40, 40, name=_SAMPLE)),
           ("edit", "outside frame"))
     arb._view_cancel()
     check("a sample outside bound is refused",
-          _try_save(_roi.Rect(100, 100, 40, 40, name="sample")),
+          _try_save(_roi.Rect(100, 100, 40, 40, name=_SAMPLE)),
           ("edit", "sample outside bound"))
     arb._view_cancel()
     check("nothing was written by any of them",
-          _roi.load_active()["sample"].xywh(), _orig)
+          _roi.load_active()[_SAMPLE].xywh(), _orig)
 
     print("== edit mode: Save writes, snapping to even ==")
     arb._view_edit()
-    arb._view_editing = _roi.Rect(1151, 791, 41, 41, name="sample")
+    arb._view_editing = _roi.Rect(1151, 791, 41, 41, name=_SAMPLE)
     arb._view_save()
     check("back to view mode",   arb._view_mode, "view")
     check("snapped even and stored",
-          _roi.load_active()["sample"].xywh(), (1150, 790, 40, 40))
-    check("Bayer-safe",   _roi.is_bayer_safe(_roi.load_active()["sample"]), True)
-    check("the screen reloaded it", arb._view_rois["sample"].xywh(), (1150, 790, 40, 40))
+          _roi.load_active()[_SAMPLE].xywh(), (1150, 790, 40, 40))
+    check("Bayer-safe",   _roi.is_bayer_safe(_roi.load_active()[_SAMPLE]), True)
+    check("the screen reloaded it",
+          arb._view_rois[_SAMPLE].xywh(), (1150, 790, 40, 40))
     check("says what it saved", arb._pool["img_name"].text, "saved 40x40")
     check("history kept, not overwritten", _db.read_val(
         "SELECT COUNT(*) FROM roi WHERE name='sample' AND active=0") >= 1, True)
 
     print("== edit mode: restore puts the commissioned default back ==")
-    _roi.restore("sample")
-    check("default is back", _roi.load_active()["sample"].xywh(), _orig)
+    _roi.restore(_SAMPLE)
+    check("default is back", _roi.load_active()[_SAMPLE].xywh(), _orig)
 
     print("== image viewer: reimaging keeps where you were looking ==")
-    arb._view_state.fit_to(arb._view_rois["sample"])
+    arb._view_state.fit_to(arb._view_rois[_SAMPLE])
     _scale_before, _cx_before = arb._view_state.scale, arb._view_state.cx
     arb._view_reimage()
     check("scale kept",  arb._view_state.scale, _scale_before)

@@ -579,26 +579,29 @@ if __name__ == "__main__":
     near("vertical pan is a no-op at fit", v.cy, before)
     near("still centred", v.cy, fh / 2.0)
 
-    print("== fit_to: the sample ROI plus 20% ==")
-    sample = Rect(1150, 790, 68, 68, name="sample")
-    v = ViewState(fw, fh, cw, ch).fit_to(sample)
+    print("== fit_to: a small off-centre rectangle plus 20% ==")
+    # A fixture for the transform arithmetic, deliberately not read from the
+    # roi table: this tests fit_to(), not any particular ROI, and must keep
+    # working whatever the operator has the table set to.
+    patch = Rect(1150, 790, 68, 68, name="fixture")
+    v = ViewState(fw, fh, cw, ch).fit_to(patch)
     near("scale ~= 2.45", round(v.scale, 2), 2.45)
-    check("ROI renders about 166 px across",
-          round(sample.w * v.scale), 167)
-    check("ROI is centred on the canvas",
-          (round(image_to_canvas(v, sample.x + sample.w / 2,
-                                 sample.y + sample.h / 2)[0]),
-           round(image_to_canvas(v, sample.x + sample.w / 2,
-                                 sample.y + sample.h / 2)[1])),
+    check("rect renders about 166 px across",
+          round(patch.w * v.scale), 167)
+    check("rect is centred on the canvas",
+          (round(image_to_canvas(v, patch.x + patch.w / 2,
+                                 patch.y + patch.h / 2)[0]),
+           round(image_to_canvas(v, patch.x + patch.w / 2,
+                                 patch.y + patch.h / 2)[1])),
           (cw // 2, ch // 2))
-    check("whole ROI is inside the canvas",
+    check("whole rect is inside the canvas",
           all(0 <= c <= m for c, m in
-              zip(rect_to_canvas(v, sample), (cw, ch, cw, ch))), True)
+              zip(rect_to_canvas(v, patch), (cw, ch, cw, ch))), True)
     tiny = ViewState(fw, fh, cw, ch).fit_to(Rect(100, 100, 2, 2))
     near("fit_to a tiny rect stops at MAX_SCALE", tiny.scale, MAX_SCALE)
 
     print("== transforms are exact inverses ==")
-    v = ViewState(fw, fh, cw, ch).fit_to(sample)
+    v = ViewState(fw, fh, cw, ch).fit_to(patch)
     for px, py in ((0, 0), (100, 120), (199, 239), (37, 201)):
         ix, iy = canvas_to_image(v, px, py)
         bx, by = image_to_canvas(v, ix, iy)
@@ -606,16 +609,16 @@ if __name__ == "__main__":
         near(f"canvas({px},{py}) round-trips y", by, py, 1e-9)
 
     print("== centre_on_edge: zoom-follow ==")
-    for side, want in (("left",   (sample.x, sample.y + sample.h / 2)),
-                       ("right",  (sample.x2(), sample.y + sample.h / 2)),
-                       ("top",    (sample.x + sample.w / 2, sample.y)),
-                       ("bottom", (sample.x + sample.w / 2, sample.y2()))):
-        v = ViewState(fw, fh, cw, ch).fit_to(sample).centre_on_edge(sample, side)
+    for side, want in (("left",   (patch.x, patch.y + patch.h / 2)),
+                       ("right",  (patch.x2(), patch.y + patch.h / 2)),
+                       ("top",    (patch.x + patch.w / 2, patch.y)),
+                       ("bottom", (patch.x + patch.w / 2, patch.y2()))):
+        v = ViewState(fw, fh, cw, ch).fit_to(patch).centre_on_edge(patch, side)
         got = image_to_canvas(v, *want)
         check(f"{side:6s} edge lands at the canvas centre",
               (round(got[0]), round(got[1])), (cw // 2, ch // 2))
     try:
-        v.centre_on_edge(sample, "diagonal")
+        v.centre_on_edge(patch, "diagonal")
     except ValueError as e:
         print(f"  OK unknown side rejected: {e}")
 
@@ -667,9 +670,9 @@ if __name__ == "__main__":
 
     print("== overlays are drawn outside the ROI, and clip ==")
     frame[:] = 40
-    v = ViewState(fw, fh, cw, ch).fit_to(sample)
-    img = compose(frame, v, [(sample, (255, 0, 255))])
-    left, top, right, bottom = rect_to_canvas(v, sample)
+    v = ViewState(fw, fh, cw, ch).fit_to(patch)
+    img = compose(frame, v, [(patch, (255, 0, 255))])
+    left, top, right, bottom = rect_to_canvas(v, patch)
     inside = img.getpixel((int(left) + 3, int(top) + 3))
     check("ROI interior is untouched by the outline", inside, (40, 40, 40))
     check("outline sits one px outside the left edge",
@@ -678,8 +681,8 @@ if __name__ == "__main__":
     check("first ROI pixel is not overdrawn",
           img.getpixel((int(math.floor(left)), int((top + bottom) / 2))),
           (40, 40, 40))
-    huge = compose(frame, ViewState(fw, fh, cw, ch).fit_to(sample).zoom(4.0),
-                   [(sample, (255, 0, 255))])
+    huge = compose(frame, ViewState(fw, fh, cw, ch).fit_to(patch).zoom(4.0),
+                   [(patch, (255, 0, 255))])
     check("a ROI larger than the canvas still composes", huge.size, CANVAS)
 
     print("== the fit view's strided reduction keeps small features ==")
@@ -704,11 +707,11 @@ if __name__ == "__main__":
     frame = np.random.default_rng(0).integers(0, 256, (fh, fw, 3),
                                               dtype=np.uint8)
     for label, vv in (("fit (minify, BOX)", ViewState(fw, fh, cw, ch)),
-                      ("sample (magnify, NEAREST)",
-                       ViewState(fw, fh, cw, ch).fit_to(sample))):
+                      ("patch (magnify, NEAREST)",
+                       ViewState(fw, fh, cw, ch).fit_to(patch))):
         t0 = time.perf_counter()
         for _ in range(10):
-            compose(frame, vv, [(sample, (255, 255, 0))])
+            compose(frame, vv, [(patch, (255, 255, 0))])
         print(f"  {label:28s} {(time.perf_counter() - t0) / 10 * 1000:7.2f} ms")
 
     print("\n== all image_view self-tests passed ==")
@@ -744,17 +747,32 @@ if __name__ == "__main__":
     except Exception as e:                            # no DB on this machine
         print(f"  (database unavailable: {e}; using roi.py's seed values)")
         import roi as roi_mod
-        rois = {n: Rect(x, y, w, h, name=n)
-                for n, _, x, y, w, h in roi_mod.SEED_ROIS}
+        rois = {}
+        for n, role, x, y, w, h in roi_mod.SEED_ROIS:
+            r = Rect(x, y, w, h, name=n)
+            r.role = role
+            rois[n] = r
 
-    COLOURS = {"sample": (255, 255, 0), "white": (0, 255, 255),
-               "black1": (0, 255, 0), "black2": (0, 255, 0),
-               "bound": (255, 0, 255)}
-    overlays = [(r, COLOURS.get(n, (255, 255, 255))) for n, r in sorted(rois.items())]
+    # Keyed on role, not on name: names are operator-editable labels, so a
+    # dict keyed on them silently falls through to white the moment someone
+    # renames a patch. Anything with an unrecognised role still gets drawn.
+    ROLE_COLOURS = {roi_mod.ROLE_SAMPLE: (255, 255, 0),
+                    roi_mod.ROLE_WHITE:  (0, 255, 255),
+                    roi_mod.ROLE_BLACK:  (0, 255, 0),
+                    roi_mod.ROLE_BOUND:  (255, 0, 255)}
+    overlays = [(r, ROLE_COLOURS.get(getattr(r, "role", None),
+                                     (255, 255, 255)))
+                for _, r in sorted(rois.items())]
 
-    views = [("fit", ViewState(fw, fh, cw, ch)),
-             ("sample +20%", ViewState(fw, fh, cw, ch).fit_to(rois["sample"])),
-             ("bound", ViewState(fw, fh, cw, ch).fit_to(rois["bound"], 0.05))]
+    views = [("fit", ViewState(fw, fh, cw, ch))]
+    sample = roi_mod.by_role(rois, roi_mod.ROLE_SAMPLE)
+    bound  = roi_mod.by_role(rois, roi_mod.ROLE_BOUND)
+    if sample is not None:
+        views.append((f"{sample.name} +20%",
+                      ViewState(fw, fh, cw, ch).fit_to(sample)))
+    if bound is not None:
+        views.append((bound.name,
+                      ViewState(fw, fh, cw, ch).fit_to(bound, 0.05)))
     sheet = Image.new("RGB", (cw * len(views) + 10 * (len(views) + 1), ch + 20),
                       (24, 24, 24))
     draw = ImageDraw.Draw(sheet)

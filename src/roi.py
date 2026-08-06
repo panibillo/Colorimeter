@@ -74,6 +74,16 @@ Public surface
     is_bayer_safe(r)               -> bool
     contains_rect(outer, inner)    -> bool
 
+    by_role(rois, role)            -> Rect | None   the one ROI for a role
+    all_by_role(rois, role)        -> list[Rect]    every ROI for a role
+    missing_roles(rois, roles)     -> list[str]     which of `roles` are absent
+    ROLE_SAMPLE / ROLE_WHITE / ROLE_BLACK / ROLE_BOUND
+
+Select ROIs by **role**, never by name.  A name is an operator-editable label
+— 'black1'/'black2' have already become 'chip1'/'chip2' once — so a literal
+name in application code silently stops matching.  devdesk/ and dev/ scripts
+are exempt: they are throwaway analyses pinned to a single archive.
+
     register_colorcard(cardid, cardname, bayer_array, pattern) -> bool
 
 TODO:
@@ -100,6 +110,24 @@ log = logging.getLogger(__name__)
 # block in db_DDL.sql — the self-test checks that they agree.
 SEED_FRAME = (2304, 1296)
 SEED_MODEL = "imx708"
+
+# ── Roles ───────────────────────────────────────────────────────────────────
+# A ROI's *role* is what it is for; its *name* is a label the operator can
+# change, and can add to or delete from the table at will.  Application code
+# must therefore select by role and never by a hardcoded name: the
+# commissioned 'black1'/'black2' rows have already been superseded by
+# 'chip1'/'chip2' once, and anything that had spelled those names out would
+# have gone quietly wrong rather than loudly missing.
+#
+# Roles are not unique — a card may carry several patches of the same role —
+# so `by_role()` returns the first and `all_by_role()` returns every one.
+# Only devdesk/ and dev/ scripts may hardcode names; they are throwaway
+# analyses pinned to one archive, not the instrument.
+
+ROLE_SAMPLE = "sample"
+ROLE_WHITE  = "white"
+ROLE_BLACK  = "black"
+ROLE_BOUND  = "bound"
 
 # name, role, x, y, w, h — all even, so no snapping is needed on load.
 #
@@ -197,6 +225,74 @@ def contains_rect(outer: Rect, inner: Rect) -> bool:
     """
     return (inner.x >= outer.x and inner.y >= outer.y
             and inner.x2() <= outer.x2() and inner.y2() <= outer.y2())
+
+
+# ── Role lookup ─────────────────────────────────────────────────────────────
+# The alternative to `rois["bound"]`.  See the note beside the role constants
+# for why a literal name in application code is a bug waiting to happen.
+
+def all_by_role(rois: Dict[str, Rect], role: str) -> list:
+    """
+    Return every ROI with the given role, ordered by name.
+
+    Args:
+        rois: The dict from load_active() / load_defaults().
+        role: One of the ROLE_* constants, or any role string in the table.
+
+    Returns:
+        List of Rects, possibly empty.  Ordered by name so the result is
+        stable across calls and across machines.
+
+    Example:
+        >>> all_by_role({'b1': Rect(0, 0, 2, 2)}, ROLE_BLACK)
+        []
+    """
+    return [r for _, r in sorted(rois.items())
+            if getattr(r, "role", None) == role]
+
+
+def by_role(rois: Dict[str, Rect], role: str) -> Optional[Rect]:
+    """
+    Return the first ROI with the given role, or None if there is none.
+
+    Use for the roles that are singular by construction — 'sample', 'white'
+    and 'bound'.  For roles that may repeat, use `all_by_role()`.
+
+    Args:
+        rois: The dict from load_active() / load_defaults().
+        role: One of the ROLE_* constants.
+
+    Returns:
+        The Rect, or None when no active ROI carries that role.
+
+    Example:
+        >>> by_role(load_active(), ROLE_BOUND)            # doctest: +SKIP
+        Rect(1082, 478, 196, 660, name='bound')
+    """
+    found = all_by_role(rois, role)
+    return found[0] if found else None
+
+
+def missing_roles(rois: Dict[str, Rect], roles: Tuple[str, ...]) -> list:
+    """
+    Return the roles from `roles` that no ROI in `rois` fills.
+
+    For callers that cannot proceed without particular roles and want to say
+    exactly which are absent rather than raising a KeyError on a name.
+
+    Args:
+        rois: The dict from load_active().
+        roles: Roles that must be present.
+
+    Returns:
+        List of missing role strings, in the order given.  Empty when all are
+        present.
+
+    Example:
+        >>> missing_roles({}, (ROLE_SAMPLE, ROLE_BOUND))
+        ['sample', 'bound']
+    """
+    return [role for role in roles if by_role(rois, role) is None]
 
 
 def to_slices(r: Rect) -> Tuple[slice, slice]:
@@ -391,6 +487,36 @@ def load_defaults(frame_w: Optional[int] = None, frame_h: Optional[int] = None,
         {name: Rect}, same shape as load_active().
     """
     return _load("WHERE isdefault = 1", frame_w, frame_h, model)
+
+
+def load_calibration(frame_w: Optional[int] = None,
+                     frame_h: Optional[int] = None,
+                     model: Optional[str] = None) -> Dict[str, Rect]:
+    """
+    Return the calibration patch set (active=2), keyed by name.
+
+    A calibration capture images a uniform card through a `bound` chosen wider
+    than the measurement one, so that different sub-bounds can be tried without
+    re-imaging, and samples it at patches spread across that bound.  Those rows
+    describe a card on the stage rather than the instrument's own targets, so
+    they must not be in force during a run — hence active=2 rather than 1.
+    Both sets live in the same table because they share the stream space and
+    the same `bound` semantics.
+
+    The set is expected to hold one `bound`, one `sample` role at the centre,
+    and several `white` roles spread to the corners; nothing here enforces that,
+    since which patches a card carries is the operator's choice.
+
+    Args:
+        frame_w: Live stream width in pixels, or None to skip the check.
+        frame_h: Live stream height in pixels, or None to skip the check.
+        model:   Live sensor model, or None to skip the check.
+
+    Returns:
+        {name: Rect}, same shape as load_active().  Empty dict when no
+        calibration capture has been set up.
+    """
+    return _load("WHERE active = 2", frame_w, frame_h, model)
 
 
 def _insert(name: str, role: Optional[str], r: Rect,
@@ -1123,81 +1249,148 @@ if __name__ == "__main__":
     shutil.copy(live, tmp)
     db.DBNAME = str(tmp)
 
-    print("== load_active: the seeded table ==")
+    print("== load_active: whatever is in force ==")
+    # Asserted against the table as it stands, not against a fixed list of
+    # names: the operator adds, renames and supersedes ROIs from the
+    # instrument, and a literal list here would fail the moment they do (as
+    # it did when 'black1'/'black2' became 'chip1'/'chip2').  What must hold
+    # is structural — the roles the instrument needs are filled, every
+    # rectangle is Bayer-safe, and the sample lies inside the crop.
     rois = load_active()
-    check("five names",     sorted(rois), ["black1", "black2", "bound", "sample", "white"])
-    check("sample geometry", rois["sample"].xywh(), (1150, 790, 68, 68))
-    check("bound geometry",  rois["bound"].xywh(),  (1090, 360, 196, 630))
-    check("role attached",   rois["black1"].role,   "black")
-    check("name attached",   rois["white"].name,    "white")
-    check("colour defaults", rois["sample"].color,  DEFAULT_COLOR)
-    check("all seeds Bayer-safe",
-          all(is_bayer_safe(r) for r in rois.values()), True)
-    check("sample inside bound",
-          contains_rect(rois["bound"], rois["sample"]), True)
+    active_names = sorted(rois)
+    print(f"     (in force: {', '.join(active_names)})")
+    check("every active row is loaded", len(rois) > 0, True)
     check("one active row per name", db.read_val(
-        "SELECT COUNT(*) FROM roi WHERE active = 1"), 5)
+        "SELECT COUNT(*) FROM roi WHERE active = 1"), len(rois))
+    check("names round-trip onto the Rects",
+          all(rois[n].name == n for n in rois), True)
+    check("every ROI carries a role",
+          all(getattr(r, "role", None) for r in rois.values()), True)
+    check("colour defaults when the column is NULL",
+          all(r.color for r in rois.values()), True)
+    check("all active ROIs Bayer-safe",
+          all(is_bayer_safe(r) for r in rois.values()), True)
+
+    print("== the roles the instrument cannot run without ==")
+    required = (ROLE_SAMPLE, ROLE_WHITE, ROLE_BOUND)
+    check("none missing", missing_roles(rois, required), [])
+    sample_r = by_role(rois, ROLE_SAMPLE)
+    bound_r  = by_role(rois, ROLE_BOUND)
+    check("by_role finds the sample", sample_r is not None, True)
+    check("sample inside bound", contains_rect(bound_r, sample_r), True)
+    check("every other ROI inside bound too",
+          [n for n, r in rois.items()
+           if r.role != ROLE_BOUND and not contains_rect(bound_r, r)], [])
+    check("by_role agrees with all_by_role",
+          all_by_role(rois, ROLE_SAMPLE)[0].xywh(), sample_r.xywh())
+    check("an unfilled role gives None", by_role(rois, "no_such_role"), None)
+    check("and lists as missing",
+          missing_roles(rois, ("no_such_role",)), ["no_such_role"])
+    check("all_by_role is empty for an unfilled role",
+          all_by_role(rois, "no_such_role"), [])
 
     print("== seed values agree with db_DDL.sql ==")
+    # Only for seeds still in force: a superseded seed name (black1/black2,
+    # replaced by chip1/chip2) is a normal edit, not a failure.
+    defaults = load_defaults()
     for nm, role, x, y, w, h in SEED_ROIS:
-        check(f"{nm} matches the DDL seed", rois[nm].xywh(), (x, y, w, h))
-        check(f"{nm} role", rois[nm].role, role)
+        if nm not in defaults:
+            print(f"  -- {nm:8s} no longer in the table (superseded)")
+            continue
+        check(f"{nm} matches the DDL seed", defaults[nm].xywh(), (x, y, w, h))
+        check(f"{nm} role", defaults[nm].role, role)
 
     print("== load_defaults ==")
+    # The defaults are the *commissioned* set, which the active set has since
+    # diverged from — that is what superseding is for.  So the invariant is
+    # not that the two agree, only that every default is well formed and that
+    # the roles needed to fall back on are all present.
     defs = load_defaults()
-    check("same names",     sorted(defs), sorted(rois))
-    check("same geometry",  defs["sample"].xywh(), rois["sample"].xywh())
+    check("defaults exist",       len(defs) > 0, True)
+    check("defaults are Bayer-safe",
+          all(is_bayer_safe(r) for r in defs.values()), True)
+    check("defaults fill the required roles",
+          missing_roles(defs, required), [])
+    check("one isdefault row per default name", db.read_val(
+        "SELECT COUNT(*) FROM roi WHERE isdefault = 1"), len(defs))
 
     print("== frame-size handling ==")
+    # Relative to whatever the sample is now, so an edit on the instrument
+    # cannot invalidate the arithmetic being tested.
+    sname = sample_r.name
+    sxywh = sample_r.xywh()
     check("matching size is verbatim",
-          load_active(2304, 1296, "imx708")["sample"].xywh(), (1150, 790, 68, 68))
+          load_active(2304, 1296, "imx708")[sname].xywh(), sxywh)
     check("same model, x2 scales",
-          load_active(4608, 2592, "imx708")["sample"].xywh(), (2300, 1580, 136, 136))
+          load_active(4608, 2592, "imx708")[sname].xywh(),
+          tuple(v * 2 for v in sxywh))
     check("scaled result stays even",
-          all(is_bayer_safe(r) for r in load_active(4608, 2592, "imx708").values()), True)
+          all(is_bayer_safe(r)
+              for r in load_active(4608, 2592, "imx708").values()), True)
     check("cross-model is left unscaled",
-          load_active(1640, 1232, "imx219")["sample"].xywh(), (1150, 790, 68, 68))
+          load_active(1640, 1232, "imx219")[sname].xywh(), sxywh)
 
     print("== save: supersedes, snaps, keeps history ==")
-    rowid = save("sample", Rect(1151, 791, 69, 69), remark="selftest")
+    history_before = db.read_val(
+        "SELECT COUNT(*) FROM roi WHERE name = ?", (sname,))
+    other = next((n for n in rois if n != sname), None)
+    other_before = rois[other].xywh() if other else None
+    rowid = save(sname, Rect(1151, 791, 69, 69), remark="selftest")
     check("returned a rowid",   rowid > 0, True)
-    check("snapped on the way in", load_active()["sample"].xywh(), (1150, 790, 68, 68))
-    save("sample", Rect(1200, 800, 40, 40), remark="selftest 2")
-    check("edit is in force",   load_active()["sample"].xywh(), (1200, 800, 40, 40))
+    check("snapped on the way in",
+          load_active()[sname].xywh(), (1150, 790, 68, 68))
+    save(sname, Rect(1200, 800, 40, 40), remark="selftest 2")
+    check("edit is in force",
+          load_active()[sname].xywh(), (1200, 800, 40, 40))
     check("still one active",   db.read_val(
-        "SELECT COUNT(*) FROM roi WHERE name='sample' AND active=1"), 1)
-    # 2 seeded (default + active) + one row per save, nothing deleted.
-    check("history kept",       db.read_val(
-        "SELECT COUNT(*) FROM roi WHERE name='sample'"), 4)
-    check("default untouched",  load_defaults()["sample"].xywh(), (1150, 790, 68, 68))
-    check("role carried over",  load_active()["sample"].role, "sample")
+        "SELECT COUNT(*) FROM roi WHERE name = ? AND active=1", (sname,)), 1)
+    check("history kept, nothing deleted", db.read_val(
+        "SELECT COUNT(*) FROM roi WHERE name = ?", (sname,)),
+        history_before + 2)
+    check("default untouched",  load_defaults()[sname].xywh(),
+          defs[sname].xywh())
+    check("role carried over",  load_active()[sname].role, ROLE_SAMPLE)
     check("frame carried over", db.read_val(
-        "SELECT frame_w FROM roi WHERE name='sample' AND active=1"), 2304)
-    check("other ROIs untouched", load_active()["white"].xywh(), (1150, 496, 136, 68))
+        "SELECT frame_w FROM roi WHERE name = ? AND active=1", (sname,)), 2304)
+    if other:
+        check("other ROIs untouched", load_active()[other].xywh(), other_before)
     check("unknown name is refused", save("nosuch", Rect(0, 0, 8, 8)), 0)
 
     print("== restore ==")
-    check("restore returns a rowid", restore("sample") > 0, True)
-    check("back to the default",  load_active()["sample"].xywh(), (1150, 790, 68, 68))
+    check("restore returns a rowid", restore(sname) > 0, True)
+    check("back to the default",  load_active()[sname].xywh(),
+          defs[sname].xywh())
     check("still one active",     db.read_val(
-        "SELECT COUNT(*) FROM roi WHERE name='sample' AND active=1"), 1)
+        "SELECT COUNT(*) FROM roi WHERE name = ? AND active=1", (sname,)), 1)
     check("default row not consumed", db.read_val(
-        "SELECT COUNT(*) FROM roi WHERE name='sample' AND isdefault=1"), 1)
+        "SELECT COUNT(*) FROM roi WHERE name = ? AND isdefault=1", (sname,)), 1)
     check("unknown name is refused",  restore("nosuch"), 0)
 
-    print("== seed_defaults is a no-op on a seeded table ==")
-    check("nothing written",   seed_defaults(), 0)
-    db.write_one("DELETE FROM roi WHERE name = 'white'")
-    check("re-seeds one name", seed_defaults(), 2)
-    check("re-seeded geometry", load_active()["white"].xywh(), (1150, 496, 136, 68))
-    check("sample not re-seeded", db.read_val(     # 2 seeded + 2 saves + 1 restore
-        "SELECT COUNT(*) FROM roi WHERE name='sample'"), 5)
+    print("== seed_defaults only fills gaps ==")
+    check("nothing written for names already present", seed_defaults(), 0)
+    # Drop a seeded name outright and confirm it comes back. Picked from
+    # SEED_ROIS rather than spelled out, so this survives a rename.
+    # Not `sname`, whose row count the next check depends on.
+    victim = next(nm for nm, *_ in SEED_ROIS
+                  if nm in load_defaults() and nm != sname)
+    seed_geom = next((x, y, w, h) for nm, _, x, y, w, h in SEED_ROIS
+                     if nm == victim)
+    db.write_one("DELETE FROM roi WHERE name = ?", (victim,))
+    check(f"re-seeds {victim!r}", seed_defaults(), 2)
+    check("re-seeded geometry", load_active()[victim].xywh(), seed_geom)
+    check("an untouched name is not re-seeded", db.read_val(
+        "SELECT COUNT(*) FROM roi WHERE name = ?", (sname,)),
+        history_before + 3)          # +2 saves, +1 restore
 
     print("== empty table degrades quietly ==")
     db.write_one("DELETE FROM roi")
     check("no active ROIs", load_active(), {})
-    check("save on empty",  save("sample", Rect(0, 0, 8, 8)), 0)
-    check("seed refills",   seed_defaults(), 10)
+    check("no roles filled", missing_roles(load_active(), required),
+          list(required))
+    check("save on empty",  save(sname, Rect(0, 0, 8, 8)), 0)
+    check("seed refills",   seed_defaults(), 2 * len(SEED_ROIS))
+    check("and the required roles are back",
+          missing_roles(load_active(), required), [])
 
     shutil.rmtree(tmp.parent, ignore_errors=True)
     print("\n== all roi self-tests passed ==")

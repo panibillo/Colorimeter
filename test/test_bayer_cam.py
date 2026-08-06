@@ -31,8 +31,15 @@ import time
 import numpy as np
 
 from bayer_cam import BayerCam
-from lighting_cal8 import LEDBank
 from utils import install_exit_signals
+
+# Hardware-only import (real branch needs gpiozero/spidev). Guarded so this
+# module stays importable on a desktop for test discovery; LEDBank() itself
+# raises a clear error if actually constructed without them.
+try:
+    from lighting_cal8 import LEDBank
+except ImportError:                                  # pragma: no cover
+    LEDBank = None
 
 
 DEFAULT_EXPOSURE_MS = 50     # ms — enough for a lit scene with the cal8 board

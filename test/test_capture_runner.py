@@ -134,6 +134,12 @@ class FakeLeds:
     def color_name(self, channel: int) -> str:
         return self._COLORS.get(channel, f"led{channel}")
 
+    def channel_of(self, name: str) -> int:
+        for ch, color in self._COLORS.items():
+            if color == name:
+                return ch
+        raise ValueError(f"Unknown LED name {name!r}")
+
     def label(self, channel: int) -> str:
         return f"LED {channel} ({self.color_name(channel)})"
 
@@ -261,22 +267,26 @@ class TestSingleLedRun(RunnerTestCase):
             for label in EXP_LABELS:
                 for ch in ("B", "Gb", "Gr", "R"):
                     self.assertIn(f"/leds/amber/lit/{label}/{ch}", f)
-                    self.assertIn(f"/leds/amber/dark/{label}/{ch}", f)
+                    self.assertIn(f"/leds/amber/dark/after_{label}/{ch}", f)
 
     def test_roi_bound_crop_shape(self):
         with self.archive(self.runner) as f:
             arr = f["/leds/amber/lit/e3/B"][()]
         # The bound the run actually used, loaded from the `roi` table, not a
         # module constant — so an edited ROI is checked, not a stale copy.
-        bound = self.runner.rois["bound"]
+        import roi as roi_mod
+        bound = roi_mod.by_role(self.runner.rois, roi_mod.ROLE_BOUND)
         self.assertEqual(arr.shape, (bound.h // 2, bound.w // 2))
 
     def test_rois_are_loaded_and_bayer_safe(self):
         """Every ROI the run used must be even, or layer extraction shifts phase."""
         import roi as roi_mod
-        for name in capture_runner.REQUIRED_ROIS:
+        self.assertEqual(
+            roi_mod.missing_roles(self.runner.rois,
+                                  capture_runner.REQUIRED_ROLES), [],
+            "a role the capture path cannot run without is unfilled")
+        for name, r in sorted(self.runner.rois.items()):
             with self.subTest(roi=name):
-                r = self.runner.rois[name]
                 self.assertTrue(roi_mod.is_bayer_safe(r), f"{name}={r.xywh()}")
 
     def test_every_roi_lies_inside_bound(self):
@@ -290,9 +300,9 @@ class TestSingleLedRun(RunnerTestCase):
         from 315x80 to 315x98.
         """
         import roi as roi_mod
-        bound = self.runner.rois["bound"]
+        bound = roi_mod.by_role(self.runner.rois, roi_mod.ROLE_BOUND)
         for name, r in sorted(self.runner.rois.items()):
-            if name == "bound":
+            if r is bound:
                 continue
             with self.subTest(roi=name):
                 self.assertTrue(
@@ -445,13 +455,14 @@ class TestFocus(RunnerTestCase):
         self.assertEqual(self.cam.lens_position, 5.0)
 
     def test_autofocus_beyond_cap_is_capped(self):
-        self.cam = FakeCam(af_result=9.0)      # above MAX_AF_DIOPTER (7.5)
+        raw = capture_runner.MAX_AF_DIOPTER + 3.0   # above the cap
+        self.cam = FakeCam(af_result=raw)
         runner = self.make_runner(led_start=1, led_end=1)
         self.run_to_completion(runner)
         meta = self.led_metadata(runner, "amber")
         self.assertEqual(meta["focus_mode"], "autofocus_capped")
         self.assertEqual(meta["focus_diopters"], capture_runner.MAX_AF_DIOPTER)
-        self.assertEqual(meta["autofocus_raw_diopters"], 9.0)
+        self.assertEqual(meta["autofocus_raw_diopters"], raw)
 
     def test_manual_focus_without_libcamera_raises(self):
         """Guard the desktop failure mode explicitly rather than by accident."""
@@ -494,14 +505,14 @@ class TestMultiLed(RunnerTestCase):
             self.assertEqual(len(dark_groups), len(EXP_LABELS), dark_groups)
             for label in EXP_LABELS:
                 np.testing.assert_array_equal(
-                    f[f"/leds/amber/dark/{label}/B"][()],
-                    f[f"/leds/blue/dark/{label}/B"][()])
+                    f[f"/leds/amber/dark/after_{label}/B"][()],
+                    f[f"/leds/blue/dark/after_{label}/B"][()])
 
     def test_dark_links_resolve_for_every_led_and_label(self):
         with self.archive(self.runner) as f:
             for color in ("amber", "blue"):
                 for label in EXP_LABELS:
-                    link = f[f"/leds/{color}/dark"].get(label, getlink=True)
+                    link = f[f"/leds/{color}/dark"].get(f"after_{label}", getlink=True)
                     self.assertIsInstance(link, h5py.SoftLink)
                     self.assertTrue(link.path.startswith("/dark/"))
 
@@ -542,49 +553,52 @@ class TestNormalMode(RunnerTestCase):
         exposure_repo.write_all_groups("amber", exposure_repo.groups_from_estar(30_000))
         exposure_repo.write_all_groups("blue",  exposure_repo.groups_from_estar(20_000))
 
+        # The normal path now sweeps config.capture_led_color_order(), not
+        # led_start/led_end, so tests control which LEDs run by patching it —
+        # single-color tests get "amber"; multi-color tests override below.
+        self._real_color_order = capture_runner.config.capture_led_color_order
+        capture_runner.config.capture_led_color_order = lambda: ["amber"]
+
     def tearDown(self):
+        capture_runner.config.capture_led_color_order = self._real_color_order
         self._db.DBNAME = self._saved_dbname
         self._dbdir.cleanup()
         super().tearDown()
 
     def test_captures_exactly_the_stored_exposures(self):
-        runner = self.make_runner(led_start=1, led_end=1, mode="normal",
-                                  exposure_group="3")
+        runner = self.make_runner(mode="normal", exposure_group="3")
         self.run_to_completion(runner)
         want = self._er.read_exposures("amber", "3")
         self.assertEqual(len(want), 3)
         self.assertEqual(runner.results[0].exposures_us, want)
 
     def test_archive_holds_e0_to_eN_lit_and_dark(self):
-        runner = self.make_runner(led_start=1, led_end=1, mode="normal",
-                                  exposure_group="2")
+        runner = self.make_runner(mode="normal", exposure_group="2")
         self.run_to_completion(runner)
         with self.archive(runner) as f:
             for label in ("e0", "e1"):
                 for ch in ("B", "Gb", "Gr", "R"):
                     self.assertIn(f"/leds/amber/lit/{label}/{ch}", f)
-                    self.assertIn(f"/leds/amber/dark/{label}/{ch}", f)
+                    self.assertIn(f"/leds/amber/dark/after_{label}/{ch}", f)
             # group "2" -> exactly two exposures, no e2.
             self.assertNotIn("/leds/amber/lit/e2", f)
 
     def test_reaches_done(self):
-        runner = self.make_runner(led_start=1, led_end=2, mode="normal",
-                                  exposure_group="1")
+        capture_runner.config.capture_led_color_order = lambda: ["amber", "blue"]
+        runner = self.make_runner(mode="normal", exposure_group="1")
         progress = self.run_to_completion(runner)
         self.assertEqual(progress[-1].phase, "done")
         self.assertEqual(progress[-1].fraction, 1.0)
 
     def test_no_white_calibration_phase(self):
         """Normal mode must not switch the white calibration LED on at all."""
-        runner = self.make_runner(led_start=1, led_end=1, mode="normal",
-                                  exposure_group="1")
+        runner = self.make_runner(mode="normal", exposure_group="1")
         self.run_to_completion(runner)
         white = capture_runner.WHITE_LED_CH
         self.assertNotIn((white, True), self.leds.history)
 
     def test_metadata_records_group_and_source(self):
-        runner = self.make_runner(led_start=1, led_end=1, mode="normal",
-                                  exposure_group="4")
+        runner = self.make_runner(mode="normal", exposure_group="4")
         self.run_to_completion(runner)
         meta = self.led_metadata(runner, "amber")
         self.assertEqual(meta["mode"], "normal")
@@ -595,8 +609,7 @@ class TestNormalMode(RunnerTestCase):
     def test_fallback_when_led_has_no_stored_exposures(self):
         """A LED with no rows for the group still captures, at the fallback."""
         self._er.delete_led("amber")
-        runner = self.make_runner(led_start=1, led_end=1, mode="normal",
-                                  exposure_group="3")
+        runner = self.make_runner(mode="normal", exposure_group="3")
         self.run_to_completion(runner)
         meta = self.led_metadata(runner, "amber")
         self.assertEqual(meta["exposure_source"], "fallback")
@@ -606,10 +619,94 @@ class TestNormalMode(RunnerTestCase):
             self.assertNotIn("/leds/amber/lit/e1", f)
 
     def test_all_leds_off_at_end(self):
-        runner = self.make_runner(led_start=1, led_end=2, mode="normal",
-                                  exposure_group="2")
+        capture_runner.config.capture_led_color_order = lambda: ["amber", "blue"]
+        runner = self.make_runner(mode="normal", exposure_group="2")
         self.run_to_completion(runner)
         self.assertEqual(self.leds.lit_channels(), set())
+
+
+# ---------------------------------------------------------------------------
+# Normal path: prefetch/capture split (dark-frame prefetch during reagent2)
+# ---------------------------------------------------------------------------
+
+class TestNormalModePrefetchSplit(RunnerTestCase):
+    """
+    run_prefetch() and run_capture() are meant to be driven as two separate
+    generators on the same CaptureRunner instance, with an arbitrary pause
+    between them (the reagent2 countdown, then whenever CAPTURE is pressed).
+    run() chains them back-to-back for a caller that never splits the run.
+    """
+
+    def setUp(self):
+        super().setUp()
+        import db_manager as db
+        import exposure_repo
+        self._db = db
+        self._er = exposure_repo
+
+        self._saved_dbname = db.DBNAME
+        self._dbdir = tempfile.TemporaryDirectory()
+        tmpdb = Path(self._dbdir.name) / "test.sqlite"
+        shutil.copy(_ROOT / "src" / "colorimeter.sqlite", tmpdb)
+        db.DBNAME = str(tmpdb)
+        db.write_one("DELETE FROM exposure")
+        exposure_repo.write_all_groups("amber", exposure_repo.groups_from_estar(30_000))
+        exposure_repo.write_all_groups("blue",  exposure_repo.groups_from_estar(20_000))
+
+        self._real_color_order = capture_runner.config.capture_led_color_order
+        capture_runner.config.capture_led_color_order = lambda: ["amber", "blue"]
+
+    def tearDown(self):
+        capture_runner.config.capture_led_color_order = self._real_color_order
+        self._db.DBNAME = self._saved_dbname
+        self._dbdir.cleanup()
+        super().tearDown()
+
+    def test_prefetch_then_capture_produces_before_and_after_darks(self):
+        runner = self.make_runner(mode="normal", exposure_group="1")
+        list(runner.run_prefetch())
+        # Prefetch must leave the archive open for run_capture(), not closed.
+        self.assertIsNotNone(runner._writer)
+        list(runner.run_capture())
+        with self.archive(runner) as f:
+            dark_groups = sorted(f["/dark"])
+            self.assertTrue(any(k.startswith("before_") for k in dark_groups))
+            self.assertTrue(any(k.startswith("after_") for k in dark_groups))
+            for color in ("amber", "blue"):
+                self.assertIn(f"/leds/{color}/dark/before_e0", f)
+                self.assertIn(f"/leds/{color}/dark/after_e0", f)
+
+    def test_run_chains_prefetch_and_capture_for_fallback_path(self):
+        """run() (no split) must still produce both before/after batches."""
+        runner = self.make_runner(mode="normal", exposure_group="1")
+        self.run_to_completion(runner)
+        with self.archive(runner) as f:
+            dark_groups = sorted(f["/dark"])
+            self.assertTrue(any(k.startswith("before_") for k in dark_groups))
+            self.assertTrue(any(k.startswith("after_") for k in dark_groups))
+
+    def test_abandoning_prefetch_closes_the_archive(self):
+        """
+        Closing the prefetch generator mid-flight must clean up (unlike a
+        normal completion, which deliberately leaves the archive open for
+        run_capture() to continue) — no dangling writer, no unreadable file.
+        """
+        runner = self.make_runner(mode="normal", exposure_group="1")
+        gen = runner.run_prefetch()
+        while runner._writer is None:
+            next(gen)
+        gen.close()
+        self.assertIsNone(runner._writer)
+        with h5py.File(runner.out_path, "r"):
+            pass   # must open cleanly — .close() left a valid archive
+
+    def test_color_order_drives_the_sweep_not_led_start_end(self):
+        """CaptureConfig.led_start/led_end no longer govern the normal path —
+        only config.capture_led_color_order() (patched here) does."""
+        capture_runner.config.capture_led_color_order = lambda: ["blue", "amber"]
+        runner = self.make_runner(mode="normal", exposure_group="1")
+        self.run_to_completion(runner)
+        self.assertEqual([r.color for r in runner.results], ["blue", "amber"])
 
 
 if __name__ == "__main__":
