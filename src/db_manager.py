@@ -201,5 +201,53 @@ def write_many(sql: str, vals_list: list) -> int:
         if con:
             con.close()
 
+def write_tx(statements: list) -> int:
+    """
+    Execute several statements in one transaction.
+
+    For a write that is only correct as a whole.  config_repo's save is the
+    reason this exists: it deactivates the row in force, inserts the new value
+    and activates it, and the `config` table's partial unique indexes mean the
+    intermediate states are only legal in that order.  Run as three separate
+    calls, a crash in the middle would leave a parameter with no active row.
+
+    Args:
+        statements: List of (sql, vals) pairs, executed in order.  vals may be
+                    None for a statement with no placeholders.
+
+    Returns:
+        Number of rows affected by the last statement.
+
+    Raises:
+        sqlite3.Error: On database error (logged, and the whole transaction is
+                       rolled back).
+
+    Example:
+        >>> write_tx([("UPDATE config SET active = 0 WHERE rowid = ?", (7,)),
+        ...           ("UPDATE config SET active = 1 WHERE rowid = ?", (9,))])
+        1
+    """
+    con = None
+    try:
+        con = sqlite3.connect(DBNAME)
+        cursor = con.cursor()
+        for sql, vals in statements:
+            if vals:
+                cursor.execute(sql, vals)
+            else:
+                cursor.execute(sql)
+        con.commit()
+        return cursor.rowcount
+    except sqlite3.Error as e:
+        if con:
+            con.rollback()
+        log.error(f"write_tx() failed: {e}\n  SQL: {sql}\n  vals: {vals}\n"
+                  f" db: {DBNAME}")
+        raise
+    finally:
+        if con:
+            con.close()
+
+
 if __name__ == '__main__':
     print (DBNAME)

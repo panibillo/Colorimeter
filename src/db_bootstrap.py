@@ -161,14 +161,13 @@ def _verify(con: sqlite3.Connection) -> int:
         DatabaseError: One or more parameters have no active row.
     """
     dead = con.execute(
-        "SELECT role, name, profile FROM config "
-        " GROUP BY role, name, profile "
+        "SELECT role, name FROM config "
+        " GROUP BY role, name "
         "HAVING SUM(active) = 0 "
         " ORDER BY role, name"
     ).fetchall()
     if dead:
-        named = ", ".join(f"{r}.{n}" + (f" [{p}]" if p else "")
-                          for r, n, p in dead)
+        named = ", ".join(f"{r}.{n}" for r, n in dead)
         raise DatabaseError(
             f"{len(dead)} config parameter(s) have no active row: {named}. "
             "Set one row per parameter to active = 1, or run "
@@ -176,13 +175,13 @@ def _verify(con: sqlite3.Connection) -> int:
         )
 
     orphans = con.execute(
-        "SELECT role, name, profile FROM config "
-        " GROUP BY role, name, profile "
+        "SELECT role, name FROM config "
+        " GROUP BY role, name "
         "HAVING SUM(isdefault) = 0 "
         " ORDER BY role, name"
     ).fetchall()
     if orphans:
-        named = ", ".join(f"{r}.{n}" for r, n, _ in orphans)
+        named = ", ".join(f"{r}.{n}" for r, n in orphans)
         log.warning(f"db_bootstrap: {len(orphans)} config parameter(s) have no "
                     f"commissioned default, so Restore cannot reach them: "
                     f"{named}")
@@ -309,11 +308,11 @@ if __name__ == "__main__":
     _con = sqlite3.connect(fresh)
     _con.executescript("""
         UPDATE config SET active = 0
-         WHERE role='protocol' AND name='reagent1_secs' AND profile='';
+         WHERE role='protocol' AND name='reagent1_secs';
         INSERT INTO config (active, isdefault, editable, add_dt, role, name,
-                            vtype, value, profile, source)
+                            vtype, value, source)
              VALUES (1, 0, 1, '2026-08-05', 'protocol', 'reagent1_secs',
-                     'int', '333', '', 'operator');
+                     'int', '333', 'operator');
         DELETE FROM config WHERE role='runtime' AND name='shutdown_timeout_s';
     """)
     _con.commit()
@@ -322,7 +321,7 @@ if __name__ == "__main__":
     _con = sqlite3.connect(fresh)
     check("operator value kept",
           _con.execute("SELECT value FROM config WHERE role='protocol' "
-                       "AND name='reagent1_secs' AND profile='' AND active=1"
+                       "AND name='reagent1_secs' AND active=1"
                        ).fetchone()[0], "333")
     check("deleted param restored",
           _con.execute("SELECT value FROM config WHERE role='runtime' "
@@ -369,7 +368,7 @@ if __name__ == "__main__":
     _con.executescript(
         "CREATE TABLE config (rowid INTEGER PRIMARY KEY NOT NULL, "
         "active INTEGER, isdefault INTEGER, add_dt TEXT, role TEXT, "
-        "name TEXT, vtype TEXT, value TEXT, profile TEXT, source TEXT, "
+        "name TEXT, vtype TEXT, value TEXT, profile TEXT, source TEXT, "  # v1 shape
         "remark TEXT);"
         "INSERT INTO config (active, role, name, vtype, value) "
         "     VALUES (1, 'protocol', 'reagent1_secs', 'int', '120');")

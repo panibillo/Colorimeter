@@ -65,14 +65,31 @@
 --     'int'  'float'  'bool'  'str'  'path'
 -- A 'path' is resolved against the project root when relative.
 --
--- `editable` is 0 for rows the config editor shows read-only — the instrument
--- serial, the firmware version, the backlight pin.  It exists so that policy
--- lives in the database with the data instead of as a list of role names
--- hardcoded in Python.
+-- The four columns that carry meaning are deliberately independent, and none
+-- of them is ever inferred from another:
 --
--- `profile` is the simulation switch: '' applies always, and a 'simulation'
--- row wins over its '' counterpart when COLORIMETER_SIMULATION=1.  Nothing
--- else selects a profile, and the config editor hides simulation rows.
+--   active     use this row.  Exactly one per parameter.
+--   isdefault  the value the editor's Default button offers.  The operator can
+--              move it to commission a new site value.
+--   source     who created the row — 'seed' (from config_defaults.sql),
+--              'operator', or 'history' (a prior value carried in for the
+--              editor's Browse screen).  A creation fact: nothing rewrites it,
+--              so it is an add-user and never doubles as an edit-user.  It is
+--              also what "Restore Factory Defaults" keys on, that being the
+--              only way to find what shipped after the operator has moved
+--              isdefault.
+--   editable   0 for rows the config editor shows read-only — the instrument
+--              serial, the version, the backlight pin.  Policy lives in the
+--              database with the data instead of as a list of role names
+--              hardcoded in Python.
+--
+-- There is no `profile` column.  One existed to let a 'simulation' row shorten
+-- the reagent waits under COLORIMETER_SIMULATION=1; it was the only thing that
+-- ever used a profile, and the only reason reading a value needed to merge
+-- tiers rather than just read the active row.  Reagent durations are editable
+-- on the instrument now, so it earned nothing and cost a column, a join
+-- condition on every query, and a three-tier resolver.  COLORIMETER_SIMULATION
+-- still selects mock hardware — that is a launch mode, not a setting.
 --
 -- The three constraints below are what used to be application convention:
 --   un_config_value       one row per distinct value — makes the seed file's
@@ -81,34 +98,33 @@
 --                         lookup.  `value` must be NOT NULL for this to bite,
 --                         because SQLite treats NULLs as distinct in a UNIQUE.
 --   ux_config_one_active  exactly one row in force per parameter.
---   ux_config_one_default exactly one commissioned fallback per parameter.
+--   ux_config_one_default exactly one Default-button value per parameter.
 -- ────────────────────────────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS config (
     rowid     INTEGER PRIMARY KEY
                       NOT NULL,
     active    INTEGER NOT NULL DEFAULT 1,  -- 1 = in force, 0 = superseded
-    isdefault INTEGER NOT NULL DEFAULT 0,  -- 1 = commissioned fallback
+    isdefault INTEGER NOT NULL DEFAULT 0,  -- 1 = what Default offers
     editable  INTEGER NOT NULL DEFAULT 1,  -- 1 = operator may edit, 0 = locked
-    add_dt    TEXT,                        -- local timestamp of the write
+    add_dt    TEXT,                        -- local timestamp the row was made
     role      TEXT NOT NULL COLLATE NOCASE,-- 'capture','protocol','device',...
     name      TEXT NOT NULL COLLATE NOCASE,-- 'reagent1_secs'
     vtype     TEXT NOT NULL,               -- int|float|bool|str|path
     value     TEXT NOT NULL DEFAULT '',    -- always TEXT; coerced by vtype
-    profile   TEXT NOT NULL DEFAULT '',    -- '' = always, 'simulation' = sim only
-    source    TEXT,                        -- 'seed','operator','commissioning'
+    source    TEXT,                        -- 'seed','operator','history'
     remark    TEXT,
     CONSTRAINT un_config_value UNIQUE
-      (role, name, profile, value)
+      (role, name, value)
 );
 
 CREATE INDEX IF NOT EXISTS ix_config_role_name_active
     ON config (role, name, active);
 
 CREATE UNIQUE INDEX IF NOT EXISTS ux_config_one_active
-    ON config (role, name, profile) WHERE active = 1;
+    ON config (role, name) WHERE active = 1;
 
 CREATE UNIQUE INDEX IF NOT EXISTS ux_config_one_default
-    ON config (role, name, profile) WHERE isdefault = 1;
+    ON config (role, name) WHERE isdefault = 1;
 
 
 -- ────────────────────────────────────────────────────────────────────────────

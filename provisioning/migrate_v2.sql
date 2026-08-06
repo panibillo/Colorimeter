@@ -21,10 +21,14 @@
 -- migration, so a second run aborts before touching anything.
 --
 -- What changes:
---   * `config` gains `editable`, a UNIQUE on (role, name, profile, value), and
---     partial unique indexes enforcing one active and one default row per
---     parameter.  The seed pairs collapse — a row may now be both active and
---     default, which is what a freshly commissioned parameter actually is.
+--   * `config` gains `editable`, a UNIQUE on (role, name, value), and partial
+--     unique indexes enforcing one active and one default row per parameter.
+--     The seed pairs collapse — a row may now be both active and default,
+--     which is what a freshly commissioned parameter actually is.
+--   * `config.profile` is dropped along with the two 'simulation' rows that
+--     were its only users.  Reagent durations are editable on the instrument,
+--     so a profile bought nothing and cost a tier-merging resolver.
+--     COLORIMETER_SIMULATION still selects mock hardware.
 --   * `device`, `users`, `testkit`, `testlot` and `defaults` become config
 --     roles.  Values that were reachable but not selected (the second test
 --     kit) are carried in as inactive history, so they can be picked from the
@@ -70,21 +74,20 @@ CREATE TABLE config (
     name      TEXT NOT NULL COLLATE NOCASE,
     vtype     TEXT NOT NULL,
     value     TEXT NOT NULL DEFAULT '',
-    profile   TEXT NOT NULL DEFAULT '',
     source    TEXT,
     remark    TEXT,
     CONSTRAINT un_config_value UNIQUE
-      (role, name, profile, value)
+      (role, name, value)
 );
 
 CREATE INDEX ix_config_role_name_active
     ON config (role, name, active);
 
 CREATE UNIQUE INDEX ux_config_one_active
-    ON config (role, name, profile) WHERE active = 1;
+    ON config (role, name) WHERE active = 1;
 
 CREATE UNIQUE INDEX ux_config_one_default
-    ON config (role, name, profile) WHERE isdefault = 1;
+    ON config (role, name) WHERE isdefault = 1;
 
 CREATE TABLE samples (
     rowid         INTEGER PRIMARY KEY
@@ -119,14 +122,17 @@ CREATE TABLE samples (
 -- commissioned value still flagged default.
 --
 -- `defaults.rowid` is dropped: it pointed at the `defaults` table row, and
--- there is no longer a row to point at.
+-- there is no longer a row to point at.  The 'simulation' rows go with the
+-- profile column; the reagent durations they shortened are editable on the
+-- instrument now.
 INSERT INTO config (active, isdefault, editable, add_dt, role, name,
-                    vtype, value, profile, source, remark)
+                    vtype, value, source, remark)
      SELECT MAX(active), MAX(isdefault), 1, MIN(add_dt), role, name,
-            MIN(vtype), COALESCE(value, ''), profile, MIN(source), MIN(remark)
+            MIN(vtype), COALESCE(value, ''), MIN(source), MIN(remark)
        FROM config_v1
       WHERE NOT (role = 'defaults' AND name = 'rowid')
-      GROUP BY role, name, profile, COALESCE(value, '');
+        AND COALESCE(profile, '') = ''
+      GROUP BY role, name, COALESCE(value, '');
 
 -- Lock the rows that identify the instrument rather than tune it.
 UPDATE config SET editable = 0
@@ -134,21 +140,25 @@ UPDATE config SET editable = 0
 
 
 -- ── 2. Fold `device` ────────────────────────────────────────────────────────
+-- source='seed': these came from commissioned tables, so they are what this
+-- instrument shipped with and what Restore Factory Defaults must go back to.
+-- config_defaults.sql carries the same values, and un_config_value makes its
+-- insert a no-op once these are in.
 INSERT OR IGNORE INTO config (active, isdefault, editable, add_dt, role, name,
-                              vtype, value, profile, source, remark)
+                              vtype, value, source, remark)
      SELECT 1, 1, 0, COALESCE(dt_add, '2026-07-21') || ' 00:00:00',
-            'device', 'hardware_sn', 'str', hardware_sn, '', 'commissioning',
+            'device', 'hardware_sn', 'str', hardware_sn, 'seed',
             'migrated from the device table'
        FROM device_v1 WHERE rowid = 1
       UNION ALL
      SELECT 1, 1, 0, COALESCE(dt_add, '2026-07-21') || ' 00:00:00',
-            'device', 'software_ver', 'str', software_ver, '', 'commissioning',
+            'device', 'software_ver', 'str', software_ver, 'seed',
             'migrated from the device table'
        FROM device_v1 WHERE rowid = 1
       UNION ALL
      SELECT 1, 1, 1, COALESCE(dt_add, '2026-07-21') || ' 00:00:00',
-            'device', 'description', 'str', COALESCE(description, ''), '',
-            'commissioning', 'migrated from the device table'
+            'device', 'description', 'str', COALESCE(description, ''),
+            'seed', 'migrated from the device table'
        FROM device_v1 WHERE rowid = 1;
 
 
@@ -157,9 +167,9 @@ INSERT OR IGNORE INTO config (active, isdefault, editable, add_dt, role, name,
 -- '<entity>' / '<entity>_<attr>' so an alphabetical listing keeps a lot next
 -- to its expiry date.  `defaults` is a single row (rowid 1).
 INSERT OR IGNORE INTO config (active, isdefault, editable, add_dt, role, name,
-                              vtype, value, profile, source, remark)
-     SELECT 1, 1, 1, '2026-07-21 00:00:00', 'defaults', n, 'str', v, '',
-            'commissioning', 'migrated from the ' || src || ' table'
+                              vtype, value, source, remark)
+     SELECT 1, 1, 1, '2026-07-21 00:00:00', 'defaults', n, 'str', v,
+            'seed', 'migrated from the ' || src || ' table'
        FROM (
          SELECT 'samp_no_template'  AS n, d.samp_no_template               AS v, 'defaults' AS src
            FROM defaults d WHERE d.rowid = 1
@@ -192,17 +202,20 @@ INSERT OR IGNORE INTO config (active, isdefault, editable, add_dt, role, name,
        );
 
 -- Every other kit on file becomes inactive history, so it can be picked from
--- the editor's Browse screen instead of retyped.  active=0 and isdefault=0: a
--- known value, neither in force nor commissioned.
+-- the editor's Browse screen instead of retyped.  active=0, isdefault=0 and
+-- source='history': a known value, neither in force nor commissioned, and not
+-- something Restore Factory Defaults should ever go back to.  The kit that IS
+-- in force was inserted above with source='seed', and un_config_value keeps
+-- this from overwriting it.
 INSERT OR IGNORE INTO config (active, isdefault, editable, add_dt, role, name,
-                              vtype, value, profile, source, remark)
+                              vtype, value, source, remark)
      SELECT 0, 0, 1, '2026-07-21 00:00:00', 'defaults', 'testkit', 'str',
-            k.handle || ' ' || COALESCE(k.partno, ''), '', 'commissioning',
+            k.handle || ' ' || COALESCE(k.partno, ''), 'history',
             'previously used test kit'
        FROM testkit k
       UNION ALL
      SELECT 0, 0, 1, '2026-07-21 00:00:00', 'defaults', 'testkit_vendor', 'str',
-            COALESCE(k.vendors, ''), '', 'commissioning',
+            COALESCE(k.vendors, ''), 'history',
             'vendor of a previously used test kit'
        FROM testkit k;
 

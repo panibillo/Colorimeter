@@ -1,38 +1,60 @@
 """
-config_repo.py  —  Every tunable instrument parameter, over the `config` table.
+config_repo.py  —  How the instrument's settings are reached, over `config`.
 ------------------------------------------------------------------------------
-This is the one place to look when asking "where is that configured?".  It
-replaced config/instrument.yaml and config_manager.py in 2026-08: a parameter
-is now a row, editable from `sqlite3` on the instrument exactly like `exposure`
-and `roi`, with the same supersede-don't-delete history.
+Every setting is a row in the `config` table: capture parameters, protocol
+durations, runtime timing, the instrument's identity, and what a new test
+pre-fills with.  This module is how the application reads and writes them.
 
     sqlite3 src/colorimeter.sqlite \\
       "SELECT role, name, vtype, value FROM config WHERE active = 1"
 
-Data access is modelled on exposure_repo.py and roi.py: an `active` flag marks
-the row in force, an `isdefault` row is the commissioned fallback that Restore
-copies back, and every write inserts rather than overwrites.
+What this module is *not* is a place where values live.  Until 2026-08 it
+carried a SEED_PARAMS table of default values that answered whenever the
+database could not, which meant an instrument could run for weeks on values
+that were not in its database and that nobody could see or edit.  Those are
+gone.  The database is the only source of a setting, db_bootstrap guarantees
+the rows are there before anything reads them, and a parameter that is missing
+now raises ConfigMissing instead of quietly working.
+
+Versioned like `exposure` and `roi`: `active` marks the row in force, an edit
+deactivates it and activates a new one, so every value a parameter has ever
+held stays in the table as history.
+
+Four columns carry meaning, and none is inferred from another:
+
+    active     use this row.  Exactly one per parameter.
+    isdefault  the value the editor's Default button offers.  Movable, so an
+               operator can commission a new value for this site.
+    source     who created the row — 'seed' (config_defaults.sql, i.e. the
+               factory), 'operator', or 'history'.  A creation fact, never
+               rewritten, so it is an add-user and not an edit-user.  It is
+               also how "Restore Factory Defaults" finds what shipped, which
+               `isdefault` cannot answer once an operator has moved it.
+    editable   0 for rows the config editor shows read-only.
+
+So there are two levels of "default", which do different things:
+
+    Default button           -> the isdefault row, this site's commissioned value
+    Restore Factory Defaults -> the source='seed' row, what the unit shipped with
+
+Reading a value is a lookup, not a merge: the table's partial unique indexes
+guarantee one active row per parameter.  This module previously merged three
+tiers to cope with a 'simulation' profile that shortened the reagent waits;
+that profile is gone, and with it the only case where two rows competed.
 
 Values are read once and cached; call load(reload=True) after editing the table
-in a long-running process (save() and restore() do it for you).
+in a long-running process (the write functions here do it for you).
 
-Three tiers resolve to the value in force, each winning over the one before it —
-the same order the YAML layers had:
+Two settings are deliberately *not* rows here:
 
-    profile = ''            what the instrument ships with
-    profile = 'simulation'  only while COLORIMETER_SIMULATION=1
-    source  = 'operator'    what was set on Menu -> Config
-
-The operator's tier comes last, so a duration entered on the instrument holds
-whichever mode it is running in.
-
-If the table is missing or a parameter has no row, SEED_PARAMS below answers
-instead and a warning is logged — a capture never fails merely because the
-config table was not seeded.  seed_defaults() repairs such a database in place.
-
-The one setting that is *not* here is the database path itself: config_repo
-reads its parameters out of the database, so it cannot say where the database
-is.  db_manager.py owns that (DBNAME / db_path, $COLORIMETER_DB).
+    the database path      config_repo reads settings out of the database, so
+                           it cannot say where the database is — db_manager
+                           owns that ($COLORIMETER_DB)
+    COLORIMETER_SIMULATION read at import time by the driver modules to choose
+                           mock hardware, before any database read is possible.
+                           It selects a launch mode, not a value, so it is not
+                           a setting at all.  arbiter.py and lighting_cal8.py
+                           read it directly; this module has no opinion on it.
 
 Usage:
     import config_repo as config
@@ -44,29 +66,35 @@ Public surface
 --------------
     load(reload=False) -> dict            {role: {name: coerced value}}
     get(role, name)                       the value in force
-    default(role, name)                   the commissioned value — what Restore offers
+    default(role, name)                   what Default offers, or None
+    snapshot()               -> dict      every active value, for the archive
+
     save(role, name, value)  -> int       supersede; new rowid
-    restore(role, name)      -> int       put the commissioned value back; new rowid
-    overrides()              -> list      (role, name) the operator has changed
-    seed_defaults()          -> int       rows written for missing parameters
-    is_simulation()          -> bool
+    set_default(role, name, value) -> int save, and commission the value
+    restore(role, name)      -> int       put the Default value back
+    restore_all()            -> int       every parameter back to the factory
+    overrides()              -> list      (role, name) not on the Default value
+
+    roles()                  -> list      for the config editor's role screen
+    items(role)              -> list      (name, vtype, value, editable, isdefault)
+    history(role, name)      -> list      every value ever used, for Browse
 
     capture_dir() / capture_suite_id() / capture_archive_name()
     capture_led_start() / capture_led_end() / fallback_exposure_group()
-    capture_led_color_order() / capture_camera_warmup_s() / capture_dark_prefetch_budget_s()
+    capture_led_color_order() / capture_camera_warmup_s()
+    capture_dark_prefetch_budget_s()
+    inspection_exposure_us() / default_focus_diopter()
     reagent1_secs() / reagent2_secs() / analysis_secs()
     main_loop_poll_s() / shutdown_timeout_s()
-    default_rowid() / backlight_pin()
+    backlight_pin()
 
 Maintenance:
     python src/config_repo.py              run the self-test
-    python src/config_repo.py --emit-sql   regenerate the seed SQL
 """
 
 from __future__ import annotations
 
 import logging
-import os
 import sqlite3
 from datetime import datetime
 from pathlib import Path
@@ -79,85 +107,16 @@ log = logging.getLogger(__name__)
 # The project root is the directory holding src/ and config/.
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
-# Overrides capture.directory for one process, for tests and ad-hoc runs.
-CAPTURE_DIR_ENV = "COLORIMETER_CAPTURE_DIR"
-# "1" → run against mock hardware and select the simulation profile.  Set by
-# run_simulation.py; it is the single switch the hardware selection and this
-# module both key off, so the two never disagree.
-SIMULATION_ENV = "COLORIMETER_SIMULATION"
-
 # Row vocabulary.
-SIM_PROFILE     = "simulation"   # config.profile of a simulation-only value
-SOURCE_SEED     = "seed"         # written by the commissioned seed
-SOURCE_OPERATOR = "operator"     # written on the Menu -> Config screen
+# `source` and `add_dt` record who created a row and when.  They are creation
+# facts: nothing rewrites them afterwards, so `source` is an add-user and never
+# doubles as an edit-user.  Which value is in force is carried by `active`
+# alone, and which one Default offers by `isdefault` alone.
+SOURCE_SEED     = "seed"         # created by config_defaults.sql — the factory
+SOURCE_OPERATOR = "operator"     # created on the instrument
+SOURCE_HISTORY  = "history"      # a prior value, seeded for Browse to offer
 
-# The date stamped on generated seed rows.  Fixed, not now(), so re-emitting
-# the SQL produces a byte-identical block.
-SEED_DT = "2026-08-01 00:00:00"
-
-# ── The commissioned parameters ─────────────────────────────────────────────
-# role, name, vtype, value, profile, remark — the single source of the default
-# values.  db_DDL.sql's seed block is generated from this tuple by --emit-sql,
-# and the self-test checks the two still agree.  Edit here, not there.
-#
-# `value` is written as it is stored: TEXT.  `vtype` says how to read it back.
-SEED_PARAMS: Tuple[Tuple[str, str, str, str, str, str], ...] = (
-    # Where capture archives are written and what they are called.
-    ("capture", "directory", "path", "captures", "",
-     "capture archives; relative paths resolve against the project root"),
-    ("capture", "timestamp_format", "str", "%Y%m%d_%H%M", "",
-     "strftime format naming each archive, and stored as its suite_id"),
-    ("capture", "extension", "str", ".h5", "",
-     "archive filename extension"),
-    # Which LEDs a run sweeps, and the group used when none is saved.
-    ("capture", "led_start", "int", "1", "",
-     "first LED channel a capture run sweeps (inclusive)"),
-    ("capture", "led_end", "int", "10", "",
-     "last LED channel a capture run sweeps (inclusive)"),
-    ("capture", "fallback_exposure_group", "str", "3", "",
-     "exposure group preselected when the saved one is missing or inactive"),
-    ("capture", "inspection_exposure_us", "int", "10000", "",
-     "operator-saved exposure from the viewer's Img recapture dialog"),
-    ("capture", "default_focus_diopter", "float", "0.0", "",
-     "operator-saved focus diopter from the viewer's Img recapture dialog"),
-    # Normal-path capture optimization: dark-frame prefetch during reagent2 countdown.
-    ("capture", "led_color_order", "str",
-     "photo_red,red,red_orange,amber,green,cyan,blue,royal_blue,violet,white", "",
-     "LED color-name sweep order for normal captures (comma-separated, user-editable)"),
-    ("capture", "camera_warmup_s", "float", "5.0", "",
-     "seconds to warm the camera before captures (thermal-stability margin)"),
-    ("capture", "dark_prefetch_budget_s", "float", "20.0", "",
-     "reserved time for dark-frame prefetch batch to run during reagent2 countdown"),
-
-    # Timed protocol steps, in seconds.  The simulation rows shorten the
-    # reagent waits so a run is quick to test, but only in simulation; a
-    # duration set on Menu -> Config wins over both.
-    ("protocol", "reagent1_secs", "int", "120", "",
-     "countdown for reagent step 1"),
-    ("protocol", "reagent1_secs", "int", "10", SIM_PROFILE,
-     "short wait so a simulated run is quick to test"),
-    ("protocol", "reagent2_secs", "int", "420", "",
-     "countdown for reagent step 2"),
-    ("protocol", "reagent2_secs", "int", "10", SIM_PROFILE,
-     "short wait so a simulated run is quick to test"),
-    ("protocol", "analysis_secs", "float", "1.5", "",
-     "placeholder analysis duration until the analysis engine lands"),
-
-    # Event-loop and screen timing.
-    ("runtime", "main_loop_poll_s", "float", "0.02", "",
-     "main event-loop cadence"),
-    ("runtime", "shutdown_timeout_s", "float", "15.0", "",
-     "shutdown screen auto-picks Exit after this"),
-
-    # Which default_gui_vals row seeds the entry screens.
-    ("defaults", "rowid", "int", "1", "",
-     "the default_gui_vals row that seeds the entry screens"),
-
-    ("hardware", "backlight_pin", "int", "13", "",
-     "BCM GPIO driving the display backlight"),
-)
-
-_SELECT = ("SELECT role, name, vtype, value, profile, source FROM config ")
+_SELECT = "SELECT role, name, vtype, value FROM config "
 
 # Returned by _coerce for a value that does not read back as its vtype — a
 # hand-edited typo.  Distinct from None, which is a value a row may hold.
@@ -168,17 +127,15 @@ _cache:         "Dict[str, Dict[str, Any]] | None" = None
 _default_cache: "Dict[str, Dict[str, Any]] | None" = None
 
 
-# ── Simulation ──────────────────────────────────────────────────────────────
-
-def is_simulation() -> bool:
+class ConfigMissing(KeyError):
     """
-    True when running with mock hardware / the simulation profile.
+    No active row for a parameter the code asked for.
 
-    The COLORIMETER_SIMULATION env var is the only switch — it is what also
-    selects mock hardware (arbiter.py, lighting_cal8.py read it directly), so
-    the two never disagree.
+    Always a bug, never a condition to work around: db_bootstrap runs the seed
+    file at every launch and fails loudly if a parameter has no active row, so
+    by the time anything reads a setting the row is guaranteed to exist.  This
+    means either the name is wrong, or the row was removed by hand.
     """
-    return os.environ.get(SIMULATION_ENV, "0") == "1"
 
 
 # ── Loading ─────────────────────────────────────────────────────────────────
@@ -192,82 +149,77 @@ def load(reload: bool = False) -> dict:
 
     Returns:
         {role: {name: value}}, values coerced to the type `vtype` names.
-        Empty if the table is missing — get() then falls back to SEED_PARAMS.
+
+    Raises:
+        sqlite3.Error: The config table cannot be read.  Not caught here —
+                       db_bootstrap has already created and verified it, so a
+                       failure now is real and must not be papered over.
     """
     global _cache, _default_cache
     if _cache is not None and not reload:
         return _cache
 
-    sim = is_simulation()
-    _cache         = _resolve(_read_rows("active = 1"), sim)
-    _default_cache = _resolve(_read_rows("isdefault = 1"), sim)
-    if not _cache:
-        log.warning("config: no active rows in the config table — using the "
-                    "built-in seed values; run config_repo.seed_defaults()")
+    _cache         = _index(db.read_all(_SELECT + "WHERE active = 1"))
+    _default_cache = _index(db.read_all(_SELECT + "WHERE isdefault = 1"))
     return _cache
 
 
-def _read_rows(where: str) -> List[tuple]:
-    """Read one layer of the table, returning [] if it cannot be read."""
-    try:
-        return db.read_all(_SELECT + "WHERE " + where)
-    except sqlite3.Error:
-        log.exception("config: cannot read the config table — using the "
-                      "built-in seed values")
-        return []
-
-
-def _resolve(rows: List[tuple], sim: bool) -> Dict[str, Dict[str, Any]]:
+def _index(rows: List[tuple]) -> Dict[str, Dict[str, Any]]:
     """
-    Merge one layer's rows into {role: {name: value}}.
+    Turn one layer's rows into {role: {name: coerced value}}.
 
-    Three tiers, each winning over the one before it:
+    There is nothing to resolve.  Exactly one row per parameter carries each
+    flag — the table's partial unique indexes guarantee it — so reading a
+    setting is a lookup, not a merge.
 
-        profile = ''            what the instrument ships with
-        profile = 'simulation'  only while simulation is active
-        source  = 'operator'    what was set on Menu -> Config
+    Until 2026-08 this merged three tiers, because a 'simulation' row could
+    shadow the shipped one and an operator's edit had to shadow that in turn.
+    Dropping the simulation profile removed the only case where two rows
+    competed, and with it the only reason reading a value had to know *why* a
+    row was in force.
 
-    The operator's tier comes last so a value entered on the instrument holds
-    in simulation too, exactly as user_settings.json used to.  A row carrying
-    some other profile name belongs to nothing here and is skipped.
+    Args:
+        rows: (role, name, vtype, value) tuples from one layer.
+
+    Returns:
+        {role: {name: value}}, skipping any row whose stored text does not
+        read back as its declared type.
     """
-    shipped: Dict[str, Dict[str, Any]] = {}
-    profile: Dict[str, Dict[str, Any]] = {}
-    operator: Dict[str, Dict[str, Any]] = {}
-
-    for role, name, vtype, value, row_profile, source in rows:
-        if source == SOURCE_OPERATOR:
-            tier = operator
-        elif row_profile == SIM_PROFILE:
-            if not sim:
-                continue
-            tier = profile
-        elif row_profile:
-            continue
-        else:
-            tier = shipped
+    out: Dict[str, Dict[str, Any]] = {}
+    for role, name, vtype, value in rows:
         coerced = _coerce(value, vtype, role, name)
         if coerced is _INVALID:
             continue                     # a typo'd row answers for nothing
-        tier.setdefault(role, {})[name] = coerced
-
-    merged: Dict[str, Dict[str, Any]] = {}
-    for tier in (shipped, profile, operator):
-        for role, items in tier.items():
-            merged.setdefault(role, {}).update(items)
-    return merged
+        out.setdefault(role, {})[name] = coerced
+    return out
 
 
-def _coerce(value: Optional[str], vtype: str, role: str, name: str) -> Any:
+def _coerce(value: Optional[str], vtype: str, role: str = "", name: str = ""
+            ) -> Any:
     """
     Read a stored TEXT value back as the type `vtype` names.
 
     An unparseable value is logged and answered with _INVALID rather than
-    raised — a hand-edited row with a typo in it must not stop a capture.  The
-    caller drops such a row, so the tier below it (ultimately SEED_PARAMS)
-    answers instead.  A stored NULL is a value, and comes back as None.
+    raised — a hand-edited row with a typo in it must not stop a capture; the
+    tier below it answers instead, and if nothing does, get() raises with a
+    name attached.  Also used by the config editor to validate what an operator
+    has typed before it is saved.
 
-    'path' and 'str' are returned as text; capture_dir() resolves a path.
+    Args:
+        value: The stored text, or None.
+        vtype: One of 'int', 'float', 'bool', 'str', 'path'.
+        role:  For the log message only.
+        name:  For the log message only.
+
+    Returns:
+        The value as its declared type, None for a stored NULL, or the
+        _INVALID sentinel if it does not parse.
+
+    Example:
+        >>> _coerce("42", "int")
+        42
+        >>> _coerce("later", "int") is _INVALID
+        True
     """
     if value is None:
         return None
@@ -285,83 +237,151 @@ def _coerce(value: Optional[str], vtype: str, role: str, name: str) -> Any:
     return str(value)
 
 
+def valid(value: str, vtype: str) -> bool:
+    """
+    True if `value` reads back as `vtype`.  For the config editor's field check.
+
+    Args:
+        value: The text an operator typed.
+        vtype: The parameter's declared type.
+
+    Example:
+        >>> valid("1.5", "float"), valid("1.5", "int")
+        (True, False)
+    """
+    return _coerce(value, vtype) is not _INVALID
+
+
 # ── Reads ───────────────────────────────────────────────────────────────────
 
 def get(role: str, name: str) -> Any:
     """
-    Return one parameter's value, falling back to the built-in seed value.
+    Return one parameter's value.
 
     Args:
         role: The section the parameter sits under, e.g. 'protocol'.
         name: The parameter, e.g. 'reagent1_secs'.
 
     Returns:
-        The value in force, coerced by its vtype; the SEED_PARAMS value when
-        the table has no row for it; None when nothing knows the parameter.
+        The value in force, coerced by its vtype.
+
+    Raises:
+        ConfigMissing: No active row for this parameter.
+
+    Example:
+        >>> get('protocol', 'reagent1_secs')            # doctest: +SKIP
+        120
     """
-    return _lookup(load(), role, name)
+    settings = load()
+    if role in settings and name in settings[role]:
+        return settings[role][name]
+    raise ConfigMissing(f"{role}.{name}")
 
 
 def default(role: str, name: str) -> Any:
     """
-    Return one parameter as the instrument was commissioned with it — what
-    `get` would return had the operator never changed it on the Config screen.
-    The Config screen's Restore offers these values.
+    Return the value the editor's Default button offers.
+
+    This site's commissioned value, which an operator may have set with
+    Default; not necessarily what the unit shipped with.
+
+    Returns:
+        The Default value, or None if the parameter has no isdefault row
+        (Restore is then unavailable for it, which db_bootstrap warns about).
     """
     load()
-    return _lookup(_default_cache or {}, role, name)
-
-
-def _lookup(settings: dict, role: str, name: str) -> Any:
+    settings = _default_cache or {}
     if role in settings and name in settings[role]:
         return settings[role][name]
-    return _seed_value(role, name)
-
-
-def _seed_value(role: str, name: str) -> Any:
-    """
-    The built-in value for a parameter the table does not carry.
-
-    Simulation rows are honoured here too, so a database missing the config
-    table still behaves like a seeded one.
-    """
-    found = None
-    for seed_role, seed_name, vtype, value, profile, _ in SEED_PARAMS:
-        if (seed_role, seed_name) != (role, name):
-            continue
-        if profile == SIM_PROFILE and not is_simulation():
-            continue
-        found = _coerce(value, vtype, role, name)
-        if profile == SIM_PROFILE:
-            break               # the simulation value wins when it applies
-    if found is None:
-        log.error("config: no parameter named %s.%s", role, name)
-    return None if found is _INVALID else found
-
-
-def _seed_vtype(role: str, name: str) -> Optional[str]:
-    """The vtype SEED_PARAMS declares for a parameter, or None if unknown."""
-    for seed_role, seed_name, vtype, _, _, _ in SEED_PARAMS:
-        if (seed_role, seed_name) == (role, name):
-            return vtype
     return None
+
+
+def snapshot() -> Dict[str, Dict[str, str]]:
+    """
+    Return every active value as stored text, grouped by role.
+
+    Written into each capture archive so an .h5 records the full state of the
+    instrument that produced it, and can be read back without this database.
+    Deliberately the raw text rather than coerced values, so the archive
+    carries what the table actually held.
+
+    Returns:
+        {role: {name: value}} for every active row.
+    """
+    out: Dict[str, Dict[str, str]] = {}
+    for role, name, value in db.read_all(
+            "SELECT role, name, value FROM config "
+            "WHERE active = 1 ORDER BY role, name"):
+        out.setdefault(role, {})[name] = value
+    return out
 
 
 def overrides() -> List[Tuple[str, str]]:
     """
-    Return (role, name) for every parameter the operator has changed.
+    Return (role, name) for every parameter not on its Default value.
 
-    The Config screen's Restore removes one; an empty list means nothing is
-    overridden and the instrument is running on its commissioned values.
+    These are the parameters restore() would change — an empty list means
+    every Restore button is a no-op.  Note this is not what restore_all()
+    undoes: that goes back to the factory value, which an operator may have
+    moved away from with Default.
+
+    Keyed on `isdefault`, because that is what restore() puts back.
     """
-    try:
-        rows = db.read_all("SELECT role, name FROM config "
-                           "WHERE active = 1 AND source = ? ORDER BY role, name",
-                           (SOURCE_OPERATOR,))
-    except sqlite3.Error:
-        log.exception("config.overrides: cannot read the config table")
-        return []
+    rows = db.read_all("SELECT role, name FROM config WHERE active = 1 "
+                       "AND isdefault = 0 ORDER BY role, name")
     return [(role, name) for role, name in rows]
+
+
+# ── The config editor's reads ───────────────────────────────────────────────
+
+def roles() -> List[str]:
+    """
+    Return the roles that have editable parameters, for the role screen.
+
+    Simulation rows are excluded: they are development scaffolding, not
+    something to offer an operator.
+    """
+    rows = db.read_all("SELECT DISTINCT role FROM config "
+                       "WHERE active = 1 ORDER BY role")
+    return [role for (role,) in rows]
+
+
+def items(role: str) -> List[tuple]:
+    """
+    Return the parameters in force for one role, for the role screen.
+
+    Args:
+        role: The role to list.
+
+    Returns:
+        [(name, vtype, value, editable, isdefault)] ordered by name, with
+        `value` the stored text.  `editable` is 0 for rows the editor must
+        show read-only; `isdefault` is 1 when the value in force is also the
+        commissioned one, so the editor can show there is nothing to restore.
+    """
+    return db.read_all(
+        "SELECT name, vtype, value, editable, isdefault FROM config "
+        "WHERE role = ? AND active = 1 ORDER BY name",
+        (role,))
+
+
+def history(role: str, name: str) -> List[tuple]:
+    """
+    Return every value this parameter has ever held, for the Browse screen.
+
+    Args:
+        role: The section.
+        name: The parameter.
+
+    Returns:
+        [(value, add_dt, source, active, isdefault)] with the row in force
+        first, the commissioned row second, and the rest newest first.
+    """
+    return db.read_all(
+        "SELECT value, add_dt, source, active, isdefault FROM config "
+        "WHERE role = ? AND name = ? "
+        "ORDER BY active DESC, isdefault DESC, add_dt DESC, rowid DESC",
+        (role, name))
 
 
 # ── Writes ──────────────────────────────────────────────────────────────────
@@ -371,31 +391,30 @@ def _now_local() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
-def _insert(role: str, name: str, vtype: str, value: Optional[str],
-            profile: str, source: str, remark: Optional[str],
-            isdefault: int = 0, active: int = 1) -> int:
-    """Insert one config row and return its rowid (0 if the write failed)."""
-    db.write_one(
-        "INSERT INTO config (active, isdefault, add_dt, role, name, vtype, "
-        "value, profile, source, remark) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        (active, isdefault, _now_local(), role, name, vtype,
-         value, profile, source, remark))
-    return db.read_val("SELECT MAX(rowid) FROM config") or 0
+def _vtype_of(role: str, name: str) -> Optional[str]:
+    """The vtype the table declares for a parameter, or None if unknown."""
+    return db.read_val("SELECT vtype FROM config WHERE role = ? AND name = ? "
+                       "ORDER BY active DESC LIMIT 1",
+                       (role, name))
 
 
 def save(role: str, name: str, value: Any,
          remark: Optional[str] = None) -> int:
     """
-    Supersede a parameter with a value set on the instrument.
+    Put a value in force, keeping the previous one as history.
 
-    The current active row is flipped to active=0 (kept as history, exactly as
-    a recalibration keeps the previous exposures) and a new active row with
-    source='operator' is inserted.  The isdefault row is untouched, so
-    restore() can still undo this, and the operator's tier wins over the
-    simulation profile so the value holds in either mode.
+    Three statements in one transaction, in an order the `config` table's
+    partial unique indexes require: deactivate the row in force, insert the new
+    value inactive, then activate it.  Inserting inactive means the table never
+    momentarily holds two active rows for the parameter.
 
-    The vtype carries over from the row being superseded, so the value is
-    stored as text and read back as the type the parameter has always had.
+    A value the parameter has held before is *reused* rather than duplicated —
+    un_config_value makes the insert a no-op and the activation finds the
+    existing row.  So repeatedly toggling between two values leaves two rows,
+    not a growing pile, and the Browse screen shows each distinct value once.
+
+    The vtype carries over from the parameter's existing rows, so the value is
+    stored as text and read back as the type it has always had.
 
     Args:
         role:   The section, e.g. 'protocol'.
@@ -404,25 +423,72 @@ def save(role: str, name: str, value: Any,
         remark: Optional note stored on the new row.
 
     Returns:
-        The new row's rowid, or 0 if the parameter is unknown.
+        The rowid now in force, or 0 if the parameter is unknown.
 
     Example:
         >>> save('protocol', 'reagent1_secs', 45)      # doctest: +SKIP
     """
-    row = db.read_one(_SELECT + "WHERE role = ? AND name = ? AND active = 1 "
-                                "AND profile = ''", (role, name))
-    vtype = row[2] if row else _seed_vtype(role, name)
+    vtype = _vtype_of(role, name)
     if vtype is None:
         log.error("config.save: no parameter named %s.%s — nothing saved",
                   role, name)
         return 0
 
-    db.write_one("UPDATE config SET active = 0 "
-                 "WHERE role = ? AND name = ? AND active = 1 AND profile = ''",
-                 (role, name))
-    rowid = _insert(role, name, vtype, str(value), "", SOURCE_OPERATOR, remark)
+    text = str(value)
+    now  = _now_local()
+    db.write_tx([
+        ("UPDATE config SET active = 0 "
+         "WHERE role = ? AND name = ? AND active = 1",
+         (role, name)),
+        ("INSERT OR IGNORE INTO config (active, isdefault, editable, add_dt, "
+         "role, name, vtype, value, source, remark) "
+         "VALUES (0, 0, 1, ?, ?, ?, ?, ?, ?, ?)",
+         (now, role, name, vtype, text, SOURCE_OPERATOR, remark)),
+        # No source/add_dt on the UPDATE: the insert is a no-op when this value
+        # is already in the history, and those two columns describe when and by
+        # whom the row was *created*, which re-selecting it does not change.
+        ("UPDATE config SET active = 1 "
+         "WHERE role = ? AND name = ? AND value = ?",
+         (role, name, text)),
+    ])
     load(reload=True)
+    rowid = db.read_val("SELECT rowid FROM config WHERE role = ? AND name = ? "
+                        "AND active = 1", (role, name)) or 0
     log.info("config.save: %s.%s = %r (rowid %s)", role, name, value, rowid)
+    return rowid
+
+
+def set_default(role: str, name: str, value: Any,
+                remark: Optional[str] = None) -> int:
+    """
+    Put a value in force *and* commission it as the parameter's default.
+
+    What the config editor's Default button does.  The previously commissioned
+    row keeps its place in the history but stops being what Restore offers.
+
+    Args:
+        role:   The section.
+        name:   The parameter.
+        value:  The value to commission.
+        remark: Optional note stored on the row.
+
+    Returns:
+        The rowid now in force, or 0 if the parameter is unknown.
+    """
+    rowid = save(role, name, value, remark)
+    if not rowid:
+        return 0
+    # Only the flag moves.  `source` still says who created the row, and the
+    # factory row keeps its source='seed', so Restore Factory Defaults can
+    # still find what shipped after this.
+    db.write_tx([
+        ("UPDATE config SET isdefault = 0 "
+         "WHERE role = ? AND name = ? AND isdefault = 1",
+         (role, name)),
+        ("UPDATE config SET isdefault = 1 WHERE rowid = ?", (rowid,)),
+    ])
+    load(reload=True)
+    log.info("config.set_default: %s.%s = %r", role, name, value)
     return rowid
 
 
@@ -430,87 +496,76 @@ def restore(role: str, name: str) -> int:
     """
     Put the commissioned value for a parameter back in force.
 
-    Copies the isdefault row into a new active row and deactivates the current
-    one, mirroring roi.restore().  Nothing is deleted, so the override being
-    undone stays in the table as history and the isdefault row is never
-    consumed.  With the operator's row gone, the simulation profile applies
-    again when simulation is active.
+    Puts back the isdefault row — this site's commissioned value, which an
+    operator may have moved with Default.  For the value the unit shipped
+    with, see restore_all().
 
-    Restoring a parameter that is already on its commissioned value writes
-    nothing — pressing Restore on an untouched instrument must not grow the
-    table a pair of rows at a time.
+    Nothing is deleted, so the value being undone stays in the table as
+    history.  Restoring a parameter already on its Default value writes
+    nothing.
 
     Args:
         role: The section, e.g. 'protocol'.
         name: The parameter, e.g. 'reagent1_secs'.
 
     Returns:
-        The new row's rowid; 0 if there was nothing to restore, or if the
-        parameter has no isdefault row.
-
-    Example:
-        >>> restore('protocol', 'reagent1_secs')       # doctest: +SKIP
+        The rowid now in force; 0 if there was nothing to restore, or if the
+        parameter has no commissioned row.
     """
-    row = db.read_one(_SELECT + "WHERE role = ? AND name = ? AND isdefault = 1 "
-                                "AND profile = ''", (role, name))
+    row = db.read_one("SELECT rowid, active FROM config WHERE role = ? "
+                      "AND name = ? AND isdefault = 1",
+                      (role, name))
     if row is None:
         log.error("config.restore: no commissioned row for %s.%s", role, name)
         return 0
 
-    _, _, vtype, value, _, _ = row
-    current = db.read_one("SELECT value, source FROM config WHERE role = ? "
-                          "AND name = ? AND active = 1 AND profile = ''",
-                          (role, name))
-    if current is not None and current == (value, SOURCE_SEED):
-        return 0                         # already commissioned — nothing to undo
+    rowid, already_active = row
+    if already_active:
+        return 0                         # already commissioned — nothing to do
 
-    db.write_one("UPDATE config SET active = 0 "
-                 "WHERE role = ? AND name = ? AND active = 1 AND profile = ''",
-                 (role, name))
-    rowid = _insert(role, name, vtype, value, "", SOURCE_SEED,
-                    "restored from default")
+    db.write_tx([
+        ("UPDATE config SET active = 0 "
+         "WHERE role = ? AND name = ? AND active = 1",
+         (role, name)),
+        ("UPDATE config SET active = 1 WHERE rowid = ?", (rowid,)),
+    ])
     load(reload=True)
-    log.info("config.restore: %s.%s = %r (rowid %s)", role, name, value, rowid)
+    log.info("config.restore: %s.%s (rowid %s)", role, name, rowid)
     return rowid
 
 
-def seed_defaults() -> int:
+def restore_all() -> int:
     """
-    Write the commissioned rows for any parameter missing from the table.
+    Put every parameter back to the value the instrument shipped with.
 
-    db_DDL.sql seeds these already, so this is for a database that predates the
-    `config` table or has had rows removed.  Parameters that already have rows
-    are left alone — this never overwrites an operator's setting.  Each missing
-    one gets two rows: the isdefault fallback (active=0) and the row in force
-    (active=1), exactly as roi.seed_defaults() does.
+    What the config editor's "Restore Factory Defaults" does, and deliberately
+    a different thing from Restore: it goes back to the factory value, not to
+    whatever the operator has since commissioned with Default.
+
+    Keyed on source='seed', because that is what config_defaults.sql writes and
+    nothing rewrites afterwards.  `isdefault` cannot answer this — an operator
+    who presses Default moves that flag onto their own value, which is exactly
+    what this has to undo.  It leaves `isdefault` alone as well, so a
+    commissioned site value stays on the Default button.
+
+    Two statements, in this order because the partial unique index forbids a
+    moment with two active rows: stand everything down, then raise the factory
+    rows.  A parameter with no factory row is left inactive, which
+    db_bootstrap's verify reports on the next launch.
 
     Returns:
-        Number of rows inserted (2 per missing parameter; 0 when the table is
-        complete, or when it cannot be written).
-
-    Example:
-        >>> seed_defaults()
-        0
+        Number of parameters that were not already on their factory value.
     """
-    written = 0
-    try:
-        for role, name, vtype, value, profile, remark in SEED_PARAMS:
-            if db.read_val("SELECT COUNT(*) FROM config "
-                           "WHERE role = ? AND name = ? AND profile = ?",
-                           (role, name, profile)):
-                continue
-            _insert(role, name, vtype, value, profile, SOURCE_SEED,
-                    remark, isdefault=1, active=0)
-            _insert(role, name, vtype, value, profile, SOURCE_SEED,
-                    remark, isdefault=0, active=1)
-            written += 2
-            log.info("config.seed_defaults: seeded %s.%s = %r", role, name, value)
-    except sqlite3.Error:
-        log.exception("config.seed_defaults: cannot write the config table")
-        return written
-    if written:
-        load(reload=True)
-    return written
+    changed = db.read_val(
+        "SELECT COUNT(*) FROM config c WHERE c.active = 1 AND c.source <> ?",
+        (SOURCE_SEED,)) or 0
+    db.write_tx([
+        ("UPDATE config SET active = 0 WHERE active = 1", None),
+        ("UPDATE config SET active = 1 WHERE source = ?", (SOURCE_SEED,)),
+    ])
+    load(reload=True)
+    log.info("config.restore_all: %d parameter(s) put back", changed)
+    return changed
 
 
 # ── Capture output ──────────────────────────────────────────────────────────
@@ -526,12 +581,8 @@ def capture_dir() -> Path:
     """
     Return the directory capture archives are written to.
 
-    $COLORIMETER_CAPTURE_DIR wins if set.  Otherwise capture.directory,
-    resolved against the project root when relative.
+    capture.directory, resolved against the project root when relative.
     """
-    from_env = os.environ.get(CAPTURE_DIR_ENV)
-    if from_env:
-        return Path(from_env).expanduser()
     return _resolve_path(str(get("capture", "directory")))
 
 
@@ -584,7 +635,8 @@ def default_focus_diopter() -> float:
 
 def capture_led_color_order() -> list:
     """LED color-name sweep order for normal captures, as a list."""
-    return [c.strip() for c in str(get("capture", "led_color_order")).split(",") if c.strip()]
+    raw = str(get("capture", "led_color_order"))
+    return [c.strip() for c in raw.split(",") if c.strip()]
 
 
 def capture_camera_warmup_s() -> float:
@@ -598,9 +650,10 @@ def capture_dark_prefetch_budget_s() -> float:
 
 
 # ── Protocol timing ─────────────────────────────────────────────────────────
-# Durations of the timed steps, in seconds.  The simulation profile shortens
-# the reagent waits, and the Menu -> Config screen overrides both (saved
-# through save(), so a custom wait holds on real hardware too).
+# Durations of the timed steps, in seconds.  A shorter pair used to be seeded
+# under a 'simulation' profile so desktop runs finished quickly; that profile
+# is gone, so a developer wanting short waits sets them in their own database
+# ($COLORIMETER_DB) or from the config editor.
 
 def reagent1_secs() -> int:
     """Countdown for reagent step 1, in seconds."""
@@ -629,13 +682,6 @@ def shutdown_timeout_s() -> float:
     return float(get("runtime", "shutdown_timeout_s"))
 
 
-# ── Reference data ──────────────────────────────────────────────────────────
-
-def default_rowid() -> int:
-    """The default_gui_vals rowid that seeds the entry screens."""
-    return int(get("defaults", "rowid"))
-
-
 # ── Hardware ────────────────────────────────────────────────────────────────
 
 def backlight_pin() -> int:
@@ -643,133 +689,15 @@ def backlight_pin() -> int:
     return int(get("hardware", "backlight_pin"))
 
 
-# ── Seed SQL generation ─────────────────────────────────────────────────────
-# SEED_PARAMS is the single source of the commissioned values.  The seed block
-# in db_DDL.sql and provisioning/config_defaults.sql are both generated from
-# it, and the self-test below checks db_DDL.sql has not drifted.
-
-_SEED_MARK_BEGIN = "-- ── config seed ─── generated by config_repo.py --emit-sql ──"
-_SEED_MARK_END   = "-- ── end config seed ──"
-
-DDL_PATH      = PROJECT_ROOT / "src" / "db_DDL.sql"
-DEFAULTS_PATH = PROJECT_ROOT / "provisioning" / "config_defaults.sql"
-
-
-def _sql_quote(value: Optional[str]) -> str:
-    """Render a Python str as a SQLite string literal (or NULL)."""
-    if value is None:
-        return "NULL"
-    return "'" + str(value).replace("'", "''") + "'"
-
-
-def seed_sql() -> str:
-    """
-    Render the seed rows as an idempotent INSERT block.
-
-    Explicit rowids so INSERT OR IGNORE makes a re-run a no-op, matching the
-    roi seed: odd rowids are the isdefault fallbacks, even rowids the rows in
-    force.  add_dt is the fixed SEED_DT, so re-emitting is byte-identical.
-    """
-    lines = [
-        _SEED_MARK_BEGIN,
-        "-- Two rows per parameter: the isdefault fallback (active=0) and the row",
-        "-- in force (active=1).  Odd rowids are the fallbacks, even the active ones.",
-        "-- Edit config_repo.SEED_PARAMS and re-emit; do not hand-edit this block.",
-        "INSERT OR IGNORE INTO config (rowid, active, isdefault, add_dt, role, name,",
-        "                              vtype, value, profile, source, remark)",
-        "     VALUES",
-    ]
-    rows = []
-    rowid = 0
-    for role, name, vtype, value, profile, remark in SEED_PARAMS:
-        for isdefault, active in ((1, 0), (0, 1)):
-            rowid += 1
-            rows.append(
-                f"       ({rowid:2d}, {active}, {isdefault}, '{SEED_DT}', "
-                f"{_sql_quote(role)}, {_sql_quote(name)}, {_sql_quote(vtype)}, "
-                f"{_sql_quote(value)}, {_sql_quote(profile)}, "
-                f"{_sql_quote(SOURCE_SEED)}, {_sql_quote(remark)})")
-    lines.append(",\n".join(rows) + ";")
-    lines.append(_SEED_MARK_END)
-    return "\n".join(lines) + "\n"
-
-
-def _ddl_seed_block() -> Optional[str]:
-    """The seed block as it currently stands in db_DDL.sql, or None."""
-    try:
-        text = DDL_PATH.read_text()
-    except OSError:
-        return None
-    start = text.find(_SEED_MARK_BEGIN)
-    end   = text.find(_SEED_MARK_END)
-    if start < 0 or end < 0:
-        return None
-    return text[start:end + len(_SEED_MARK_END)] + "\n"
-
-
-def emit_sql() -> None:
-    """
-    Write the generated seed block into db_DDL.sql and config_defaults.sql.
-
-    db_DDL.sql's block is replaced in place between its markers; the block must
-    already be present (add the two marker lines once by hand).
-    config_defaults.sql is rewritten whole — it is the standalone re-seed
-    provisioning applies to bring a unit's config back to commissioned values
-    without touching any other table.
-    """
-    block = seed_sql()
-
-    text  = DDL_PATH.read_text()
-    start = text.find(_SEED_MARK_BEGIN)
-    end   = text.find(_SEED_MARK_END)
-    if start < 0 or end < 0:
-        raise SystemExit(f"{DDL_PATH}: seed markers not found — add\n"
-                         f"  {_SEED_MARK_BEGIN}\n  {_SEED_MARK_END}\n"
-                         f"where the config seed belongs, then re-run.")
-    DDL_PATH.write_text(text[:start] + block.rstrip("\n")
-                        + text[end + len(_SEED_MARK_END):])
-    print(f"updated {DDL_PATH}")
-
-    DEFAULTS_PATH.parent.mkdir(parents=True, exist_ok=True)
-    DEFAULTS_PATH.write_text(
-        "-- ==========================================================================\n"
-        "-- config_defaults.sql — the commissioned values of every tunable parameter\n"
-        "-- ==========================================================================\n"
-        "--\n"
-        "-- GENERATED by `python src/config_repo.py --emit-sql` from that module's\n"
-        "-- SEED_PARAMS.  Do not hand-edit.\n"
-        "--\n"
-        "-- Applying it to an instrument seeds any parameter the config table is\n"
-        "-- missing, and is a no-op for those it already has:\n"
-        "--\n"
-        "--     sqlite3 src/colorimeter.sqlite < provisioning/config_defaults.sql\n"
-        "--\n"
-        "-- It never touches another table, and never overwrites a value the\n"
-        "-- operator set on Menu -> Config.  To drop those overrides as well, use\n"
-        "-- the Config screen's Restore, or:\n"
-        "--\n"
-        "--     UPDATE config SET active = 0 WHERE active = 1 AND source = 'operator';\n"
-        "--     UPDATE config SET active = 1 WHERE isdefault = 1;\n"
-        "--\n"
-        "-- The same block is embedded in src/db_DDL.sql, so a database built from\n"
-        "-- that file alone is already seeded.\n"
-        "-- ==========================================================================\n"
-        "\n" + block)
-    print(f"wrote   {DEFAULTS_PATH}")
-
-
 # ── Self-test ───────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
     import shutil
-    import sys
     import tempfile
 
-    logging.basicConfig(level=logging.ERROR)
+    import db_bootstrap
 
-    if "--emit-sql" in sys.argv:
-        emit_sql()
-        raise SystemExit(0)
+    logging.basicConfig(level=logging.CRITICAL)
 
     _failures = 0
 
@@ -781,107 +709,113 @@ if __name__ == "__main__":
         print(f"  {'PASS' if ok else 'FAIL'}  {label}"
               f"{'' if ok else f'   got {got!r}, want {want!r}'}")
 
-    # Everything below runs against a throwaway database built from db_DDL.sql,
-    # so the live config table is never written and the checks say something
-    # about the schema file rather than about whatever this machine's database
-    # happens to hold.
-    _tmpdir = tempfile.mkdtemp()
-    _tmpdb  = Path(_tmpdir) / "config_selftest.sqlite"
-    sqlite3.connect(_tmpdb).executescript(DDL_PATH.read_text())
+    # Everything below runs against a throwaway database built the way the
+    # application builds its own, so the live config table is never written.
+    _tmpdir = Path(tempfile.mkdtemp())
+    _tmpdb  = _tmpdir / "config_selftest.sqlite"
     db.DBNAME = str(_tmpdb)
-    os.environ.pop(SIMULATION_ENV, None)
+    db_bootstrap.ensure(_tmpdb)
     load(reload=True)
-    
-    print('capture_led_color_order()')
-    s = capture_led_color_order()
-    print(s)
 
-    print("== db_DDL.sql agrees with SEED_PARAMS ==")
-    check("seed block matches", _ddl_seed_block(), seed_sql())
-
-    print("== the shipped values ==")
+    print("== the seeded values are what the table holds ==")
     check("reagent1", reagent1_secs(), 120)
-    check("reagent2", reagent2_secs(), 420)
-    check("analysis", analysis_secs(), 1.5)
-    check("poll",     main_loop_poll_s(), 0.02)
-    check("shutdown", shutdown_timeout_s(), 15.0)
-    check("led range", (capture_led_start(), capture_led_end()), (1, 10))
-    check("group",    fallback_exposure_group(), "3")
-    check("rowid",    default_rowid(), 1)
+    check("extension", capture_archive_name("X"), "X.h5")
+    check("dir is absolute", capture_dir().is_absolute(), True)
+    check("colour order", capture_led_color_order()[0], "photo_red")
     check("backlight", backlight_pin(), 13)
-    check("archive",  capture_archive_name("x"), "x.h5")
-    check("suite id", capture_suite_id(datetime(2026, 7, 19, 13, 43)),
-          "20260719_1343")
-    check("capture dir", capture_dir(), PROJECT_ROOT / "captures")
 
-    print("== $COLORIMETER_CAPTURE_DIR wins over the table ==")
-    os.environ[CAPTURE_DIR_ENV] = "/tmp/from_env"
-    check("env dir", capture_dir(), Path("/tmp/from_env"))
-    del os.environ[CAPTURE_DIR_ENV]
+    print("== a missing parameter raises, it does not quietly work ==")
+    try:
+        get("protocol", "no_such_param")
+        check("raised", False, True)
+    except ConfigMissing as e:
+        check("raised", "no_such_param" in str(e), True)
 
-    print("== save supersedes, keeping the old row as history ==")
-    _rows_before = db.read_val("SELECT COUNT(*) FROM config "
-                               "WHERE role = 'protocol' AND name = 'reagent1_secs'")
+    print("== saving supersedes, keeps history, and can be restored ==")
     check("saved", save("protocol", "reagent1_secs", 45) > 0, True)
-    check("in force",     reagent1_secs(), 45)
-    check("survives reload", (load(reload=True), reagent1_secs())[1], 45)
+    check("in force", reagent1_secs(), 45)
     check("commissioned unchanged", default("protocol", "reagent1_secs"), 120)
-    # Two active rows survive — the operator's and the simulation profile's.
-    check("one active base row", db.read_val(
-        "SELECT COUNT(*) FROM config WHERE role = 'protocol' "
-        "AND name = 'reagent1_secs' AND active = 1 AND profile = ''"), 1)
-    check("history kept", db.read_val(
-        "SELECT COUNT(*) FROM config WHERE role = 'protocol' "
-        "AND name = 'reagent1_secs'"), _rows_before + 1)
-    check("listed as an override", ("protocol", "reagent1_secs") in overrides(), True)
-    check("neighbour untouched", reagent2_secs(), 420)
-
-    print("== an operator value wins over the simulation profile ==")
-    os.environ[SIMULATION_ENV] = "1"
-    load(reload=True)
-    check("simulation active",   is_simulation(), True)
-    check("operator value holds", reagent1_secs(), 45)
-    check("unset one uses the profile", reagent2_secs(), 10)
-    check("commissioned reads the profile too",
-          default("protocol", "reagent2_secs"), 10)
-
-    print("== restore puts the commissioned value back ==")
+    check("listed as an override",
+          ("protocol", "reagent1_secs") in overrides(), True)
+    check("history has both",
+          [r[0] for r in history("protocol", "reagent1_secs")], ["45", "120"])
     check("restored", restore("protocol", "reagent1_secs") > 0, True)
-    check("profile applies again", reagent1_secs(), 10)
+    check("back in force", reagent1_secs(), 120)
     check("no overrides left", overrides(), [])
-    check("restoring again writes nothing",
-          restore("protocol", "reagent1_secs"), 0)
-    os.environ.pop(SIMULATION_ENV, None)
-    load(reload=True)
-    check("shipped value on hardware", reagent1_secs(), 120)
+    check("restoring again is a no-op", restore("protocol", "reagent1_secs"), 0)
 
-    print("== an unknown parameter is refused, not guessed ==")
-    check("save refused",    save("protocol", "nonesuch", 1), 0)
-    check("restore refused", restore("protocol", "nonesuch"), 0)
-    check("get is None",     get("protocol", "nonesuch"), None)
+    print("== reusing a former value does not duplicate a row ==")
+    save("protocol", "reagent1_secs", 45)
+    save("protocol", "reagent1_secs", 120)
+    save("protocol", "reagent1_secs", 45)
+    check("still two rows", len(history("protocol", "reagent1_secs")), 2)
+    check("in force", reagent1_secs(), 45)
 
-    print("== a hand-edited typo is ignored, not raised ==")
-    db.write_one("UPDATE config SET value = 'abc' WHERE role = 'runtime' "
-                 "AND name = 'main_loop_poll_s' AND active = 1")
-    load(reload=True)
-    check("falls back to the seed value", main_loop_poll_s(), 0.02)
-    restore("runtime", "main_loop_poll_s")
+    print("== the table's invariants survive all that ==")
+    _con = sqlite3.connect(_tmpdb)
+    check("one active row each",
+          _con.execute("SELECT COUNT(*) FROM (SELECT 1 FROM config "
+                       "GROUP BY role, name HAVING SUM(active) <> 1)"
+                       ).fetchone()[0], 0)
+    _con.close()
 
-    print("== seed_defaults refills a gap and is otherwise a no-op ==")
-    check("nothing to do", seed_defaults(), 0)
-    db.write_one("DELETE FROM config WHERE role = 'hardware' "
-                 "AND name = 'backlight_pin'")
-    check("refilled", seed_defaults(), 2)
-    check("value back", backlight_pin(), 13)
+    print("== Default commissions a site value, distinct from the factory ==")
+    check("set", set_default("protocol", "reagent1_secs", 45) > 0, True)
+    check("Default now offers it", default("protocol", "reagent1_secs"), 45)
+    check("so Restore has nothing to do", overrides(), [])
+    check("but the factory row keeps its source",
+          [r[2] for r in history("protocol", "reagent1_secs")
+           if r[0] == "120"], ["seed"])
 
-    print("== an empty table still runs on the built-in seed values ==")
-    db.write_one("DELETE FROM config")
-    load(reload=True)
-    check("reagent1", reagent1_secs(), 120)
-    check("group",    fallback_exposure_group(), "3")
-    check("refilled wholesale", seed_defaults(), 2 * len(SEED_PARAMS))
-    check("reagent1 from the table", reagent1_secs(), 120)
+    print("== Restore Factory Defaults ignores the commissioned value ==")
+    save("capture", "extension", ".hdf5")
+    check("two off the factory value", restore_all(), 2)
+    check("reagent1 back to the factory", reagent1_secs(), 120)
+    check("extension back", capture_archive_name("X"), "X.h5")
+    check("Default still offers the site value",
+          default("protocol", "reagent1_secs"), 45)
+    check("which Restore can put back",
+          restore("protocol", "reagent1_secs") > 0, True)
+    check("in force again", reagent1_secs(), 45)
+    set_default("protocol", "reagent1_secs", 120)
+    restore_all()
+
+    print("== the editor's reads ==")
+    check("roles", roles(), ["capture", "defaults", "device", "hardware",
+                             "protocol", "runtime"])
+    _items = dict((n, (v, t)) for n, t, v, _, _ in items("device"))
+    check("device names", sorted(_items), ["description", "hardware_sn",
+                                           "software_ver"])
+    check("serial value", _items["hardware_sn"][0], "XCN-001")
+    check("serial is locked",
+          [e for n, _, _, e, _ in items("device") if n == "hardware_sn"], [0])
+    check("reagent1 is editable",
+          [e for n, _, _, e, _ in items("protocol")
+           if n == "reagent1_secs"], [1])
+    check("kit history offers the other kit",
+          sorted(r[0] for r in history("defaults", "testkit")),
+          ["Ascel 458201", "Hach 1"])
+    check("no simulation rows on the role screen",
+          "simulation" in str(roles()), False)
+
+    print("== validation, for the editor's fields ==")
+    check("int ok",      valid("42", "int"), True)
+    check("int rejects", valid("4.2", "int"), False)
+    check("float ok",    valid("4.2", "float"), True)
+    check("str takes anything", valid("anything", "str"), True)
+
+    print("== the archive snapshot ==")
+    _snap = snapshot()
+    check("grouped by role", _snap["protocol"]["reagent1_secs"], "120")
+    check("text, not coerced", isinstance(_snap["capture"]["led_start"], str),
+          True)
+    check("identity travels too", _snap["device"]["hardware_sn"], "XCN-001")
+
+    print("== an unknown parameter cannot be written ==")
+    check("save refused", save("nope", "nothing", 1), 0)
+    check("restore refused", restore("nope", "nothing"), 0)
 
     shutil.rmtree(_tmpdir, ignore_errors=True)
-    print(f"\n{'FAILURES: ' + str(_failures) if _failures else 'all checks passed'}")
+
+    print(f"\n{'PASSED' if not _failures else f'FAILURES: {_failures}'}")
     raise SystemExit(1 if _failures else 0)
