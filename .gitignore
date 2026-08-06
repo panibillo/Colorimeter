@@ -13,7 +13,7 @@
 **.npy
 **.h5
 **.sqlite
-**.sqlite.bak-*
+**.sqlite.*
 image_view_check.png
 **.prof
 **.log
