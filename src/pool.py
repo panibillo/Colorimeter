@@ -109,6 +109,8 @@ class Pool:
         field("weight_fld",     L.BODY_FLD2, 18, "field_blue")
         button("collectdt_lbl", L.BODY_LBL3, "white", "label_coral", 13, text="Collect")
         field("collectdt_fld",  L.BODY_FLD3, 18, "field_blue")
+        button("remark_lbl",    L.BODY_LBL4, "white", "label_coral", 13, text="Remark")
+        field("remark_fld",     L.BODY_FLD4, 18, "field_blue")
 
         # ── body: timer cluster + instructions ─────────────────────────────────
         #label("timer_lbl", L.TIMER_LBL, "white", "label_coral", 22)

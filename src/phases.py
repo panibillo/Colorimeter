@@ -278,19 +278,22 @@ class Entry2Phase(Phase):
     title    = ""                 # header shows the sample id
 
     FIELDS = {"temp_fld": "samp_degC", "weight_fld": "samp_grams",
-              "collectdt_fld": "collect_dt"}
+              "collectdt_fld": "collect_dt", "remark_fld": "remark"}
 
     def enter(self, pool, slot, arb) -> None:
         r = slot.record
         # Temp label reads the DS18B20; Collect label stamps the current time.
-        # Weight has no source yet — its label is an inert placeholder.
+        # Weight and Remark have no source yet — their labels are inert
+        # placeholders.
         pool.put("temp_lbl",      "Temp °C", on=lambda: self.fill_temp(arb, slot))
         pool.put("temp_fld",      _text(r.get("samp_degC")))
         pool.put("weight_lbl",    "Weight g")
         pool.put("weight_fld",    _text(r.get("samp_grams")))
         pool.put("collectdt_lbl", "Collect", on=lambda: self.fill_collect(arb, slot))
         pool.put("collectdt_fld", r.get("collect_dt") or "")
-        pool.show("div1", "div2")
+        pool.put("remark_lbl",    "Remark")
+        pool.put("remark_fld",    r.get("remark") or "")
+        pool.show("div1", "div2", "div3")
         self._chrome(pool, slot, arb, "Continue",
                      main_on=lambda: self.proceed(arb, slot))
 
@@ -313,7 +316,8 @@ class Entry2Phase(Phase):
             r["collect_dt"] = arb.timestamp()
         arb.persist(slot, collect_dt=r["collect_dt"],
                     samp_degC=_to_float(r.get("samp_degC")),
-                    samp_grams=_to_float(r.get("samp_grams")))
+                    samp_grams=_to_float(r.get("samp_grams")),
+                    remark=r.get("remark"))
         arb.goto(slot, self.next)
 
 
@@ -772,12 +776,14 @@ if __name__ == "__main__":
 
     print("== entry2: collect stamp + Continue persists -> reagent1 ==")
     A.record["samp_degC"] = "21.5"; A.record["samp_grams"] = "3.2"   # writethrough sim
+    A.record["remark"] = "cloudy sample"                             # writethrough sim
     press(pool, "collectdt_lbl")                   # Collect label stamps the datetime
     check("collect stamped",  bool(A.record["collect_dt"]), True)
     press(pool, "main_btn")                        # Continue
     check("phase reagent1",   A.phase, "reagent1")
     check("degC persisted (float)",  A.record["samp_degC"], 21.5)
     check("grams persisted (float)", A.record["samp_grams"], 3.2)
+    check("remark persisted",        A.record["remark"], "cloudy sample")
     check("run_btn label",    pool["run_btn"].label, "START\n1")
     check("instr1",           pool["instr1"].text, "Add Reagent 1")
     check("main is CANCEL",   pool["main_btn"].label, "CANCEL")
