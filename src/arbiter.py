@@ -114,12 +114,17 @@ _EDIT_MARGIN         = 0.5      # Edit zooms to the rectangle plus half its size
 _EDIT_EDGE_TOL_PX    = 12       # canvas px within which a tap arms an edge
 _EDIT_MIN_SIDE       = 16       # smallest ROI a Save will accept, image px
 
-# Bounds for a reagent countdown entered on the Menu → Config screen.  Zero is
+# Bounds for a reagent countdown entered on the Menu → Phases screen.  Zero is
 # excluded (a wait that expires the instant it starts is never what was meant)
 # and the ceiling is one hour, well past the longest protocol step.
 _CFG_MIN_SECS, _CFG_MAX_SECS = 1, 3600
-# The step buttons on each config row, in the order they are laid out.
+# The step buttons on each phases row, in the order they are laid out.
 _CFG_STEPS = (-60, -10, 10, 60)
+
+# Config editor: body rows per page (layout.py draws four), and the label of the
+# entry that sits at the end of the role list rather than naming a role.
+_CFGE_ROWS    = 4
+_CFGE_RESTORE = "Restore Factory Defaults"
 
 # Tunables (LED range, loop cadence, timeouts, reagent durations, rowid, the
 # backlight pin) are rows in the database's `config` table and are read through
@@ -137,8 +142,31 @@ def _clamp_us(us: float) -> int:
 
 
 def _mmss(secs: int) -> str:
-    """Seconds as m:ss, so the config screen shows what a duration means."""
+    """Seconds as m:ss, so the phases screen shows what a duration means."""
     return f"{secs // 60}:{secs % 60:02d}"
+
+
+def _cfge_fit(name: str, limit: int = 13) -> str:
+    """
+    Break a parameter name at its underscores so it fits the config editor's
+    title, which has only the 120 px between the two corner buttons.
+
+    Example:
+        >>> _cfge_fit("dark_prefetch_budget_s")
+        'dark_prefetch\\nbudget_s'
+    """
+    if len(name) <= limit:
+        return name
+    lines, line = [], ""
+    for part in name.split("_"):
+        candidate = f"{line}_{part}" if line else part
+        if line and len(candidate) > limit:
+            lines.append(line)
+            line = part
+        else:
+            line = candidate
+    lines.append(line)
+    return "\n".join(lines)
 
 
 class Arbiter:
@@ -244,9 +272,27 @@ class Arbiter:
         # The group saved before the choice screen opened, so CANCEL can restore it.
         self._cap_saved_on_open: str | None = None
 
-        # Config screen state (Menu → Config): the reagent countdowns in
+        # Phases screen state (Menu → Phases): the reagent countdowns in
         # seconds, staged while the screen is open and written only by its OK.
         self._cfg_secs: dict[str, int] = {"r1": 0, "r2": 0}
+
+        # Config editor state (Menu → Config): which of the three views is up,
+        # what it is showing, and where in the list it is.  _cfge_start holds
+        # the value each field on the current page was loaded with, which is
+        # what "edited" is measured against and what Rollback puts back.
+        self._cfge_view:  str | None = None   # None | "roles" | "role" | "browse"
+        self._cfge_role:  str = ""            # the role the role/browse views show
+        self._cfge_name:  str = ""            # the parameter the browse view shows
+        self._cfge_page:  int = 0
+        self._cfge_list:  list = []           # the whole list being paged through
+        self._cfge_start: dict[str, str] = {}
+        # An edit lives only in its field, and both the confirm modals and the
+        # Browse view take the fields off the screen — so anything typed is
+        # held here for the render that brings the role view back.
+        self._cfge_hold:  dict[str, str] = {}
+        # Whether the footer is currently drawn in its edit-pending state, so a
+        # keystroke repaints those five buttons only when it flips.
+        self._cfge_footer_pending: bool = False
 
         # Image viewer state (Menu → View Image, and later Read → View Sample).
         # _view_open is read by _camera_wanted(), so the shared camera is held
@@ -662,18 +708,18 @@ class Arbiter:
         self._pool.put("menu_cancel_btn", "CANCEL", on=self._menu_cancel)
         self._pool.put("menu_title",      "Menu")
         self._pool.put("menu_ok_btn",     "OK",     on=self._menu_ok)
-        # The 3x2 option grid, laid out in layout.py: the remaining stub is
-        # shown disabled (no handler wired) so the grid reads as a whole while
-        # the screen behind it is still to come.  "View Image" is disabled
+        # The 3x2 option grid, laid out in layout.py.  "View Image" is disabled
         # while a capture is in flight — the imaging tools share the camera and
-        # LED bank with the capture path.
+        # LED bank with the capture path.  "Phases" edits the two reagent
+        # countdowns; "Config" is the general editor over every setting,
+        # reagent countdowns included.
         self._pool.put("menu_capture",    "Capture",  on=self._menu_open_capture)
         self._pool.put("menu_stub1",      "View\nImage",
                        on=self._menu_open_image_view,
                        enabled=self.capture_available())
         self._pool.put("menu_defaults",   "Defaults", on=self._menu_open_defaults)
-        self._pool.put("menu_stub2",      "stub2",    enabled=False)
-        self._pool.put("menu_config",     "Config",   on=self._menu_open_config)
+        self._pool.put("menu_stub2",      "Config",   on=self._cfge_open)
+        self._pool.put("menu_config",     "Phases",   on=self._menu_open_config)
         self._pool.put("menu_power",      "Power",    on=self._menu_power)
         self._pool.render(self._disp)
         self._rebuild_focus()
@@ -736,19 +782,20 @@ class Arbiter:
         self._load_defaults()
         self._menu_open_defaults()
 
-    # ── Config screen (Menu → Config) ──────────────────────────────────────────
+    # ── Phases screen (Menu → Phases) ──────────────────────────────────────────
     # Custom reagent countdowns, entered on the instrument itself.  The two
     # durations are staged in self._cfg_secs while the screen is open and are
     # written (as new rows in the `config` table) only by its OK, so a mis-tap
     # costs nothing — CANCEL leaves the saved values alone.
     #
-    # A saved duration wins over both the commissioned value and the simulation
-    # profile, so it applies on real hardware too — which the shortened
-    # simulation durations do not.  Restore supersedes it with the commissioned
-    # row again; the edit stays in the table as history either way.
+    # They are ordinary `protocol` parameters, so the config editor below can
+    # reach them too; this screen exists because stepping a countdown by ±10 s
+    # against a mm:ss readout is the way an operator actually wants to set one.
+    # Restore supersedes a custom value with the commissioned row again; the
+    # edit stays in the table as history either way.
 
     def _menu_open_config(self) -> None:
-        """Open the config screen, staging the durations now in force."""
+        """Open the phases screen, staging the durations now in force."""
         self._cfg_secs = {"r1": config.reagent1_secs(),
                           "r2": config.reagent2_secs()}
         self._render_config()
@@ -764,7 +811,7 @@ class Arbiter:
         p.hide_all()
         # Top-corner chrome like the Menu and Capture screens.
         p.put("menu_cancel_btn", "CANCEL", on=self._cfg_cancel)
-        p.put("cfg_title",       "Config")
+        p.put("cfg_title",       "Phases")
         p.put("menu_ok_btn",     "OK",     on=self._cfg_ok)
         for row, n in (("r1", 1), ("r2", 2)):
             p.put(f"cfg_{row}_lbl", f"Reagent {n}")
@@ -857,6 +904,428 @@ class Arbiter:
         r1, r2 = config.reagent1_secs(), config.reagent2_secs()
         self._phases = build_phases(reagent1_secs=r1, reagent2_secs=r2)
         log.info("Arbiter: reagent countdowns set to %ds / %ds", r1, r2)
+
+    # ── Config editor (Menu → Config) ──────────────────────────────────────────
+    # Every setting the instrument has, in one screen with three views: the list
+    # of roles, one role's parameters, and one parameter's history.  Built as
+    # _cfge_* methods rather than Phase objects for the reason set out for the
+    # image viewer below — a Phase is bound to a Slot, and this screen has none.
+    #
+    # A value is typed into its field from the USB keyboard, or picked from the
+    # Browse view, which is the whole editor for a touch-only instrument (there
+    # is no on-screen keyboard).  Typing marks the row edited — red on yellow —
+    # and from then until Rollback or Save the paging buttons are dead, so an
+    # unsaved edit cannot be scrolled off the screen and lost.
+    #
+    # Nothing here writes SQL: config_repo owns the four transactions (save,
+    # set_default, restore, restore_all) and this screen only decides which one
+    # a button calls and with what.
+
+    def _cfge_open(self) -> None:
+        """Menu → Config: open the editor on the list of roles."""
+        self._cfge_role = ""
+        self._cfge_name = ""
+        self._cfge_open_roles()
+
+    def _cfge_editable(self) -> bool:
+        """
+        False while a slot is past entry: a live sample has already read these
+        values and none of them may move under it.  The screen stays viewable —
+        only the fields and the write buttons go dead.
+        """
+        return not self._any_slot_active()
+
+    # ── the three views ────────────────────────────────────────────────────────
+
+    def _cfge_open_roles(self) -> None:
+        """Show the roles, with Restore Factory Defaults after the last one."""
+        self._cfge_view  = "roles"
+        self._cfge_page  = 0
+        self._cfge_start = {}
+        # Restore rides at the end of the list, so it lands on the last page
+        # rather than under a finger aiming for the first role.
+        self._cfge_list  = config.roles() + [_CFGE_RESTORE]
+        self._cfge_render()
+
+    def _cfge_open_role(self, role: str) -> None:
+        """Show one role's parameters, four to a page, alphabetically."""
+        self._cfge_view = "role"
+        self._cfge_role = role
+        self._cfge_page = 0
+        self._cfge_list = config.items(role)
+        self._cfge_render()
+
+    def _cfge_open_browse(self, name: str) -> None:
+        """
+        Show every value one parameter has held: in force, default, history.
+
+        Looking a value up is the obvious thing to do halfway through typing
+        one, so an edit in progress is held rather than blocked or discarded —
+        CANCEL comes back to the role view with it still in its field.
+        """
+        self._cfge_hold = dict(self._cfge_pending())
+        self._cfge_view = "browse"
+        self._cfge_name = name
+        self._cfge_page = 0
+        self._cfge_list = config.history(self._cfge_role, name)
+        self._cfge_render()
+
+    # ── paging ─────────────────────────────────────────────────────────────────
+
+    def _cfge_pages(self) -> int:
+        """How many pages the current list fills (at least one, even if empty)."""
+        return max(1, -(-len(self._cfge_list) // _CFGE_ROWS))
+
+    def _cfge_page_rows(self) -> list:
+        """The slice of the list the four body rows are showing."""
+        first = self._cfge_page * _CFGE_ROWS
+        return self._cfge_list[first:first + _CFGE_ROWS]
+
+    def _cfge_page_step(self, delta: int) -> None:
+        self._cfge_page = max(0, min(self._cfge_pages() - 1,
+                                     self._cfge_page + delta))
+        self._cfge_render()
+
+    # ── rendering ──────────────────────────────────────────────────────────────
+
+    def _cfge_render(self) -> None:
+        """Draw the view that is up, header and footer included."""
+        if self._pool is None:
+            return
+        p = self._pool
+        p.hide_all()
+        p.put("menu_cancel_btn", "CANCEL", on=self._cfge_cancel)
+        p.put("cfge_title", self._cfge_title())
+        p.put("menu_ok_btn", "OK", on=self._cfge_ok)
+        if self._cfge_view == "roles":
+            self._cfge_put_roles()
+        elif self._cfge_view == "role":
+            self._cfge_put_role()
+        else:
+            self._cfge_put_browse()
+        self._cfge_put_footer()
+        p.render(self._disp)
+        self._rebuild_focus()
+
+    def _cfge_title(self) -> str:
+        """
+        The header line, at most three lines in the 120 px between the corner
+        buttons: what screen this is, then what it is showing.
+        """
+        if self._cfge_view == "roles":
+            return "Config\nRoles"
+        if self._cfge_view == "role":
+            return f"Config\n{self._cfge_role}"
+        return f"{self._cfge_role}\n{_cfge_fit(self._cfge_name)}"
+
+    def _cfge_put_roles(self) -> None:
+        from palette import color
+        p = self._pool
+        for i, role in enumerate(self._cfge_page_rows(), 1):
+            row = f"cfge_row{i}"
+            if role == _CFGE_RESTORE:
+                p.put(row, "Restore Factory\nDefaults",
+                      on=self._cfge_confirm_restore_all,
+                      enabled=self._cfge_editable())
+                p[row].color = color("label_coral")
+            else:
+                p.put(row, role, on=lambda r=role: self._cfge_open_role(r))
+                p[row].color = color("slot_b_bg")
+
+    def _cfge_put_role(self) -> None:
+        """
+        Four rows of `name / value / Browse`.
+
+        A parameter the table marks editable=0 — the serial numbers, the
+        backlight pin — shows greyed and takes neither keystrokes nor a Browse:
+        it is a record of how the instrument was built, not a setting.
+        """
+        p = self._pool
+        editable = self._cfge_editable()
+        self._cfge_start = {}
+        for i, (name, _vtype, value, row_editable, _isdefault) in enumerate(
+                self._cfge_page_rows(), 1):
+            self._cfge_start[name] = value
+            can_edit = editable and bool(row_editable)
+            p.put(f"cfge_lbl{i}", name)
+            # The field shows what was typed if an edit is being held over from
+            # a modal or the Browse view, and the stored value otherwise.
+            fld = p.put(f"cfge_fld{i}", self._cfge_hold.pop(name, value),
+                        enabled=can_edit)
+            # `editable` is what makes a TextBox take characters at all, and it
+            # sets focusability; both have to be re-stated every render because
+            # the four field widgets are shared with every other page and view.
+            fld.editable  = can_edit
+            fld.focusable = can_edit
+            p.put(f"cfge_btn{i}", "Browse",
+                  on=lambda n=name: self._cfge_open_browse(n),
+                  enabled=bool(row_editable))
+            self._cfge_paint_row(i, redraw=False)
+        # Anything still held names a parameter on another page, which cannot
+        # happen while paging is locked out — drop it rather than let it
+        # reappear over an unrelated row later.
+        self._cfge_hold = {}
+
+    def _cfge_put_browse(self) -> None:
+        """
+        Four rows of one parameter's history: value, when and by whom it was
+        first stored, and whether it is the row in force or the commissioned
+        default.  Use puts it back in force — no typing involved, which is what
+        makes this the editor a touch-only instrument gets.
+        """
+        from palette import color
+        p = self._pool
+        editable = self._cfge_editable()
+        for i, (value, add_dt, source, active, isdefault) in enumerate(
+                self._cfge_page_rows(), 1):
+            marks = "  ".join(m for m, on in (("in force", active),
+                                              ("default", isdefault)) if on)
+            p.put(f"cfge_lbl{i}", f"{add_dt or '?'}  {source or '?'}  {marks}")
+            fld = p.put(f"cfge_fld{i}", value, enabled=False)
+            fld.editable  = False
+            fld.focusable = False
+            fld.color, fld.bg = color("black"), color("white")
+            p.put(f"cfge_btn{i}", "Use",
+                  on=lambda v=value: self._cfge_activate(v),
+                  enabled=editable and not active)
+
+    def _cfge_put_footer(self) -> None:
+        """
+        The five action buttons.  Paging is dead while an edit is pending —
+        the field is the only place that edit exists, so paging away would
+        discard it without saying so.
+        """
+        p = self._pool
+        pending = bool(self._cfge_pending())
+        self._cfge_footer_pending = pending
+        p.put("cfge_prior", "< Prior", on=lambda: self._cfge_page_step(-1),
+              enabled=self._cfge_page > 0 and not pending)
+        p.put("cfge_rollback", "Rollbk", on=self._cfge_rollback, enabled=pending)
+        p.put("cfge_save", "Save", on=self._cfge_save, enabled=pending)
+        p.put("cfge_default", "Default", on=self._cfge_confirm_default,
+              enabled=pending)
+        p.put("cfge_next", "Next >", on=lambda: self._cfge_page_step(1),
+              enabled=self._cfge_page < self._cfge_pages() - 1 and not pending)
+
+    def _cfge_repaint_footer(self) -> None:
+        """
+        Repaint the five footer buttons after the pending-edit state flipped.
+
+        Keyboard focus is preserved rather than rebuilt: the operator is typing
+        in a field, and _rebuild_focus() would drop them back to the first
+        widget mid-word.
+        """
+        keep = self._focused_widget()
+        self._cfge_put_footer()
+        for name in ("cfge_prior", "cfge_rollback", "cfge_save",
+                     "cfge_default", "cfge_next"):
+            self._pool[name].invalidate()
+            self._pool.redraw(self._disp, name)
+        self._focusables = self._pool.focusable_widgets()
+        self._focus_idx  = (self._focusables.index(keep)
+                            if keep in self._focusables else -1)
+
+    def _cfge_paint_row(self, i: int, redraw: bool = True) -> None:
+        """
+        Colour one role-view field by its state: edited (red on yellow), fixed
+        by the table (grey), or the value in force (black on white).  A no-op
+        when the colour is already right, so most keystrokes cost no redraw.
+        """
+        from palette import color
+        p    = self._pool
+        fld  = p[f"cfge_fld{i}"]
+        name = self._cfge_row_name(i)
+        if name is None:
+            return
+        if not fld.editable:
+            want = ("btn_gray", "white")
+        elif str(fld.value) != self._cfge_start.get(name, ""):
+            want = ("edited_text", "field_yellow")
+        else:
+            want = ("black", "white")
+        fg, bg = color(want[0]), color(want[1])
+        if (fld.color, fld.bg) == (fg, bg):
+            return
+        fld.color, fld.bg = fg, bg
+        if redraw:
+            fld.invalidate()
+            p.redraw(self._disp, f"cfge_fld{i}")
+
+    # ── edit state ─────────────────────────────────────────────────────────────
+
+    def _cfge_row_name(self, i: int) -> "str | None":
+        """The parameter name on body row i (1..4), or None if the row is empty."""
+        rows = self._cfge_page_rows()
+        return rows[i - 1][0] if 1 <= i <= len(rows) else None
+
+    def _cfge_pending(self) -> "list[tuple[str, str]]":
+        """
+        (name, text) for every field on this page no longer showing the value
+        it was loaded with.  Empty in the roles and browse views, which have
+        nothing to edit.
+        """
+        if self._cfge_view != "role" or self._pool is None:
+            return []
+        out = []
+        for i, row in enumerate(self._cfge_page_rows(), 1):
+            fld  = self._pool[f"cfge_fld{i}"]
+            text = str(fld.value)
+            if fld.editable and text != self._cfge_start.get(row[0], text):
+                out.append((row[0], text))
+        return out
+
+    def _cfge_writethrough(self, textbox) -> None:
+        """
+        React to a keystroke in one of the editor's fields.
+
+        There is nothing to copy anywhere — the field itself is where the edit
+        lives until Save.  What changes is the row's colour and whether the
+        footer's write buttons are live.
+        """
+        if self._pool is None or not str(textbox.name).startswith("cfge_fld"):
+            return
+        self._cfge_paint_row(int(textbox.name[-1]))
+        if bool(self._cfge_pending()) != self._cfge_footer_pending:
+            self._cfge_repaint_footer()
+
+    # ── writes ─────────────────────────────────────────────────────────────────
+
+    def _cfge_rollback(self) -> None:
+        """Put the fields back to the values they were loaded with."""
+        self._cfge_render()
+
+    def _cfge_save(self) -> None:
+        """Put the edited values in force, keeping the previous ones as history."""
+        self._cfge_write(config.save)
+
+    def _cfge_set_default(self) -> None:
+        """Put the edited values in force *and* commission them as the defaults."""
+        self._cfge_write(config.set_default)
+
+    def _cfge_write(self, writer) -> bool:
+        """
+        Validate every pending edit, then write them all with `writer`.
+
+        Nothing is written unless all of them read back as their declared type,
+        so a page of edits either lands together or not at all.
+
+        Args:
+            writer: config.save or config.set_default.
+
+        Returns:
+            True if the values were written; False if one was rejected, in
+            which case a modal is up saying which.
+        """
+        pending = self._cfge_pending()
+        vtypes  = {row[0]: row[1] for row in self._cfge_page_rows()}
+        for name, text in pending:
+            if not config.valid(text, vtypes[name]):
+                log.error("config editor: %s.%s = %r is not a valid %s",
+                          self._cfge_role, name, text, vtypes[name])
+                # Hold the rejected text: the operator has to see it again to
+                # correct it, and Rollback is right there if they would rather
+                # start over.
+                self._cfge_hold = dict(pending)
+                self._cfge_warn(f"{name}\nis not a valid {vtypes[name]}")
+                return False
+        for name, text in pending:
+            writer(self._cfge_role, name, text)
+        self._cfge_hold = {}
+        self._cfge_applied()
+        self._cfge_list = config.items(self._cfge_role)
+        self._cfge_render()
+        return True
+
+    def _cfge_activate(self, value: str) -> None:
+        """Put a value from the Browse list back in force."""
+        config.save(self._cfge_role, self._cfge_name, value)
+        # Picking a value here settles this parameter — a half-typed one held
+        # from the role view would otherwise reappear over what was just chosen.
+        self._cfge_hold.pop(self._cfge_name, None)
+        self._cfge_applied()
+        self._cfge_list = config.history(self._cfge_role, self._cfge_name)
+        self._cfge_render()
+
+    def _cfge_applied(self) -> None:
+        """
+        Re-read everything the running program holds a copy of.
+
+        Called after any write rather than only for the roles that matter, so
+        no list of "settings with a consumer" has to be kept in step here —
+        both calls are cheap and idempotent.
+        """
+        self._load_defaults()
+        self._apply_reagent_secs()
+
+    # ── confirms ───────────────────────────────────────────────────────────────
+
+    def _cfge_confirm_default(self) -> None:
+        names = ", ".join(name for name, _ in self._cfge_pending())
+        self._cfge_modal(f"Commission as the\ndefault value?\n{names}",
+                         self._cfge_set_default)
+
+    def _cfge_confirm_restore_all(self) -> None:
+        self._cfge_modal("Put every setting back\nto its factory value?",
+                         self._cfge_restore_all)
+
+    def _cfge_restore_all(self) -> None:
+        count = config.restore_all()
+        self._cfge_applied()
+        log.info("config editor: %d parameter(s) put back to factory", count)
+        self._cfge_open_roles()
+
+    def _cfge_modal(self, msg: str, on_ok) -> None:
+        """A yes/no confirm over the editor; either answer returns to the view."""
+        p = self._pool
+        if p is None:
+            return
+        # Hold whatever is typed: the modal takes the fields off the screen,
+        # and Cancel has to come back to the screen the operator left.
+        self._cfge_hold = dict(self._cfge_pending())
+        p.hide_all()
+        p.put("modal_panel")
+        p.put("modal_msg", msg)
+        names = p.layout_modal_buttons(2)
+        p.put(names[0], "OK",     on=on_ok)
+        p.put(names[1], "Cancel", on=self._cfge_render)
+        p.render(self._disp)
+        self._rebuild_focus()
+
+    def _cfge_warn(self, msg: str) -> None:
+        """A one-button modal explaining why a write was refused."""
+        p = self._pool
+        if p is None:
+            return
+        p.hide_all()
+        p.put("modal_panel")
+        p.put("modal_msg", msg)
+        names = p.layout_modal_buttons(1)
+        p.put(names[0], "OK", on=self._cfge_render)
+        p.render(self._disp)
+        self._rebuild_focus()
+
+    # ── leaving ────────────────────────────────────────────────────────────────
+
+    def _cfge_ok(self) -> None:
+        """Save anything typed, then step back one level."""
+        if self._cfge_view == "role" and self._cfge_pending():
+            if not self._cfge_write(config.save):
+                return                     # rejected — the warning modal is up
+        self._cfge_back()
+
+    def _cfge_cancel(self) -> None:
+        """Discard anything typed and step back one level."""
+        self._cfge_back()
+
+    def _cfge_back(self) -> None:
+        """Browse → role → roles → the Menu."""
+        if self._cfge_view == "browse":
+            self._cfge_open_role(self._cfge_role)
+        elif self._cfge_view == "role":
+            self._cfge_open_roles()
+        else:
+            self._cfge_view = None
+            self._render_menu()
 
     # ── Capture screen (Menu → Capture) ────────────────────────────────────────
     # A standalone capture launched from the Menu: pick a path (Calibration or
@@ -2767,6 +3236,14 @@ class Arbiter:
         focused slot's record.  On the first entry screen, also re-enable Begin
         the moment the sample number and user are both set.
         """
+        # The config editor has no slot behind it — its fields stage their own
+        # value until Save, so it only needs to recolour and re-enable.  Keyed
+        # on the widget, not on the screen state, so a stale view field can
+        # never reach a slot record.
+        if str(textbox.name).startswith("cfge_"):
+            self._cfge_writethrough(textbox)
+            return
+
         slot = self._focused
         if slot is None:
             return
@@ -3204,8 +3681,8 @@ def _selftest() -> None:
     check("camera freed on cancel", arb.capture_available(), True)
     check("cancel leaves capture view", arb._cap_view, None)
 
-    # ── Menu grid + Config screen ────────────────────────────────────────────
-    # The Config screen writes to the `config` table, which is already the
+    # ── Menu grid + Phases screen ────────────────────────────────────────────
+    # The Phases screen writes to the `config` table, which is already the
     # throwaway copy set up above, so the live settings are untouched.
 
     print("== menu: six options in a 3x2 grid ==")
@@ -3213,14 +3690,18 @@ def _selftest() -> None:
     for _name in ("menu_capture", "menu_stub1", "menu_defaults",
                   "menu_stub2", "menu_config", "menu_power"):
         check(f"{_name} shown", arb._pool[_name].visible, True)
-    # stub1 became "View Image" in step 6; stub2 is the last inert one.
+    # Every grid slot opens a screen now: the two that were stubs became the
+    # image viewer and the config editor, and menu_config narrowed to "Phases"
+    # (the reagent countdowns) since the editor covers every setting.
     check("stub1 is View Image", arb._pool["menu_stub1"].label, "View\nImage")
-    check("stub2 inert",   arb._pool["menu_stub2"].enabled, False)
+    check("stub2 is Config",     arb._pool["menu_stub2"].label, "Config")
+    check("stub2 enabled",       arb._pool["menu_stub2"].enabled, True)
+    check("config slot is Phases", arb._pool["menu_config"].label, "Phases")
 
     _file_r1 = int(config.default("protocol", "reagent1_secs"))
     _file_r2 = int(config.default("protocol", "reagent2_secs"))
 
-    print("== config screen: steps stage a duration; CANCEL discards it ==")
+    print("== phases screen: steps stage a duration; CANCEL discards it ==")
     arb._menu_open_config()
     check("stages the live durations", arb._cfg_secs["r1"], config.reagent1_secs())
     check("field shows the seconds",   arb._pool["cfg_r1_fld"].value, str(_file_r1))
@@ -3229,7 +3710,7 @@ def _selftest() -> None:
     arb._cfg_cancel()
     check("CANCEL saved nothing", config.reagent1_secs(), _file_r1)
 
-    print("== config screen: OK saves the custom wait and applies it ==")
+    print("== phases screen: OK saves the custom wait and applies it ==")
     arb._menu_open_config()
     arb._pool["cfg_r1_m10"].on_press()
     arb._cfg_ok()
@@ -3240,7 +3721,7 @@ def _selftest() -> None:
     check("phases rebuilt",    arb._phases["reagent1"].secs, _stepped_r1)
     check("reagent2 untouched", config.reagent2_secs(), _file_r2)
 
-    print("== config screen: a typed duration is honoured and clamped ==")
+    print("== phases screen: a typed duration is honoured and clamped ==")
     arb._menu_open_config()
     arb._pool.set("cfg_r2_fld", "45")          # as a keyboard would leave it
     arb._cfg_ok()
@@ -3255,7 +3736,7 @@ def _selftest() -> None:
           arb._cfg_staged("r1"), arb._cfg_secs["r1"])
     arb._cfg_cancel()
 
-    print("== config screen: Restore returns to the commissioned durations ==")
+    print("== phases screen: Restore returns to the commissioned durations ==")
     arb._menu_open_config()
     arb._cfg_restore()
     check("staged from the commissioned row", arb._cfg_secs["r2"], _file_r2)
@@ -3267,6 +3748,199 @@ def _selftest() -> None:
     # business.
     check("no reagent overrides left behind",
           [p for p in config.overrides() if p[0] == "protocol"], [])
+
+    # ── Config editor (Menu → Config) ────────────────────────────────────────
+    # Also against the throwaway copy.  It ends with Restore Factory Defaults,
+    # which stands every parameter back on its seed row — nothing below reads
+    # a value this screen has moved.
+
+    import palette as _palette
+
+    # Both slots are still parked on the result screen from the run above, and
+    # the editor locks its fields while any slot is past entry.  Stand them
+    # down first; the lockout gets a test of its own further down.
+    for _s in arb._slots.values():
+        _s.active_phase = "entry"
+
+    def cfge_row_of(name):
+        """Body row (1..4) showing `name` on the page that is up, or None."""
+        for i, row in enumerate(arb._cfge_page_rows(), 1):
+            if row[0] == name:
+                return i
+        return None
+
+    print("== config editor: opens on the roles, Restore last ==")
+    arb.open_menu(A)
+    arb._pool["menu_stub2"].on_press()
+    check("roles view",        arb._cfge_view, "roles")
+    check("lists every role",  arb._cfge_list[:-1], config.roles())
+    check("Restore rides last", arb._cfge_list[-1], _CFGE_RESTORE)
+    check("first page of four", len(arb._cfge_page_rows()), 4)
+    check("Prior dead on page 1", arb._pool["cfge_prior"].enabled, False)
+    check("Next live",         arb._pool["cfge_next"].enabled, True)
+    check("nothing to save",   arb._pool["cfge_save"].enabled, False)
+    check("row 1 opens a role", arb._pool["cfge_row1"].label, config.roles()[0])
+
+    print("== config editor: paging reaches the Restore entry ==")
+    arb._pool["cfge_next"].on_press()
+    check("page 2",            arb._cfge_page, 1)
+    check("Next dead at the end", arb._pool["cfge_next"].enabled, False)
+    check("Prior live",        arb._pool["cfge_prior"].enabled, True)
+    _restore_row = [i for i in (1, 2, 3, 4)
+                    if arb._pool[f"cfge_row{i}"].visible
+                    and arb._pool[f"cfge_row{i}"].label.startswith("Restore")]
+    check("Restore is on the last page", len(_restore_row), 1)
+    arb._pool["cfge_prior"].on_press()
+    check("back to page 1",    arb._cfge_page, 0)
+
+    print("== config editor: a role lists its parameters; device_sn is fixed ==")
+    arb._cfge_open_role("device")
+    check("role view",         arb._cfge_view, "role")
+    check("titled for the role", arb._pool["cfge_title"].text, "Config\ndevice")
+    check("three device rows", len(arb._cfge_list), 3)
+    _sn = cfge_row_of("hardware_sn")
+    check("hardware_sn is listed", _sn is not None, True)
+    check("hardware_sn read-only", arb._pool[f"cfge_fld{_sn}"].editable, False)
+    check("its Browse is greyed",  arb._pool[f"cfge_btn{_sn}"].enabled, False)
+    _desc = cfge_row_of("description")
+    check("description editable",  arb._pool[f"cfge_fld{_desc}"].editable, True)
+    check("shows the value in force",
+          arb._pool[f"cfge_fld{_desc}"].value, config.get("device", "description"))
+
+    print("== config editor: typing marks the row and wakes the write buttons ==")
+    _fld = arb._pool[f"cfge_fld{_desc}"]
+    _fld.set_value("bench rig")
+    arb._writethrough(_fld)
+    check("edit is pending",   arb._cfge_pending(), [("description", "bench rig")])
+    check("field turned yellow", _fld.bg, _palette.color("field_yellow"))
+    check("text turned red",     _fld.color, _palette.color("edited_text"))
+    check("Save live",         arb._pool["cfge_save"].enabled, True)
+    check("Rollback live",     arb._pool["cfge_rollback"].enabled, True)
+    check("Default live",      arb._pool["cfge_default"].enabled, True)
+    check("paging locked out", arb._pool["cfge_next"].enabled, False)
+    check("nothing written yet", config.get("device", "description") != "bench rig", True)
+
+    print("== config editor: Rollback puts the field back ==")
+    arb._pool["cfge_rollback"].on_press()
+    check("no edit pending",   arb._cfge_pending(), [])
+    check("field back to white",
+          arb._pool[f"cfge_fld{cfge_row_of('description')}"].bg,
+          _palette.color("white"))
+    check("Save dead again",   arb._pool["cfge_save"].enabled, False)
+
+    print("== config editor: Save writes it and reloads the row ==")
+    _was_desc = config.get("device", "description")
+    _fld = arb._pool[f"cfge_fld{cfge_row_of('description')}"]
+    _fld.set_value("bench rig")
+    arb._writethrough(_fld)
+    arb._pool["cfge_save"].on_press()
+    check("in force",          config.get("device", "description"), "bench rig")
+    check("edit cleared",      arb._cfge_pending(), [])
+    check("still on the role", arb._cfge_view, "role")
+
+    print("== config editor: a value its vtype cannot read is refused ==")
+    arb._cfge_open_role("protocol")
+    _r1row = cfge_row_of("reagent1_secs")
+    _fld = arb._pool[f"cfge_fld{_r1row}"]
+    _fld.set_value("two minutes")
+    arb._writethrough(_fld)
+    check("refused",           arb._cfge_write(config.save), False)
+    check("unchanged",         config.reagent1_secs(), _file_r1)
+    check("a modal says why",  arb._pool["modal_msg"].visible, True)
+    check("names the type",    "int" in arb._pool["modal_msg"].text, True)
+    arb._pool["modal_yes"].on_press()          # its OK returns to the view
+    check("back on the role",  arb._cfge_view, "role")
+    # The rejected text comes back with the screen — it is what has to be
+    # corrected — and Rollback is the way to abandon it.
+    check("rejected text is still there",
+          arb._cfge_pending(), [("reagent1_secs", "two minutes")])
+    arb._pool["cfge_rollback"].on_press()
+    check("Rollback abandons it", arb._cfge_pending(), [])
+
+    print("== config editor: a saved edit reaches the running program ==")
+    _fld = arb._pool[f"cfge_fld{cfge_row_of('reagent1_secs')}"]
+    _fld.set_value("77")
+    arb._writethrough(_fld)
+    arb._pool["cfge_save"].on_press()
+    check("saved",             config.reagent1_secs(), 77)
+    check("phases rebuilt",    arb._phases["reagent1"].secs, 77)
+
+    print("== config editor: Browse lists the history, Use reactivates ==")
+    arb._cfge_open_browse("reagent1_secs")
+    check("browse view",       arb._cfge_view, "browse")
+    check("in force is first", arb._cfge_list[0][0], "77")
+    check("row 1 is not offered", arb._pool["cfge_btn1"].enabled, False)
+    _old = [i for i, row in enumerate(arb._cfge_page_rows(), 1)
+            if row[0] == str(_file_r1)]
+    check("the commissioned value is listed", len(_old), 1)
+    arb._pool[f"cfge_btn{_old[0]}"].on_press()
+    check("reactivated",       config.reagent1_secs(), _file_r1)
+    check("no duplicate row",
+          _db.read_val("SELECT COUNT(*) FROM config WHERE role='protocol' "
+                       "AND name='reagent1_secs' AND value=?", (str(_file_r1),)), 1)
+
+    print("== config editor: Default commissions the edited value ==")
+    arb._cfge_open_role("runtime")
+    _fld = arb._pool[f"cfge_fld{cfge_row_of('shutdown_timeout_s')}"]
+    _fld.set_value("12.5")
+    arb._writethrough(_fld)
+    arb._pool["cfge_default"].on_press()       # opens the confirm
+    check("confirm is up",     arb._pool["modal_msg"].visible, True)
+    arb._pool["modal_no"].on_press()           # Cancel writes nothing
+    check("cancelled",         config.default("runtime", "shutdown_timeout_s") != 12.5, True)
+    # …and comes back to the edit rather than dropping it on the floor.
+    check("the edit survived the confirm",
+          arb._cfge_pending(), [("shutdown_timeout_s", "12.5")])
+    arb._pool["cfge_default"].on_press()
+    arb._pool["modal_yes"].on_press()
+    check("in force",          config.shutdown_timeout_s(), 12.5)
+    check("and commissioned",  config.default("runtime", "shutdown_timeout_s"), 12.5)
+    check("edit cleared after Default", arb._cfge_pending(), [])
+
+    print("== config editor: an edit survives a look at the history ==")
+    _fld = arb._pool[f"cfge_fld{cfge_row_of('shutdown_timeout_s')}"]
+    _fld.set_value("9.0")
+    arb._writethrough(_fld)
+    arb._cfge_open_browse("shutdown_timeout_s")
+    check("browsing",          arb._cfge_view, "browse")
+    arb._cfge_cancel()
+    check("back on the role",  arb._cfge_view, "role")
+    check("still pending",     arb._cfge_pending(), [("shutdown_timeout_s", "9.0")])
+    arb._pool["cfge_rollback"].on_press()
+    check("rolled back",       arb._cfge_pending(), [])
+
+    print("== config editor: locked out while a slot is live ==")
+    A.active_phase = "reagent1"
+    arb._cfge_open_role("runtime")
+    check("fields disabled",   arb._pool["cfge_fld1"].editable, False)
+    check("still viewable",    arb._pool["cfge_fld1"].visible, True)
+    arb._cfge_open_browse("shutdown_timeout_s")
+    check("Use disabled too",  arb._pool["cfge_btn2"].enabled, False)
+    A.active_phase = "entry"
+
+    print("== config editor: CANCEL walks back out to the Menu ==")
+    arb._cfge_open_role("runtime")
+    arb._cfge_open_browse("shutdown_timeout_s")
+    arb._cfge_cancel()
+    check("browse → role",     arb._cfge_view, "role")
+    arb._cfge_cancel()
+    check("role → roles",      arb._cfge_view, "roles")
+    arb._cfge_cancel()
+    check("roles → menu",      arb._cfge_view, None)
+    check("the Menu is up",    arb._pool["menu_capture"].visible, True)
+
+    print("== config editor: Restore Factory Defaults undoes all of it ==")
+    arb._cfge_open()
+    arb._cfge_confirm_restore_all()
+    arb._pool["modal_yes"].on_press()
+    check("back on the roles",  arb._cfge_view, "roles")
+    check("description restored", config.get("device", "description"), _was_desc)
+    check("shutdown_timeout_s restored",
+          config.shutdown_timeout_s() != 12.5, True)
+    check("every parameter on its seed row",
+          _db.read_val("SELECT COUNT(*) FROM config WHERE active=1 "
+                       "AND source <> 'seed'"), 0)
+    arb._cfge_cancel()
 
     # ── Image viewer (Tool 1) ─────────────────────────────────────────────────
     print("== image viewer: camera guard ==")

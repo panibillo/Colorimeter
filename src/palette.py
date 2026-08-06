@@ -44,6 +44,9 @@ PALETTE: dict[str, int] = {
     "row_line":    0x8410,
     "field_blue":  0x041F,
     "field_yellow":0xFFE0,
+    # Config editor: a field holding a typed value that has not been saved yet
+    # reads red on field_yellow, so an unsaved edit is obvious at a glance.
+    "edited_text": 0xF800,   # red
     "status_bg":   0x0000,
     # Step-status chips (reagent 1 / 2 / Capture).  "ready" reuses start_green
     # (the RUN colour); the rest are its dim form and a running amber + dim.

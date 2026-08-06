@@ -99,20 +99,55 @@ MODAL_3C    = Rect(208, 134,  84,  46)
 # Options sit in a 3-row x 2-column grid filling the body; the menu draws no
 # footer, so the bottom row may run to the foot of the screen.
 #
-#       Capture  | stub1
-#       Defaults | stub2
-#       Config   | Power
+#       Capture  | View Image
+#       Defaults | Config
+#       Phases   | Power
 MENU_CANCEL_BTN = Rect(  0,   0, 100,  50)   # top-left: discard staged choices
 MENU_TITLE      = Rect(100,   5, 120,  40)
 MENU_OK_BTN     = Rect(220,   0, 100,  50)   # top-right: save staged choices
 MENU_CAPTURE    = Rect(  8,  54, 148,  56)   # row 1 left: capture choice screen
-MENU_STUB1      = Rect(164,  54, 148,  56)   # row 1 right: unassigned
+MENU_STUB1      = Rect(164,  54, 148,  56)   # row 1 right: image viewer
 MENU_DEFAULTS   = Rect(  8, 118, 148,  56)   # row 2 left
-MENU_STUB2      = Rect(164, 118, 148,  56)   # row 2 right: unassigned
-MENU_CONFIG     = Rect(  8, 182, 148,  56)   # row 3 left: config screen
+MENU_STUB2      = Rect(164, 118, 148,  56)   # row 2 right: config editor
+MENU_CONFIG     = Rect(  8, 182, 148,  56)   # row 3 left: reagent durations
 MENU_POWER      = Rect(164, 182, 148,  56)   # row 3 right
 
-# ── config screen (Menu → Config: the reagent countdown durations) ──────────────
+# ── config editor (Menu → Config: every setting in the config table) ───────────
+# Four body rows on a 38 px pitch (y 52..202), then a five-button footer band.
+# One row is drawn two ways, and the two are never shown together:
+#
+#   Roles / Restore  ┌──────────────── CFGE_ROW ─────────────────┐
+#   Role view        ┌── CFGE_LBL (name) ───┐  ┌─── CFGE_BTN ────┐
+#                    └── CFGE_FLD (value) ──┘  └── Browse / Use ─┘
+#
+# The name gets its own line above the value so a long value — a vendor name,
+# the LED colour order — is readable at full width instead of clipped into a
+# column beside its label.
+CFGE_ROW1   = Rect(  4,  52, 312, 36)
+CFGE_LBL1   = Rect(  6,  52, 246, 14)
+CFGE_FLD1   = Rect(  4,  66, 248, 22)
+CFGE_BTN1   = Rect(256,  52,  60, 36)
+CFGE_ROW2   = Rect(  4,  90, 312, 36)
+CFGE_LBL2   = Rect(  6,  90, 246, 14)
+CFGE_FLD2   = Rect(  4, 104, 248, 22)
+CFGE_BTN2   = Rect(256,  90,  60, 36)
+CFGE_ROW3   = Rect(  4, 128, 312, 36)
+CFGE_LBL3   = Rect(  6, 128, 246, 14)
+CFGE_FLD3   = Rect(  4, 142, 248, 22)
+CFGE_BTN3   = Rect(256, 128,  60, 36)
+CFGE_ROW4   = Rect(  4, 166, 312, 36)
+CFGE_LBL4   = Rect(  6, 166, 246, 14)
+CFGE_FLD4   = Rect(  4, 180, 248, 22)
+CFGE_BTN4   = Rect(256, 166,  60, 36)
+# Its own footer band, taller than the standard one: five labelled actions do
+# not fit in 21 px.  Shown instead of PRIOR/CLOCK/MENU/NEXT, never with them.
+CFGE_PRIOR    = Rect(  0, 206,  62, 33)
+CFGE_ROLLBACK = Rect( 64, 206,  62, 33)
+CFGE_SAVE     = Rect(128, 206,  62, 33)
+CFGE_DEFAULT  = Rect(192, 206,  62, 33)
+CFGE_NEXT     = Rect(256, 206,  62, 33)
+
+# ── phases screen (Menu → Phases: the reagent countdown durations) ─────────────
 # Two identical rows — a label, the value in seconds, and four step buttons
 # (-60 / -10 / +10 / +60).  The value is an editable field as well, so a
 # keyboard can type a duration straight in.  CANCEL/OK reuse the menu's corners.

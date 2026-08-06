@@ -164,19 +164,42 @@ class Pool:
         button("menu_cancel_btn", L.MENU_CANCEL_BTN, "hdr_text", "btn_gray",   18, text="CANCEL")
         label("menu_title",       L.MENU_TITLE,       "black",   "white",     20, text="Menu")
         button("menu_ok_btn",     L.MENU_OK_BTN,       "hdr_text", "start_green", 18, text="OK")
-        # The 3x2 option grid: left column Capture/Defaults/Config, right column
-        # two unassigned stubs and Power.
+        # The 3x2 option grid: left column Capture/Defaults/Phases, right column
+        # View Image/Config/Power.  The two grid slots still named for the stubs
+        # they started as are positional, like the body rows — the arbiter says
+        # what each one opens.
         button("menu_capture",    L.MENU_CAPTURE,      "hdr_text", "start_green", 18, text="Capture")
-        button("menu_stub1",      L.MENU_STUB1,        "hdr_text", "btn_gray",    18, text="stub1")
+        button("menu_stub1",      L.MENU_STUB1,        "hdr_text", "btn_gray",    18, text="View\nImage")
         button("menu_defaults",   L.MENU_DEFAULTS,     "hdr_text", "slot_a_bg",   18, text="Defaults")
-        button("menu_stub2",      L.MENU_STUB2,        "hdr_text", "btn_gray",    18, text="stub2")
-        button("menu_config",     L.MENU_CONFIG,       "hdr_text", "slot_b_bg",   18, text="Config")
+        button("menu_stub2",      L.MENU_STUB2,        "hdr_text", "btn_gray",    18, text="Config")
+        button("menu_config",     L.MENU_CONFIG,       "hdr_text", "slot_b_bg",   18, text="Phases")
         button("menu_power",      L.MENU_POWER,        "hdr_text", "label_coral", 18, text="Power")
 
-        # ── config screen (Menu → Config): the two reagent countdowns ───────────
+        # ── config editor (Menu → Config): roles, one role, one parameter ──────
+        # Four body rows, each built both ways — one full-width button for the
+        # role and history lists, and a name/value/action triple for the role
+        # view — because the three views never share the screen.  The arbiter
+        # decides per render which set it shows.
+        label("cfge_title", L.MENU_TITLE, "black", "white", 11)
+        cfge_rows = ((L.CFGE_ROW1, L.CFGE_LBL1, L.CFGE_FLD1, L.CFGE_BTN1),
+                     (L.CFGE_ROW2, L.CFGE_LBL2, L.CFGE_FLD2, L.CFGE_BTN2),
+                     (L.CFGE_ROW3, L.CFGE_LBL3, L.CFGE_FLD3, L.CFGE_BTN3),
+                     (L.CFGE_ROW4, L.CFGE_LBL4, L.CFGE_FLD4, L.CFGE_BTN4))
+        for i, (row_r, lbl_r, fld_r, btn_r) in enumerate(cfge_rows, 1):
+            button(f"cfge_row{i}", row_r, "hdr_text", "slot_b_bg", 16)
+            label(f"cfge_lbl{i}", lbl_r, "black", "white", 11, align="left")
+            field(f"cfge_fld{i}", fld_r, 13, "field_blue")
+            button(f"cfge_btn{i}", btn_r, "btn_text", "btn_gray", 13)
+        button("cfge_prior",    L.CFGE_PRIOR,    "btn_text", "btn_gray", 13, text="< Prior")
+        button("cfge_rollback", L.CFGE_ROLLBACK, "btn_text", "btn_gray", 13, text="Rollbk")
+        button("cfge_save",     L.CFGE_SAVE,     "btn_text", "start_green", 13, text="Save")
+        button("cfge_default",  L.CFGE_DEFAULT,  "btn_text", "btn_gray", 13, text="Default")
+        button("cfge_next",     L.CFGE_NEXT,     "btn_text", "btn_gray", 13, text="Next >")
+
+        # ── phases screen (Menu → Phases): the two reagent countdowns ───────────
         # Each row is label / seconds field / four step buttons; the arbiter
         # wires the steps and writes the staged value into the field.
-        label("cfg_title",   L.MENU_TITLE, "black", "white", 20, text="Config")
+        label("cfg_title",   L.MENU_TITLE, "black", "white", 20, text="Phases")
         label("cfg_r1_lbl",  L.CFG_LBL1,   "black", "white", 13, align="left", text="Reagent 1")
         field("cfg_r1_fld",  L.CFG_FLD1,   18, "field_blue", align="center")
         button("cfg_r1_m60", L.CFG_R1_M60, "btn_text", "btn_gray", 13, text="-60")
@@ -557,6 +580,37 @@ if __name__ == "__main__":
         assert pool.handle_touch(r.x + r.w // 2, r.y + r.h // 2, disp), name
         assert hits == [name], f"{name} press routed to {hits}"
     print(f"  all {len(_VIEWER) - 2} buttons route to themselves")
+
+    print("\n== config editor: rows and footer are laid out clear of each other ==")
+    # The role view draws a name over a value in the left column with an action
+    # button beside them; the roles/history views draw one full-width button in
+    # the same space.  The two never share the screen, so ROW is allowed to
+    # cover LBL/FLD/BTN — but nothing may cross a row boundary or the footer.
+    _footer = [pool[n].rect for n in ("cfge_prior", "cfge_rollback", "cfge_save",
+                                      "cfge_default", "cfge_next")]
+    _rows = []
+    for i in (1, 2, 3, 4):
+        row = pool[f"cfge_row{i}"].rect
+        lbl, fld, btn = (pool[f"cfge_{p}{i}"].rect for p in ("lbl", "fld", "btn"))
+        for part in (lbl, fld, btn):
+            assert row.y <= part.y and part.bottom <= row.bottom, \
+                f"cfge row {i}: {part} escapes {row}"
+        assert lbl.bottom <= fld.y, f"cfge row {i}: name overlaps its value"
+        assert fld.right <= btn.x, f"cfge row {i}: value overlaps its button"
+        _rows.append(row)
+    for a, b in zip(_rows, _rows[1:]):
+        assert a.bottom <= b.y, f"cfge rows overlap: {a} and {b}"
+    assert _rows[-1].bottom <= _footer[0].y, "cfge row 4 runs into the footer"
+    for a, b in zip(_footer, _footer[1:]):
+        assert a.right <= b.x, f"cfge footer buttons overlap: {a} and {b}"
+    assert _footer[-1].right <= layout.SCREEN_W, "cfge footer runs off screen"
+    assert _footer[-1].bottom <= layout.SCREEN_H, "cfge footer runs off screen"
+    # Five across leaves each footer button under the 40 px the viewer's pad
+    # gets; 62 x 33 is the floor a finger still lands on reliably.
+    for r in _footer:
+        assert r.w >= 60 and r.h >= 33, f"cfge footer button is only {r.w}x{r.h}"
+    print(f"  4 rows y{_rows[0].y}..{_rows[-1].bottom}, "
+          f"footer y{_footer[0].y}..{_footer[-1].bottom}, no overlaps")
 
     print("\n== palette: ROI overlay colours unpack to RGB ==")
     from palette import PALETTE, rgb888, unpack565
