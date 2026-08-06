@@ -1,12 +1,18 @@
 #!/usr/bin/env python3
 """
-Unit tests for config_repo (src/config_repo.py).
+Unit tests for config_repo (src/config_repo.py) and db_bootstrap.
 
 config_repo is the only module that reads the database's `config` table, and
 the only place that answers "where do capture archives go and what are they
-called". These tests cover the resolution rules — environment override, the
-simulation profile, operator overrides via save()/restore(), and the
-defaults that keep a capture working when a row is missing or malformed.
+called". These tests cover reading and coercion, the two independent kinds of
+default (the Default button vs Restore Factory Defaults), the write
+transactions and the invariants the schema enforces on them.
+
+What is deliberately *not* here any more: tests that a missing table, an empty
+table or a malformed value silently falls back to values compiled into Python.
+That fallback is gone. db_bootstrap guarantees the rows exist before anything
+reads them, and a genuinely missing parameter now raises ConfigMissing, which
+is what TestMissingParameters checks instead.
 
 Run from the project root:
     python test/test_config_repo.py
@@ -26,327 +32,515 @@ from pathlib import Path
 _ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(_ROOT / "src"))
 
+import db_bootstrap
 import db_manager as db
 import config_repo as config
-
-_DDL_PATH = _ROOT / "src" / "db_DDL.sql"
 
 
 class ConfigTestCase(unittest.TestCase):
     """
-    Isolates each test in a throwaway database built from db_DDL.sql, so
-    every test starts from the real, fully-seeded config table and the live
-    database is never touched.
+    Isolates each test in a throwaway database built the way the application
+    builds its own — db_bootstrap.ensure() — so every test starts from the real
+    seeded config table and the live database is never touched.
     """
 
-    _MANAGED_ENV = (
-        config.CAPTURE_DIR_ENV,
-        config.SIMULATION_ENV,
-    )
-
     def setUp(self):
-        self._saved_env = {k: os.environ.pop(k, None) for k in self._MANAGED_ENV}
         self._saved_dbname = db.DBNAME
         self._tmpdir = tempfile.mkdtemp()
         self._tmpdb  = Path(self._tmpdir) / "config_test.sqlite"
-        sqlite3.connect(self._tmpdb).executescript(_DDL_PATH.read_text())
         db.DBNAME = str(self._tmpdb)
+        db_bootstrap.ensure(self._tmpdb)
         config.load(reload=True)
 
     def tearDown(self):
         db.DBNAME = self._saved_dbname
         shutil.rmtree(self._tmpdir, ignore_errors=True)
-        for key, value in self._saved_env.items():
-            if value is None:
-                os.environ.pop(key, None)
-            else:
-                os.environ[key] = value
         config.load(reload=True)
 
-    def use_rows(self, rows) -> None:
-        """
-        Replace the config table's contents with `rows`.
+    def rows(self, sql, vals=()):
+        """Query the test database directly, bypassing config_repo's cache."""
+        con = sqlite3.connect(self._tmpdb)
+        try:
+            return con.execute(sql, vals).fetchall()
+        finally:
+            con.close()
 
-        Each row is (role, name, vtype, value, profile). Two rows are written
-        per entry — the isdefault fallback and the row in force — exactly as
-        the real seed does, so save()/restore() behave the same way under test
-        as they do against the shipped table.
-        """
-        db.write_one("DELETE FROM config")
-        rowid = 0
-        for role, name, vtype, value, profile in rows:
-            for isdefault, active in ((1, 0), (0, 1)):
-                rowid += 1
-                db.write_one(
-                    "INSERT INTO config (rowid, active, isdefault, add_dt, role, "
-                    "name, vtype, value, profile, source, remark) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                    (rowid, active, isdefault, "2026-01-01 00:00:00",
-                     role, name, vtype, value, profile, "seed", None))
-        config.load(reload=True)
+    def assertOneActiveRowPerParameter(self):
+        """The invariant every write has to leave the table in."""
+        broken = self.rows(
+            "SELECT role, name FROM config "
+            "GROUP BY role, name HAVING SUM(active) <> 1")
+        self.assertEqual(broken, [], "parameters without exactly one active row")
+        for flag in ("active", "isdefault"):
+            dupes = self.rows(
+                f"SELECT role, name FROM config WHERE {flag} = 1 "
+                "GROUP BY role, name HAVING COUNT(*) > 1")
+            self.assertEqual(dupes, [], f"duplicate {flag} rows")
 
 
-class TestShippedConfig(ConfigTestCase):
-    """The real db_DDL.sql seed must be complete and agree with SEED_PARAMS."""
+class TestSeededValues(ConfigTestCase):
+    """A freshly bootstrapped database holds what config_defaults.sql says."""
 
-    def test_seed_block_matches_seed_params(self):
-        self.assertEqual(config._ddl_seed_block(), config.seed_sql())
-
-    def test_shipped_table_loads(self):
-        settings = config.load(reload=True)
-        self.assertIn("capture", settings)
-
-    def test_shipped_capture_directory_is_captures(self):
-        self.assertEqual(config.capture_dir(), config.PROJECT_ROOT / "captures")
-
-    def test_shipped_archive_name_is_timestamp_dot_h5(self):
-        suite_id = config.capture_suite_id(datetime(2026, 7, 19, 13, 43))
-        self.assertEqual(suite_id, "20260719_1343")
-        self.assertEqual(config.capture_archive_name(suite_id), "20260719_1343.h5")
-
-
-class TestCaptureDir(ConfigTestCase):
-
-    def test_relative_directory_resolves_against_project_root(self):
-        self.use_rows([("capture", "directory", "path", "captures", "")])
-        self.assertEqual(config.capture_dir(), config.PROJECT_ROOT / "captures")
-
-    def test_absolute_directory_is_used_as_given(self):
-        self.use_rows([("capture", "directory", "path",
-                        "/srv/colorimeter/archives", "")])
-        self.assertEqual(config.capture_dir(), Path("/srv/colorimeter/archives"))
-
-    def test_user_home_is_expanded(self):
-        self.use_rows([("capture", "directory", "path", "~/archives", "")])
-        self.assertEqual(config.capture_dir(), Path.home() / "archives")
-
-    def test_environment_variable_wins_over_table(self):
-        self.use_rows([("capture", "directory", "path", "/srv/from_table", "")])
-        os.environ[config.CAPTURE_DIR_ENV] = "/tmp/from_env"
-        self.assertEqual(config.capture_dir(), Path("/tmp/from_env"))
-
-    def test_environment_variable_expands_user(self):
-        os.environ[config.CAPTURE_DIR_ENV] = "~/from_env"
-        self.assertEqual(config.capture_dir(), Path.home() / "from_env")
-
-
-class TestNaming(ConfigTestCase):
-
-    def test_timestamp_format_is_configurable(self):
-        self.use_rows([("capture", "timestamp_format", "str",
-                        "%Y-%m-%d_%H%M%S", "")])
-        self.assertEqual(
-            config.capture_suite_id(datetime(2026, 7, 19, 13, 43, 7)),
-            "2026-07-19_134307")
-
-    def test_extension_is_configurable(self):
-        self.use_rows([("capture", "extension", "str", ".hdf5", "")])
-        self.assertEqual(config.capture_archive_name("abc"), "abc.hdf5")
-
-    def test_suite_id_defaults_to_now(self):
-        before = datetime.now().strftime("%Y%m%d")
-        self.assertTrue(config.capture_suite_id().startswith(before))
-
-
-class TestFallbacks(ConfigTestCase):
-    """A missing table, empty table, or a typo must not stop a capture."""
-
-    def test_missing_table_falls_back_to_seed_params(self):
-        db.write_one("DROP TABLE config")
-        config.load(reload=True)
-        self.assertEqual(config.capture_dir(), config.PROJECT_ROOT / "captures")
-        self.assertEqual(config.capture_archive_name("x"), "x.h5")
-
-    def test_empty_table_falls_back_to_seed_params(self):
-        db.write_one("DELETE FROM config")
-        config.load(reload=True)
-        self.assertEqual(config.capture_dir(), config.PROJECT_ROOT / "captures")
-        self.assertEqual(config.reagent1_secs(), 120)
-
-    def test_malformed_value_falls_back_to_seed_params(self):
-        self.use_rows([("runtime", "main_loop_poll_s", "float", "abc", "")])
-        self.assertEqual(config.main_loop_poll_s(), 0.02)
-
-    def test_partial_row_set_keeps_other_defaults(self):
-        """One row must not blank out its neighbours' seed values."""
-        self.use_rows([("capture", "directory", "path", "/srv/only_this", "")])
-        self.assertEqual(config.capture_dir(), Path("/srv/only_this"))
-        self.assertEqual(config.capture_archive_name("x"), "x.h5")
-
-
-class TestShippedTunables(ConfigTestCase):
-    """The values migrated out of the code keep their historical defaults."""
-
-    def test_shipped_protocol_durations(self):
+    def test_protocol_durations(self):
         self.assertEqual(config.reagent1_secs(), 120)
         self.assertEqual(config.reagent2_secs(), 420)
         self.assertEqual(config.analysis_secs(), 1.5)
 
-    def test_shipped_runtime_timing(self):
+    def test_runtime_timing(self):
         self.assertEqual(config.main_loop_poll_s(), 0.02)
         self.assertEqual(config.shutdown_timeout_s(), 15.0)
 
-    def test_shipped_capture_selection(self):
+    def test_capture_selection(self):
         self.assertEqual(config.capture_led_start(), 1)
         self.assertEqual(config.capture_led_end(), 10)
         self.assertEqual(config.fallback_exposure_group(), "3")
+        self.assertEqual(config.capture_led_color_order()[0], "photo_red")
+        self.assertEqual(len(config.capture_led_color_order()), 10)
 
-    def test_shipped_default_rowid(self):
-        self.assertEqual(config.default_rowid(), 1)
-
-    def test_shipped_backlight_pin(self):
+    def test_backlight_pin(self):
         self.assertEqual(config.backlight_pin(), 13)
 
+    def test_folded_identity_and_defaults(self):
+        """device/users/testkit/testlot are config roles now, not tables."""
+        self.assertEqual(config.get("device", "hardware_sn"), "XCN-001")
+        self.assertEqual(config.get("defaults", "testkit"), "Ascel 458201")
+        self.assertEqual(config.get("defaults", "testlot"), "0 12V601-HH")
+        self.assertEqual(config.get("defaults", "user"), "William Olsen")
 
-class TestSimulationProfile(ConfigTestCase):
-    """A 'simulation' row wins over its '' counterpart only while active."""
-
-    _ROWS = [
-        ("protocol", "reagent1_secs", "int", "120", ""),
-        ("protocol", "reagent1_secs", "int", "10",  config.SIM_PROFILE),
-        ("protocol", "reagent2_secs", "int", "420", ""),
-        ("protocol", "reagent2_secs", "int", "10",  config.SIM_PROFILE),
-    ]
-
-    def test_env_unset_is_not_simulation(self):
-        self.use_rows(self._ROWS)
-        self.assertFalse(config.is_simulation())
-        self.assertEqual(config.reagent1_secs(), 120)
-
-    def test_env_off_keeps_the_shipped_durations(self):
-        self.use_rows(self._ROWS)
-        os.environ[config.SIMULATION_ENV] = "0"
-        config.load(reload=True)
-        self.assertFalse(config.is_simulation())
-        self.assertEqual(config.reagent1_secs(), 120)
-
-    def test_env_on_applies_the_profile(self):
-        self.use_rows(self._ROWS)
-        os.environ[config.SIMULATION_ENV] = "1"
-        config.load(reload=True)
-        self.assertTrue(config.is_simulation())
-        self.assertEqual(config.reagent1_secs(), 10)
-        self.assertEqual(config.reagent2_secs(), 10)
-
-    def test_profile_leaves_unprofiled_params_alone(self):
-        self.use_rows(self._ROWS + [
-            ("protocol", "analysis_secs", "float", "99", "")])
-        os.environ[config.SIMULATION_ENV] = "1"
-        config.load(reload=True)
-        self.assertEqual(config.reagent1_secs(), 10)    # profiled
-        self.assertEqual(config.analysis_secs(), 99)    # untouched
-
-
-class TestOperatorOverrides(ConfigTestCase):
-    """
-    Values the operator changes on the instrument (Menu -> Config) are saved
-    as a new active row with source='operator' and win over every other tier.
-    """
-
-    _ROWS = [
-        ("protocol", "reagent1_secs", "int", "120", ""),
-        ("protocol", "reagent1_secs", "int", "10",  config.SIM_PROFILE),
-        ("protocol", "reagent2_secs", "int", "420", ""),
-        ("protocol", "analysis_secs", "float", "1.5", ""),
-    ]
-
-    def test_nothing_saved_leaves_the_commissioned_value_in_charge(self):
-        self.use_rows(self._ROWS)
-        self.assertEqual(config.reagent1_secs(), 120)
+    def test_every_parameter_starts_as_its_own_default(self):
         self.assertEqual(config.overrides(), [])
+        self.assertOneActiveRowPerParameter()
 
-    def test_saved_value_wins_over_the_commissioned_value(self):
-        self.use_rows(self._ROWS)
+
+class TestCaptureDir(ConfigTestCase):
+    """capture_dir() resolves capture.directory; there is no env override."""
+
+    def test_relative_directory_resolves_against_project_root(self):
+        config.save("capture", "directory", "captures")
+        self.assertEqual(config.capture_dir(), config.PROJECT_ROOT / "captures")
+
+    def test_absolute_directory_is_used_as_given(self):
+        config.save("capture", "directory", "/var/tmp/shots")
+        self.assertEqual(config.capture_dir(), Path("/var/tmp/shots"))
+
+    def test_user_home_is_expanded(self):
+        config.save("capture", "directory", "~/shots")
+        self.assertEqual(config.capture_dir(), Path.home() / "shots")
+
+
+class TestNaming(ConfigTestCase):
+    """The archive's suite id and filename."""
+
+    def test_timestamp_format_is_configurable(self):
+        when = datetime(2026, 7, 19, 13, 43, 21)
+        self.assertEqual(config.capture_suite_id(when), "20260719_1343")
+        config.save("capture", "timestamp_format", "%Y-%m-%d")
+        self.assertEqual(config.capture_suite_id(when), "2026-07-19")
+
+    def test_extension_is_configurable(self):
+        self.assertEqual(config.capture_archive_name("X"), "X.h5")
+        config.save("capture", "extension", ".hdf5")
+        self.assertEqual(config.capture_archive_name("X"), "X.hdf5")
+
+    def test_suite_id_defaults_to_now(self):
+        self.assertEqual(config.capture_suite_id(),
+                         datetime.now().strftime("%Y%m%d_%H%M"))
+
+
+class TestMissingParameters(ConfigTestCase):
+    """
+    A parameter with no active row is a bug, and says so.
+
+    This replaces the old fallback tests. There is no longer a table of values
+    in Python for a missing row to fall back to, which is the point: a value
+    the operator cannot see in the database cannot be in force.
+    """
+
+    def test_unknown_parameter_raises(self):
+        with self.assertRaises(config.ConfigMissing):
+            config.get("protocol", "no_such_parameter")
+
+    def test_the_exception_names_the_parameter(self):
+        with self.assertRaises(config.ConfigMissing) as caught:
+            config.get("nope", "missing")
+        self.assertIn("nope.missing", str(caught.exception))
+
+    def test_a_deactivated_parameter_raises(self):
+        con = sqlite3.connect(self._tmpdb)
+        con.execute("UPDATE config SET active = 0 WHERE role = 'protocol' "
+                    "AND name = 'reagent1_secs'")
+        con.commit()
+        con.close()
+        config.load(reload=True)
+        with self.assertRaises(config.ConfigMissing):
+            config.reagent1_secs()
+
+    def test_a_malformed_value_raises_rather_than_being_guessed_at(self):
+        con = sqlite3.connect(self._tmpdb)
+        con.execute("UPDATE config SET value = 'later' WHERE role = 'protocol' "
+                    "AND name = 'reagent1_secs'")
+        con.commit()
+        con.close()
+        config.load(reload=True)
+        with self.assertRaises(config.ConfigMissing):
+            config.reagent1_secs()
+
+    def test_saving_an_unknown_parameter_is_refused(self):
+        self.assertEqual(config.save("nope", "missing", 1), 0)
+
+    def test_restoring_an_unknown_parameter_is_refused(self):
+        self.assertEqual(config.restore("nope", "missing"), 0)
+
+
+class TestCoercion(ConfigTestCase):
+    """vtype decides how the stored TEXT reads back."""
+
+    def test_types_come_back_as_declared(self):
+        self.assertIsInstance(config.reagent1_secs(), int)
+        self.assertIsInstance(config.analysis_secs(), float)
+        self.assertIsInstance(config.fallback_exposure_group(), str)
+
+    def test_valid_accepts_what_parses(self):
+        self.assertTrue(config.valid("42", "int"))
+        self.assertTrue(config.valid("4.2", "float"))
+        self.assertTrue(config.valid("anything at all", "str"))
+        self.assertTrue(config.valid("yes", "bool"))
+
+    def test_valid_rejects_what_does_not(self):
+        self.assertFalse(config.valid("4.2", "int"))
+        self.assertFalse(config.valid("later", "int"))
+        self.assertFalse(config.valid("soon", "float"))
+
+
+class TestSaving(ConfigTestCase):
+    """save() supersedes without losing what was there."""
+
+    def test_saved_value_is_in_force(self):
         self.assertGreater(config.save("protocol", "reagent1_secs", 45), 0)
         self.assertEqual(config.reagent1_secs(), 45)
 
     def test_saved_value_survives_a_reload(self):
-        self.use_rows(self._ROWS)
         config.save("protocol", "reagent1_secs", 45)
         config.load(reload=True)
         self.assertEqual(config.reagent1_secs(), 45)
 
-    def test_saved_value_wins_over_the_simulation_profile(self):
-        """The point of the Config screen: a custom wait holds in either mode."""
-        self.use_rows(self._ROWS)
-        os.environ[config.SIMULATION_ENV] = "1"
-        config.load(reload=True)
-        self.assertEqual(config.reagent1_secs(), 10)   # profile applies
-        config.save("protocol", "reagent1_secs", 45)
-        self.assertEqual(config.reagent1_secs(), 45)
-
-    def test_saving_one_param_leaves_its_siblings_alone(self):
-        self.use_rows(self._ROWS)
+    def test_saving_one_parameter_leaves_its_siblings_alone(self):
         config.save("protocol", "reagent1_secs", 45)
         self.assertEqual(config.reagent2_secs(), 420)
-        self.assertEqual(config.analysis_secs(), 1.5)
+
+    def test_the_superseded_value_is_kept_as_history(self):
+        config.save("protocol", "reagent1_secs", 45)
+        values = [r[0] for r in config.history("protocol", "reagent1_secs")]
+        self.assertEqual(values, ["45", "120"])
+
+    def test_reusing_a_former_value_reuses_its_row(self):
+        """
+        Toggling between two values must not grow the table, and Browse must
+        show each distinct value once. un_config_value is what guarantees it.
+        """
+        for value in (45, 120, 45, 120, 45):
+            config.save("protocol", "reagent1_secs", value)
+        self.assertEqual(len(config.history("protocol", "reagent1_secs")), 2)
+        self.assertEqual(config.reagent1_secs(), 45)
+        self.assertOneActiveRowPerParameter()
+
+    def test_source_records_creation_and_is_never_rewritten(self):
+        """
+        `source` is an add-user, not an edit-user. Re-activating a row the seed
+        created must leave it saying 'seed' — resolution does not consult it,
+        and Restore Factory Defaults depends on it staying put.
+        """
+        config.save("protocol", "reagent1_secs", 45)
+        config.save("protocol", "reagent1_secs", 120)     # back to the seed row
+        sources = dict((r[0], r[2])
+                       for r in config.history("protocol", "reagent1_secs"))
+        self.assertEqual(sources["120"], config.SOURCE_SEED)
+        self.assertEqual(sources["45"], config.SOURCE_OPERATOR)
+
+    def test_the_invariants_hold_after_many_writes(self):
+        for value in (45, 60, 45, 90, 120):
+            config.save("protocol", "reagent1_secs", value)
+        config.save("capture", "extension", ".hdf5")
+        self.assertOneActiveRowPerParameter()
+
+
+class TestDefaultButton(ConfigTestCase):
+    """
+    isdefault is what the editor's Default button offers, and only that.
+
+    It is movable: an operator may commission a value for this site. That is a
+    different thing from what the unit shipped with — see TestFactoryReset.
+    """
 
     def test_default_reports_the_commissioned_value_regardless(self):
-        self.use_rows(self._ROWS)
         config.save("protocol", "reagent1_secs", 45)
+        self.assertEqual(config.reagent1_secs(), 45)
         self.assertEqual(config.default("protocol", "reagent1_secs"), 120)
 
-    def test_restoring_returns_to_the_commissioned_value(self):
-        self.use_rows(self._ROWS)
+    def test_restore_puts_it_back(self):
         config.save("protocol", "reagent1_secs", 45)
         self.assertGreater(config.restore("protocol", "reagent1_secs"), 0)
         self.assertEqual(config.reagent1_secs(), 120)
+        self.assertOneActiveRowPerParameter()
+
+    def test_restoring_what_was_never_changed_writes_nothing(self):
+        self.assertEqual(config.restore("protocol", "reagent1_secs"), 0)
+
+    def test_overrides_lists_what_restore_would_change(self):
+        self.assertEqual(config.overrides(), [])
+        config.save("protocol", "reagent1_secs", 45)
+        self.assertEqual(config.overrides(), [("protocol", "reagent1_secs")])
+        config.restore("protocol", "reagent1_secs")
         self.assertEqual(config.overrides(), [])
 
-    def test_restoring_what_was_never_set_writes_nothing(self):
-        self.use_rows(self._ROWS)
-        before = db.read_val("SELECT COUNT(*) FROM config")
-        self.assertEqual(config.restore("protocol", "reagent1_secs"), 0)
-        self.assertEqual(db.read_val("SELECT COUNT(*) FROM config"), before)
-
-    def test_history_is_kept_not_overwritten(self):
-        self.use_rows(self._ROWS)
-        before = db.read_val(
-            "SELECT COUNT(*) FROM config WHERE role='protocol' "
-            "AND name='reagent1_secs'")
-        config.save("protocol", "reagent1_secs", 45)
-        after = db.read_val(
-            "SELECT COUNT(*) FROM config WHERE role='protocol' "
-            "AND name='reagent1_secs'")
-        self.assertEqual(after, before + 1)
-
-    def test_saving_an_unknown_parameter_is_refused(self):
-        self.use_rows(self._ROWS)
-        self.assertEqual(config.save("protocol", "nonesuch", 1), 0)
-
-    def test_restoring_an_unknown_parameter_is_refused(self):
-        self.use_rows(self._ROWS)
-        self.assertEqual(config.restore("protocol", "nonesuch"), 0)
-
-
-class TestSeedDefaults(ConfigTestCase):
-
-    def test_is_a_noop_on_a_complete_table(self):
-        self.assertEqual(config.seed_defaults(), 0)
-
-    def test_refills_a_missing_parameter(self):
-        db.write_one("DELETE FROM config WHERE role = 'hardware' "
-                     "AND name = 'backlight_pin'")
-        config.load(reload=True)
-        self.assertEqual(config.seed_defaults(), 2)
-        self.assertEqual(config.backlight_pin(), 13)
-
-    def test_never_overwrites_an_operator_value(self):
-        config.save("protocol", "reagent1_secs", 45)
-        config.seed_defaults()
+    def test_set_default_commissions_the_value(self):
+        config.set_default("protocol", "reagent1_secs", 45)
         self.assertEqual(config.reagent1_secs(), 45)
+        self.assertEqual(config.default("protocol", "reagent1_secs"), 45)
+        self.assertEqual(config.overrides(), [],
+                         "a commissioned value is not an override")
+        self.assertOneActiveRowPerParameter()
+
+    def test_set_default_does_not_rewrite_source(self):
+        """The factory row must stay identifiable after Default is pressed."""
+        config.set_default("protocol", "reagent1_secs", 45)
+        sources = dict((r[0], r[2])
+                       for r in config.history("protocol", "reagent1_secs"))
+        self.assertEqual(sources["120"], config.SOURCE_SEED)
+
+
+class TestFactoryReset(ConfigTestCase):
+    """
+    restore_all() goes back to what the unit shipped with, not to whatever the
+    operator has since commissioned. It keys on source='seed' because that is
+    the only thing an operator pressing Default cannot move.
+    """
+
+    def test_puts_every_parameter_back(self):
+        config.save("protocol", "reagent1_secs", 45)
+        config.save("capture", "extension", ".hdf5")
+        self.assertEqual(config.restore_all(), 2)
+        self.assertEqual(config.reagent1_secs(), 120)
+        self.assertEqual(config.capture_archive_name("X"), "X.h5")
+        self.assertOneActiveRowPerParameter()
+
+    def test_is_a_noop_on_an_untouched_instrument(self):
+        self.assertEqual(config.restore_all(), 0)
+        self.assertEqual(config.reagent1_secs(), 120)
+
+    def test_beats_a_commissioned_site_value(self):
+        config.set_default("protocol", "reagent1_secs", 45)
+        self.assertEqual(config.reagent1_secs(), 45)
+        config.restore_all()
+        self.assertEqual(config.reagent1_secs(), 120,
+                         "factory reset must undo a commissioned value")
+
+    def test_leaves_the_commissioned_value_on_the_default_button(self):
+        """Restoring the factory undoes what is in force, not what Default offers."""
+        config.set_default("protocol", "reagent1_secs", 45)
+        config.restore_all()
+        self.assertEqual(config.default("protocol", "reagent1_secs"), 45)
+        self.assertGreater(config.restore("protocol", "reagent1_secs"), 0)
+        self.assertEqual(config.reagent1_secs(), 45)
+
+    def test_never_activates_a_history_row(self):
+        """
+        Values seeded only so Browse can offer them carry source='history' and
+        must never be mistaken for what the unit shipped with.
+        """
+        config.save("defaults", "testkit", "Hach 1")
+        config.restore_all()
+        self.assertEqual(config.get("defaults", "testkit"), "Ascel 458201")
+        self.assertOneActiveRowPerParameter()
+
+
+class TestEditorReads(ConfigTestCase):
+    """roles() / items() / history() feed the config editor's three screens."""
+
+    def test_roles_are_the_screens_worth_offering(self):
+        self.assertEqual(config.roles(),
+                         ["capture", "defaults", "device", "hardware",
+                          "protocol", "runtime"])
+
+    def test_items_are_alphabetical_with_type_and_lock(self):
+        names = [row[0] for row in config.items("device")]
+        self.assertEqual(names, ["description", "hardware_sn", "software_ver"])
+        by_name = {row[0]: row for row in config.items("device")}
+        self.assertEqual(by_name["hardware_sn"][2], "XCN-001")
+        self.assertEqual(by_name["hardware_sn"][3], 0, "serial must be locked")
+        self.assertEqual(by_name["description"][3], 1)
+
+    def test_entity_attributes_sort_beside_their_entity(self):
+        """The '<entity>_<attr>' naming is what keeps a lot next to its expiry."""
+        names = [row[0] for row in config.items("defaults")]
+        self.assertEqual(names[names.index("testlot")
+                               :names.index("testlot") + 2],
+                         ["testlot", "testlot_expire_dt"])
+
+    def test_history_offers_a_carried_over_value(self):
+        values = [r[0] for r in config.history("defaults", "testkit")]
+        self.assertCountEqual(values, ["Ascel 458201", "Hach 1"])
+
+    def test_history_puts_the_row_in_force_first(self):
+        config.save("protocol", "reagent1_secs", 45)
+        first = config.history("protocol", "reagent1_secs")[0]
+        self.assertEqual(first[0], "45")
+        self.assertEqual(first[3], 1, "active row sorts first")
+
+
+class TestSnapshot(ConfigTestCase):
+    """snapshot() is what makes a capture archive self-describing."""
+
+    def test_groups_every_active_value_by_role(self):
+        snap = config.snapshot()
+        self.assertEqual(snap["protocol"]["reagent1_secs"], "120")
+        self.assertEqual(snap["device"]["hardware_sn"], "XCN-001")
+
+    def test_values_are_the_stored_text(self):
+        snap = config.snapshot()
+        self.assertIsInstance(snap["capture"]["led_start"], str)
+
+    def test_follows_what_is_in_force(self):
+        config.save("protocol", "reagent1_secs", 45)
+        self.assertEqual(config.snapshot()["protocol"]["reagent1_secs"], "45")
 
 
 class TestCaching(ConfigTestCase):
+    """Values are read once; the write functions invalidate for you."""
 
     def test_values_are_cached_until_reloaded(self):
-        self.use_rows([("capture", "extension", "str", ".one", "")])
-        self.assertEqual(config.capture_archive_name("x"), "x.one")
-        db.write_one("UPDATE config SET value = '.two' WHERE role = 'capture' "
-                     "AND name = 'extension' AND active = 1")
-        self.assertEqual(config.capture_archive_name("x"), "x.one")
+        self.assertEqual(config.reagent1_secs(), 120)
+        con = sqlite3.connect(self._tmpdb)
+        con.execute("UPDATE config SET value = '99' WHERE role = 'protocol' "
+                    "AND name = 'reagent1_secs' AND active = 1")
+        con.commit()
+        con.close()
+        self.assertEqual(config.reagent1_secs(), 120, "should still be cached")
         config.load(reload=True)
-        self.assertEqual(config.capture_archive_name("x"), "x.two")
+        self.assertEqual(config.reagent1_secs(), 99)
+
+    def test_writes_invalidate_the_cache(self):
+        config.reagent1_secs()
+        config.save("protocol", "reagent1_secs", 45)
+        self.assertEqual(config.reagent1_secs(), 45)
+
+
+class TestBootstrap(ConfigTestCase):
+    """db_bootstrap builds and repairs; setUp has already run it once."""
+
+    def test_running_again_changes_nothing(self):
+        result = db_bootstrap.ensure(self._tmpdb)
+        self.assertEqual(result.added, 0)
+        self.assertEqual(result.state, "current")
+
+    def test_a_deleted_parameter_comes_back(self):
+        con = sqlite3.connect(self._tmpdb)
+        con.execute("DELETE FROM config WHERE role = 'runtime' "
+                    "AND name = 'shutdown_timeout_s'")
+        con.commit()
+        con.close()
+        self.assertEqual(db_bootstrap.ensure(self._tmpdb).added, 1)
+        config.load(reload=True)
+        self.assertEqual(config.shutdown_timeout_s(), 15.0)
+
+    def test_an_operator_value_is_not_overwritten(self):
+        config.save("protocol", "reagent1_secs", 45)
+        db_bootstrap.ensure(self._tmpdb)
+        config.load(reload=True)
+        self.assertEqual(config.reagent1_secs(), 45)
+
+    def test_a_deactivated_parameter_is_healed(self):
+        """
+        The seed file's closing UPDATE reactivates any row still flagged
+        isdefault, without inserting anything.
+        """
+        con = sqlite3.connect(self._tmpdb)
+        con.execute("UPDATE config SET active = 0 WHERE role = 'capture' "
+                    "AND name = 'extension'")
+        con.commit()
+        con.close()
+        self.assertEqual(db_bootstrap.ensure(self._tmpdb).added, 0)
+        config.load(reload=True)
+        self.assertEqual(config.capture_archive_name("X"), "X.h5")
+
+    def test_a_parameter_beyond_repair_is_fatal(self):
+        con = sqlite3.connect(self._tmpdb)
+        con.execute("UPDATE config SET active = 0, isdefault = 0 "
+                    "WHERE role = 'capture' AND name = 'extension'")
+        con.commit()
+        con.close()
+        with self.assertRaises(db_bootstrap.DatabaseError) as caught:
+            db_bootstrap.ensure(self._tmpdb)
+        self.assertIn("capture.extension", str(caught.exception))
+
+    def test_a_pre_migration_database_is_refused(self):
+        legacy = Path(self._tmpdir) / "legacy.sqlite"
+        con = sqlite3.connect(legacy)
+        con.executescript(
+            "CREATE TABLE config (rowid INTEGER PRIMARY KEY NOT NULL, "
+            "active INTEGER, isdefault INTEGER, add_dt TEXT, role TEXT, "
+            "name TEXT, vtype TEXT, value TEXT, profile TEXT, source TEXT, "
+            "remark TEXT);")
+        con.commit()
+        con.close()
+        with self.assertRaises(db_bootstrap.DatabaseError) as caught:
+            db_bootstrap.ensure(legacy)
+        self.assertIn("migrat", str(caught.exception).lower())
+
+
+class TestSchemaConstraints(ConfigTestCase):
+    """
+    The invariants are the schema's job now, not the application's.
+
+    They used to be enforced only by config_repo.save() remembering to, which
+    is how the prototype ended up with operator rows that had no commissioned
+    fallback and could never be restored.
+    """
+
+    def _insert(self, **over):
+        row = dict(active=0, isdefault=0, editable=1, add_dt="now",
+                   role="protocol", name="reagent1_secs", vtype="int",
+                   value="777", source="operator")
+        row.update(over)
+        con = sqlite3.connect(self._tmpdb)
+        try:
+            con.execute(
+                "INSERT INTO config (active, isdefault, editable, add_dt, "
+                "role, name, vtype, value, source) "
+                "VALUES (:active, :isdefault, :editable, :add_dt, :role, "
+                ":name, :vtype, :value, :source)", row)
+            con.commit()
+        finally:
+            con.close()
+
+    def test_a_second_active_row_is_rejected(self):
+        with self.assertRaises(sqlite3.IntegrityError):
+            self._insert(active=1)
+
+    def test_a_second_default_row_is_rejected(self):
+        with self.assertRaises(sqlite3.IntegrityError):
+            self._insert(isdefault=1)
+
+    def test_a_duplicate_value_is_rejected(self):
+        with self.assertRaises(sqlite3.IntegrityError):
+            self._insert(value="120")
+
+    def test_role_and_name_are_case_insensitive(self):
+        with self.assertRaises(sqlite3.IntegrityError):
+            self._insert(role="PROTOCOL", name="REAGENT1_SECS", value="120")
+
+    def test_a_history_row_is_allowed(self):
+        self._insert()
+        self.assertOneActiveRowPerParameter()
+
+    def test_there_is_no_profile_column(self):
+        """
+        Dropped with the simulation tier. Its absence is what lets reading a
+        value be a lookup instead of a merge.
+        """
+        columns = {r[1] for r in self.rows("PRAGMA table_info(config)")}
+        self.assertNotIn("profile", columns)
+        self.assertIn("editable", columns)
 
 
 if __name__ == "__main__":

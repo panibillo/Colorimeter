@@ -209,25 +209,37 @@ class TestLedTiming(unittest.TestCase):
 # built for a run honours an explicit directory.
 
 class TestOutputLocation(unittest.TestCase):
+    """
+    These used to drive $COLORIMETER_CAPTURE_DIR. That override is gone —
+    capture.directory is a config row and the table is the only source — so
+    they now change the row instead. The regression they guard is unchanged.
+    """
 
     def setUp(self):
-        self._saved = os.environ.pop(config_repo.CAPTURE_DIR_ENV, None)
+        import db_bootstrap
+        import db_manager as db
+        self._db = db
+        self._saved_dbname = db.DBNAME
+        self._tmpdir = tempfile.mkdtemp()
+        db.DBNAME = str(Path(self._tmpdir) / "capture_config.sqlite")
+        db_bootstrap.ensure(db.DBNAME)
+        config_repo.load(reload=True)
 
     def tearDown(self):
-        os.environ.pop(config_repo.CAPTURE_DIR_ENV, None)
-        if self._saved is not None:
-            os.environ[config_repo.CAPTURE_DIR_ENV] = self._saved
+        self._db.DBNAME = self._saved_dbname
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+        config_repo.load(reload=True)
 
     def test_config_resolves_location_when_built_not_when_imported(self):
         """
         Regression guard: out_dir was once a plain dataclass default, baked in
-        at import, so setting the variable afterwards silently had no effect.
+        at import, so changing the setting afterwards silently had no effect.
         """
-        os.environ[config_repo.CAPTURE_DIR_ENV] = "/tmp/set/after/import"
+        config_repo.save("capture", "directory", "/tmp/set/after/import")
         self.assertEqual(CaptureConfig().out_dir, Path("/tmp/set/after/import"))
 
-    def test_explicit_out_dir_wins_over_environment(self):
-        os.environ[config_repo.CAPTURE_DIR_ENV] = "/tmp/ignored"
+    def test_explicit_out_dir_wins_over_the_configured_one(self):
+        config_repo.save("capture", "directory", "/tmp/ignored")
         config = CaptureConfig(out_dir=Path("/tmp/explicit"))
         self.assertEqual(config.out_dir, Path("/tmp/explicit"))
 
