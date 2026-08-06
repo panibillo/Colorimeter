@@ -286,6 +286,12 @@ class Arbiter:
         self._cfge_page:  int = 0
         self._cfge_list:  list = []           # the whole list being paged through
         self._cfge_start: dict[str, str] = {}
+        # The page each list was showing when the operator dropped a level.
+        # Stepping back comes up on those same four rows: a role picked off
+        # page 2 has to hand the screen back on page 2, not at the top of a
+        # list the operator would then have to page through again.
+        self._cfge_roles_page: int = 0        # roles view, on entering a role
+        self._cfge_names_page: int = 0        # role view, on entering Browse
         # An edit lives only in its field, and both the confirm modals and the
         # Browse view take the fields off the screen — so anything typed is
         # held here for the render that brings the role view back.
@@ -922,9 +928,11 @@ class Arbiter:
     # a button calls and with what.
 
     def _cfge_open(self) -> None:
-        """Menu → Config: open the editor on the list of roles."""
+        """Menu → Config: open the editor on the first page of roles."""
         self._cfge_role = ""
         self._cfge_name = ""
+        self._cfge_roles_page = 0
+        self._cfge_names_page = 0
         self._cfge_open_roles()
 
     def _cfge_editable(self) -> bool:
@@ -937,37 +945,46 @@ class Arbiter:
 
     # ── the three views ────────────────────────────────────────────────────────
 
-    def _cfge_open_roles(self) -> None:
+    def _cfge_open_roles(self, page: int = 0) -> None:
         """Show the roles, with Restore Factory Defaults after the last one."""
         self._cfge_view  = "roles"
-        self._cfge_page  = 0
         self._cfge_start = {}
         # Restore rides at the end of the list, so it lands on the last page
         # rather than under a finger aiming for the first role.
         self._cfge_list  = config.roles() + [_CFGE_RESTORE]
+        self._cfge_goto(page)
         self._cfge_render()
 
-    def _cfge_open_role(self, role: str) -> None:
+    def _cfge_enter_role(self, role: str) -> None:
+        """A role tapped on the roles view: remember this page, then open it."""
+        self._cfge_roles_page = self._cfge_page
+        self._cfge_open_role(role)
+
+    def _cfge_open_role(self, role: str, page: int = 0) -> None:
         """Show one role's parameters, four to a page, alphabetically."""
         self._cfge_view = "role"
         self._cfge_role = role
-        self._cfge_page = 0
         self._cfge_list = config.items(role)
+        self._cfge_goto(page)
         self._cfge_render()
 
     def _cfge_open_browse(self, name: str) -> None:
         """
         Show every value one parameter has held: in force, default, history.
 
+        Only ever reached from the role view, so the page it leaves is the one
+        it has to come back to.
+
         Looking a value up is the obvious thing to do halfway through typing
         one, so an edit in progress is held rather than blocked or discarded —
         CANCEL comes back to the role view with it still in its field.
         """
         self._cfge_hold = dict(self._cfge_pending())
+        self._cfge_names_page = self._cfge_page
         self._cfge_view = "browse"
         self._cfge_name = name
-        self._cfge_page = 0
         self._cfge_list = config.history(self._cfge_role, name)
+        self._cfge_goto(0)
         self._cfge_render()
 
     # ── paging ─────────────────────────────────────────────────────────────────
@@ -981,9 +998,19 @@ class Arbiter:
         first = self._cfge_page * _CFGE_ROWS
         return self._cfge_list[first:first + _CFGE_ROWS]
 
+    def _cfge_goto(self, page: int) -> None:
+        """
+        Show `page` of the list just loaded, clamped to what the list has.
+
+        A remembered page can outlive the list it was counted against — a role
+        loses a parameter, a value drops out of a history — so it is clamped
+        rather than trusted, and the operator lands on the last page instead of
+        on four blank rows.
+        """
+        self._cfge_page = max(0, min(self._cfge_pages() - 1, page))
+
     def _cfge_page_step(self, delta: int) -> None:
-        self._cfge_page = max(0, min(self._cfge_pages() - 1,
-                                     self._cfge_page + delta))
+        self._cfge_goto(self._cfge_page + delta)
         self._cfge_render()
 
     # ── rendering ──────────────────────────────────────────────────────────────
@@ -1029,7 +1056,7 @@ class Arbiter:
                       enabled=self._cfge_editable())
                 p[row].color = color("label_coral")
             else:
-                p.put(row, role, on=lambda r=role: self._cfge_open_role(r))
+                p.put(row, role, on=lambda r=role: self._cfge_enter_role(r))
                 p[row].color = color("slot_b_bg")
 
     def _cfge_put_role(self) -> None:
@@ -1272,7 +1299,9 @@ class Arbiter:
         count = config.restore_all()
         self._cfge_applied()
         log.info("config editor: %d parameter(s) put back to factory", count)
-        self._cfge_open_roles()
+        # Restore sits at the end of the list, so this comes back to the last
+        # page — the one the operator tapped it from.
+        self._cfge_open_roles(self._cfge_page)
 
     def _cfge_modal(self, msg: str, on_ok) -> None:
         """A yes/no confirm over the editor; either answer returns to the view."""
@@ -1318,11 +1347,11 @@ class Arbiter:
         self._cfge_back()
 
     def _cfge_back(self) -> None:
-        """Browse → role → roles → the Menu."""
+        """Browse → role → roles → the Menu, each onto the page it was left on."""
         if self._cfge_view == "browse":
-            self._cfge_open_role(self._cfge_role)
+            self._cfge_open_role(self._cfge_role, self._cfge_names_page)
         elif self._cfge_view == "role":
-            self._cfge_open_roles()
+            self._cfge_open_roles(self._cfge_roles_page)
         else:
             self._cfge_view = None
             self._render_menu()
@@ -3792,6 +3821,40 @@ def _selftest() -> None:
     check("Restore is on the last page", len(_restore_row), 1)
     arb._pool["cfge_prior"].on_press()
     check("back to page 1",    arb._cfge_page, 0)
+
+    print("== config editor: stepping back lands on the page it left ==")
+
+    def cfge_shown(kind):
+        """The text of the visible body widgets of one kind, top to bottom."""
+        attr = {"cfge_row": "label", "cfge_lbl": "text"}[kind]
+        return [getattr(arb._pool[f"{kind}{i}"], attr) for i in (1, 2, 3, 4)
+                if arb._pool[f"{kind}{i}"].visible]
+
+    arb._pool["cfge_next"].on_press()
+    _roles_p2 = cfge_shown("cfge_row")
+    arb._pool["cfge_row1"].on_press()          # a role picked off page 2
+    check("a role opened from page 2", arb._cfge_view, "role")
+    check("the role starts at its own top", arb._cfge_page, 0)
+    arb._pool["menu_cancel_btn"].on_press()
+    check("back on the roles",  arb._cfge_view, "roles")
+    check("on the page it left", arb._cfge_page, 1)
+    check("showing the same roles", cfge_shown("cfge_row"), _roles_p2)
+    # And one level further down: Browse leaves a page of names and CANCEL has
+    # to hand back that page, not the first one.
+    _long = next(r for r in config.roles() if len(config.items(r)) > _CFGE_ROWS)
+    arb._cfge_open_role(_long)
+    arb._pool["cfge_next"].on_press()
+    _names_p2 = cfge_shown("cfge_lbl")
+    _b = next(i for i in (1, 2, 3, 4) if arb._pool[f"cfge_btn{i}"].enabled)
+    arb._pool[f"cfge_btn{_b}"].on_press()
+    check("browsing a name off page 2", arb._cfge_view, "browse")
+    check("the history starts at its own top", arb._cfge_page, 0)
+    arb._pool["menu_cancel_btn"].on_press()
+    check("back on the role",   arb._cfge_view, "role")
+    check("on the page it left", arb._cfge_page, 1)
+    check("showing the same names", cfge_shown("cfge_lbl"), _names_p2)
+    arb._cfge_open()                           # a fresh entry starts at the top
+    check("Menu → Config opens at the top", arb._cfge_page, 0)
 
     print("== config editor: a role lists its parameters; device_sn is fixed ==")
     arb._cfge_open_role("device")
