@@ -71,17 +71,39 @@ points (`src/main.py`, `dev/camtest8.py`) import, plus the config they read.
 ## Step 3c — Upload the reference database (on local)
 
 The runtime database `src/colorimeter.sqlite` holds seed data the app needs —
-the color-card ROI rectangles (`colorcard`), the device/user/testkit rows, and
-the entry-screen defaults. It is **not** in Git (`.sqlite` is gitignored) and is
-**not** in the sync list.
+the color-card ROI rectangles (`colorcard`), the ROI geometry, and every
+instrument setting in `config` (which since 2026-08 also holds the device,
+operator, test kit and lot values that used to have tables of their own). It is
+**not** in Git (`.sqlite` is gitignored) and is **not** in the sync list.
 
-> **`src/db_DDL.sql` will build a runnable database** (all 11 tables, incl. the
-> commissioned `config` table, the `default_gui_vals` view, and seed rows) if
-> you have no reference copy to hand:
-> `sqlite3 src/colorimeter.sqlite < src/db_DDL.sql`. It is idempotent, so
-> re-running it is safe. Prefer copying a working `colorimeter.sqlite` anyway —
-> that is what carries this fleet's reference data. *(Before 2026-07-31 the DDL
-> was incomplete and could not be used at all.)*
+> **The app builds its own database.** `src/db_bootstrap.py` runs
+> `src/db_DDL.sql` (structure — 6 tables) and then
+> `provisioning/config_defaults.sql` (every seeded value) at **every launch**,
+> so a unit with no database, or one that has lost a table or a parameter,
+> repairs itself on the next start. Both files are idempotent and neither ever
+> overwrites a value the operator has set. To build one by hand:
+> ```bash
+> sqlite3 src/colorimeter.sqlite < src/db_DDL.sql
+> sqlite3 src/colorimeter.sqlite < provisioning/config_defaults.sql
+> ```
+> Prefer copying a working `colorimeter.sqlite` anyway — that is what carries
+> this fleet's reference data. *(Before 2026-07-31 the DDL was incomplete and
+> could not be used at all. Before 2026-08 it also carried the seed rows; those
+> now live only in `provisioning/config_defaults.sql`.)*
+
+> 🔴 **A database last written before 2026-08 will not start the app.** The
+> `device`, `users`, `testkit`, `testlot` and `defaults` tables were folded into
+> `config`, and `samples` now records provenance by value rather than by rowid.
+> `db_bootstrap` detects the old shape and refuses to launch rather than upgrade
+> in place. Migrate it once, on the unit, with a backup taken first:
+> ```bash
+> cd ~/pi/Colorimeter
+> cp src/colorimeter.sqlite src/colorimeter.sqlite.v1.bak
+> sqlite3 -bail src/colorimeter.sqlite < provisioning/migrate_v2.sql
+> ```
+> The migration preserves `samples`, `exposure`, `roi` and `colorcard`, and is
+> guarded — a second run aborts without touching anything. Start the app
+> afterwards; bootstrap fills in any parameter the old database never had.
 
 > 🔴 **On a unit that has already been used, this step destroys data.** The DB is
 > not just seed rows once the instrument has run: it holds measurement results,

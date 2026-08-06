@@ -14,17 +14,25 @@ Usage:
 import os
 import sys
 
-# Enable simulation mode
+# Enable simulation mode.  This is read at import time by the driver modules
+# to choose mock hardware, so it has to be set before they are imported.
 os.environ['COLORIMETER_SIMULATION'] = '1'
 
 # Import and run the app
+import db_bootstrap
 from arbiter import Arbiter
 
 if __name__ == "__main__":
     app = None
     try:
+        # Create, repair and verify the database before anything reads it.
+        db_bootstrap.ensure()
+
         app = Arbiter()
         app.start()
+    except db_bootstrap.DatabaseError as e:
+        print(f"Database error: {e}")
+        sys.exit(1)
     except KeyboardInterrupt:
         # Normally unreachable once Arbiter._init_hardware() has installed its
         # own SIGINT handler (which calls app.shutdown() directly); this stays

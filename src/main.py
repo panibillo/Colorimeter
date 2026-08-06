@@ -17,6 +17,7 @@ Signals:
 import sys
 import signal
 
+import db_bootstrap
 from arbiter import Arbiter
 
 
@@ -36,8 +37,19 @@ def main():
         # Install handler for Ctrl-Z to allow pause/resume
         signal.signal(signal.SIGTSTP, handle_sigtstp)
 
+        # Create, repair and verify the database before anything reads it.
+        # The Arbiter loads settings in its constructor, so this has to come
+        # first.
+        db_bootstrap.ensure()
+
         app = Arbiter()
         app.start()
+
+    except db_bootstrap.DatabaseError as e:
+        # A schema problem needs an operator decision (migrate, restore a
+        # backup), not a stack trace.
+        print(f"Database error: {e}", file=sys.stderr)
+        sys.exit(1)
 
     except KeyboardInterrupt:
         # Normally unreachable once Arbiter._init_hardware() has installed its

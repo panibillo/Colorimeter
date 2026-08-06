@@ -156,33 +156,54 @@ if [[ -f "${DB}" ]]; then
     pass "colorimeter.sqlite present ($(du -h "${DB}" | cut -f1))"
     db_report="$(python3 - "${DB}" <<'PY' 2>&1
 import sqlite3, sys
+# A table count is not a useful check — a unit may carry extra ad-hoc tables
+# from development work.  Check that the required ones are there, and that the
+# schema is the post-2026-08 shape the app can actually start on.
+REQUIRED = {"config", "samples", "exposure", "roi", "colorcard", "data"}
+LEGACY   = {"device", "users", "testkit", "testlot", "defaults"}
 try:
     c = sqlite3.connect(sys.argv[1])
-    tables = [r[0] for r in c.execute(
-        "select name from sqlite_master where type='table'")]
+    tables = {r[0] for r in c.execute(
+        "select name from sqlite_master where type='table'")}
+    ver = c.execute("pragma user_version").fetchone()[0]
+    if "config" in tables:
+        cols = {r[1] for r in c.execute("pragma table_info(config)")}
+        # The column, not the stamp, is what db_bootstrap trusts.  Only
+        # db_bootstrap stamps user_version, so a database built by hand from
+        # db_DDL.sql is the current shape while still reading as 0; and a
+        # pre-migration database reads as 0 whatever it claims.
+        ver = 0 if "editable" not in cols else max(ver, 2)
     n = c.execute("select count(*) from colorcard").fetchone()[0] \
         if "colorcard" in tables else -1
     cfg = c.execute("select count(*) from config where active = 1").fetchone()[0] \
         if "config" in tables else -1
-    print(f"OK {len(tables)} {n} {cfg}")
+    print(f"OK {ver} {','.join(sorted(REQUIRED - tables)) or '-'} "
+          f"{','.join(sorted(LEGACY & tables)) or '-'} {n} {cfg}")
 except Exception as e:
     print(f"ERR {e}")
 PY
 )"
-    read -r tag a b cfg <<<"${db_report}"
+    read -r tag ver missing legacy b cfg <<<"${db_report}"
     if [[ "${tag}" == "OK" ]]; then
-        if [[ "${a}" -eq 11 ]]; then pass "${a} tables (expected 11)"
-        else warn "${a} tables — the live schema has 11"; fi
+        if   [[ "${ver}" -eq 2 ]]; then pass "schema v2"
+        elif [[ "${ver}" -eq 0 ]]; then fail "pre-2026-08 schema — the app will refuse to start"
+                                        reenter "3c (cp src/colorimeter.sqlite{,.v1.bak} && sqlite3 -bail src/colorimeter.sqlite < provisioning/migrate_v2.sql)"
+        else warn "schema v${ver} — this release expects v2"; fi
+        if [[ "${missing}" == "-" ]]; then pass "all 6 required tables present"
+        else fail "missing table(s): ${missing}"; reenter "3c"; fi
+        if [[ "${legacy}" != "-" ]]; then
+            warn "v1 table(s) not folded into config: ${legacy}"; fi
         if   [[ "${b}" -gt 0 ]]; then pass "colorcard seeded (${b} rows)"
         elif [[ "${b}" -eq 0 ]]; then fail "colorcard is EMPTY — blank or wrong DB was copied"
                                     reenter "3c (⚠ overwrites data — back up first)"
         else fail "no colorcard table — wrong DB"; reenter "3c (⚠ overwrites data — back up first)"; fi
         if   [[ "${cfg}" -gt 0 ]]; then pass "config table seeded (${cfg} active rows)"
-        elif [[ "${cfg}" -eq 0 ]]; then fail "config table is EMPTY — run provisioning/config_defaults.sql"
+        elif [[ "${cfg}" -eq 0 ]]; then fail "config table is EMPTY — start the app, or run provisioning/config_defaults.sql"
                                        reenter "3c (sqlite3 src/colorimeter.sqlite < provisioning/config_defaults.sql)"
-        else fail "no config table — wrong or pre-2026-08 DB"; reenter "3c (⚠ overwrites data — back up first)"; fi
+        else fail "no config table — wrong DB"; reenter "3c (⚠ overwrites data — back up first)"; fi
     else
-        fail "cannot read the database: ${a} ${b}"; reenter "3c (⚠ overwrites data — back up first)"
+        fail "cannot read the database: ${db_report#ERR }"
+        reenter "3c (⚠ overwrites data — back up first)"
     fi
 else
     fail "colorimeter.sqlite missing"; reenter "3c"
