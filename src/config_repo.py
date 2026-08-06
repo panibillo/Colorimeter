@@ -80,7 +80,7 @@ Public surface
     history(role, name)      -> list      every value ever used, for Browse
 
     capture_dir() / capture_suite_id() / capture_archive_name()
-    capture_led_start() / capture_led_end() / fallback_exposure_group()
+    capture_led_start() / capture_led_end()
     capture_led_color_order() / capture_camera_warmup_s()
     capture_dark_prefetch_budget_s()
     inspection_exposure_us() / default_focus_diopter()
@@ -616,11 +616,6 @@ def capture_led_start() -> int:
 def capture_led_end() -> int:
     """Last (inclusive) LED channel a capture run sweeps."""
     return int(get("capture", "led_end"))
-
-
-def fallback_exposure_group() -> str:
-    """Exposure group to preselect when the saved one is missing or inactive."""
-    return str(get("capture", "fallback_exposure_group"))
 
 
 def inspection_exposure_us() -> int:

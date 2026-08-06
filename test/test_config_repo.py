@@ -93,7 +93,6 @@ class TestSeededValues(ConfigTestCase):
     def test_capture_selection(self):
         self.assertEqual(config.capture_led_start(), 1)
         self.assertEqual(config.capture_led_end(), 10)
-        self.assertEqual(config.fallback_exposure_group(), "3")
         self.assertEqual(config.capture_led_color_order()[0], "photo_red")
         self.assertEqual(len(config.capture_led_color_order()), 10)
 
@@ -198,7 +197,7 @@ class TestCoercion(ConfigTestCase):
     def test_types_come_back_as_declared(self):
         self.assertIsInstance(config.reagent1_secs(), int)
         self.assertIsInstance(config.analysis_secs(), float)
-        self.assertIsInstance(config.fallback_exposure_group(), str)
+        self.assertIsInstance(config.get("defaults", "exposuregroup"), str)
 
     def test_valid_accepts_what_parses(self):
         self.assertTrue(config.valid("42", "int"))

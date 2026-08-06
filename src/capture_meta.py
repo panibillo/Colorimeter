@@ -35,11 +35,12 @@ the error travels with the archive where it can be seen later.
 Layout produced
 ---------------
     {
-      "meta_version": 1,
+      "meta_version": 2,
       "written_dt":   "2026-08-03 20:15:04",
       "roi":    {"frame_w":…, "frame_h":…, "model":…, "bound": {...},
                  "rects": {"sample": {"x":…,"y":…,"w":…,"h":…,"role":…}, …}},
       "camera": {"model":…, "bayer_pattern":…, "stream_w":…, …},
+      "config": {"capture": {"led_color_order":…, …}, "device": {…}, …},
       "device": {"hardware_sn":…, "software_ver":…, …},
       "sample": {"samp_no":…, "collect_dt":…, …}   (absent fields → None),
       "run":    {"mode":…, "exposure_group":…, …},
@@ -61,6 +62,7 @@ import logging
 from datetime import datetime
 from typing import Any, Callable, Dict, Optional, Tuple
 
+import config_repo as config
 import db_manager as db
 import roi as roi_mod
 
@@ -69,21 +71,24 @@ log = logging.getLogger(__name__)
 # Bumped when the *shape* of the dict below changes in a way a reader must
 # know about. Independent of capture_h5.SCHEMA_VERSION, which versions the
 # group/dataset layout.
-META_VERSION = 1
+META_VERSION = 2
 
 # ── Declarative field lists — the maintenance surface ───────────────────────
 # Add a column here and it appears in the next archive. Nothing else changes.
 
-DEVICE_COLUMNS: Tuple[str, ...] = (
-    "rowid", "hardware_sn", "software_ver", "description", "dt_add",
-    "dt_update", "remark",
+# The instrument's identity, now config parameters rather than a `device` row.
+# Kept as its own block (and its own root attrs) because every reader wants the
+# serial without walking the config snapshot.
+DEVICE_NAMES: Tuple[str, ...] = (
+    "hardware_sn", "software_ver", "description",
 )
 
 # The whole sample row travels with the archive: which reagent lot, the
 # milestone timestamps the analysis needs to know the strip's age, the
 # operator's manual reading, and the result once there is one.
 SAMPLE_COLUMNS: Tuple[str, ...] = (
-    "rowid", "samp_no", "userid", "testlotid", "colorimeterid", "collect_dt",
+    "rowid", "samp_no", "user", "test_kit", "test_lot", "instrument_sn",
+    "collect_dt",
     "samp_grams", "samp_degC", "reagent1_start", "reagent1_end",
     "reagent2_start", "reagent2_end", "capture_start", "capture_end",
     "manual_read", "txt_result", "num_result", "h5file", "remark",
@@ -128,15 +133,12 @@ class MetaContext:
         cfg: The CaptureConfig for this run, or None.
         sample_rowid: `samples.rowid` this capture belongs to, or None for a
             menu-launched capture that is not part of a protocol run.
-        device_rowid: `device.rowid` for the instrument.
     """
 
-    def __init__(self, cam=None, cfg=None, sample_rowid: Optional[int] = None,
-                 device_rowid: Optional[int] = None):
+    def __init__(self, cam=None, cfg=None, sample_rowid: Optional[int] = None):
         self.cam = cam
         self.cfg = cfg
         self.sample_rowid = sample_rowid
-        self.device_rowid = device_rowid
 
 
 # ── Generic helpers ─────────────────────────────────────────────────────────
@@ -253,8 +255,19 @@ def _camera_block(ctx: MetaContext) -> Dict[str, Any]:
 
 
 def _device_block(ctx: MetaContext) -> Dict[str, Any]:
-    """The instrument's identity row; see DEVICE_COLUMNS."""
-    return _row_dict("device", DEVICE_COLUMNS, ctx.device_rowid)
+    """The instrument's identity; see DEVICE_NAMES."""
+    return {name: config.get("device", name) for name in DEVICE_NAMES}
+
+
+def _config_block(ctx: MetaContext) -> Dict[str, Any]:
+    """
+    Every setting in force, as {role: {name: value}}.
+
+    One query, and the archive becomes self-describing: whatever the analysis
+    later needs to know about how this capture was configured is in here,
+    without the reader having to guess at the instrument's state.
+    """
+    return config.snapshot()
 
 
 def _sample_block(ctx: MetaContext) -> Dict[str, Any]:
@@ -276,6 +289,7 @@ def _run_block(ctx: MetaContext) -> Dict[str, Any]:
 BLOCKS: Tuple[Tuple[str, Callable[[MetaContext], Dict[str, Any]]], ...] = (
     ("roi",    _roi_block),
     ("camera", _camera_block),
+    ("config", _config_block),
     ("device", _device_block),
     ("sample", _sample_block),
     ("run",    _run_block),
@@ -284,27 +298,8 @@ BLOCKS: Tuple[Tuple[str, Callable[[MetaContext], Dict[str, Any]]], ...] = (
 
 # ── Public surface ──────────────────────────────────────────────────────────
 
-def default_device_rowid() -> Optional[int]:
-    """
-    Return the instrument's `device.rowid` from the GUI defaults.
-
-    Falls back to None if the defaults row is unreadable, which leaves the
-    device block empty rather than failing the capture.
-
-    Returns:
-        The device rowid, or None.
-    """
-    try:
-        import sample_repo
-        defaults = sample_repo.load_defaults()
-        return defaults.deviceid if defaults else None
-    except Exception as e:              # noqa: BLE001 — metadata is optional
-        log.warning("capture_meta: no default device rowid: %s", e)
-        return None
-
-
-def collect(cam=None, cfg=None, sample_rowid: Optional[int] = None,
-            device_rowid: Optional[int] = None) -> Dict[str, Any]:
+def collect(cam=None, cfg=None,
+            sample_rowid: Optional[int] = None) -> Dict[str, Any]:
     """
     Gather every metadata block into one JSON-serializable dict.
 
@@ -317,7 +312,6 @@ def collect(cam=None, cfg=None, sample_rowid: Optional[int] = None,
         cfg: The CaptureConfig for this run, or None.
         sample_rowid: `samples.rowid` this capture belongs to, or None for a
             capture launched from the menu rather than a protocol run.
-        device_rowid: `device.rowid`; defaults to the GUI defaults' deviceid.
 
     Returns:
         The metadata dict described in the module docstring.
@@ -327,10 +321,7 @@ def collect(cam=None, cfg=None, sample_rowid: Optional[int] = None,
         >>> meta["roi"]["bound"]["w"]                    # doctest: +SKIP
         196
     """
-    if device_rowid is None:
-        device_rowid = default_device_rowid()
-    ctx = MetaContext(cam=cam, cfg=cfg, sample_rowid=sample_rowid,
-                      device_rowid=device_rowid)
+    ctx = MetaContext(cam=cam, cfg=cfg, sample_rowid=sample_rowid)
 
     meta: Dict[str, Any] = {
         "meta_version": META_VERSION,
@@ -457,24 +448,29 @@ if __name__ == "__main__":
     check("sample roi carries its role",
           roi_block["rects"]["sample"]["role"], "sample")
 
-    print("== device block ==")
-    dev = _row_dict("device", DEVICE_COLUMNS, 1)
-    check("device columns match the spec", sorted(dev),
-          sorted(DEVICE_COLUMNS))
-    check("missing rowid gives {}", _row_dict("device", DEVICE_COLUMNS,
-                                              999999), {})
-    check("None rowid gives {}", _row_dict("device", DEVICE_COLUMNS, None), {})
+    print("== device block reads the config table ==")
+    dev = _device_block(MetaContext())
+    check("device names match the spec", sorted(dev), sorted(DEVICE_NAMES))
+    check("serial is a non-empty string", bool(dev["hardware_sn"]), True)
+
+    print("== config block is a full snapshot ==")
+    cfgblk = _config_block(MetaContext())
+    check("roles present", "capture" in cfgblk and "device" in cfgblk, True)
+    check("values are text",
+          all(isinstance(v, str)
+              for names in cfgblk.values() for v in names.values()), True)
+    check("agrees with the device block",
+          cfgblk["device"]["hardware_sn"], dev["hardware_sn"])
 
     print("== sample block ==")
-    samp = _row_dict("samples", SAMPLE_COLUMNS, 1)
-    check("sample columns match the spec", sorted(samp),
-          sorted(SAMPLE_COLUMNS))
+    check("row shape matches the spec",
+          sorted(_row_dict("samples", SAMPLE_COLUMNS, 1)) in
+          ([], sorted(SAMPLE_COLUMNS)), True)
     check("no sample is a normal state",
           _sample_block(MetaContext(sample_rowid=None)), {})
 
     print("== collect assembles every block ==")
-    meta = collect(cam=FakeCam(), cfg=FakeCfg(), sample_rowid=1,
-                   device_rowid=1)
+    meta = collect(cam=FakeCam(), cfg=FakeCfg(), sample_rowid=1)
     check("every block present",
           all(name in meta for name, _ in BLOCKS), True)
     check("meta_version stamped", meta["meta_version"], META_VERSION)

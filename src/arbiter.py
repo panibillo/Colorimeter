@@ -220,15 +220,12 @@ class Arbiter:
         self._shutting_down = False
         self._cleaned_up    = False
 
-        # Reference data: which default_gui_vals row seeds the entry screens, and
-        # the resolved Defaults loaded from it (the rowid comes from config).
-        self._default_rowid = config.default_rowid()
+        # Reference data: the entry-screen pre-fills, read from the config
+        # table's `defaults` and `device` roles.
         self._defaults: sample_repo.Defaults | None = None
 
-        # Menu screen state: the slot to return to, and a staged (not yet
-        # committed) default_rowid choice — see open_menu()/_menu_ok().
+        # Menu screen state: the slot to return to when the menu closes.
         self._pre_menu_slot: Slot | None = None
-        self._menu_staged_rowid: int | None = None
 
         # Capture screen state (Menu → Capture): the staged path + images
         # choice, which view is showing, and the run's progress/result text.
@@ -361,12 +358,11 @@ class Arbiter:
         self._load_defaults()
 
     def _load_defaults(self) -> None:
-        """Load the GUI default values (entry pre-fills) from the DB."""
+        """Load the GUI default values (entry pre-fills) from the config table."""
         try:
-            self._defaults = sample_repo.load_defaults(self._default_rowid)
+            self._defaults = sample_repo.load_defaults()
         except sqlite3.Error:
-            log.exception("Arbiter: could not load defaults (rowid=%s)",
-                          self._default_rowid)
+            log.exception("Arbiter: could not load defaults")
             self._defaults = None
         if self._defaults is None:
             log.warning("Arbiter: no defaults loaded — entry fields start blank")
@@ -544,7 +540,8 @@ class Arbiter:
         r = slot.record
         try:
             rowid = sample_repo.insert_sample(
-                r["samp_no"], r["userid"], r["testlotid"], r["colorimeterid"])
+                r["samp_no"], r["user"], r["test_kit"], r["test_lot"],
+                r["instrument_sn"])
         except sqlite3.IntegrityError:
             log.warning("Arbiter: samp_no %r already in use", r["samp_no"])
             return False
@@ -655,7 +652,6 @@ class Arbiter:
     def open_menu(self, slot: Slot) -> None:
         """Open the Menu screen; `slot` is who OK/CANCEL will return the view to."""
         self._pre_menu_slot = slot
-        self._menu_staged_rowid = self._default_rowid
         self._focused = None
         self._render_menu()
 
@@ -682,15 +678,17 @@ class Arbiter:
         self._pool.render(self._disp)
         self._rebuild_focus()
 
+    # Nothing is staged at the menu level any more — the screens it opens each
+    # commit their own changes — so OK and CANCEL are two ways out of the same
+    # screen.  Both are kept because the header chrome is shared with the
+    # screens below, where the distinction still means something.
+
     def _menu_ok(self) -> None:
-        """Save any choices staged while in the menu, then return."""
-        if self._menu_staged_rowid != self._default_rowid:
-            self._default_rowid = self._menu_staged_rowid
-            self._load_defaults()
+        """Leave the menu."""
         self._close_menu()
 
     def _menu_cancel(self) -> None:
-        """Discard any choices staged while in the menu, then return."""
+        """Leave the menu."""
         self._close_menu()
 
     def _close_menu(self) -> None:
@@ -712,30 +710,31 @@ class Arbiter:
 
     def _menu_open_defaults(self) -> None:
         """
-        A minimal row-picker over default_gui_vals.  Only rowid=1 exists today,
-        so this is a confirm-and-stage rather than a real list; Select stages
-        the rowid (applied only if the menu's OK is then pressed) so the
-        mechanism is exercised end to end and is ready to grow into a real
-        picker once more default rows exist.
+        Show the pre-fills the entry screens will use.
+
+        Read-only: the values are ordinary config parameters now, so editing
+        them belongs to the config editor rather than to a screen of its own.
+        Reload picks up an edit made there without leaving the menu.
         """
         if self._pool is None:
             return
         d = self._defaults
-        msg = (f"rowid {d.rowid}: {d.fullname} / {d.testkit}"
-              if d else "No defaults loaded")
+        msg = (f"{d.user}\n{d.testkit}\nlot {d.testlot}" if d
+               else "No defaults loaded")
         self._pool.hide_all()
         self._pool.put("modal_panel")
         self._pool.put("modal_msg", msg)
         names = self._pool.layout_modal_buttons(2)
-        self._pool.put(names[0], "Select", on=self._menu_select_defaults,
-                       enabled=not self._any_slot_active())
+        self._pool.put(names[0], "Reload", on=self._menu_reload_defaults)
         self._pool.put(names[1], "Back",   on=self._render_menu)
         self._pool.render(self._disp)
         self._rebuild_focus()
 
-    def _menu_select_defaults(self) -> None:
-        self._menu_staged_rowid = config.default_rowid()   # the only row today
-        self._render_menu()
+    def _menu_reload_defaults(self) -> None:
+        """Re-read the pre-fills from the config table and redisplay them."""
+        config.load(reload=True)
+        self._load_defaults()
+        self._menu_open_defaults()
 
     # ── Config screen (Menu → Config) ──────────────────────────────────────────
     # Custom reagent countdowns, entered on the instrument itself.  The two
@@ -870,12 +869,8 @@ class Arbiter:
     def _menu_open_capture(self) -> None:
         """Open the capture choice screen, initialising from the saved default."""
         self._cap_mode  = "normal"
-        try:
-            self._cap_saved_on_open = sample_repo.load_default_exposuregroup(
-                self._default_rowid)
-        except sqlite3.Error:
-            self._cap_saved_on_open = None
-        self._cap_group = self._initial_exposure_group()
+        self._cap_saved_on_open = self._initial_exposure_group()
+        self._cap_group = self._cap_saved_on_open
         self._cap_progress = ""
         self._cap_result   = ""
         self._render_capture_choice()
@@ -883,8 +878,7 @@ class Arbiter:
     def _initial_exposure_group(self) -> str:
         """
         The exposure group to preselect when the capture screen opens: the value
-        last saved on the defaults row, or the configured fallback when nothing
-        has been saved yet.
+        in force for `defaults.exposuregroup`.
 
         The operator's saved choice is honoured whether or not the exposure
         table currently has rows for that group — preselecting anything else
@@ -893,17 +887,15 @@ class Arbiter:
         uncalibrated one). A Normal capture on an uncalibrated group simply
         finds nothing to capture; that is handled at capture time, not by
         second-guessing the preselection here.
+
+        A fresh instrument has never chosen one, and gets the seeded value; the
+        Default button on the config editor puts that back.
         """
         try:
-            saved = sample_repo.load_default_exposuregroup(self._default_rowid)
-        except sqlite3.Error:
-            log.exception("Arbiter: could not read saved exposure group")
-            saved = None
-        if saved is not None:
-            return saved
-        # Nothing saved yet — the configured default (the config table,
-        # capture.fallback_exposure_group).
-        return config.fallback_exposure_group()
+            return config.get("defaults", "exposuregroup")
+        except config.ConfigMissing:
+            log.exception("Arbiter: no saved exposure group")
+            return "1"
 
     def _render_capture_choice(self) -> None:
         if self._pool is None:
@@ -947,11 +939,7 @@ class Arbiter:
 
     def _cap_choice_cancel(self) -> None:
         """Discard this visit's group change (restore the pre-open value), to Menu."""
-        try:
-            sample_repo.save_default_exposuregroup(
-                self._default_rowid, self._cap_saved_on_open)
-        except sqlite3.Error:
-            log.exception("Arbiter: could not restore exposure group on cancel")
+        config.save("defaults", "exposuregroup", self._cap_saved_on_open)
         self._cap_view = None
         self._render_menu()
 
@@ -961,11 +949,8 @@ class Arbiter:
 
     def _cap_set_group(self, n) -> None:
         self._cap_group = str(n)
-        # Persist the choice onto the defaults row so it is preselected next time.
-        try:
-            sample_repo.save_default_exposuregroup(self._default_rowid, self._cap_group)
-        except sqlite3.Error:
-            log.exception("Arbiter: could not save exposure group to defaults")
+        # Persist the choice so it is preselected next time.
+        config.save("defaults", "exposuregroup", self._cap_group)
         self._render_capture_choice()
 
     def _cap_start(self) -> None:
@@ -3125,27 +3110,30 @@ def _selftest() -> None:
     # Config screen's writes below — but the cache was filled from the live DB
     # during construction, so it has to be refilled from the copy.
     config.load(reload=True)
-    config.seed_defaults()                    # in case the copy predates `config`
     _db.write_one("DELETE FROM exposure")
-    sample_repo.save_default_exposuregroup(1, None)     # start with nothing saved
+
+    def saved_group():
+        """The exposure group persisted in the config table."""
+        return config.get("defaults", "exposuregroup")
 
     class _R:                       # a stand-in LedResult carrying e*
         def __init__(self, color, estar):
             self.color = color; self.metadata = {"e3_final_us": estar}
 
-    print("== capture screen: unsaved group falls back to the configured default ==")
+    print("== capture screen: opens on the group in force ==")
+    config.save("defaults", "exposuregroup", "3")
     arb.open_menu(A)
     check("menu open (no slot focus)", arb._focused is None, True)
     arb._menu_open_capture()
     check("choice view",          arb._cap_view, "choice")
     check("default mode normal",  arb._cap_mode, "normal")
     check("button always Calibrate", arb._pool["cap_start"].label, "Calibrate\nExposures")
-    check("fallback group 3",     arb._cap_group, config.fallback_exposure_group())
+    check("group in force is 3",  arb._cap_group, "3")
 
-    print("== capture screen: selecting a group persists it to defaults ==")
+    print("== capture screen: selecting a group persists it ==")
     arb._cap_set_group(4)
     check("group set to 4",        arb._cap_group, "4")
-    check("persisted to defaults", sample_repo.load_default_exposuregroup(1), "4")
+    check("persisted to config",   saved_group(), "4")
 
     print("== capture screen: reopen restores the saved group ==")
     exposure_repo.write_estar("amber", 30000)           # some exposures exist
@@ -3156,21 +3144,23 @@ def _selftest() -> None:
     arb._menu_open_capture()                            # opens with saved '4'
     arb._cap_set_group(2)                               # saves '2' on tap
     arb._cap_choice_cancel()
-    check("CANCEL reverted to 4", sample_repo.load_default_exposuregroup(1), "4")
+    check("CANCEL reverted to 4", saved_group(), "4")
     check("CANCEL leaves choice", arb._cap_view, None)
     arb._menu_open_capture()
     arb._cap_set_group(2)
     arb._cap_choice_ok()
-    check("OK kept 2",            sample_repo.load_default_exposuregroup(1), "2")
+    check("OK kept 2",            saved_group(), "2")
     check("OK leaves choice",     arb._cap_view, None)
 
     print("== capture screen: saved group is honoured even without exposures ==")
     exposure_repo.delete_led("amber")                   # no active groups remain
     arb._menu_open_capture()
     check("saved group 2 kept",   arb._cap_group, "2")  # was '2' from OK above
-    sample_repo.save_default_exposuregroup(1, None)     # clear the saved choice
-    arb._menu_open_capture()
-    check("fallback when unset",  arb._cap_group, config.fallback_exposure_group())
+
+    print("== capture screen: toggling a group leaves no duplicate rows ==")
+    check("one row per distinct value",
+          _db.read_val("SELECT COUNT(*) FROM config WHERE role='defaults' "
+                       "AND name='exposuregroup' AND value='4'"), 1)
 
     print("== capture screen: Calibrate button persists e*, even with Path=Normal ==")
     _db.write_one("DELETE FROM exposure")
@@ -3278,7 +3268,11 @@ def _selftest() -> None:
     arb._cfg_ok()
     check("reagent1 back to commissioned", config.reagent1_secs(), _file_r1)
     check("reagent2 back to commissioned", config.reagent2_secs(), _file_r2)
-    check("no overrides left behind", config.overrides(), [])
+    # Only the two durations this screen touches: the copied database carries
+    # whatever else the instrument has been set to, which is not this test's
+    # business.
+    check("no reagent overrides left behind",
+          [p for p in config.overrides() if p[0] == "protocol"], [])
 
     # ── Image viewer (Tool 1) ─────────────────────────────────────────────────
     print("== image viewer: camera guard ==")

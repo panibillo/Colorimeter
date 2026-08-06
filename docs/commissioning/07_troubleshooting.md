@@ -97,14 +97,19 @@ Both prerequisites are handled by `provisioning/bootstrap_system.sh`
 
 ### Database looks empty / app errors on missing rows
 
-- The app needs the `default_gui_vals` view and one row each in `defaults`,
-  `device`, `users`, `testkit`, `testlot`. It will not start without them.
+- Every setting lives in the `config` table now; the `defaults`, `device`,
+  `users`, `testkit` and `testlot` tables and the `default_gui_vals` view are
+  gone. `src/db_bootstrap.py` runs at every launch and re-seeds any parameter
+  that has no active row, so this class of failure should repair itself. If it
+  does not, the message names the parameter.
 - `colorcard` (colour-card patch geometry) is *not* read at runtime — an empty
   `colorcard` is normal and is not the cause of a startup error. It is still a
   useful tell that you copied a blank DB.
-- To rebuild a working schema + seed rows:
-  `sqlite3 src/colorimeter.sqlite < src/db_DDL.sql` (idempotent; safe to
-  re-run). Recopying the reference DB (step 3c) is still preferred.
+- To rebuild a working schema + seed rows by hand:
+  `sqlite3 src/colorimeter.sqlite < src/db_DDL.sql` then
+  `sqlite3 src/colorimeter.sqlite < provisioning/config_defaults.sql` (both
+  idempotent; neither overwrites a value already there). Recopying the
+  reference DB (step 3c) is still preferred, for the calibration data.
 - Validate: the schema-count snippet in [03_upload_firmware_db_venv.md](03_upload_firmware_db_venv.md#step-3c--upload-the-reference-database-on-local).
 
 ### App won't start under systemd but runs by hand

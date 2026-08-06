@@ -27,18 +27,18 @@ def _new_record() -> dict:
     return {
         # ── display fields shown on the entry screens ───────────────────────
         "samp_no":       "",   # id_fld        -> samples.samp_no
-        "user":          "",   # user_fld      (fullname; display only)
-        "test":          "",   # test_fld      (testkit;  display only)
-        "test_lot":      "",   # test_lot_fld  (lotno;    display only)
+        "user":          "",   # user_fld      -> samples.user
+        "test_kit":      "",   # test_fld      -> samples.test_kit
+        "test_lot":      "",   # test_lot_fld  -> samples.test_lot
         "collect_dt":    "",   # entry2        -> samples.collect_dt
         "samp_degC":     "",   # entry2 temp   -> samples.samp_degC
         "samp_grams":    "",   # entry2 weight -> samples.samp_grams
         "manual_read":   "",   # read screen   -> samples.manual_read
-        # ── identity carried from the loaded defaults (the real FKs stored) ──
+        # ── identity carried from the loaded defaults ───────────────────────
+        # Provenance travels by value: the strings above and the serial below
+        # are stored on the sample as they read at the time, not as FKs.
         "db_rowid":      None,  # samples.rowid, once reserved at Begin
-        "userid":        None,  # samples.userid
-        "testlotid":     None,  # samples.testlotid
-        "colorimeterid": None,  # samples.colorimeterid (defaults.deviceid)
+        "instrument_sn": "",    # samples.instrument_sn (device.hardware_sn)
         # ── milestone timestamps (epoch seconds) -> samples.* ───────────────
         "reagent1_start": None, "reagent1_end": None,
         "reagent2_start": None, "reagent2_end": None,

@@ -131,6 +131,9 @@ INSERT INTO config (active, isdefault, editable, add_dt, role, name,
             MIN(vtype), COALESCE(value, ''), MIN(source), MIN(remark)
        FROM config_v1
       WHERE NOT (role = 'defaults' AND name = 'rowid')
+        -- fallback_exposure_group duplicated defaults.exposuregroup; the
+        -- surviving parameter's isdefault row is now the fallback.
+        AND NOT (role = 'capture' AND name = 'fallback_exposure_group')
         AND COALESCE(profile, '') = ''
       GROUP BY role, name, COALESCE(value, '');
 
@@ -174,7 +177,9 @@ INSERT OR IGNORE INTO config (active, isdefault, editable, add_dt, role, name,
          SELECT 'samp_no_template'  AS n, d.samp_no_template               AS v, 'defaults' AS src
            FROM defaults d WHERE d.rowid = 1
           UNION ALL
-         SELECT 'exposuregroup',     COALESCE(d.exposuregroup, '1'),          'defaults'
+         -- A NULL here meant "operator has never chosen"; the v1 code then
+         -- used capture.fallback_exposure_group, whose seeded value was 3.
+         SELECT 'exposuregroup',     COALESCE(d.exposuregroup, '3'),          'defaults'
            FROM defaults d WHERE d.rowid = 1
           UNION ALL
          SELECT 'user',              COALESCE(u.fullname, u.handle),          'users'

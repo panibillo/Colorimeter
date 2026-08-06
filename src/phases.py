@@ -201,7 +201,7 @@ class EntryPhase(Phase):
     # entry field widget -> record key; the arbiter writes edits straight through
     # to the record on each keystroke, so the record is always the source of truth.
     FIELDS = {"id_fld": "samp_no", "user_fld": "user",
-              "test_fld": "test", "test_lot_fld": "test_lot"}
+              "test_fld": "test_kit", "test_lot_fld": "test_lot"}
 
     def enter(self, pool, slot, arb) -> None:
         r = slot.record
@@ -212,7 +212,7 @@ class EntryPhase(Phase):
         pool.put("user_lbl",     "User",     on=lambda: self.fill_user(arb, slot))
         pool.put("user_fld",     r["user"])
         pool.put("test_lbl",     "Test",     on=lambda: self.fill_test(arb, slot))
-        pool.put("test_fld",     r["test"])
+        pool.put("test_fld",     r["test_kit"])
         pool.put("test_lot_lbl", "Test lot", on=lambda: self.fill_test_lot(arb, slot))
         pool.put("test_lot_fld", r["test_lot"])
         pool.show("div1", "div2", "div3")
@@ -229,10 +229,10 @@ class EntryPhase(Phase):
         r["samp_no"] = arb.next_sample_no()
         d = arb.defaults()
         if d is not None:
-            r["user"],     r["userid"]    = d.fullname, d.userid
-            r["test"],     r["testlotid"] = d.testkit,  d.testlotid
-            r["test_lot"]                 = d.lotno
-            r["colorimeterid"]            = d.deviceid
+            r["user"]          = d.user
+            r["test_kit"]      = d.testkit
+            r["test_lot"]      = d.testlot
+            r["instrument_sn"] = d.hardware_sn
 
     def fill_id(self, arb, slot) -> None:
         slot.record["samp_no"] = arb.next_sample_no()
@@ -241,19 +241,19 @@ class EntryPhase(Phase):
     def fill_user(self, arb, slot) -> None:
         d = arb.defaults()
         if d is not None:
-            slot.record["user"], slot.record["userid"] = d.fullname, d.userid
+            slot.record["user"] = d.user
             arb.render(slot)
 
     def fill_test(self, arb, slot) -> None:
         d = arb.defaults()
         if d is not None:
-            slot.record["test"], slot.record["testlotid"] = d.testkit, d.testlotid
+            slot.record["test_kit"] = d.testkit
             arb.render(slot)
 
     def fill_test_lot(self, arb, slot) -> None:
         d = arb.defaults()
         if d is not None:
-            slot.record["test_lot"], slot.record["testlotid"] = d.lotno, d.testlotid
+            slot.record["test_lot"] = d.testlot
             arb.render(slot)
 
     def begin(self, arb, slot) -> None:
@@ -598,12 +598,17 @@ if __name__ == "__main__":
         def draw_rect(self, rect, color, **kw): pass
         def draw_text(self, text, rect, **kw): pass
 
-    import sample_repo
+    from sample_repo import Defaults
 
-    DEFAULTS = sample_repo.load_defaults(1)
-    if DEFAULTS is None:
-        raise SystemExit("self-test: no default_gui_vals row with rowid=1 "
-                          "in the database — populate the `defaults` table first.")
+    # Canned pre-fills.  These tests are about phase behaviour, so they state
+    # the defaults outright rather than depending on what the database holds.
+    DEFAULTS = Defaults(
+        samp_no_template="ZZ1000",
+        user="William Olsen", user_email="w@example.org", user_org="MGWWG",
+        testkit="Ascel 458201", testkit_vendor="Industrial Test Systems, Inc.",
+        testlot="0 12V601-HH", testlot_expire_dt="2027-07",
+        hardware_sn="XCN-001", software_ver="0.2",
+    )
 
     class MockArbiter:
         """Minimal stand-in exercising the whole phase contract."""
@@ -733,19 +738,17 @@ if __name__ == "__main__":
     arb.goto(A, "entry")
     check("main_btn label",       pool["main_btn"].label, "Begin")
     check("id autofilled",        pool["id_fld"].value, "ZZ1001")
-    check("user autofilled",      pool["user_fld"].value, DEFAULTS.fullname)
+    check("user autofilled",      pool["user_fld"].value, DEFAULTS.user)
     check("test autofilled",      pool["test_fld"].value, DEFAULTS.testkit)
-    check("test-lot autofilled",  pool["test_lot_fld"].value, DEFAULTS.lotno)
+    check("test-lot autofilled",  pool["test_lot_fld"].value, DEFAULTS.testlot)
     check("Begin enabled",        pool["main_btn"].enabled, True)
-    check("userid carried",       A.record["userid"], DEFAULTS.userid)
-    check("testlotid carried",    A.record["testlotid"], DEFAULTS.testlotid)
-    check("colorimeterid carried", A.record["colorimeterid"], DEFAULTS.deviceid)
+    check("instrument_sn carried", A.record["instrument_sn"], DEFAULTS.hardware_sn)
 
     print("== label-button refills a cleared field ==")
     A.record["user"] = ""; arb.render(A)
     check("user cleared",   pool["user_fld"].value, "")
     press(pool, "user_lbl")                        # User label = load-default button
-    check("user refilled",  pool["user_fld"].value, DEFAULTS.fullname)
+    check("user refilled",  pool["user_fld"].value, DEFAULTS.user)
 
     print("== Begin reserves the row -> entry2 ==")
     press(pool, "main_btn")
