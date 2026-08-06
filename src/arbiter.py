@@ -1279,10 +1279,35 @@ class Arbiter:
 
         Called after any write rather than only for the roles that matter, so
         no list of "settings with a consumer" has to be kept in step here —
-        both calls are cheap and idempotent.
+        all three calls are cheap and idempotent.
         """
         self._load_defaults()
         self._apply_reagent_secs()
+        self._cfge_refill_slots()
+
+    def _cfge_refill_slots(self) -> None:
+        """
+        Put the new defaults into every slot, so both read the same instrument.
+
+        A slot fills its identity fields from the defaults the first time its
+        entry screen is drawn and never again.  Without this, a slot already
+        looked at would keep showing the user, kit and lot that were current
+        when it was opened, while a slot not yet opened picked up the edited
+        ones — two slots disagreeing about the same instrument.
+
+        Safe unconditionally because editing is locked out once any slot is
+        past entry (_cfge_editable): every slot reachable from here is still
+        on its entry screen with nothing reserved in the database.  Nothing is
+        redrawn — the editor is what is on screen, and the entry phase reads
+        the record afresh when the operator comes back to it.
+        """
+        entry = self._phases.get("entry")
+        if entry is None:
+            return
+        for slot in self._slots.values():
+            if slot.record.get("db_rowid") is not None:
+                continue           # belt and braces: a reserved row never moves
+            entry.autofill(self, slot)
 
     # ── confirms ───────────────────────────────────────────────────────────────
 
@@ -3787,9 +3812,10 @@ def _selftest() -> None:
 
     # Both slots are still parked on the result screen from the run above, and
     # the editor locks its fields while any slot is past entry.  Stand them
-    # down first; the lockout gets a test of its own further down.
+    # down the way Done does — a finished run cleared back to a fresh one; the
+    # lockout gets a test of its own further down.
     for _s in arb._slots.values():
-        _s.active_phase = "entry"
+        _s.clear_run()
 
     def cfge_row_of(name):
         """Body row (1..4) showing `name` on the page that is up, or None."""
@@ -3992,12 +4018,35 @@ def _selftest() -> None:
     check("roles → menu",      arb._cfge_view, None)
     check("the Menu is up",    arb._pool["menu_capture"].visible, True)
 
+    print("== config editor: a saved default reaches both slots ==")
+    # A gets looked at, B does not: render() is a no-op for the unfocused slot,
+    # so only A's record is filled from the defaults in force right now.
+    A.clear_run(); B.clear_run()
+    _was_user = config.get("defaults", "user")
+    arb.focus(A)
+    check("A filled from the defaults", A.record["user"], _was_user)
+    check("B never opened, still blank", B.record["user"], "")
+    arb._cfge_open_role("defaults")
+    while cfge_row_of("user") is None:          # 'user' sits on a later page
+        arb._pool["cfge_next"].on_press()
+    _fld = arb._pool[f"cfge_fld{cfge_row_of('user')}"]
+    _fld.set_value("R. Feynman")
+    arb._writethrough(_fld)
+    arb._pool["cfge_save"].on_press()
+    check("saved",             config.get("defaults", "user"), "R. Feynman")
+    check("the slot already opened caught up", A.record["user"], "R. Feynman")
+    check("and so did the one that was not",   B.record["user"], "R. Feynman")
+    arb._cfge_cancel()
+    arb._cfge_cancel()
+
     print("== config editor: Restore Factory Defaults undoes all of it ==")
     arb._cfge_open()
     arb._cfge_confirm_restore_all()
     arb._pool["modal_yes"].on_press()
     check("back on the roles",  arb._cfge_view, "roles")
     check("description restored", config.get("device", "description"), _was_desc)
+    check("both slots followed it back",
+          [A.record["user"], B.record["user"]], [_was_user, _was_user])
     check("shutdown_timeout_s restored",
           config.shutdown_timeout_s() != 12.5, True)
     check("every parameter on its seed row",

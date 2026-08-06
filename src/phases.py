@@ -206,7 +206,7 @@ class EntryPhase(Phase):
     def enter(self, pool, slot, arb) -> None:
         r = slot.record
         if not r.get("samp_no"):
-            self._autofill(arb, slot)     # first view of a fresh run
+            self.autofill(arb, slot)      # first view of a fresh run
         pool.put("id_lbl",       "ID",       on=lambda: self.fill_id(arb, slot))
         pool.put("id_fld",       r["samp_no"])
         pool.put("user_lbl",     "User",     on=lambda: self.fill_user(arb, slot))
@@ -223,8 +223,13 @@ class EntryPhase(Phase):
     # ── defaults + label-button fills ───────────────────────────────────────────
     # Each row label is a Button: pressing it loads that field's default value.
 
-    def _autofill(self, arb, slot) -> None:
-        """Seed every field of a fresh run from the loaded defaults."""
+    def autofill(self, arb, slot) -> None:
+        """
+        Seed every field of a fresh run from the loaded defaults.
+
+        Called on the first view of a run, and again by the arbiter whenever a
+        config edit moves the defaults out from under a slot that has not begun.
+        """
         r = slot.record
         r["samp_no"] = arb.next_sample_no()
         d = arb.defaults()
