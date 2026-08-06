@@ -603,16 +603,19 @@ if __name__ == "__main__":
         def draw_rect(self, rect, color, **kw): pass
         def draw_text(self, text, rect, **kw): pass
 
+    import version
     from sample_repo import Defaults
 
     # Canned pre-fills.  These tests are about phase behaviour, so they state
     # the defaults outright rather than depending on what the database holds.
+    # software_ver is the exception: it is never a stored default, so the only
+    # honest value for it is the one the running code carries.
     DEFAULTS = Defaults(
         samp_no_template="ZZ1000",
         user="William Olsen", user_email="w@example.org", user_org="MGWWG",
         testkit="Ascel 458201", testkit_vendor="Industrial Test Systems, Inc.",
         testlot="0 12V601-HH", testlot_expire_dt="2027-07",
-        hardware_sn="XCN-001", software_ver="0.2",
+        hardware_sn="XCN-001", software_ver=version.__version__,
     )
 
     class MockArbiter:

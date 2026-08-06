@@ -191,9 +191,26 @@ Expect **9 tables**, with `colorcard` populated (the ROI patches) and
 
 ### 1d — Which versions are on the Pi?
 
-The Pi has no Git checkout and no version file, so **file content is the only
-ground truth**. `rsync --checksum --dry-run` compares the desktop against the Pi
-and lists exactly the files that differ:
+**Which release** the Pi is running, it now tells you itself. Every launch
+stamps `src/version.py`'s `__version__` into the Pi's own database, and
+superseded rows are kept, so this is the unit's version history — newest last,
+`active=1` on the one it is running now:
+
+```bash
+# On the Pi:
+sqlite3 ~/Colorimeter/src/colorimeter.sqlite \
+  "SELECT value, add_dt, active FROM config
+    WHERE role='device' AND name='software_ver' ORDER BY add_dt"
+```
+
+`commissioning_status.sh` prints the same value under Step 3c. A unit that has
+never been launched since 2026-08 has no row at all.
+
+**Whether that checkout is exactly your working tree** is a different question,
+and the release number cannot answer it — a version is bumped per release, not
+per edit. For that, file content is still the only ground truth.
+`rsync --checksum --dry-run` compares the desktop against the Pi and lists
+exactly the files that differ:
 
 ```bash
 # On local, from ~/Projects/Colorimeter:

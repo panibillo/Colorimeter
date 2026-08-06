@@ -18,8 +18,10 @@
 # What it deliberately does NOT do:
 #   • verify the venv's imports — that is make_venv.sh's job (safe to re-run)
 #   • verify the peripherals   — that is verify_peripherals.sh's job
-#   • compare code versions against the desktop — the Pi carries no version
-#     stamp, so that check only exists on the desktop side:
+#   • confirm the checkout is exactly the desktop's working tree.  Step 3c
+#     below reports the release the unit last launched at (stamped into its own
+#     database from src/version.py), but a release number moves per release,
+#     not per edit, so a file-by-file check still only exists on the desktop:
 #       ./push_pi_scripts.sh -n <host>     # provisioning scripts that differ
 #       ./bulk_sync_to_pi.sh  -n <host>    # .py/.yaml/.csv that differ
 #
@@ -177,14 +179,26 @@ try:
         if "colorcard" in tables else -1
     cfg = c.execute("select count(*) from config where active = 1").fetchone()[0] \
         if "config" in tables else -1
+    # The release the unit last launched at.  config_repo.stamp_version()
+    # writes it from src/version.py at every launch, so a unit that has not
+    # been started since 2026-08 has no row at all.
+    sw = (c.execute("select value from config where role='device' "
+                    "and name='software_ver' and active=1").fetchone()
+          if "config" in tables else None)
     print(f"OK {ver} {','.join(sorted(REQUIRED - tables)) or '-'} "
-          f"{','.join(sorted(LEGACY & tables)) or '-'} {n} {cfg}")
+          f"{','.join(sorted(LEGACY & tables)) or '-'} {n} {cfg} "
+          f"{sw[0].replace(' ', '') if sw else '-'}")
 except Exception as e:
     print(f"ERR {e}")
 PY
 )"
-    read -r tag ver missing legacy b cfg <<<"${db_report}"
+    read -r tag ver missing legacy b cfg sw <<<"${db_report}"
     if [[ "${tag}" == "OK" ]]; then
+        if   [[ "${sw}" == "-" ]]; then
+            warn "no software version stamped — not launched since 2026-08"
+        else
+            pass "last launched at software v${sw}"
+        fi
         if   [[ "${ver}" -eq 2 ]]; then pass "schema v2"
         elif [[ "${ver}" -eq 0 ]]; then fail "pre-2026-08 schema — the app will refuse to start"
                                         reenter "3c (cp src/colorimeter.sqlite{,.v1.bak} && sqlite3 -bail src/colorimeter.sqlite < provisioning/migrate_v2.sql)"

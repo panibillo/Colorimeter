@@ -109,15 +109,21 @@ INSERT OR IGNORE INTO config (active, isdefault, editable, add_dt, role, name,
 
 -- ── device ──────────────────────────────────────────────────────────────────
 -- Was the `device` table.  One instrument, so one value per name.  The serial
--- and the version are editable=0: they identify the instrument and end up in
--- every archive, so they are commissioning data, not settings.
+-- is editable=0: it identifies the instrument and ends up in every archive, so
+-- it is commissioning data, not a setting.
+--
+-- `software_ver` is deliberately NOT here, and is the one exception to this
+-- file being the only place a value is written down.  It is not a setting at
+-- all — it is a fact about the code that is running, so src/version.py owns it
+-- and config_repo.stamp_version() writes it into the table at every launch
+-- (editable=0, source='code').  A value here would be a second version number
+-- to keep in step, and would be wrong the moment the software was updated
+-- without the database being reseeded.
 INSERT OR IGNORE INTO config (active, isdefault, editable, add_dt, role, name,
                               vtype, value, source, remark)
      VALUES
   (0, 1, 0, '2026-07-21 00:00:00', 'device', 'hardware_sn', 'str', 'XCN-001', 'seed',
    'instrument hardware serial number'),
-  (0, 1, 0, '2026-07-21 00:00:00', 'device', 'software_ver', 'str', '0.2', 'seed',
-   'version this instrument is commissioned at'),
   (0, 1, 1, '2026-07-21 00:00:00', 'device', 'description', 'str', 'dev8 lighting, prototype', 'seed',
    'free-text description of this instrument');
 

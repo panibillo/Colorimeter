@@ -241,6 +241,67 @@ except ImportError:
     PLATFORM = "desktop"
 ```
 
+## Versioning and Releases
+
+### One version number, and it lives in `src/version.py`
+
+`__version__` there is the only release string in the project. Nothing else
+hardcodes one — not the seed SQL, not a test fixture, not a docstring.
+`config_repo.stamp_version()` copies it into the instrument's `config` table at
+every launch (`device.software_ver`, `editable=0`, `source='code'`), and from
+there it reaches every capture archive. Because the config table keeps
+superseded rows, an instrument carries a dated log of every version it has run.
+
+Plain semantic versioning, `MAJOR.MINOR.PATCH`, no suffix. Being on 0.x *is* the
+alpha statement (SemVer clause 4: anything may change at any time), so there is
+no second counter to also keep moving.
+
+| Bump | When |
+|------|------|
+| **PATCH** `0.3.0 → 0.3.1` | Fixes and internal changes. Archives and the database keep the same shape, so a desktop tool at 0.3.0 reads 0.3.1 archives unchanged. |
+| **MINOR** `0.3.0 → 0.4.0` | Anything a stored archive or database would notice: a config parameter added, renamed or retyped; a capture-path or workflow change; **and always whenever a format version below moves**. |
+| **MAJOR** `0.x → 1.0.0` | Archive format frozen, instrument calibrated and validated. |
+
+### The release number is not the compatibility contract
+
+> `software_ver` tells you which build wrote a file. It never tells you whether
+> you can read it. Readers branch on the format versions, never on
+> `software_ver`.
+
+Three integers are the real contract. Each lives beside the code that writes it,
+carries its own `# 1 -> 2: what changed` comment, and moves independently:
+
+| Constant | Module | Stamped as | Governs |
+|---|---|---|---|
+| `SCHEMA_VERSION` | `capture_h5.py` | `.h5` attr `schema_version` | group/dataset layout |
+| `META_VERSION` | `capture_meta.py` | `.h5` attr `meta_version` | shape of the `/meta` record |
+| `SCHEMA_VERSION` | `db_bootstrap.py` | `PRAGMA user_version` | the SQLite schema |
+
+`src/version.py` holds the other half — `READS_SCHEMA`, `READS_META`, `READS_DB`,
+the ranges *this* checkout accepts. Widening a range is how a desktop change
+restores compatibility with an older instrument's archives; narrowing one is how
+support is dropped. `test/test_version.py` fails if a writer is bumped without
+the matching range being widened.
+
+Desktop tools call `version.check_archive(reader.attrs("/"))` immediately after
+opening an archive, and abort on the message it returns. It returns a message
+rather than raising so a caller with a real fallback — `devdesk/flatfield.py`
+copes with schema-1 archives that carry no ROI geometry — can decide for itself.
+
+### Release checklist
+
+1. Bump `__version__` in `src/version.py`.
+2. Add the CHANGELOG entry, including its `Writes:` / `Reads:` pair. If a format
+   version moved, say which and why a reader should care.
+3. Commit, then `git tag -a v0.3.0 -m "..."` and push the tag.
+4. Sync the Pi. The instrument stamps the new version into its own database on
+   its next launch — confirm with:
+   ```sh
+   sqlite3 src/colorimeter.sqlite \
+     "SELECT value, add_dt FROM config
+       WHERE role='device' AND name='software_ver' ORDER BY add_dt"
+   ```
+
 ## Testing Standards
 
 - Unit tests in `test/` directory

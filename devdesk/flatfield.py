@@ -117,6 +117,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
+import version  # noqa: E402
 from hdf5read import Hdf5Reader  # noqa: E402
 from rect import Rect  # noqa: E402
 import roi as roi_mod  # noqa: E402
@@ -2998,6 +2999,13 @@ def _run_modes(args: argparse.Namespace, h5_path: Path,
                any_mode: bool) -> int:
     """Open the archive and run whichever modes were asked for."""
     with Hdf5Reader(h5_path) as reader:
+        # Only formats outside src/version.py's READS_* ranges are refused
+        # here. A schema-1 archive is still supported, and resolve_bound below
+        # is what copes with its missing geometry.
+        problem = version.check_archive(reader.attrs("/"))
+        if problem:
+            print(f"{h5_path.name}: {problem}", file=sys.stderr)
+            return 1
         args.bound = resolve_bound(reader, args.bound)
         colors = args.led or list_led_colors(reader)
         if not colors:
@@ -3008,6 +3016,10 @@ def _run_modes(args: argparse.Namespace, h5_path: Path,
         if args.transfer:
             dst_path = resolve_h5_path(args.file2, args.captures_dir)
             with Hdf5Reader(dst_path) as dst:
+                dst_problem = version.check_archive(dst.attrs("/"))
+                if dst_problem:
+                    print(f"{dst_path.name}: {dst_problem}", file=sys.stderr)
+                    return 1
                 # Transfer compares two archives pixel for pixel, so they must
                 # be crops of the same rectangle. Two different bounds would
                 # silently compare different parts of the stage.

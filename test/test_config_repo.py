@@ -35,6 +35,7 @@ sys.path.insert(0, str(_ROOT / "src"))
 import db_bootstrap
 import db_manager as db
 import config_repo as config
+import version
 
 
 class ConfigTestCase(unittest.TestCase):
@@ -366,6 +367,77 @@ class TestEditorReads(ConfigTestCase):
         self.assertEqual(by_name["hardware_sn"][2], "XCN-001")
         self.assertEqual(by_name["hardware_sn"][3], 0, "serial must be locked")
         self.assertEqual(by_name["description"][3], 1)
+        self.assertEqual(by_name["software_ver"][3], 0,
+                         "the version must be locked")
+
+
+class TestVersionStamp(ConfigTestCase):
+    """
+    device.software_ver is the one parameter the source tree owns rather than
+    config_defaults.sql.  db_bootstrap.ensure() stamps it at every launch, so
+    setUp has already run it once.
+    """
+
+    def active_version_rows(self):
+        return self.rows("SELECT value, editable, source, isdefault FROM config"
+                         " WHERE role='device' AND name='software_ver'"
+                         " AND active=1")
+
+    def test_the_seed_file_does_not_carry_a_version(self):
+        """A value in the SQL would be a second version number to keep in step."""
+        seeded = self.rows("SELECT value FROM config WHERE role='device' "
+                           "AND name='software_ver' AND source='seed'")
+        self.assertEqual(seeded, [])
+
+    def test_launch_stamps_the_running_version(self):
+        self.assertEqual(self.active_version_rows(),
+                         [(version.__version__, 0, "code", 1)])
+
+    def test_restamping_the_same_version_writes_nothing(self):
+        self.assertEqual(config.stamp_version(), 0)
+        self.assertEqual(len(self.rows(
+            "SELECT 1 FROM config WHERE role='device' AND name='software_ver'")),
+            1)
+
+    def test_a_bump_supersedes_and_keeps_the_commissioned_row(self):
+        was = version.__version__
+        try:
+            version.__version__ = "9.9.9"
+            self.assertTrue(config.stamp_version())
+        finally:
+            version.__version__ = was
+
+        self.assertEqual(config.get("device", "software_ver"), "9.9.9")
+        self.assertEqual(
+            self.rows("SELECT value, active, isdefault FROM config "
+                      "WHERE role='device' AND name='software_ver' "
+                      "ORDER BY value"),
+            [(was, 0, 1), ("9.9.9", 1, 0)],
+            "the commissioned-at row stays the default and stays in the table")
+        self.assertOneActiveRowPerParameter()
+
+    def test_restore_all_restamps_rather_than_reverting(self):
+        """
+        The regression this design is most exposed to: software_ver has no
+        source='seed' row for restore_all to raise, so without its restamp the
+        parameter would be left with nothing active at all.
+        """
+        was = version.__version__
+        try:
+            version.__version__ = "9.9.9"
+            config.stamp_version()
+            config.restore_all()
+            self.assertEqual(self.active_version_rows(),
+                             [("9.9.9", 0, "code", 0)])
+            self.assertEqual(config.get("device", "software_ver"), "9.9.9")
+        finally:
+            version.__version__ = was
+        self.assertOneActiveRowPerParameter()
+
+    def test_restore_all_does_not_count_the_version(self):
+        """It is restamped, not restored, so it is not a parameter 'put back'."""
+        config.save("protocol", "reagent1_secs", 45)
+        self.assertEqual(config.restore_all(), 1)
 
     def test_entity_attributes_sort_beside_their_entity(self):
         """The '<entity>_<attr>' naming is what keeps a lot next to its expiry."""
@@ -480,9 +552,22 @@ class TestBootstrap(ConfigTestCase):
             "remark TEXT);")
         con.commit()
         con.close()
+        db.DBNAME = str(legacy)          # ensure() writes through db_manager
         with self.assertRaises(db_bootstrap.DatabaseError) as caught:
             db_bootstrap.ensure(legacy)
         self.assertIn("migrat", str(caught.exception).lower())
+
+    def test_a_path_db_manager_does_not_know_about_is_refused(self):
+        """
+        ensure() builds the file it is given, but the version stamp goes
+        through config_repo and so through db_manager.  Stamping one database
+        while building another is a bug that would surface much later.
+        """
+        elsewhere = Path(self._tmpdir) / "elsewhere.sqlite"
+        with self.assertRaises(db_bootstrap.DatabaseError) as caught:
+            db_bootstrap.ensure(elsewhere)
+        self.assertIn("DBNAME", str(caught.exception))
+        self.assertFalse(elsewhere.exists())
 
 
 class TestSchemaConstraints(ConfigTestCase):

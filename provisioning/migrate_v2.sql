@@ -150,6 +150,12 @@ UPDATE config SET editable = 0
 -- instrument shipped with and what Restore Factory Defaults must go back to.
 -- config_defaults.sql carries the same values, and un_config_value makes its
 -- insert a no-op once these are in.
+--
+-- `software_ver` is the exception, and carries source='code'.  It is not a
+-- setting and has no factory value to restore to: src/version.py owns it, and
+-- config_repo.stamp_version() supersedes whatever is here at the next launch.
+-- The row is kept, and keeps isdefault, because the value the old `device`
+-- table held is a real fact — the version this instrument was commissioned at.
 INSERT OR IGNORE INTO config (active, isdefault, editable, add_dt, role, name,
                               vtype, value, source, remark)
      SELECT 1, 1, 0, COALESCE(dt_add, '2026-07-21') || ' 00:00:00',
@@ -158,8 +164,8 @@ INSERT OR IGNORE INTO config (active, isdefault, editable, add_dt, role, name,
        FROM device_v1 WHERE rowid = 1
       UNION ALL
      SELECT 1, 1, 0, COALESCE(dt_add, '2026-07-21') || ' 00:00:00',
-            'device', 'software_ver', 'str', software_ver, 'seed',
-            'migrated from the device table'
+            'device', 'software_ver', 'str', software_ver, 'code',
+            'version this instrument was commissioned at'
        FROM device_v1 WHERE rowid = 1
       UNION ALL
      SELECT 1, 1, 1, COALESCE(dt_add, '2026-07-21') || ' 00:00:00',

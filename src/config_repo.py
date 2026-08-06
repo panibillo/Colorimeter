@@ -32,6 +32,11 @@ Four columns carry meaning, and none is inferred from another:
                `isdefault` cannot answer once an operator has moved it.
     editable   0 for rows the config editor shows read-only.
 
+One parameter is not a setting and is not seeded: device.software_ver.  It is a
+fact about the running code, so src/version.py owns its value and
+stamp_version() writes it in at every launch, editable=0.  Its superseded rows
+are the instrument's version history.
+
 So there are two levels of "default", which do different things:
 
     Default button           -> the isdefault row, this site's commissioned value
@@ -71,6 +76,7 @@ Public surface
 
     save(role, name, value)  -> int       supersede; new rowid
     set_default(role, name, value) -> int save, and commission the value
+    stamp_version()          -> int       record the running software version
     restore(role, name)      -> int       put the Default value back
     restore_all()            -> int       every parameter back to the factory
     overrides()              -> list      (role, name) not on the Default value
@@ -100,6 +106,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import db_manager as db
+import version
 
 log = logging.getLogger(__name__)
 
@@ -114,6 +121,13 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 SOURCE_SEED     = "seed"         # created by config_defaults.sql — the factory
 SOURCE_OPERATOR = "operator"     # created on the instrument
 SOURCE_HISTORY  = "history"      # a prior value, seeded for Browse to offer
+SOURCE_CODE     = "code"         # stamped from a constant in the source tree
+
+# The one parameter the code owns rather than the seed file: it is a fact about
+# the running software, not a setting, so config_defaults.sql does not carry it
+# and stamp_version() below is what puts it in the table.
+VERSION_ROLE = "device"
+VERSION_NAME = "software_ver"
 
 _SELECT = "SELECT role, name, vtype, value FROM config "
 
@@ -491,6 +505,69 @@ def set_default(role: str, name: str, value: Any,
     return rowid
 
 
+def stamp_version() -> int:
+    """
+    Record the version of the software now running on this instrument.
+
+    Called once per launch, by db_bootstrap.ensure(), before anything reads a
+    setting.  Writes version.__version__ to device.software_ver, which from
+    there reaches every capture archive (capture_meta.py).  Because superseded
+    rows are kept, the parameter's history becomes a dated log of every version
+    this instrument has ever run — the version stamp the Pi has never had.
+
+    Not save(): that writes editable=1 and source='operator', and refuses a
+    parameter it cannot already find a vtype for, which on a fresh database
+    this is.  The three statements are otherwise save()'s, in the same order
+    for the same reason — the partial unique indexes forbid a moment with two
+    active rows, and un_config_value makes a repeat of an earlier version reuse
+    its row instead of piling up duplicates.
+
+    isdefault is claimed only on the first stamp, when the parameter has no
+    default row at all.  That row is then the version the instrument was
+    commissioned at, and later stamps leave it alone.  Nothing offers it — the
+    row is editable=0, so the config editor's Default button is disabled — but
+    db_bootstrap._verify() warns about a parameter with no default, and this is
+    a real answer rather than a way to quiet the warning.
+
+    Returns:
+        The rowid now in force, or 0 if the running version was already the
+        value in force, which is every launch but the first after a bump.
+    """
+    current = db.read_val(
+        "SELECT value FROM config WHERE role = ? AND name = ? AND active = 1",
+        (VERSION_ROLE, VERSION_NAME))
+    if current == version.__version__:
+        return 0
+
+    has_default = db.read_val(
+        "SELECT COUNT(*) FROM config WHERE role = ? AND name = ? "
+        "AND isdefault = 1", (VERSION_ROLE, VERSION_NAME)) or 0
+
+    now = _now_local()
+    db.write_tx([
+        ("UPDATE config SET active = 0 "
+         "WHERE role = ? AND name = ? AND active = 1",
+         (VERSION_ROLE, VERSION_NAME)),
+        ("INSERT OR IGNORE INTO config (active, isdefault, editable, add_dt, "
+         "role, name, vtype, value, source, remark) "
+         "VALUES (0, ?, 0, ?, ?, ?, 'str', ?, ?, ?)",
+         (0 if has_default else 1, now, VERSION_ROLE, VERSION_NAME,
+          version.__version__, SOURCE_CODE,
+          "version this instrument was commissioned at" if not has_default
+          else "version this instrument ran")),
+        ("UPDATE config SET active = 1 "
+         "WHERE role = ? AND name = ? AND value = ?",
+         (VERSION_ROLE, VERSION_NAME, version.__version__)),
+    ])
+    load(reload=True)
+    rowid = db.read_val("SELECT rowid FROM config WHERE role = ? AND name = ? "
+                        "AND active = 1",
+                        (VERSION_ROLE, VERSION_NAME)) or 0
+    log.info("config.stamp_version: %s.%s = %r (was %r)",
+             VERSION_ROLE, VERSION_NAME, version.__version__, current)
+    return rowid
+
+
 def restore(role: str, name: str) -> int:
     """
     Put the commissioned value for a parameter back in force.
@@ -552,16 +629,25 @@ def restore_all() -> int:
     rows.  A parameter with no factory row is left inactive, which
     db_bootstrap's verify reports on the next launch.
 
+    device.software_ver is the one parameter that has no factory row by design
+    — the source tree owns it, not config_defaults.sql — so it is stamped again
+    here.  Without that it would be left with nothing active and the next read
+    of it would raise ConfigMissing.  It is also not a setting, so putting it
+    "back" to an older version would be a lie about what is running.
+
     Returns:
         Number of parameters that were not already on their factory value.
+        software_ver is not counted: it is restamped, not restored.
     """
     changed = db.read_val(
-        "SELECT COUNT(*) FROM config c WHERE c.active = 1 AND c.source <> ?",
-        (SOURCE_SEED,)) or 0
+        "SELECT COUNT(*) FROM config c WHERE c.active = 1 AND c.source <> ? "
+        "AND NOT (c.role = ? AND c.name = ?)",
+        (SOURCE_SEED, VERSION_ROLE, VERSION_NAME)) or 0
     db.write_tx([
         ("UPDATE config SET active = 0 WHERE active = 1", None),
         ("UPDATE config SET active = 1 WHERE source = ?", (SOURCE_SEED,)),
     ])
+    stamp_version()
     load(reload=True)
     log.info("config.restore_all: %d parameter(s) put back", changed)
     return changed
@@ -774,6 +860,11 @@ if __name__ == "__main__":
     check("serial value", _items["hardware_sn"][0], "XCN-001")
     check("serial is locked",
           [e for n, _, _, e, _ in items("device") if n == "hardware_sn"], [0])
+    check("version comes from the source tree",
+          _items["software_ver"][0], version.__version__)
+    check("version is locked",
+          [e for n, _, _, e, _ in items("device") if n == "software_ver"], [0])
+    check("restamping at the same version writes nothing", stamp_version(), 0)
     check("reagent1 is editable",
           [e for n, _, _, e, _ in items("protocol")
            if n == "reagent1_secs"], [1])

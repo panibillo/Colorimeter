@@ -54,6 +54,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
+import version  # noqa: E402
 from hdf5read import Hdf5Reader  # noqa: E402
 
 DEFAULT_CAPTURES_DIR = Path(__file__).resolve().parent.parent / "captures"
@@ -616,6 +617,13 @@ def main() -> int:
         run_summary = True  # default when no mode flag given
 
     with Hdf5Reader(str(h5_path)) as reader:
+        # Fail at the door rather than somewhere deep in a mode. `software_ver`
+        # says which build wrote the archive; the format versions say whether
+        # these tools can read it. See src/version.py.
+        problem = version.check_archive(reader.attrs("/"))
+        if problem:
+            print(f"ERROR: {h5_path.name}: {problem}", file=sys.stderr)
+            return 1
         if run_summary:
             cmd_summary(reader, h5_path)
         if run_jpeg:

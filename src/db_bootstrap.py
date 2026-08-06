@@ -22,7 +22,9 @@ have one.
 
 Why it is not part of config_repo: config_repo reads the settings *out of* the
 database, so it cannot be the thing that decides whether the database exists.
-It sits alongside db_manager, which owns the path for the same reason.
+It sits alongside db_manager, which owns the path for the same reason.  It does
+call back into config_repo for one write — the software version stamp — once
+the tables are known to be there; see `ensure`.
 
 Schema versions:
     0   pre-2026-08: separate device/users/testkit/testlot/defaults tables
@@ -43,6 +45,7 @@ import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
 
+import config_repo as config
 import db_manager as db
 import logging_manager as log
 
@@ -197,19 +200,25 @@ def ensure(path=None) -> Result:
 
     Idempotent: the first call on a new file builds and seeds it, and every
     call after that inserts nothing.  Existing values, and the active and
-    isdefault flags, are never touched.
+    isdefault flags, are never touched.  The one write that is not from the
+    seed file is the software version stamp, which only writes on the first
+    launch after src/version.py changes.
 
     Args:
         path: The database file.  Defaults to db_manager.DBNAME, which is
-              where the application keeps it.
+              where the application keeps it.  A different path must be
+              accompanied by db_manager.DBNAME being reassigned to it, because
+              the version stamp goes through config_repo, which reads the path
+              from db_manager; a mismatch is refused rather than allowed to
+              write to the wrong database.
 
     Returns:
         A Result describing what changed.
 
     Raises:
         DatabaseError: The database predates the 2026-08 migration, a schema
-                       file is missing or failed, or a parameter is left with
-                       no active row.
+                       file is missing or failed, a parameter is left with no
+                       active row, or `path` disagrees with db_manager.DBNAME.
 
     Example:
         >>> import db_bootstrap
@@ -218,6 +227,16 @@ def ensure(path=None) -> Result:
         0
     """
     path = Path(path) if path else Path(db.DBNAME)
+
+    # config_repo, which stamps the version below, reaches the database through
+    # db_manager rather than through the connection opened here.  Catch the
+    # disagreement now: silently stamping a version into a different file than
+    # the one being built is the kind of bug that only shows up much later.
+    if path.resolve() != Path(db.DBNAME).resolve():
+        raise DatabaseError(
+            f"ensure({path}) does not match db_manager.DBNAME "
+            f"({db.DBNAME}). Set db_manager.DBNAME (or $COLORIMETER_DB) to "
+            f"the same file first — config_repo writes through it.")
 
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -243,6 +262,14 @@ def ensure(path=None) -> Result:
         _run_script(con, DEFAULTS_PATH)
 
         after  = con.execute("SELECT COUNT(*) FROM config").fetchone()[0]
+
+        # Counted after `after`, so Result.added keeps meaning "seed rows the
+        # file put back", and before _verify, so software_ver always has an
+        # active row by the time the fatal check for one runs.  config_repo
+        # opens its own connection; `con` holds no write transaction here, so
+        # the two do not contend.
+        config.stamp_version()
+
         params = _verify(con)
 
         con.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
@@ -280,16 +307,23 @@ if __name__ == "__main__":
         print(f"  {'PASS' if ok else 'FAIL'}  {label}"
               f"{'' if ok else f'   got {got!r}, want {want!r}'}")
 
+    import version
+
     _tmpdir = Path(tempfile.mkdtemp())
 
+    def use(p: Path) -> Path:
+        """Point db_manager at a scratch file, as the unit tests do."""
+        db.DBNAME = str(p)
+        return p
+
     print("== a new file is built and seeded ==")
-    fresh = _tmpdir / "sub" / "fresh.sqlite"   # parent does not exist yet
+    fresh = use(_tmpdir / "sub" / "fresh.sqlite")  # parent does not exist yet
     r1 = ensure(fresh)
     check("state", r1.state, "created")
     check("parent dir made", fresh.parent.is_dir(), True)
     check("params seeded", r1.params > 20, True)
     _con = sqlite3.connect(fresh)
-    check("version stamped",
+    check("schema version stamped",
           _con.execute("PRAGMA user_version").fetchone()[0], SCHEMA_VERSION)
     check("one active row each",
           _con.execute("SELECT COUNT(*) FROM config WHERE active = 1"
@@ -298,11 +332,58 @@ if __name__ == "__main__":
           _con.execute("SELECT COUNT(*) FROM roi").fetchone()[0], 10)
     _con.close()
 
+    print("== the running software version is stamped in ==")
+    _sw = ("SELECT value, editable, source, isdefault FROM config "
+           "WHERE role='device' AND name='software_ver' AND active=1")
+    _con = sqlite3.connect(fresh)
+    check("stamped from the source tree",
+          _con.execute(_sw).fetchone(),
+          (version.__version__, 0, "code", 1))   # first stamp claims isdefault
+    check("only one row for it",
+          _con.execute("SELECT COUNT(*) FROM config WHERE role='device' "
+                       "AND name='software_ver'").fetchone()[0], 1)
+    _con.close()
+
     print("== running again changes nothing ==")
     r2 = ensure(fresh)
     check("state", r2.state, "current")
     check("rows added", r2.added, 0)
     check("params unchanged", r2.params, r1.params)
+
+    print("== a version bump supersedes, and keeps the commissioned row ==")
+    _was = version.__version__
+    version.__version__ = "9.9.9"
+    ensure(fresh)
+    _con = sqlite3.connect(fresh)
+    check("new version in force", _con.execute(_sw).fetchone(),
+          ("9.9.9", 0, "code", 0))
+    check("old version kept as history",
+          _con.execute("SELECT value, active, isdefault FROM config "
+                       "WHERE role='device' AND name='software_ver' "
+                       "AND value = ?", (_was,)).fetchone(),
+          (_was, 0, 1))          # commissioned-at row: superseded, still default
+    _con.close()
+    version.__version__ = _was
+    ensure(fresh)                                  # and back, reusing the row
+    _con = sqlite3.connect(fresh)
+    check("returning to a known version reuses its row",
+          _con.execute("SELECT COUNT(*) FROM config WHERE role='device' "
+                       "AND name='software_ver'").fetchone()[0], 2)
+    _con.close()
+
+    print("== restore_all leaves the version stamped, not reverted ==")
+    # software_ver is the one parameter with no source='seed' row to raise, so
+    # without restore_all's restamp it would be left with nothing active.
+    import config_repo as _cfg
+    _cfg.load(reload=True)
+    _cfg.restore_all()
+    _con = sqlite3.connect(fresh)
+    check("still exactly one active row",
+          _con.execute("SELECT COUNT(*) FROM config WHERE role='device' "
+                       "AND name='software_ver' AND active=1").fetchone()[0], 1)
+    check("at the running version", _con.execute(_sw).fetchone()[0],
+          version.__version__)
+    _con.close()
 
     print("== an operator value survives, a deleted one comes back ==")
     _con = sqlite3.connect(fresh)
@@ -363,7 +444,7 @@ if __name__ == "__main__":
         check("raised", "capture.extension" in str(e), True)
 
     print("== a pre-migration database is refused, not upgraded ==")
-    legacy = _tmpdir / "legacy.sqlite"
+    legacy = use(_tmpdir / "legacy.sqlite")
     _con = sqlite3.connect(legacy)
     _con.executescript(
         "CREATE TABLE config (rowid INTEGER PRIMARY KEY NOT NULL, "
@@ -386,6 +467,16 @@ if __name__ == "__main__":
     check("version not stamped",
           _con.execute("PRAGMA user_version").fetchone()[0], 0)
     _con.close()
+
+    print("== a path db_manager does not know about is refused ==")
+    # config_repo writes through db_manager, so ensure() must not build one
+    # file while the version stamp goes to another.
+    try:
+        ensure(_tmpdir / "elsewhere.sqlite")
+        check("raised", False, True)
+    except DatabaseError as e:
+        check("raised", "DBNAME" in str(e), True)
+    check("not created", (_tmpdir / "elsewhere.sqlite").exists(), False)
 
     shutil.rmtree(_tmpdir, ignore_errors=True)
 
