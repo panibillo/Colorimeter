@@ -791,6 +791,10 @@ if __name__ == "__main__":
     db.DBNAME = str(_tmpdb)
     os.environ.pop(SIMULATION_ENV, None)
     load(reload=True)
+    
+    print('capture_led_color_order()')
+    s = capture_led_color_order()
+    print(s)
 
     print("== db_DDL.sql agrees with SEED_PARAMS ==")
     check("seed block matches", _ddl_seed_block(), seed_sql())

@@ -40,7 +40,7 @@ Required rows, all in **whole-image (stream) coordinates**, all even:
 
 | role | count | placement |
 |---|---|---|
-| `bound` | 1 | the crop the archive stores — make it **wider than the measurement bound**, so different sub-bounds can be tried later without re-imaging |
+| `bound` | 1 | the crop the archive stores — make it **larger than the measurement bound**, so different sub-bounds can be tried later without re-imaging |
 | `sample` | 1 | at the centre, where the sample will sit |
 | `white` | 4 | one per quadrant of the bound |
 
@@ -48,9 +48,23 @@ Required rows, all in **whole-image (stream) coordinates**, all even:
 > whole-image space (2304 × 1296). The stored Bayer layers are *half* that in
 > each axis, so a patch's origin **and** its width and height halve. The bound
 > halves with them, so a patch keeps its relative place in the crop — halving
-> does not push patches into a corner. If you compute a patch position in layer
-> space, double both its offset from the bound origin and its size before
-> writing it to the table.
+> does not push patches into a corner. If you compute a patch position in Bayer
+> layer space, double both its offset from the bound origin and its size before
+> writing it to the table.  
+> - Option 1: 
+>     - Define the 'bound' on the device, capture an image set, download the 
+>image set `.h5` file, inspect it with 
+>         `python src/hdf5read.py captures/S1000.h5`
+>     - read the bound origin and size, eg: 
+>         ` 'bound_h': np.int64(728), 'bound_w': np.int64(732),` 
+>         ` 'bound_x': np.int64(806), 'bound_y': np.int64(386),`
+>     - extract the `.png` image from the `.h5` file with
+>        `python devdesk/hdf5inspect.py captures/S1000.h5 -o S1000bound.png`
+>     - open `S1000bound.png` with inkscape, set the image object bounds using `bound_` values.
+>     - draw your desired rectangles on the image and enter their bounds in the roi table. 
+>
+> - Option 2: Define the rectangles on the device and download the roi table
+> to the desktop db. The Rect dimensions in the roi table are guaranteed correct.
 
 Check the result before capturing anything — this catches the error above in
 one look:
@@ -77,7 +91,7 @@ The four `white` patches must land near 25 % and 75 % on each axis, and
 
 Five suites of the **same uniform card**, using the normal capture path. The
 card must be matte and uniform; a gray card is preferred over white stock,
-which carries optical brighteners that fluoresce under violet.
+which may have optical brighteners that fluoresce under violet.
 
 | # | file | what to do |
 |---|---|---|
