@@ -968,9 +968,8 @@ class Arbiter:
             return
         self._cap_run_mode = "calibration"
         from capture_runner import CaptureConfig
-        cfg = CaptureConfig(mode=self._cap_run_mode, exposure_group=self._cap_group,
-                            led_start=config.capture_led_start(),
-                            led_end=config.capture_led_end())
+        cfg = CaptureConfig(mode=self._cap_run_mode,
+                            exposure_group=self._cap_group)
         session = self._new_session(cfg)
         if not session.start():
             log.error("Arbiter: capture failed to start: %s", session.error)
@@ -1161,8 +1160,6 @@ class Arbiter:
         # not silently fall back to a full calibration sweep.
         from capture_runner import CaptureConfig
         cfg = CaptureConfig(mode=self._cap_mode, exposure_group=self._cap_group,
-                            led_start=config.capture_led_start(),
-                            led_end=config.capture_led_end(),
                             sample_rowid=slot.record.get("db_rowid"))
         session = self._new_session(cfg)
         if not session.start():
@@ -1192,8 +1189,7 @@ class Arbiter:
         from capture_runner import CaptureConfig
         from capture_session import CaptureSession
         if cfg is None:
-            cfg = CaptureConfig(led_start=config.capture_led_start(),
-                                led_end=config.capture_led_end())
+            cfg = CaptureConfig()
         # Borrow the Arbiter's persistent camera when available, so this run
         # reuses the already-open sensor instead of paying the open cost again.
         # If it could not be opened, the session builds and owns its own.
@@ -1420,8 +1416,6 @@ class Arbiter:
         """Build a session and begin run_prefetch() for `slot`'s upcoming capture."""
         from capture_runner import CaptureConfig
         cfg = CaptureConfig(mode=self._cap_mode, exposure_group=self._cap_group,
-                            led_start=config.capture_led_start(),
-                            led_end=config.capture_led_end(),
                             sample_rowid=slot.record.get("db_rowid"))
         session = self._new_session(cfg)
         if not session.start_prefetch():

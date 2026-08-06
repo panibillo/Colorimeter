@@ -134,6 +134,9 @@ INSERT INTO config (active, isdefault, editable, add_dt, role, name,
         -- fallback_exposure_group duplicated defaults.exposuregroup; the
         -- surviving parameter's isdefault row is now the fallback.
         AND NOT (role = 'capture' AND name = 'fallback_exposure_group')
+        -- led_start/led_end duplicated led_color_order; both capture paths
+        -- sweep the color list now.
+        AND NOT (role = 'capture' AND name IN ('led_start', 'led_end'))
         AND COALESCE(profile, '') = ''
       GROUP BY role, name, COALESCE(value, '');
 

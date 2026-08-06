@@ -80,7 +80,6 @@ Public surface
     history(role, name)      -> list      every value ever used, for Browse
 
     capture_dir() / capture_suite_id() / capture_archive_name()
-    capture_led_start() / capture_led_end()
     capture_led_color_order() / capture_camera_warmup_s()
     capture_dark_prefetch_budget_s()
     inspection_exposure_us() / default_focus_diopter()
@@ -606,17 +605,8 @@ def capture_archive_name(suite_id: str) -> str:
 
 
 # ── Capture selection ───────────────────────────────────────────────────────
-# Which LEDs a run sweeps, and the exposure group used when none is saved.
-
-def capture_led_start() -> int:
-    """First (inclusive) LED channel a capture run sweeps."""
-    return int(get("capture", "led_start"))
-
-
-def capture_led_end() -> int:
-    """Last (inclusive) LED channel a capture run sweeps."""
-    return int(get("capture", "led_end"))
-
+# Which LEDs a run sweeps — see capture_led_color_order() below, the one
+# representation both capture paths read.
 
 def inspection_exposure_us() -> int:
     """Operator-saved exposure from the viewer's Img recapture dialog."""
@@ -802,7 +792,7 @@ if __name__ == "__main__":
     print("== the archive snapshot ==")
     _snap = snapshot()
     check("grouped by role", _snap["protocol"]["reagent1_secs"], "120")
-    check("text, not coerced", isinstance(_snap["capture"]["led_start"], str),
+    check("text, not coerced", isinstance(_snap["capture"]["led_color_order"], str),
           True)
     check("identity travels too", _snap["device"]["hardware_sn"], "XCN-001")
 

@@ -252,7 +252,7 @@ class TestSingleLedRun(RunnerTestCase):
 
     def setUp(self):
         super().setUp()
-        self.runner   = self.make_runner(led_start=1, led_end=1)
+        self.runner   = self.make_runner(led_colors=["amber"])
         self.progress = self.run_to_completion(self.runner)
 
     def test_run_reaches_done(self):
@@ -385,7 +385,7 @@ class TestSingleLedRun(RunnerTestCase):
 class TestLedLifetime(RunnerTestCase):
 
     def test_white_led_used_for_calibration_then_turned_off(self):
-        runner = self.make_runner(led_start=1, led_end=1)
+        runner = self.make_runner(led_colors=["amber"])
         self.run_to_completion(runner)
         white = capture_runner.WHITE_LED_CH
         self.assertIn((white, True), self.leds.history)
@@ -393,7 +393,7 @@ class TestLedLifetime(RunnerTestCase):
 
     def test_abandoning_generator_turns_off_lit_led(self):
         """Closing the generator mid-run must not leave an LED burning."""
-        runner = self.make_runner(led_start=1, led_end=1)
+        runner = self.make_runner(led_colors=["amber"])
         gen = runner.run()
         for progress in gen:
             # Stop as soon as a capture-phase LED is actually lit.
@@ -405,7 +405,7 @@ class TestLedLifetime(RunnerTestCase):
 
     def test_abandoning_generator_leaves_a_readable_archive(self):
         """A partial run must still close the file, not leave it locked."""
-        runner = self.make_runner(led_start=1, led_end=1)
+        runner = self.make_runner(led_colors=["amber"])
         gen = runner.run()
         for progress in gen:
             if progress.step == "e0":     # first lit frame is in the archive
@@ -416,7 +416,7 @@ class TestLedLifetime(RunnerTestCase):
 
     def test_runner_does_not_stop_the_camera(self):
         """Hardware lifetime belongs to the caller, not the runner."""
-        runner = self.make_runner(led_start=1, led_end=1)
+        runner = self.make_runner(led_colors=["amber"])
         self.run_to_completion(runner)
         self.assertFalse(self.cam.stopped)
 
@@ -427,7 +427,7 @@ class TestLedLifetime(RunnerTestCase):
         all lit frames are captured in the one "on" state, all dark frames
         in the one "off" state.
         """
-        runner = self.make_runner(led_start=1, led_end=2)
+        runner = self.make_runner(led_colors=["amber", "blue"])
         self.run_to_completion(runner)
         for led in (1, 2):
             events = [(ch, on) for ch, on in self.leds.history if ch == led]
@@ -459,7 +459,7 @@ class TestFocus(RunnerTestCase):
         super().tearDown()
 
     def test_manual_focus_sets_requested_lens_position(self):
-        runner = self.make_runner(led_start=1, led_end=1, focus_diopter=5.0)
+        runner = self.make_runner(led_colors=["amber"], focus_diopter=5.0)
         self.run_to_completion(runner)
         meta = self.led_metadata(runner, "amber")
         self.assertEqual(meta["focus_mode"], "manual")
@@ -469,7 +469,7 @@ class TestFocus(RunnerTestCase):
     def test_autofocus_beyond_cap_is_capped(self):
         raw = capture_runner.MAX_AF_DIOPTER + 3.0   # above the cap
         self.cam = FakeCam(af_result=raw)
-        runner = self.make_runner(led_start=1, led_end=1)
+        runner = self.make_runner(led_colors=["amber"])
         self.run_to_completion(runner)
         meta = self.led_metadata(runner, "amber")
         self.assertEqual(meta["focus_mode"], "autofocus_capped")
@@ -479,7 +479,7 @@ class TestFocus(RunnerTestCase):
     def test_manual_focus_without_libcamera_raises(self):
         """Guard the desktop failure mode explicitly rather than by accident."""
         capture_runner._libcamera = None
-        runner = self.make_runner(led_start=1, led_end=1, focus_diopter=5.0)
+        runner = self.make_runner(led_colors=["amber"], focus_diopter=5.0)
         with self.assertRaises(RuntimeError):
             self.run_to_completion(runner)
         # The failure must still leave no LED burning, and — because focus
@@ -496,7 +496,7 @@ class TestMultiLed(RunnerTestCase):
 
     def setUp(self):
         super().setUp()
-        self.runner = self.make_runner(led_start=1, led_end=2)
+        self.runner = self.make_runner(led_colors=["amber", "blue"])
         self.run_to_completion(self.runner)
 
     def test_each_led_produces_a_result_and_metadata(self):
@@ -530,10 +530,45 @@ class TestMultiLed(RunnerTestCase):
 
     def test_progress_reports_reuse_of_shared_darks(self):
         """The second LED should report reusing darks, not storing them."""
-        progress = self.run_to_completion(self.make_runner(led_start=1, led_end=2))
+        progress = self.run_to_completion(self.make_runner(led_colors=["amber", "blue"]))
         messages = [p.message for p in progress if p.step.startswith("dark")]
         self.assertTrue(any("stored dark" in m for m in messages), messages)
         self.assertTrue(any("reused dark" in m for m in messages), messages)
+
+    def test_led_colors_sets_the_sweep_order(self):
+        """The calibration path follows led_colors too, order included."""
+        runner = self.make_runner(led_colors=["blue", "amber"])
+        self.run_to_completion(runner)
+        self.assertEqual([r.color for r in runner.results], ["blue", "amber"])
+
+
+# ---------------------------------------------------------------------------
+# The configured sweep list is operator-editable, so it is validated
+# ---------------------------------------------------------------------------
+
+class TestColorOrderResolution(RunnerTestCase):
+
+    def test_names_resolve_to_channels_and_canonical_spelling(self):
+        self.assertEqual(
+            capture_runner._resolve_color_order(self.leds, ["blue", "amber"]),
+            [(2, "blue"), (1, "amber")])
+
+    def test_led_count_follows_the_list(self):
+        self.assertEqual(CaptureConfig(led_colors=["amber", "blue"]).led_count, 2)
+        self.assertEqual(CaptureConfig(led_colors=[]).led_count, 0)
+
+    def test_an_unknown_color_is_named_in_the_error(self):
+        with self.assertRaises(ValueError) as ctx:
+            capture_runner._resolve_color_order(self.leds, ["amber", "chartreuse"])
+        self.assertIn("chartreuse", str(ctx.exception))
+
+    def test_a_typo_fails_before_the_archive_is_opened(self):
+        """A bad name costs an error, not a run that dies with a half-written
+        archive — the check runs before the writer is created."""
+        runner = self.make_runner(led_colors=["amber", "chartreuse"])
+        with self.assertRaises(ValueError):
+            self.run_to_completion(runner)
+        self.assertIsNone(runner._writer)
 
 
 # ---------------------------------------------------------------------------
@@ -565,17 +600,16 @@ class TestNormalMode(RunnerTestCase):
         exposure_repo.write_all_groups("amber", exposure_repo.groups_from_estar(30_000))
         exposure_repo.write_all_groups("blue",  exposure_repo.groups_from_estar(20_000))
 
-        # The normal path now sweeps config.capture_led_color_order(), not
-        # led_start/led_end, so tests control which LEDs run by patching it —
-        # single-color tests get "amber"; multi-color tests override below.
-        self._real_color_order = capture_runner.config.capture_led_color_order
-        capture_runner.config.capture_led_color_order = lambda: ["amber"]
-
     def tearDown(self):
-        capture_runner.config.capture_led_color_order = self._real_color_order
         self._db.DBNAME = self._saved_dbname
         self._dbdir.cleanup()
         super().tearDown()
+
+    def make_runner(self, **kwargs):
+        """Both capture paths sweep CaptureConfig.led_colors, so that is where
+        a test says which LEDs run. Defaults to the one calibrated color."""
+        kwargs.setdefault("led_colors", ["amber"])
+        return super().make_runner(**kwargs)
 
     def test_captures_exactly_the_stored_exposures(self):
         runner = self.make_runner(mode="normal", exposure_group="3")
@@ -596,8 +630,8 @@ class TestNormalMode(RunnerTestCase):
             self.assertNotIn("/leds/amber/lit/e2", f)
 
     def test_reaches_done(self):
-        capture_runner.config.capture_led_color_order = lambda: ["amber", "blue"]
-        runner = self.make_runner(mode="normal", exposure_group="1")
+        runner = self.make_runner(mode="normal", exposure_group="1",
+                                  led_colors=["amber", "blue"])
         progress = self.run_to_completion(runner)
         self.assertEqual(progress[-1].phase, "done")
         self.assertEqual(progress[-1].fraction, 1.0)
@@ -631,8 +665,8 @@ class TestNormalMode(RunnerTestCase):
             self.assertNotIn("/leds/amber/lit/e1", f)
 
     def test_all_leds_off_at_end(self):
-        capture_runner.config.capture_led_color_order = lambda: ["amber", "blue"]
-        runner = self.make_runner(mode="normal", exposure_group="2")
+        runner = self.make_runner(mode="normal", exposure_group="2",
+                                  led_colors=["amber", "blue"])
         self.run_to_completion(runner)
         self.assertEqual(self.leds.lit_channels(), set())
 
@@ -665,14 +699,16 @@ class TestNormalModePrefetchSplit(RunnerTestCase):
         exposure_repo.write_all_groups("amber", exposure_repo.groups_from_estar(30_000))
         exposure_repo.write_all_groups("blue",  exposure_repo.groups_from_estar(20_000))
 
-        self._real_color_order = capture_runner.config.capture_led_color_order
-        capture_runner.config.capture_led_color_order = lambda: ["amber", "blue"]
-
     def tearDown(self):
-        capture_runner.config.capture_led_color_order = self._real_color_order
         self._db.DBNAME = self._saved_dbname
         self._dbdir.cleanup()
         super().tearDown()
+
+    def make_runner(self, **kwargs):
+        """Defaults to both calibrated colors — the split is about the dark
+        batches either side of the sweep, so it needs more than one LED."""
+        kwargs.setdefault("led_colors", ["amber", "blue"])
+        return super().make_runner(**kwargs)
 
     def test_prefetch_then_capture_produces_before_and_after_darks(self):
         runner = self.make_runner(mode="normal", exposure_group="1")
@@ -712,11 +748,10 @@ class TestNormalModePrefetchSplit(RunnerTestCase):
         with h5py.File(runner.out_path, "r"):
             pass   # must open cleanly — .close() left a valid archive
 
-    def test_color_order_drives_the_sweep_not_led_start_end(self):
-        """CaptureConfig.led_start/led_end no longer govern the normal path —
-        only config.capture_led_color_order() (patched here) does."""
-        capture_runner.config.capture_led_color_order = lambda: ["blue", "amber"]
-        runner = self.make_runner(mode="normal", exposure_group="1")
+    def test_led_colors_sets_the_sweep_order(self):
+        """The sweep follows CaptureConfig.led_colors, order included."""
+        runner = self.make_runner(mode="normal", exposure_group="1",
+                                  led_colors=["blue", "amber"])
         self.run_to_completion(runner)
         self.assertEqual([r.color for r in runner.results], ["blue", "amber"])
 

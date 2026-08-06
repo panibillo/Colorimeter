@@ -116,8 +116,7 @@ RUN_FIELDS: Tuple[Tuple[str, Callable[[Any], Any]], ...] = (
     ("mode",            lambda g: g.mode),
     ("exposure_group",  lambda g: g.exposure_group),
     ("exposure_ms",     lambda g: g.exposure_ms),
-    ("led_start",       lambda g: g.led_start),
-    ("led_end",         lambda g: g.led_end),
+    ("led_colors",      lambda g: list(g.led_colors)),
     ("focus_diopter",   lambda g: g.focus_diopter),
 )
 
@@ -414,8 +413,7 @@ if __name__ == "__main__":
         mode = "calibration"
         exposure_group = "3"
         exposure_ms = 20.0
-        led_start = 1
-        led_end = 10
+        led_colors = ["amber", "blue"]
         focus_diopter = None
 
     print("== _fields applies the spec, and survives a bad accessor ==")

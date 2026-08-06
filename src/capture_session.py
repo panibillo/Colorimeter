@@ -11,7 +11,7 @@ A UI polls step() from its main loop and repaints from the returned Progress.
 Nothing here knows about screens or widgets.
 
 Usage (a full run in one go):
-    session = CaptureSession(CaptureConfig(led_start=1, led_end=10))
+    session = CaptureSession(CaptureConfig(led_colors=['amber', 'blue']))
     session.start()
     while session.active:            # in reality, once per event-loop pass
         progress = session.step()
@@ -170,8 +170,8 @@ class CaptureSession:
         """
         ok = self._start(lambda r: r.run(), in_prefetch=False)
         if ok:
-            log.info("CaptureSession: started (LEDs %d–%d, mode=%s, group=%s)",
-                     self.config.led_start, self.config.led_end,
+            log.info("CaptureSession: started (LEDs %s, mode=%s, group=%s)",
+                     ", ".join(self.config.led_colors),
                      self.config.mode, self.config.exposure_group)
         return ok
 

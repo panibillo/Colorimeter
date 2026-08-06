@@ -91,8 +91,6 @@ class TestSeededValues(ConfigTestCase):
         self.assertEqual(config.shutdown_timeout_s(), 15.0)
 
     def test_capture_selection(self):
-        self.assertEqual(config.capture_led_start(), 1)
-        self.assertEqual(config.capture_led_end(), 10)
         self.assertEqual(config.capture_led_color_order()[0], "photo_red")
         self.assertEqual(len(config.capture_led_color_order()), 10)
 
@@ -397,7 +395,7 @@ class TestSnapshot(ConfigTestCase):
 
     def test_values_are_the_stored_text(self):
         snap = config.snapshot()
-        self.assertIsInstance(snap["capture"]["led_start"], str)
+        self.assertIsInstance(snap["capture"]["led_color_order"], str)
 
     def test_follows_what_is_in_force(self):
         config.save("protocol", "reagent1_secs", 45)

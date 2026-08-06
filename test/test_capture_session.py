@@ -46,8 +46,8 @@ class CaptureSessionTestCase(unittest.TestCase):
         self._tmp.cleanup()
 
     def make_session(self, **kwargs) -> CaptureSession:
-        config = CaptureConfig(out_dir=self.out_root, led_start=1, led_end=1,
-                               **kwargs)
+        kwargs.setdefault("led_colors", ["amber"])
+        config = CaptureConfig(out_dir=self.out_root, **kwargs)
         return CaptureSession(config,
                               cam_factory=lambda: self.cam,
                               leds_factory=lambda: self.leds)
@@ -189,15 +189,6 @@ class TestPrefetchCaptureSplit(CaptureSessionTestCase):
     real exposure table (see test_capture_runner.TestNormalModePrefetchSplit
     for the archive-content-level assertions).
     """
-
-    def setUp(self):
-        super().setUp()
-        self._real_color_order = capture_runner.config.capture_led_color_order
-        capture_runner.config.capture_led_color_order = lambda: ["amber"]
-
-    def tearDown(self):
-        capture_runner.config.capture_led_color_order = self._real_color_order
-        super().tearDown()
 
     def make_session(self, **kwargs) -> CaptureSession:
         return super().make_session(mode="normal", **kwargs)

@@ -29,7 +29,7 @@ when the generator finishes or is abandoned, but does not close either device.
 Usage:
     from capture_runner import CaptureRunner, CaptureConfig
 
-    runner = CaptureRunner(cam, leds, CaptureConfig(led_start=1, led_end=10))
+    runner = CaptureRunner(cam, leds, CaptureConfig())
     for progress in runner.run():
         if not progress.transient:
             print(progress.message)
@@ -165,8 +165,11 @@ class CaptureConfig:
     """Parameters for one capture run."""
 
     exposure_ms:    float = DEFAULT_EXPOSURE_MS
-    led_start:      int = 1
-    led_end:        int = 1
+    # The LEDs this run sweeps, by color name, in the order it sweeps them.
+    # default_factory so the list is read when a config is built rather than
+    # baked in at import, same as out_dir below.
+    led_colors:     "list[str]" = field(
+        default_factory=config.capture_led_color_order)
     focus_diopter:  "float | None" = None
     # Which capture path to run, and (normal only) which stored exposure group
     # to use — its name is the number of images per LED ('1'..'5').
@@ -189,7 +192,39 @@ class CaptureConfig:
     @property
     def led_count(self) -> int:
         """Number of LEDs this run will visit."""
-        return max(0, self.led_end - self.led_start + 1)
+        return len(self.led_colors)
+
+
+def _resolve_color_order(leds, colors) -> "list[tuple[int, str]]":
+    """
+    Map the configured color names onto this LED bank's channels.
+
+    Both capture paths sweep `capture.led_color_order`, which an operator can
+    edit, so a name the bank does not have has to be caught somewhere.  Doing
+    it once up front means a typo costs an error message instead of a run that
+    dies partway through with the archive already open.
+
+    Args:
+        leds:   The LEDBank the run will drive.
+        colors: Color names, in sweep order.
+
+    Returns:
+        [(channel, canonical color name)] — the name as the bank spells it, so
+        the archive records one spelling however the list was typed.
+
+    Raises:
+        ValueError: A name is not one of this bank's LEDs.
+    """
+    resolved = []
+    for name in colors:
+        try:
+            ch = leds.channel_of(name)
+        except ValueError:
+            raise ValueError(
+                f"capture.led_color_order names {name!r}, which is not an LED "
+                f"on this bank") from None
+        resolved.append((ch, leds.color_name(ch)))
+    return resolved
 
 
 @dataclass(frozen=True)
@@ -613,11 +648,6 @@ class CaptureRunner:
         # chosen group only (darks are batched separately), set when that
         # run starts.
         self._captures_per_led = _CAPTURES_PER_LED
-        # Overrides config.led_count for the completion estimate when set —
-        # the normal path sweeps a config-driven color list, not a channel
-        # range, so led_start/led_end no longer describe its true LED count.
-        # None (the calibration path's default) falls back to config.led_count.
-        self._led_total_override: "int | None" = None
 
         # Normal-path prefetch/capture state, populated by run_prefetch() and
         # read by run_capture() — see the "Normal path" section below for how
@@ -643,9 +673,7 @@ class CaptureRunner:
     # ── Progress helpers ─────────────────────────────────────────────
 
     def _led_total(self) -> int:
-        """LED count for progress reporting — see _led_total_override."""
-        if self._led_total_override is not None:
-            return self._led_total_override
+        """LED count for progress reporting: the length of the sweep list."""
         return self.config.led_count
 
     def _fraction(self) -> float:
@@ -936,10 +964,9 @@ class CaptureRunner:
         w = self._writer = CaptureSuiteWriter(self.out_path, suite_id=self.suite_id)
         self._write_metadata(w)
 
-        for led in range(cfg.led_start, cfg.led_end + 1):
+        for led, color in _resolve_color_order(leds, cfg.led_colors):
             self._led_index     += 1
             self._captures_done  = 0
-            color = leds.color_name(led)
             self._current_color = color
             self.prof.set_section(color)
             log.info(f"=== LED {led}: {color} ===")
@@ -1243,8 +1270,10 @@ class CaptureRunner:
                 "focus", f"Focus: {self._focus_pos:.2f} diopters ({self._focus_mode})")
 
             # ── Resolve the color order and each color's exposures ────
-            self._color_order = config.capture_led_color_order()
-            self._led_total_override = len(self._color_order)
+            # Same list as the calibration path sweeps, resolved the same way,
+            # so an unknown name fails here rather than mid-capture.
+            self._color_order = [c for _, c in
+                                 _resolve_color_order(self._leds, cfg.led_colors)]
             self._color_exposures = {}
             self._color_labels    = {}
             self._color_fallback  = {}
