@@ -741,17 +741,11 @@ if __name__ == "__main__":
         real[790:858, 1150:1218] = (40, 90, 180)      # BGR -> orange
         real[496:564, 1150:1286] = (230, 230, 230)    # the white patch
 
-    try:
-        import roi as roi_mod
-        rois = roi_mod.load_active(fw, fh, None)
-    except Exception as e:                            # no DB on this machine
-        print(f"  (database unavailable: {e}; using roi.py's seed values)")
-        import roi as roi_mod
-        rois = {}
-        for n, role, x, y, w, h in roi_mod.SEED_ROIS:
-            r = Rect(x, y, w, h, name=n)
-            r.role = role
-            rois[n] = r
+    # No fallback: the commissioned geometry lives only in
+    # provisioning/config_defaults.sql now, so a database this cannot reach is
+    # a real problem to see, not one to paper over with stale coordinates.
+    import roi as roi_mod
+    rois = roi_mod.load_active(fw, fh, None)
 
     # Keyed on role, not on name: names are operator-editable labels, so a
     # dict keyed on them silently falls through to white the moment someone

@@ -245,6 +245,52 @@ class TestOutputLocation(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# ROI loading has no Python fallback left
+# ---------------------------------------------------------------------------
+# _load_rois() used to self-heal an empty or short `roi` table from a copy of
+# the seed geometry kept in roi.py. That copy is gone — db_bootstrap seeds the
+# table from provisioning/config_defaults.sql at every launch instead — so a
+# role still unfilled by the time a run starts must now fail loudly.
+
+class TestLoadRoisHasNoFallback(unittest.TestCase):
+
+    def setUp(self):
+        import db_bootstrap
+        import db_manager as db
+        self._db = db
+        self._saved_dbname = db.DBNAME
+        self._tmpdir = tempfile.mkdtemp()
+        db.DBNAME = str(Path(self._tmpdir) / "roi_load.sqlite")
+        db_bootstrap.ensure(db.DBNAME)
+        self.cam = FakeCam()
+
+    def tearDown(self):
+        self._db.DBNAME = self._saved_dbname
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    def test_a_freshly_bootstrapped_table_loads_fine(self):
+        rois = capture_runner._load_rois(self.cam)
+        self.assertEqual(capture_runner.roi.missing_roles(
+            rois, capture_runner.REQUIRED_ROLES), [])
+
+    def test_a_role_left_unfilled_raises_rather_than_substitutes(self):
+        import roi as roi_mod
+        self._db.write_one("UPDATE roi SET active = 0 WHERE role = ?",
+                           (roi_mod.ROLE_WHITE,))
+        with self.assertRaises(roi_mod.RoiMissing) as ctx:
+            capture_runner._load_rois(self.cam)
+        self.assertIn(roi_mod.ROLE_WHITE, str(ctx.exception))
+
+    def test_an_empty_table_raises_naming_every_required_role(self):
+        import roi as roi_mod
+        self._db.write_one("UPDATE roi SET active = 0")
+        with self.assertRaises(roi_mod.RoiMissing) as ctx:
+            capture_runner._load_rois(self.cam)
+        for role in capture_runner.REQUIRED_ROLES:
+            self.assertIn(role, str(ctx.exception))
+
+
+# ---------------------------------------------------------------------------
 # A complete single-LED run
 # ---------------------------------------------------------------------------
 

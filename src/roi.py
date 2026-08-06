@@ -65,7 +65,6 @@ Public surface
     load_defaults(...)                   -> dict[str, Rect]
     save(name, rect, remark=None)        -> int   new rowid; supersedes the old
     restore(name)                        -> int   new rowid from the default row
-    seed_defaults()                      -> int   rows written (first-run only)
 
     to_slices(r)                   -> (yslice, xslice)  for rgb[] and bayer[]
     to_layer_rect(r)               -> Rect   against whole-frame layers
@@ -106,10 +105,18 @@ from rect import Rect, DEFAULT_COLOR
 
 log = logging.getLogger(__name__)
 
-# The stream the seed geometry was commissioned against.  Must match the seed
-# block in db_DDL.sql — the self-test checks that they agree.
-SEED_FRAME = (2304, 1296)
-SEED_MODEL = "imx708"
+
+class RoiMissing(RuntimeError):
+    """
+    A required ROI role has no active row.
+
+    Always a bug, never a condition to work around: db_bootstrap runs
+    provisioning/config_defaults.sql at every launch and fails loudly if it
+    cannot seed the `roi` table, so by the time anything here reads a ROI the
+    row is guaranteed to exist.  This means either the role was renamed, or
+    the row was removed by hand.
+    """
+
 
 # ── Roles ───────────────────────────────────────────────────────────────────
 # A ROI's *role* is what it is for; its *name* is a label the operator can
@@ -129,19 +136,10 @@ ROLE_WHITE  = "white"
 ROLE_BLACK  = "black"
 ROLE_BOUND  = "bound"
 
-# name, role, x, y, w, h — all even, so no snapping is needed on load.
-#
-# `bound` is the crop the h5 archive stores, so every other ROI must fit inside
-# it or that part cannot be re-measured from the archive.  It was commissioned
-# at w=160, ending at x=1250, which clipped 36 px off the white patch
-# (x 1150..1286) — 26% of its width.  Widened to w=196 on 2026-07-31.
-SEED_ROIS: Tuple[Tuple[str, str, int, int, int, int], ...] = (
-    ("sample", "sample", 1150, 790,  68,  68),
-    ("white",  "white",  1150, 496, 136,  68),
-    ("black1", "black",  1150, 380,  68,  68),
-    ("black2", "black",  1150, 900,  68,  68),
-    ("bound",  "bound",  1090, 360, 196, 630),
-)
+# The commissioned geometry lives only in provisioning/config_defaults.sql now
+# — db_bootstrap seeds it into the `roi` table at every launch — so it is not
+# duplicated here.  See that file's "roi" section for the numbers and the
+# rationale (bound was widened from w=160 to w=196 on 2026-07-31, etc.).
 
 # Smallest ROI that still yields a Bayer layer sample.
 MIN_SIDE_PX = 2
@@ -610,37 +608,6 @@ def restore(name: str) -> int:
                     "restored from default")
     log.info("roi.restore: %r -> %s (rowid %s)", name, (x, y, w, h), rowid)
     return rowid
-
-
-def seed_defaults() -> int:
-    """
-    Write the commissioned ROI rows for any name missing from the table.
-
-    db_DDL.sql seeds these already, so this is for a database that predates the
-    `roi` table or has had rows removed.  Names that already have rows are left
-    alone — this never overwrites an edit.  Each new name gets two rows: the
-    isdefault fallback (active=0) and the row in force (active=1).
-
-    Returns:
-        Number of rows inserted (2 per missing name; 0 when nothing is missing).
-
-    Example:
-        >>> seed_defaults()
-        0
-    """
-    frame_w, frame_h = SEED_FRAME
-    written = 0
-    for name, role, x, y, w, h in SEED_ROIS:
-        if db.read_val("SELECT COUNT(*) FROM roi WHERE name = ?", (name,)):
-            continue
-        r = Rect(x, y, w, h, name=name)
-        _insert(name, role, r, frame_w, frame_h, SEED_MODEL, None,
-                "commissioned default", isdefault=1, active=0)
-        _insert(name, role, r, frame_w, frame_h, SEED_MODEL, None,
-                "seed", isdefault=0, active=1)
-        written += 2
-        log.info("roi.seed_defaults: seeded %r = %s", name, (x, y, w, h))
-    return written
 
 
 # ── Colour-card registration ────────────────────────────────────────────────
@@ -1289,17 +1256,6 @@ if __name__ == "__main__":
     check("all_by_role is empty for an unfilled role",
           all_by_role(rois, "no_such_role"), [])
 
-    print("== seed values agree with db_DDL.sql ==")
-    # Only for seeds still in force: a superseded seed name (black1/black2,
-    # replaced by chip1/chip2) is a normal edit, not a failure.
-    defaults = load_defaults()
-    for nm, role, x, y, w, h in SEED_ROIS:
-        if nm not in defaults:
-            print(f"  -- {nm:8s} no longer in the table (superseded)")
-            continue
-        check(f"{nm} matches the DDL seed", defaults[nm].xywh(), (x, y, w, h))
-        check(f"{nm} role", defaults[nm].role, role)
-
     print("== load_defaults ==")
     # The defaults are the *commissioned* set, which the active set has since
     # diverged from — that is what superseding is for.  So the invariant is
@@ -1366,31 +1322,15 @@ if __name__ == "__main__":
         "SELECT COUNT(*) FROM roi WHERE name = ? AND isdefault=1", (sname,)), 1)
     check("unknown name is refused",  restore("nosuch"), 0)
 
-    print("== seed_defaults only fills gaps ==")
-    check("nothing written for names already present", seed_defaults(), 0)
-    # Drop a seeded name outright and confirm it comes back. Picked from
-    # SEED_ROIS rather than spelled out, so this survives a rename.
-    # Not `sname`, whose row count the next check depends on.
-    victim = next(nm for nm, *_ in SEED_ROIS
-                  if nm in load_defaults() and nm != sname)
-    seed_geom = next((x, y, w, h) for nm, _, x, y, w, h in SEED_ROIS
-                     if nm == victim)
-    db.write_one("DELETE FROM roi WHERE name = ?", (victim,))
-    check(f"re-seeds {victim!r}", seed_defaults(), 2)
-    check("re-seeded geometry", load_active()[victim].xywh(), seed_geom)
-    check("an untouched name is not re-seeded", db.read_val(
-        "SELECT COUNT(*) FROM roi WHERE name = ?", (sname,)),
-        history_before + 3)          # +2 saves, +1 restore
-
     print("== empty table degrades quietly ==")
+    # Repairing a missing row is db_bootstrap's job now (it re-runs
+    # provisioning/config_defaults.sql at every launch) — roi.py itself just
+    # has to report the gap rather than paper over it.
     db.write_one("DELETE FROM roi")
     check("no active ROIs", load_active(), {})
     check("no roles filled", missing_roles(load_active(), required),
           list(required))
     check("save on empty",  save(sname, Rect(0, 0, 8, 8)), 0)
-    check("seed refills",   seed_defaults(), 2 * len(SEED_ROIS))
-    check("and the required roles are back",
-          missing_roles(load_active(), required), [])
 
     shutil.rmtree(tmp.parent, ignore_errors=True)
     print("\n== all roi self-tests passed ==")

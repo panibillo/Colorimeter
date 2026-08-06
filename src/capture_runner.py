@@ -95,17 +95,9 @@ OUT_STEM = "camtest8"
 
 # ROI definitions live in the `roi` table and are loaded per run by
 # _load_rois() once the camera has reported its stream size — see roi.py.
-# The last-resort fallback for a database with no roi rows at all (an old DB,
-# or one built before the table existed) is roi.SEED_ROIS itself, keyed by
-# role: copying those numbers here would be a second source of truth that
-# could drift from the seed block and from db_DDL.sql.
-def _fallback_by_role() -> dict:
-    """Return {role: Rect} built from roi.SEED_ROIS, first seed per role."""
-    out = {}
-    for name, role, x, y, w, h in roi.SEED_ROIS:
-        out.setdefault(role, Rect(x, y, w, h, name=name))
-    return out
-
+# db_bootstrap seeds that table at every launch, so a role still unfilled by
+# the time _load_rois() runs is a real bug, not a condition to work around —
+# it raises rather than falling back to a Python copy of the seed geometry.
 
 # The roles this module cannot run without: ROLE_WHITE drives exposure
 # calibration, ROLE_SAMPLE drives the exposure ladder, ROLE_BOUND is the crop
@@ -278,12 +270,12 @@ def _load_rois(cam) -> "dict[str, Rect]":
     different stream is then rescaled or loudly refused rather than silently
     misapplied.
 
-    Self-heals two degraded cases, in order:
-      1. Table empty (a DB predating the `roi` table) — seed it from roi.py's
-         commissioned defaults and re-read.
-      2. Still empty, or a required *role* unfilled — fall back to the
-         matching roi.SEED_ROIS entry and log an error. A capture that cannot
-         find its ROIs should still produce an archive.
+    db_bootstrap seeds the `roi` table at every launch, so by the time this
+    runs every REQUIRED_ROLES entry is guaranteed to have an active row.
+    Raises roi.RoiMissing if one is unfilled anyway, rather than quietly
+    substituting a Python copy of the seed geometry — that substitution is
+    exactly the kind of value-lurking-in-Python this table was seeded to
+    replace, and a run using it would archive a crop the operator never chose.
 
     Also validates what it returns, because these are the assumptions the
     Bayer-layer conversions rest on (see roi.py's traps A and B):
@@ -296,26 +288,19 @@ def _load_rois(cam) -> "dict[str, Rect]":
 
     Returns:
         {name: Rect} in stream space, guaranteed to fill REQUIRED_ROLES.
+
+    Raises:
+        roi.RoiMissing: a required role has no active row.
     """
     size  = getattr(cam, "config_size", None) or (None, None)
     model = getattr(cam, "model", None)
     rois  = roi.load_active(size[0], size[1], model)
 
-    if not rois:
-        log.warning("capture: the roi table has no active rows — seeding it "
-                    "from roi.py's commissioned defaults")
-        roi.seed_defaults()
-        rois = roi.load_active(size[0], size[1], model)
-
-    fallback = _fallback_by_role()
-    for role in REQUIRED_ROLES:
-        if roi.by_role(rois, role) is None:
-            spare = fallback[role]
-            log.error("capture: no active ROI fills role %r; using the "
-                      "commissioned seed %s as %r",
-                      role, spare.xywh(), spare.name)
-            spare.role = role
-            rois[spare.name] = spare
+    missing = roi.missing_roles(rois, REQUIRED_ROLES)
+    if missing:
+        raise roi.RoiMissing(
+            f"the roi table has no active row for role(s) {missing} — "
+            f"expected db_bootstrap.ensure() to have seeded it")
 
     for name, r in sorted(rois.items()):
         if not roi.is_bayer_safe(r):
@@ -627,12 +612,11 @@ class CaptureRunner:
         self.suite_id: str = ""
         self.results: list = []
 
-        # ROIs in force for this run, in stream space, keyed by name. Loaded
-        # from the `roi` table by _load_rois() once the camera reports its
-        # stream size, so an edit made in the viewer takes effect on the next
-        # run without a restart.
-        self.rois: "dict[str, Rect]" = {
-            r.name: r for r in _fallback_by_role().values()}
+        # ROIs in force for this run, in stream space, keyed by name. Empty
+        # until _load_rois() fills it, once the camera reports its stream
+        # size — nothing reads this before then, and an edit made in the
+        # viewer takes effect on the next run without a restart.
+        self.rois: "dict[str, Rect]" = {}
 
         # The archive being written. Unlike the camera and LED bank, this is
         # created and owned by the runner, so the runner also closes it.
