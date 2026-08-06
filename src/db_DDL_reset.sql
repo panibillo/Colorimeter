@@ -21,6 +21,8 @@
 -- 2026-08, and a database predating that migration still has them.
 -- ============================================================================
 
+-- These are destructive. They should be hard to run accidentally
+/*
 PRAGMA foreign_keys = OFF;
 
 DROP VIEW  IF EXISTS default_gui_vals;
@@ -50,3 +52,4 @@ DROP TABLE IF EXISTS samples_v1;
 DROP TABLE IF EXISTS device_v1;
 
 PRAGMA user_version = 0;
+*/

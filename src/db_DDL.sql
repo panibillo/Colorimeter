@@ -20,12 +20,12 @@
 --
 -- Object inventory (6 tables):
 --
+--     colorcard   colour-calibration card patch geometry
 --     config      every instrument setting — see config_repo.py
---     samples     one row per test run — the main record
+--     data        generic timestamped key/value measurements
 --     exposure    calibrated exposure ladders, per LED and group
 --     roi         regions of interest in camera stream coordinates
---     colorcard   colour-calibration card patch geometry
---     data        generic timestamped key/value measurements
+--     samples     one row per test run — the main record
 --
 -- `device`, `users`, `testkit`, `testlot`, `defaults` and the
 -- `default_gui_vals` view were folded into `config` (see the note there);
