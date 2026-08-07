@@ -123,3 +123,26 @@ class Hdf5Writer:
             link_path:   New path to create as a soft link.
         """
         self._file[link_path] = h5py.SoftLink(target_path)
+
+    def delete(self, path: str) -> bool:
+        """
+        Remove the group or dataset at `path`, if it is there.
+
+        Needed because HDF5 will not let you create a dataset over one that
+        already exists: rewriting a dataset means deleting it first. Note
+        that HDF5 does not hand the freed bytes back — the file keeps the
+        space the old copy occupied until the file is rebuilt with a tool
+        such as h5repack. That is fine for a small text dataset rewritten a
+        handful of times, and not fine for image data, so do not use this to
+        rewrite arrays.
+
+        Args:
+            path: HDF5 path to a group or dataset.
+
+        Returns:
+            True if something was deleted, False if there was nothing there.
+        """
+        if path not in self._file:
+            return False
+        del self._file[path]
+        return True

@@ -61,6 +61,7 @@ import capture_meta
 import config_repo as config
 import exposure_repo
 import roi
+import sample_repo
 from bayer_cam import BayerCam
 from capture_h5 import CaptureSuiteWriter
 from capture_profile import CaptureProfiler
@@ -627,6 +628,17 @@ class CaptureRunner:
         self._captures_done  = 0
         self._current_color  = ""
         self._lit_on_channel: "int | None" = None
+
+        # When things happened, to the millisecond, as text — see
+        # capture_meta.timestamp_ms(). Each is overwritten as the run moves
+        # on, so they are copied into the archive as soon as they are taken:
+        #   _led_on_dt / _led_off_dt   set by _led_on() / _led_off(), copied
+        #                              into that LED's metadata record
+        #   _frame_captured_dt         set by _settle(), copied onto the
+        #                              image datasets it produced
+        self._led_on_dt         = ""
+        self._led_off_dt        = ""
+        self._frame_captured_dt = ""
         # Captures per LED, for the completion estimate. The calibration path
         # does a fixed lit+dark bracket; the normal path does lit of the
         # chosen group only (darks are batched separately), set when that
@@ -706,8 +718,24 @@ class CaptureRunner:
     # ── Profiled camera / numpy helpers ──────────────────────────────────
 
     def _settle(self, exposure_us: int) -> "tuple[np.ndarray, np.ndarray, dict]":
-        """set_exposure + capture until the pipeline adopts it, timing frames."""
-        return _set_and_settle(self._cam, exposure_us, self.prof)
+        """
+        set_exposure + capture until the pipeline adopts it, timing frames.
+
+        Also notes when the frame arrived, in self._frame_captured_dt. Every
+        photograph this class stores comes through here, so stamping the
+        clock in this one place is what guarantees each stored image carries
+        a capture time — a new capture site cannot forget to do it.
+
+        The clock is read after _set_and_settle() returns, not before it is
+        called: that function may take several frames to talk the pipeline
+        into the requested exposure, and only the last of them is the one
+        kept. Reading the clock on the way out therefore lands within a few
+        milliseconds of the stored frame, where reading it on the way in
+        could be off by the whole settling period.
+        """
+        frame = _set_and_settle(self._cam, exposure_us, self.prof)
+        self._frame_captured_dt = capture_meta.timestamp_ms()
+        return frame
 
     def _extract(self, bayer: np.ndarray, pattern: str) -> dict:
         """Split a full bayer frame into channel layers, timed as cpu.extract."""
@@ -720,6 +748,29 @@ class CaptureRunner:
             return _roi_bound_layers(bayer, pattern,
                                      roi.by_role(self.rois, roi.ROLE_BOUND))
 
+    def _choose_out_path(self) -> None:
+        """
+        Decide where this run's archive goes, and make sure the directory
+        exists. Sets self.suite_id and self.out_path.
+
+        The file is named after the sample it holds — "ZP1007.h5" — because
+        that is the name an operator has in hand when they come looking for
+        it. A capture launched from the menu belongs to no sample, so it falls
+        back to the capture time, which is what every archive used to be
+        called. config.capture_archive_path() handles the (unlikely) case of
+        that name already being taken; see its comments.
+
+        self.suite_id keeps its old meaning either way — the capture time,
+        stored inside the archive as the suite_id attribute and repeated in
+        each LED's metadata as "timestamp". It is no longer necessarily part
+        of the filename, so do not use one to work out the other.
+        """
+        cfg = self.config
+        self.suite_id = config.capture_suite_id()
+        cfg.out_dir.mkdir(parents=True, exist_ok=True)
+        stem = sample_repo.samp_no_for(cfg.sample_rowid) or self.suite_id
+        self.out_path = config.capture_archive_path(cfg.out_dir, stem)
+
     def _write_metadata(self, w: CaptureSuiteWriter) -> None:
         """
         Stamp the archive with its ROI geometry, camera, device and sample.
@@ -729,6 +780,13 @@ class CaptureRunner:
         a crop of `bound`, and without `bound`'s x and y nothing else in the
         file can be located. capture_meta.collect() never raises, so this
         cannot cost a capture.
+
+        Writing this early has one cost worth knowing about: most of the
+        sample record does not exist yet. The operator has not finished the
+        reading, so capture_end, manual_read and the results are all still
+        empty here, and they stay that way in the file until somebody calls
+        capture_meta.update_archive_sample() on it afterwards. The arbiter
+        does that when the capture finishes and again when analysis lands.
 
         Args:
             w: The freshly opened CaptureSuiteWriter.
@@ -848,13 +906,27 @@ class CaptureRunner:
             self._lit_on_channel = None
 
     def _led_on(self, channel: int) -> None:
-        """Switch an LED on and remember it for cleanup."""
+        """
+        Switch an LED on, note the time, and remember it for cleanup.
+
+        The clock is read immediately after the switch returns, which is the
+        closest this code can get to the moment the LED actually lit. The
+        time is kept in self._led_on_dt for whoever is running the sweep to
+        copy into that LED's metadata; it is overwritten by the next LED, so
+        read it before switching anything else on.
+        """
         self._leds.set_channel(channel, True)
+        self._led_on_dt = capture_meta.timestamp_ms()
         self._lit_on_channel = channel
 
     def _led_off(self, channel: int) -> None:
-        """Switch an LED off and clear the cleanup record."""
+        """
+        Switch an LED off, note the time, and clear the cleanup record.
+
+        Companion to _led_on() — see there for how the time is used.
+        """
         self._leds.set_channel(channel, False)
+        self._led_off_dt = capture_meta.timestamp_ms()
         self._lit_on_channel = None
 
     def _run(self) -> Iterator[Progress]:
@@ -863,9 +935,7 @@ class CaptureRunner:
         leds = self._leds
 
         # Naming lives in the config table under role `capture`.
-        self.suite_id = config.capture_suite_id()
-        cfg.out_dir.mkdir(parents=True, exist_ok=True)
-        self.out_path = cfg.out_dir / config.capture_archive_name(self.suite_id)
+        self._choose_out_path()
         self.results = []
 
         # ── Camera init ──────────────────────────────────────────────
@@ -896,6 +966,9 @@ class CaptureRunner:
         yield self._progress("calibrate", "Phase 0: white LED exposure calibration")
 
         self._led_on(WHITE_LED_CH)
+        # Kept in a local because _led_on_dt is overwritten by the first
+        # colored LED further down, long before the metadata is assembled.
+        phase0_led_on_dt = self._led_on_dt
         yield from self._wait(LED_ON_WARMUP_S, "White LED on, warming up")
 
         current_us     = cfg.initial_us
@@ -924,6 +997,7 @@ class CaptureRunner:
 
         calibrated_us = current_us
         self._led_off(WHITE_LED_CH)
+        phase0_led_off_dt = self._led_off_dt
         yield self._progress(
             "calibrate",
             f"Calibrated initial exposure: {calibrated_us:,} µs "
@@ -1071,7 +1145,18 @@ class CaptureRunner:
                 "autofocus_raw_diopters": raw_af_pos,
                 "target_bayer_channel": target_ch,
                 "roi_white_channel_means": ref_means,
+                # When this LED was lit and put out again, to the millisecond.
+                # led_off_dt is filled in further down, once it has been: the
+                # dark frames are photographed after the LED goes out, so the
+                # record cannot be finished until then.
+                "led_on_dt":  self._led_on_dt,
+                "led_off_dt": "",
                 "phase0_calibrated_exposure_us": calibrated_us,
+                # The white LED of Phase 0 is lit once for the whole run, not
+                # once per color, so these two repeat identically in every
+                # LED's record — the same as the two phase0 values above them.
+                "phase0_led_on_dt":  phase0_led_on_dt,
+                "phase0_led_off_dt": phase0_led_off_dt,
                 "phase0_desat_retries": phase0_retries,
                 "per_led_desat_retries": per_led_retries,
                 "ref_exposure_us": current_us,
@@ -1120,7 +1205,8 @@ class CaptureRunner:
 
                 layers_out = self._bound_layers(bayer, pattern)
                 with self.prof.time("io.hdf5"):
-                    w.add_lit(color, exp_label, layers_out, exposure_us=exp_us)
+                    w.add_lit(color, exp_label, layers_out, exposure_us=exp_us,
+                              captured_dt=self._frame_captured_dt)
 
                 if exp_label == "e3":    # keep the median frame for the JPEG
                     e3_frame = (rgb, bayer, meta)
@@ -1133,6 +1219,7 @@ class CaptureRunner:
 
             # LED off, then dark frames at the same exposures
             self._led_off(led)
+            meta_json["led_off_dt"] = self._led_off_dt
             yield from self._wait(LED_OFF_SETTLE_S, f"{color} LED off, settling")
 
             yield self._progress("capture", "Dark captures:")
@@ -1144,7 +1231,8 @@ class CaptureRunner:
                 # captured for an earlier LED is reused rather than restored.
                 layers_out = self._bound_layers(bayer, pattern)
                 with self.prof.time("io.hdf5"):
-                    stored = w.add_dark(layers_out, exposure_us=exp_us)
+                    stored = w.add_dark(layers_out, exposure_us=exp_us,
+                                        captured_dt=self._frame_captured_dt)
                     w.link_dark(color, exp_label, exposure_us=exp_us)
 
                 self._captures_done += 1
@@ -1221,9 +1309,7 @@ class CaptureRunner:
         try:
             self._group = group = str(cfg.exposure_group)
 
-            self.suite_id = config.capture_suite_id()
-            cfg.out_dir.mkdir(parents=True, exist_ok=True)
-            self.out_path = cfg.out_dir / config.capture_archive_name(self.suite_id)
+            self._choose_out_path()
             self.results = []
 
             # ── Camera init ──────────────────────────────────────────
@@ -1290,7 +1376,8 @@ class CaptureRunner:
                 _, bayer, _ = self._settle(exp_us)
                 layers_out = self._bound_layers(bayer, self._pattern)
                 with self.prof.time("io.hdf5"):
-                    stored = w.add_dark(layers_out, exposure_us=exp_us, when="before")
+                    stored = w.add_dark(layers_out, exposure_us=exp_us, when="before",
+                                        captured_dt=self._frame_captured_dt)
                 yield self._progress(
                     "capture",
                     f"    {'stored' if stored else 'reused'} dark before "
@@ -1359,7 +1446,8 @@ class CaptureRunner:
                     applied_us[label] = int(meta.get("ExposureTime", 0))
                     layers_out = self._bound_layers(bayer, self._pattern)
                     with self.prof.time("io.hdf5"):
-                        w.add_lit(color, label, layers_out, exposure_us=exp_us)
+                        w.add_lit(color, label, layers_out, exposure_us=exp_us,
+                                  captured_dt=self._frame_captured_dt)
                     if i == mid_idx:
                         mid_frame = (rgb, bayer, meta)
                     self._captures_done += 1
@@ -1384,6 +1472,10 @@ class CaptureRunner:
                     "focus_diopters": self._focus_pos,
                     "focus_mode": self._focus_mode,
                     "autofocus_raw_diopters": self._raw_af_pos,
+                    # Both available here, unlike the calibration path: this
+                    # record is assembled after the LED has been put out.
+                    "led_on_dt":  self._led_on_dt,
+                    "led_off_dt": self._led_off_dt,
                     "exposure_group": self._group,
                     "exposure_source": "fallback" if used_fallback else "exposure_table",
                     "exposures_us": {lbl: int(us) for lbl, us in zip(labels, exposures_us)},
@@ -1421,7 +1513,8 @@ class CaptureRunner:
                 _, bayer, _ = self._settle(exp_us)
                 layers_out = self._bound_layers(bayer, self._pattern)
                 with self.prof.time("io.hdf5"):
-                    stored = w.add_dark(layers_out, exposure_us=exp_us, when="after")
+                    stored = w.add_dark(layers_out, exposure_us=exp_us, when="after",
+                                        captured_dt=self._frame_captured_dt)
                 yield self._progress(
                     "capture",
                     f"    {'stored' if stored else 'reused'} dark after "

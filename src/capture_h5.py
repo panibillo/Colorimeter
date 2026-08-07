@@ -23,9 +23,9 @@ Layout:
     /leds/<color>/led_metadata            JSON text
     /leds/<color>/capture_info            JSON text  (optional)
     /leds/<color>/jpeg_e3                 raw JPEG bytes  (optional)
-    /leds/<color>/lit/<label>/<ch>        attrs: exposure_us, exposure_ms
+    /leds/<color>/lit/<label>/<ch>        attrs: exposure_us, captured_dt
     /leds/<color>/dark/<when>_<label>     soft link → /dark/<when>_<us>us
-    /dark/<when>_<us>us/<ch>              attrs: exposure_us, exposure_ms
+    /dark/<when>_<us>us/<ch>              attrs: exposure_us, captured_dt
 
 `/meta` carries the ROI geometry, camera configuration, instrument identity
 and sample record, so an archive can be interpreted without consulting any
@@ -35,6 +35,24 @@ database, so an ROI edited on the instrument never reaches it. `bound`'s width
 and height can be recovered from the stored layer shape, but its x and y
 cannot — they are only in `/meta` (and the root attrs). See capture_meta.py,
 which decides what goes in; this module only writes what it is handed.
+
+`/meta` is written twice, on purpose, and a maintainer needs to know both
+times or the second one looks like a mistake:
+
+  1. Once at the very start of a run, by CaptureRunner._write_metadata(),
+     while the archive is still open. Everything known before the first
+     photograph goes in here — above all the ROI geometry, without which the
+     stored arrays cannot be located. Writing it first means a run that dies
+     partway still leaves a readable file.
+  2. Again after the run has finished and the archive has been closed, by
+     capture_meta.update_archive_sample(), which reopens the file and swaps
+     in a fresh copy of the sample record. This is needed because several
+     columns of that record do not exist yet at step 1 — the operator has
+     not finished the reading, so capture_end, txt_result and num_result are
+     still empty. See the comments on those two functions for the full list.
+
+Only the JSON text at `/meta` and the root attributes are rewritten in step
+2. No image data is ever touched after it is written.
 
 Dark frames are captured with the LED off, so they depend only on the
 exposure time — not on which label or LED asked for it — and are shared
@@ -65,6 +83,34 @@ from hdf5write import Hdf5Writer
 SCHEMA_VERSION    = 2
 SUITE_DESCRIPTION = "Colorimeter camtest8 capture suite"
 METADATA_NAME     = "meta"
+
+
+def _frame_attrs(exposure_us: int, captured_dt: str) -> dict:
+    """
+    Build the attributes stamped on every stored image dataset.
+
+    One helper for both lit and dark frames, so the two cannot drift apart.
+
+    Exposure is recorded in microseconds only. There used to be an
+    `exposure_ms` alongside it, computed as `exposure_us // 1000`; it was
+    dropped because integer division threw away the remainder, so an 11,888 µs
+    exposure was advertised as a flat 11 ms. Anything wanting milliseconds
+    should divide `exposure_us` itself and keep the fraction.
+
+    Args:
+        exposure_us: Exposure time in microseconds.
+        captured_dt: When the photograph was taken, as text with milliseconds,
+                     or "" if unknown.
+
+    Returns:
+        The attribute dict. `captured_dt` is left out entirely when it is "",
+        because an HDF5 attribute holding an empty string is harder for a
+        reader to recognise as "no value" than an absent one.
+    """
+    attrs = {"exposure_us": exposure_us}
+    if captured_dt:
+        attrs["captured_dt"] = captured_dt
+    return attrs
 
 
 class CaptureSuiteWriter:
@@ -216,6 +262,7 @@ class CaptureSuiteWriter:
 
     def add_lit(
         self, color: str, label: str, layers: dict, exposure_us: int,
+        captured_dt: str = "",
     ) -> None:
         """
         Store the lit ROI crop for one LED at one exposure, all channels.
@@ -226,15 +273,26 @@ class CaptureSuiteWriter:
             layers:      {channel_name: ndarray}, as returned by
                          BayerCam.extract_bayer_layers().
             exposure_us: Exposure time in microseconds.
+            captured_dt: When this photograph was taken, as text with
+                         milliseconds — "2026-08-06 13:56:48.123". The runner
+                         reads the clock immediately after the frame arrives
+                         from the sensor, so the exposure itself began about
+                         `exposure_us` earlier than this says. Pass "" (the
+                         default) when the time is not known, and the
+                         attribute is left off the datasets rather than
+                         written as an empty string; the offline converter in
+                         dev/build_h5_from_camtest8.py does that, because it
+                         rebuilds an archive from files photographed long ago.
         """
         group = self._lit_group(color, label)
-        attrs = {"exposure_us": exposure_us, "exposure_ms": exposure_us // 1000}
         for ch_name, array in layers.items():
-            self._w.write_array(group, ch_name, array, attrs=attrs)
+            self._w.write_array(group, ch_name, array,
+                                attrs=_frame_attrs(exposure_us, captured_dt))
 
     # ── Shared dark frames ───────────────────────────────────────────
 
-    def add_dark(self, layers: dict, exposure_us: int, when: str = "after") -> bool:
+    def add_dark(self, layers: dict, exposure_us: int, when: str = "after",
+                 captured_dt: str = "") -> bool:
         """
         Store a dark ROI crop, unless one for this (when, exposure) already
         exists.
@@ -248,6 +306,14 @@ class CaptureSuiteWriter:
             exposure_us: Exposure time in microseconds.
             when:        Which batch this frame belongs to — "before" or
                          "after" (default) — see the module docstring.
+            captured_dt: When this photograph was taken, as text with
+                         milliseconds. Because a repeated (when, exposure) is
+                         skipped rather than stored twice, the time kept is
+                         the one from the photograph that was actually
+                         stored — the first to reach this exposure. Any LED
+                         that later links to it was photographed at some
+                         other moment, so do not read this as that LED's own
+                         capture time.
 
         Returns:
             True if the frames were written, False if an identical
@@ -258,9 +324,9 @@ class CaptureSuiteWriter:
             return False
 
         group = self._dark_group(exposure_us, when)
-        attrs = {"exposure_us": exposure_us, "exposure_ms": exposure_us // 1000}
         for ch_name, array in layers.items():
-            self._w.write_array(group, ch_name, array, attrs=attrs)
+            self._w.write_array(group, ch_name, array,
+                                attrs=_frame_attrs(exposure_us, captured_dt))
         self._dark_written.add(key)
         return True
 
@@ -289,3 +355,69 @@ class CaptureSuiteWriter:
             f"/leds/{color}/dark/{when}_{label}",
         )
         return True
+
+
+# ── Rewriting the metadata of an archive that is already closed ──────────
+# These two are the only way anything reaches an archive after its run has
+# finished. They exist so the sample record can be brought up to date once
+# the operator has finished the reading — see the module docstring, step 2,
+# and capture_meta.update_archive_sample(), which is the one caller.
+#
+# They are deliberately kept apart from CaptureSuiteWriter: that class creates
+# a file and owns it for the length of a run, whereas these open a finished
+# file, change one small thing, and leave. Mixing the two would blur when the
+# archive is safe to touch.
+
+def read_metadata(path) -> dict:
+    """
+    Read back the metadata record of an existing archive.
+
+    Args:
+        path: Path of the .h5 file to read. Opened read-only.
+
+    Returns:
+        The dict that capture_meta.collect() produced when the archive was
+        written.
+
+    Raises:
+        KeyError: The archive has no /meta — it was written by a version of
+            this schema older than 2, before the record existed.
+        OSError: The file is missing or is not readable as HDF5.
+    """
+    from hdf5read import Hdf5Reader     # imported here to keep the write path
+                                        # free of the reader on the instrument
+    with Hdf5Reader(path) as r:
+        return r.read_metadata("/", METADATA_NAME)
+
+
+def replace_metadata(path, meta: dict, root_attrs: dict = None) -> None:
+    """
+    Reopen a closed archive and rewrite its metadata record in place.
+
+    The old /meta dataset is deleted and a new one written in its place.
+    HDF5 does not return the deleted bytes to the file, so each rewrite
+    leaves the previous copy's space behind; the record is a few kilobytes of
+    text and is rewritten at most a couple of times per archive, so the waste
+    is not worth reclaiming. No image data is touched.
+
+    Args:
+        path:       Path of the .h5 file, which must already exist. Opened in
+                    append mode, so nothing else in it is disturbed.
+        meta:       The complete replacement record. Pass the whole dict, not
+                    just the part that changed — this overwrites, it does not
+                    merge.
+        root_attrs: Flat scalars to refresh on "/", from
+                    capture_meta.root_attrs(). Attributes not named here keep
+                    the values they already had.
+
+    Returns:
+        None
+    """
+    w = Hdf5Writer(path, mode="a")
+    try:
+        w.delete(f"/{METADATA_NAME}")
+        w.write_metadata("/", METADATA_NAME, meta)
+        if root_attrs:
+            w.set_attrs("/", root_attrs)
+    finally:
+        w.close()

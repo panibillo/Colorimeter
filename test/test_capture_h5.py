@@ -28,6 +28,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
+import capture_h5
 from capture_h5 import SCHEMA_VERSION, CaptureSuiteWriter
 
 
@@ -108,9 +109,23 @@ class TestRootAndLayout(CaptureSuiteWriterTestCase):
             grp = f["/leds/amber/lit/e3"]
             self.assertEqual(sorted(grp.keys()), ["B", "Gb", "Gr", "R"])
             self.assertEqual(grp["B"].attrs["exposure_us"], 45691)
-            # exposure_ms is the truncated form of the same value
-            self.assertEqual(grp["B"].attrs["exposure_ms"], 45)
+            # Microseconds only. There was an exposure_ms alongside it, which
+            # reported this same 45691 as a flat 45; it was dropped rather
+            # than let a reader take the truncated value for the real one.
+            self.assertNotIn("exposure_ms", grp["B"].attrs)
             np.testing.assert_array_equal(grp["B"][()], _layers(100)["B"])
+
+    def test_capture_time_is_stored_when_given_and_absent_when_not(self):
+        """The attribute is left off rather than written as an empty string,
+        so a reader can tell "not recorded" from a real value."""
+        with self.writer() as w:
+            w.add_lit("amber", "e3", _layers(100), exposure_us=45691,
+                      captured_dt="2026-08-06 13:56:48.123")
+            w.add_lit("blue", "e3", _layers(100), exposure_us=45691)
+        with h5py.File(self.path, "r") as f:
+            self.assertEqual(f["/leds/amber/lit/e3/B"].attrs["captured_dt"],
+                             "2026-08-06 13:56:48.123")
+            self.assertNotIn("captured_dt", f["/leds/blue/lit/e3/B"].attrs)
 
     def test_add_jpeg_roundtrips_bytes(self):
         blob = b"\xff\xd8\xff\xe0 not really a jpeg \x00\x01"
@@ -135,7 +150,7 @@ class TestDarkDedup(CaptureSuiteWriterTestCase):
         with h5py.File(self.path, "r") as f:
             self.assertIn("/dark/after_45691us", f)
             self.assertEqual(f["/dark/after_45691us/B"].attrs["exposure_us"], 45691)
-            self.assertEqual(f["/dark/after_45691us/B"].attrs["exposure_ms"], 45)
+            self.assertNotIn("exposure_ms", f["/dark/after_45691us/B"].attrs)
 
     def test_repeat_dark_is_skipped_not_raised(self):
         """A second LED offering the same exposure must be a silent no-op.
@@ -245,6 +260,91 @@ class TestDarkLinking(CaptureSuiteWriterTestCase):
         with h5py.File(self.path, "r") as f:
             self.assertIn("/leds/amber/dark/before_e3", f)
             self.assertNotIn("/leds/amber/dark/after_e3", f)
+
+
+# ---------------------------------------------------------------------------
+# Rewriting the metadata of an archive that has already been closed
+# ---------------------------------------------------------------------------
+
+class TestMetadataRewrite(CaptureSuiteWriterTestCase):
+    """
+    The second of the two /meta writes — see the capture_h5 module docstring.
+    An archive is written with a sample record that is mostly still empty,
+    and the record is filled in later, once the operator has finished.
+    """
+
+    def _write_archive(self) -> dict:
+        """Write an archive the way a real run does, and return its metadata."""
+        meta = {
+            "roi":    {"bound": {"x": 1082, "y": 478, "w": 196, "h": 660}},
+            "camera": {"model": "imx708"},
+            "sample": {"samp_no": "ZP1007", "capture_end": None,
+                       "txt_result": None},
+        }
+        with self.writer() as w:
+            w.add_metadata(meta, {"samp_no": "ZP1007"})
+            w.add_lit("amber", "e3", _layers(100), exposure_us=45691)
+        return meta
+
+    def test_read_metadata_returns_what_was_written(self):
+        meta = self._write_archive()
+        self.assertEqual(capture_h5.read_metadata(self.path), meta)
+
+    def test_replace_metadata_updates_the_record_in_place(self):
+        meta = self._write_archive()
+        meta["sample"]["capture_end"] = 1786042699
+        meta["sample"]["txt_result"] = "0.42 ppm"
+        capture_h5.replace_metadata(self.path, meta)
+
+        after = capture_h5.read_metadata(self.path)
+        self.assertEqual(after["sample"]["capture_end"], 1786042699)
+        self.assertEqual(after["sample"]["txt_result"], "0.42 ppm")
+
+    def test_replace_metadata_leaves_the_images_alone(self):
+        """The whole point: results arrive long after the images, and must
+        not put them at risk."""
+        self._write_archive()
+        meta = capture_h5.read_metadata(self.path)
+        meta["sample"]["txt_result"] = "0.42 ppm"
+        capture_h5.replace_metadata(self.path, meta)
+
+        with h5py.File(self.path, "r") as f:
+            np.testing.assert_array_equal(f["/leds/amber/lit/e3/B"][()],
+                                          _layers(100)["B"])
+            self.assertEqual(f["/leds/amber/lit/e3/B"].attrs["exposure_us"],
+                             45691)
+
+    def test_replace_metadata_keeps_the_blocks_it_was_not_given(self):
+        """The camera is closed by now and could not be asked again, so the
+        blocks recorded during the run have to survive untouched."""
+        self._write_archive()
+        meta = capture_h5.read_metadata(self.path)
+        meta["sample"]["txt_result"] = "0.42 ppm"
+        capture_h5.replace_metadata(self.path, meta)
+
+        after = capture_h5.read_metadata(self.path)
+        self.assertEqual(after["roi"]["bound"]["x"], 1082)
+        self.assertEqual(after["camera"]["model"], "imx708")
+
+    def test_replace_metadata_refreshes_root_attrs(self):
+        self._write_archive()
+        meta = capture_h5.read_metadata(self.path)
+        capture_h5.replace_metadata(self.path, meta, {"samp_no": "ZP1007-a"})
+        with h5py.File(self.path, "r") as f:
+            self.assertEqual(f.attrs["samp_no"], "ZP1007-a")
+            # An attribute not named in the refresh keeps its old value.
+            self.assertEqual(f.attrs["suite_id"], "20260615_2120")
+
+    def test_rewriting_more_than_once_is_allowed(self):
+        """Called once when the capture ends and again when analysis lands."""
+        self._write_archive()
+        for result in ("pending", "0.42 ppm"):
+            meta = capture_h5.read_metadata(self.path)
+            meta["sample"]["txt_result"] = result
+            capture_h5.replace_metadata(self.path, meta)
+        self.assertEqual(
+            capture_h5.read_metadata(self.path)["sample"]["txt_result"],
+            "0.42 ppm")
 
 
 if __name__ == "__main__":

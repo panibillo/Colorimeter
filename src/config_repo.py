@@ -690,6 +690,49 @@ def capture_archive_name(suite_id: str) -> str:
     return f"{suite_id}{get('capture', 'extension')}"
 
 
+def capture_archive_path(out_dir: Path, stem: str) -> Path:
+    """
+    Return a path in out_dir named for `stem` that no file is using yet.
+
+    Archives are named after the sample they hold — "ZP1007.h5" — because
+    that is how an operator looks for one.  Sample numbers are unique in the
+    `samples` table, so ordinarily the plain name is free and is what you get.
+
+    A clash is still possible: a database restored from a backup can reissue
+    a sample number whose archive is already sitting in the directory, and
+    archives synced from an instrument are not covered by that table's
+    uniqueness at all.  Rather than overwrite a capture that cannot be taken
+    again, a letter is appended — ZP1007.h5, then ZP1007-a.h5, ZP1007-b.h5,
+    and so on.  Past the alphabet it falls back to the capture timestamp, so
+    this always returns something rather than failing a run.
+
+    Args:
+        out_dir: Directory the archive will be written to.
+        stem:    Filename without extension — a sample number, or the capture
+                 timestamp for a menu-launched capture with no sample.
+
+    Returns:
+        A path that did not exist at the moment it was checked.
+
+    Example:
+        >>> capture_archive_path(Path("/captures"), "ZP1007")  # doctest: +SKIP
+        PosixPath('/captures/ZP1007.h5')
+    """
+    ext = str(get("capture", "extension"))
+    out_dir = Path(out_dir)
+
+    candidate = out_dir / f"{stem}{ext}"
+    if not candidate.exists():
+        return candidate
+
+    for i in range(26):                      # 'a' through 'z'
+        candidate = out_dir / f"{stem}-{chr(ord('a') + i)}{ext}"
+        if not candidate.exists():
+            return candidate
+
+    return out_dir / f"{stem}-{capture_suite_id()}{ext}"
+
+
 # ── Capture selection ───────────────────────────────────────────────────────
 # Which LEDs a run sweeps — see capture_led_color_order() below, the one
 # representation both capture paths read.

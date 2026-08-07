@@ -176,6 +176,20 @@ def insert_sample(samp_no: str, user, test_kit, test_lot, instrument_sn) -> int:
     return db.read_val("SELECT rowid FROM samples WHERE samp_no = ?", (samp_no,))
 
 
+def samp_no_for(rowid: Optional[int]) -> str:
+    """
+    Return the sample number of one row, or "" if there is not one.
+
+    Used by the capture runner to name the archive file after the sample it
+    belongs to.  Answers "" rather than raising for a capture launched from
+    the menu, which belongs to no sample at all — the caller then falls back
+    to naming the file after the capture time.
+    """
+    if rowid is None:
+        return ""
+    return db.read_val("SELECT samp_no FROM samples WHERE rowid = ?", (rowid,)) or ""
+
+
 def update_sample(rowid: int, **cols) -> int:
     """UPDATE the given columns of one sample row.  Unknown columns are ignored."""
     if rowid is None:

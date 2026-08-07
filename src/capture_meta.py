@@ -142,6 +142,35 @@ class MetaContext:
 
 # ── Generic helpers ─────────────────────────────────────────────────────────
 
+def timestamp_ms() -> str:
+    """
+    Return the current wall-clock time as text, to the millisecond.
+
+    The format is the one used everywhere else in this project, with three
+    more digits on the end: "2026-08-06 13:56:48.123". It sorts correctly as
+    plain text, reads without decoding, and stores in HDF5 as a string.
+
+    This is the only millisecond-resolution clock in the project. Everything
+    that records *when* something happened during a capture goes through it,
+    so the moments can be compared with each other:
+      - each LED switching on and off      (capture_runner, into the per-LED
+                                            metadata as led_on_dt/led_off_dt)
+      - each photograph being taken        (capture_runner, into each stored
+                                            dataset as the started_dt attr)
+
+    Not to be confused with the `samples` table's own milestone columns
+    (capture_start, reagent1_start and so on). Those are whole seconds since
+    the epoch, stamped by Arbiter.epoch(), and they mark steps of the
+    operator's protocol rather than the instrument's own actions.
+
+    Returns:
+        The current local time, e.g. "2026-08-06 13:56:48.123".
+    """
+    # strftime gives microseconds and has no millisecond code of its own, so
+    # the last three digits are trimmed off.
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+
+
 def _row_dict(table: str, columns: Tuple[str, ...],
               rowid: Optional[int]) -> Dict[str, Any]:
     """
@@ -352,6 +381,69 @@ ROOT_ATTR_PATHS: Tuple[Tuple[str, Tuple[str, ...]], ...] = (
     ("samp_no",       ("sample", "samp_no")),
     ("meta_version",  ("meta_version",)),
 )
+
+
+def update_archive_sample(archive_path, sample_rowid: Optional[int]) -> bool:
+    """
+    Reopen a finished archive and refresh the sample record inside it.
+
+    Why this exists
+    ---------------
+    collect() runs once, at the very start of a capture, because the ROI
+    geometry it records is what makes the stored images interpretable and a
+    run that fails partway must still leave a readable file. The cost of
+    writing that early is that most of the `samples` row does not exist yet:
+
+        known at the start   samp_no, user, test_kit, test_lot,
+                             instrument_sn, collect_dt, samp_grams,
+                             samp_degC, remark, reagent1_start/end
+        filled in later      reagent2_end, capture_start, capture_end,
+                             manual_read, h5file
+        later still          txt_result, num_result — these come from
+                             analysing the stored images, which may not even
+                             happen on this machine
+
+    Without this function every archive would keep saying those are empty
+    forever. Call it whenever the sample row has gained something worth
+    keeping; it is safe to call as many times as you like.
+
+    Only the `sample` block is replaced. Every other block — roi, camera,
+    config, device, run — keeps the values recorded during the run, which is
+    the point: the camera is long since closed and could not be asked again.
+
+    Args:
+        archive_path: Path of the .h5 file. Must exist and have been written
+            by schema version 2 or later.
+        sample_rowid: `samples.rowid` to re-read. None does nothing and
+            returns False, which is the normal case for a capture launched
+            from the menu rather than a protocol run.
+
+    Returns:
+        True if the archive was rewritten, False if there was nothing to do
+        or the attempt failed. Never raises: this runs after the images are
+        safely stored, so a failure here must not cost the operator a
+        capture. Failures are logged.
+
+    Example:
+        >>> update_archive_sample("captures/ZP1007.h5", 13)  # doctest: +SKIP
+        True
+    """
+    import capture_h5      # imported here, not at module scope: capture_h5
+                           # is the file layout and this module is the
+                           # content, and only this one function needs it
+
+    if sample_rowid is None or not archive_path:
+        return False
+    try:
+        meta = capture_h5.read_metadata(archive_path)
+        meta["sample"] = _row_dict("samples", SAMPLE_COLUMNS, sample_rowid)
+        capture_h5.replace_metadata(archive_path, meta, root_attrs(meta))
+    except Exception as e:      # noqa: BLE001 — the images are already safe
+        log.error("capture_meta: could not refresh the sample record in %s: %s",
+                  archive_path, e)
+        return False
+    log.info("capture_meta: refreshed the sample record in %s", archive_path)
+    return True
 
 
 def root_attrs(meta: Dict[str, Any]) -> Dict[str, Any]:

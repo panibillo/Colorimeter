@@ -27,6 +27,31 @@ import h5py
 import numpy as np
 
 
+def _as_json_text(obj) -> "str | None":
+    """
+    Return a dataset's contents as indented JSON, or None if it is not JSON.
+
+    Used by summary() to tell a stored metadata record apart from an image
+    array. A JSON record is a scalar dataset holding one string, so anything
+    with a shape, or anything whose text does not parse, is not one and is
+    left alone.
+
+    Args:
+        obj: An h5py dataset.
+
+    Returns:
+        Pretty-printed JSON text, or None.
+    """
+    if obj.shape != ():
+        return None
+    try:
+        raw = obj[()]
+        text = raw.decode("utf-8") if isinstance(raw, bytes) else raw
+        return json.dumps(json.loads(text), indent=2, sort_keys=True)
+    except Exception:       # noqa: BLE001 — not JSON, so not our business
+        return None
+
+
 class Hdf5Reader:
     """Generic HDF5 archive reader. Use as a context manager."""
 
@@ -69,8 +94,24 @@ class Hdf5Reader:
         """Return the names of immediate children (groups + datasets) of group_path."""
         return list(self._file[group_path].keys())
 
-    def summary(self) -> str:
-        """Return a printable summary of every group/dataset in the file."""
+    def summary(self, show_json: bool = True) -> str:
+        """
+        Return a printable summary of every group/dataset in the file.
+
+        JSON-text datasets — the ones write_metadata() produced, such as
+        /meta and each LED's led_metadata — are printed decoded and indented,
+        not as "shape=() dtype=object". Without that the sample record, the
+        ROI geometry and the camera settings are all in the file but invisible
+        to anyone reading this summary, which is exactly the confusion this
+        argument exists to prevent.
+
+        Args:
+            show_json: False prints just the shape of the JSON datasets, for
+                when the decoded records make the summary too long to scan.
+
+        Returns:
+            The summary as one string, ready to print.
+        """
         lines = [f"HDF5 file: {self._file.filename}"]
         root_attrs = dict(self._file.attrs)
         if root_attrs:
@@ -87,6 +128,10 @@ class Hdf5Reader:
                 else:
                     desc = f"shape={obj.shape} dtype={obj.dtype}"
                 lines.append(f"{indent}{name}  ({desc})")
+                text = _as_json_text(obj)
+                if show_json and text is not None:
+                    for line in text.splitlines():
+                        lines.append(f"{indent}    {line}")
             obj_attrs = dict(obj.attrs)
             if obj_attrs:
                 lines.append(f"{indent}  attrs: {obj_attrs}")

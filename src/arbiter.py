@@ -1895,6 +1895,16 @@ class Arbiter:
         owner.capturing = False
         self.persist(owner, capture_end=self.epoch(),
                      h5file=str(session.out_path) if session.out_path else "")
+        # The archive was written with a copy of the sample record taken
+        # before the first photograph, so it is missing everything decided
+        # since — including the capture_end and h5file persisted on the line
+        # above. Now that the file is closed, reopen it and put the current
+        # record in. Does nothing for a menu-launched capture, which has no
+        # sample. See capture_meta.update_archive_sample().
+        import capture_meta          # imported here, like the other capture
+                                     # modules, to keep it off the startup path
+        capture_meta.update_archive_sample(session.out_path,
+                                           owner.record.get("db_rowid"))
         self.goto(owner, "analysis")
         # A capture just freed the camera; re-enable a waiting CAPTURE button
         # on the other slot if it is the one being viewed (not, say, the Menu).
@@ -1999,6 +2009,13 @@ class Arbiter:
         self._analysis = None
         slot.result = "Analysis not yet implemented"
         self.persist(slot, txt_result=slot.result)
+        # The result is the last thing to reach the sample record, so refresh
+        # the archive's copy of it again here — the refresh done when the
+        # capture ended happened before this existed. Same call, second time;
+        # see capture_meta.update_archive_sample().
+        import capture_meta          # as in pump_capture — kept off startup
+        capture_meta.update_archive_sample(slot.record.get("h5file"),
+                                           slot.record.get("db_rowid"))
         log.info("Arbiter: analysis done for slot %s", slot.name)
         self.render(slot)
 
