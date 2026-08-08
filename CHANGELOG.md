@@ -33,6 +33,8 @@ sqlite3 src/colorimeter.sqlite \
 
 ## [Unreleased]
 
+## [0.4.0] — 2026-08-08
+
 Writes: archive schema 3 · meta 2 · database 2
 Reads:  archive schema 1–3 · meta 1–2 · database 2
 
