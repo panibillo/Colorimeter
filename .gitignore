@@ -19,6 +19,9 @@ image_view_check.png
 **.log
 docs/.~lock.*
 
+# Analysis
+devdesk/flatfield/**
+
 # ── Project source and configuration ─────────────────────────────────────
 # Re-included from the data rules above: hand-maintained files the project
 # cannot be rebuilt without. Negations must follow the rule they override,
