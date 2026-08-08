@@ -17,6 +17,9 @@
 # (touchscreen application) and dev/camtest8.py (command-line capture) — plus
 # the data files they read. See the end of this file for how to regenerate it.
 
+# ── License ──────────────────────────────────────────────────────────────
+LICENSE
+
 # ── Entry points ─────────────────────────────────────────────────────────
 src/main.py
 dev/camtest8.py
@@ -51,6 +54,7 @@ src/capture_runner.py
 src/capture_profile.py
 src/capture_session.py
 src/exposure_repo.py
+src/hdf5read.py
 src/hdf5write.py
 src/lighting_cal8.py
 src/sample_repo.py
@@ -72,20 +76,23 @@ src/logging_manager.py
 src/utils.py
 src/version.py
 
-# ── Db schema ────────────────────────────────────────────────────────────
+# ── Db schema and Configuration ──────────────────────────────────────────
 # The schema, so a unit with no reference colorimeter.sqlite to copy can build
 # a complete seeded one in place:  sqlite3 src/colorimeter.sqlite < src/db_DDL.sql
-# (idempotent).  The destructive companion, db_DDL_reset.sql, stays on the
-# desktop deliberately.
+# (idempotent).  
+# The destructive companion, db_DDL_reset.sql, stays on the desktop deliberately.
+# Instrument settings moved into the database's `config` table in 2026-08 —
 src/db_DDL.sql
+provisioning/config_defaults.sql
 
 # ── Mock hardware (desktop test doubles) ─────────────────────────────────
 src/mock/__init__.py
 
 # ── Configuration ────────────────────────────────────────────────────────
-# Instrument settings moved into the database's `config` table in 2026-08 —
 # see provisioning/config_defaults.sql, synced with db_DDL.sql below.
-#
+provisioning/config_defaults.sql
+
+# ── Instrument Lens Position ─────────────────────────────────────────────
 # The commissioned lens position.  bayer_cam.focus() restores this and skips
 # the autofocus sweep entirely; without the file every capture run sweeps,
 # which only means anything with a focus target on the stage.  Focus is a
@@ -94,11 +101,10 @@ src/mock/__init__.py
 # that is not written yet — so the commissioned value is shipped rather than
 # rediscovered per unit.
 #
-# ⚠ Syncing overwrites whatever the Pi holds, including a value it wrote
+# WARNING Syncing overwrites whatever the Pi holds, including a value it wrote
 # itself through save_focus_cal().  If a unit has been re-focused on the
 # device, pull that value back (sync_from_pi.sh) before pushing.
-config/focus_cal.json
-provisioning/config_defaults.sql
+# config/focus_cal.json
 
 # ── Tools run on the Pi ──────────────────────────────────────────────────
 src/calibrate_screen.py
