@@ -139,6 +139,105 @@ class TestRootAndLayout(CaptureSuiteWriterTestCase):
 
 
 # ---------------------------------------------------------------------------
+# Omitted layers — a layer measured and deliberately not stored
+# ---------------------------------------------------------------------------
+
+class TestOmittedLayers(CaptureSuiteWriterTestCase):
+    """
+    A Bayer layer with no usable signal is written as an empty placeholder
+    carrying its statistics, rather than 45 kB of noise or nothing at all.
+
+    Nothing at all was the tempting option and is the wrong one: an absent
+    dataset cannot say why it is absent, and a reader hunting for missing data
+    looks at the layer's own path first.
+    """
+
+    def test_kept_layers_are_unaffected(self):
+        with self.writer() as w:
+            w.add_lit("amber", "e3", _layers(100), exposure_us=45691,
+                      omit=("B",))
+        with h5py.File(self.path, "r") as f:
+            for ch in ("Gb", "Gr", "R"):
+                ds = f[f"/leds/amber/lit/e3/{ch}"]
+                self.assertEqual(ds.shape, (4, 3))
+                self.assertFalse(capture_h5.is_omitted(ds.attrs))
+
+    def test_omitted_layer_is_empty_but_present(self):
+        with self.writer() as w:
+            w.add_lit("amber", "e3", _layers(100), exposure_us=45691,
+                      omit=("B",))
+        with h5py.File(self.path, "r") as f:
+            ds = f["/leds/amber/lit/e3/B"]
+            self.assertEqual(ds.shape, (0, 0))    # ndim 2, like a real layer
+            self.assertEqual(ds.size, 0)
+            self.assertEqual(ds.id.get_storage_size(), 0)
+            self.assertTrue(capture_h5.is_omitted(ds.attrs))
+
+    def test_omitted_layer_keeps_the_ordinary_attrs(self):
+        """
+        exposure_us and captured_dt survive, so anything reading metadata
+        rather than pixels goes on working — hdf5inspect's exposure column,
+        for one, indexes R whether or not R holds an array.
+        """
+        with self.writer() as w:
+            w.add_lit("amber", "e3", _layers(100), exposure_us=45691,
+                      captured_dt="2026-08-06 13:56:48.123", omit=("B",))
+        with h5py.File(self.path, "r") as f:
+            attrs = f["/leds/amber/lit/e3/B"].attrs
+            self.assertEqual(attrs["exposure_us"], 45691)
+            self.assertEqual(attrs["captured_dt"], "2026-08-06 13:56:48.123")
+
+    def test_omitted_layer_records_what_was_seen(self):
+        """The five numbers standing in for the array. Raw DN, not signal."""
+        with self.writer() as w:
+            w.add_lit("amber", "e3", _layers(100), exposure_us=45691,
+                      omit=("B",))
+        with h5py.File(self.path, "r") as f:
+            attrs = f["/leds/amber/lit/e3/B"].attrs
+            # _layers fills B with 100 exactly.
+            self.assertEqual(attrs["raw_mean"], 100.0)
+            self.assertEqual(attrs["raw_min"], 100)
+            self.assertEqual(attrs["raw_max"], 100)
+            self.assertEqual(attrs["raw_p10"], 100.0)
+            self.assertEqual(attrs["raw_p90"], 100.0)
+
+    def test_dark_layers_can_be_omitted_too(self):
+        """
+        A dark layer exists to be subtracted from a lit one, so a channel no
+        lit frame kept has nothing to subtract from.
+        """
+        with self.writer() as w:
+            w.add_dark(_layers(10), exposure_us=45691, omit=("B", "Gb"))
+        with h5py.File(self.path, "r") as f:
+            for ch in ("B", "Gb"):
+                self.assertTrue(
+                    capture_h5.is_omitted(f[f"/dark/after_45691us/{ch}"].attrs))
+            for ch in ("Gr", "R"):
+                self.assertEqual(f[f"/dark/after_45691us/{ch}"].shape, (4, 3))
+
+    def test_default_keeps_everything(self):
+        """
+        A caller that knows nothing about layer screening behaves as before —
+        which is what keeps the calibration path and the offline converter
+        writing complete archives without being changed.
+        """
+        with self.writer() as w:
+            w.add_lit("amber", "e3", _layers(100), exposure_us=45691)
+            w.add_dark(_layers(10), exposure_us=45691)
+        with h5py.File(self.path, "r") as f:
+            for ch in ("B", "Gb", "Gr", "R"):
+                self.assertFalse(
+                    capture_h5.is_omitted(f[f"/leds/amber/lit/e3/{ch}"].attrs))
+                self.assertFalse(
+                    capture_h5.is_omitted(f[f"/dark/after_45691us/{ch}"].attrs))
+
+    def test_is_omitted_reads_a_plain_dict(self):
+        self.assertFalse(capture_h5.is_omitted({}))
+        self.assertFalse(capture_h5.is_omitted({"exposure_us": 1}))
+        self.assertTrue(capture_h5.is_omitted({"omitted": True}))
+
+
+# ---------------------------------------------------------------------------
 # Dark-frame deduplication — the guard the converter cannot reach
 # ---------------------------------------------------------------------------
 

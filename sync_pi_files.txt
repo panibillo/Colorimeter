@@ -56,6 +56,11 @@ src/capture_session.py
 src/exposure_repo.py
 src/hdf5read.py
 src/hdf5write.py
+# The flat-field result the capture path screens Bayer layers with, and the
+# analysis path will divide by.  Rows are fitted offline by
+# devdesk/flatfield_pool.py and carried over in colorimeter.sqlite; without
+# this module capture_runner dies at import.
+src/layermodel_repo.py
 src/lighting_cal8.py
 src/sample_repo.py
 

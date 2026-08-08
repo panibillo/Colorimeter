@@ -18,14 +18,15 @@
 -- scratch, run db_DDL_reset.sql first — that is the destructive one, and it is
 -- kept in a separate file precisely so it cannot be triggered by accident.
 --
--- Object inventory (6 tables):
+-- Object inventory (7 tables):
 --
---     colorcard   colour-calibration card patch geometry
---     config      every instrument setting — see config_repo.py
---     data        generic timestamped key/value measurements
---     exposure    calibrated exposure ladders, per LED and group
---     roi         regions of interest in camera stream coordinates
---     samples     one row per test run — the main record
+--     colorcard    colour-calibration card patch geometry
+--     config       every instrument setting — see config_repo.py
+--     data         generic timestamped key/value measurements
+--     exposure     calibrated exposure ladders, per LED and group
+--     layermodels  illumination correction, per LED and Bayer layer
+--     roi          regions of interest in camera stream coordinates
+--     samples      one row per test run — the main record
 --
 -- `device`, `users`, `testkit`, `testlot`, `defaults` and the
 -- `default_gui_vals` view were folded into `config` (see the note there);
@@ -223,6 +224,82 @@ CREATE TABLE IF NOT EXISTS roi (
 );
 
 CREATE INDEX IF NOT EXISTS ix_roi_name_active ON roi (name, active);
+
+
+-- ────────────────────────────────────────────────────────────────────────────
+-- layermodels — the illumination correction, one row per (LED, Bayer layer).
+--
+-- What a measurement actually needs from the flat-field analysis.  The sample
+-- ROI is imaged between two gray chips, all three collinear in x, so the
+-- illumination at the sample is a fixed linear combination of the two chip
+-- readings:
+--
+--     divisor = w1 * mean(roi1) + w2 * mean(roi2)
+--
+-- and the corrected sample mean is divided by it.  The polynomial that
+-- produced w1 and w2 is kept alongside (coef_json, norm_mean, deg_y, deg_x)
+-- as provenance — the instrument never evaluates it — so a moved ROI can be
+-- re-anchored without repeating the whole analysis.  See devdesk/flatfield.py
+-- and devdesk/flatfield_pool.py, which fit the field and write these rows, and
+-- src/layermodel_repo.py, which reads them.
+--
+-- There is deliberately no exposure key.  w1 and w2 are properties of the
+-- illumination geometry, and vary less than 0.2 % across an exposure ladder
+-- whose own repeatability floor is 0.4-0.8 %.  `exposure_us` is the reference
+-- exposure p10 and p90 were measured at, nothing more: a caller judging a
+-- different exposure scales them by (its own µs / exposure_us), which the
+-- sensor's linearity (better than 1.7 % across a ladder) supports.  Keying on
+-- exposure instead would break the moment the `exposure` table is
+-- recalibrated.
+--
+-- `active` and `usable` are independent, and neither may be read as the other:
+--   active = 1  this row is the one in force; 0 = superseded history, exactly
+--               as in `exposure`, `roi` and `config`.
+--   usable = 1  this LED/layer carries enough signal to be worth capturing and
+--               analysing; 0 = it never does at any exposure in the ladder, and
+--               w1/w2 are NULL.  The p10/p90 of an unusable row are kept as the
+--               evidence for that verdict.
+-- The capture path's keep-test is `WHERE active = 1 AND usable = 1`, plus the
+-- scaled percentile check against config capture.layer_keep_min_dn /
+-- layer_keep_max_dn.
+--
+-- p10, p90 and black_dn are in DN of the *dark-subtracted* signal, pooled over
+-- roisamp, roi1 and roi2 together.  (The `omitted` layer attributes an archive
+-- carries are raw DN — a different quantity, named differently on purpose.)
+--
+-- Seeded empty — rows are written by the offline flat-field analysis.
+-- ────────────────────────────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS layermodels (
+    rowid       INTEGER PRIMARY KEY
+                        NOT NULL,
+    active      INTEGER NOT NULL DEFAULT 1,  -- 1 = in force, 0 = superseded
+    usable      INTEGER NOT NULL DEFAULT 1,  -- 1 = worth capturing/analysing
+    add_dt      TEXT,                        -- local timestamp of the write
+    led_color   TEXT NOT NULL,               -- matches LEDBank colour names
+    bayer_layer TEXT NOT NULL,               -- 'R' | 'Gr' | 'Gb' | 'B'
+    exposure_us INTEGER NOT NULL,            -- reference exposure for p10/p90
+    roisamp     INTEGER,                     -- roi.rowid of the sample patch
+    roi1        INTEGER,                     -- roi.rowid of the first chip
+    w1          REAL,                        -- weight on mean(roi1)
+    roi2        INTEGER,                     -- roi.rowid of the second chip
+    w2          REAL,                        -- weight on mean(roi2)
+    p10         REAL,                        -- signal DN over the three
+    p90         REAL,                        --   patches, at exposure_us
+    black_dn    REAL,                        -- dark level they were taken from
+    roibound    INTEGER,                     -- roi.rowid of the fitted bound
+    deg_y       INTEGER,                     -- polynomial basis, y then x
+    deg_x       INTEGER,
+    coef_json   TEXT,                        -- coefficients, terms and domain
+    norm_mean   REAL,                        -- makes the surface unit-mean
+    anchor_form TEXT,                        -- '1anchor' | '2anchor'
+    rho         REAL,                        -- curvature correction (evidence)
+    loo_pct     REAL,                        -- leave-one-placement-out error %
+    analysisref TEXT,                        -- report set that produced it
+    remark      TEXT
+);
+
+CREATE INDEX IF NOT EXISTS ix_layermodels_led_layer_active
+    ON layermodels (led_color, bayer_layer, active);
 
 
 -- ────────────────────────────────────────────────────────────────────────────

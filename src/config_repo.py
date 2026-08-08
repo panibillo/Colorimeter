@@ -87,7 +87,8 @@ Public surface
 
     capture_dir() / capture_suite_id() / capture_archive_name()
     capture_led_color_order() / capture_camera_warmup_s()
-    capture_dark_prefetch_budget_s()
+    capture_prefetch_budget_s()
+    capture_layer_keep_min_dn() / capture_layer_keep_max_dn()
     inspection_exposure_us() / default_focus_diopter()
     reagent1_secs() / reagent2_secs() / analysis_secs()
     main_loop_poll_s() / shutdown_timeout_s()
@@ -758,9 +759,47 @@ def capture_camera_warmup_s() -> float:
     return float(get("capture", "camera_warmup_s"))
 
 
-def capture_dark_prefetch_budget_s() -> float:
-    """Reserved time for dark-frame prefetch batch during reagent2 countdown."""
-    return float(get("capture", "dark_prefetch_budget_s"))
+def capture_prefetch_budget_s() -> float:
+    """
+    Reserved time for the normal path's prefetch stage, in seconds.
+
+    How long before a reagent2 countdown expires the arbiter starts
+    CaptureRunner.run_prefetch(), so its work is finished by the time CAPTURE
+    becomes reachable.  Also part of how early the shared camera is opened —
+    see arbiter._camera_open_lead_s().
+
+    Was `dark_prefetch_budget_s`, and was 20 s because the stage took a batch
+    of thirty dark frames.  It no longer does: every dark frame is taken after
+    the LED sweep now, and what is left here is camera setup and focus.  Worth
+    re-measuring with src/capture_profile.py rather than assuming the old
+    number still fits.
+    """
+    return float(get("capture", "prefetch_budget_s"))
+
+
+def capture_layer_keep_min_dn() -> int:
+    """
+    Floor below which a Bayer layer is too dark to be worth storing, in DN.
+
+    Compared against the layer's tenth-percentile dark-subtracted signal, taken
+    from `layermodels` and scaled to the exposure actually being captured — see
+    layermodel_repo.keep_channels().  The seeded 96 DN is a tenth of the
+    sensor's 959 DN usable range (1023 minus a 64 DN black level), matching the
+    threshold the offline flat-field analysis calls under-exposed.
+    """
+    return int(get("capture", "layer_keep_min_dn"))
+
+
+def capture_layer_keep_max_dn() -> int:
+    """
+    Ceiling above which a Bayer layer is too bright to be worth storing, in DN.
+
+    The companion to capture_layer_keep_min_dn(), compared against the layer's
+    ninetieth-percentile signal.  The seeded 863 DN is nine tenths of the same
+    959 DN range, so a layer whose bright end is approaching the sensor's
+    non-linear knee is rejected rather than stored and later distrusted.
+    """
+    return int(get("capture", "layer_keep_max_dn"))
 
 
 # ── Protocol timing ─────────────────────────────────────────────────────────

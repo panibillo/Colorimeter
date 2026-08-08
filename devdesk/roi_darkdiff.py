@@ -3,6 +3,15 @@ roi_darkdiff.py — dark before/after diff stats over hardcoded ROI rects.
 --------------------------------------------------------------------------
 Desktop-only developer tool. Not synced to the Pi (see sync_pi_files.txt).
 
+HISTORICAL ARCHIVES ONLY. This tool needs both a "before" and an "after" dark
+batch, and only normal-path archives captured before 2026-08 have both — the
+"before" batch was dropped once this had answered its question, because it
+cost 30 settled captures and 5.3 MB of every run. Point this at a newer
+archive and it correctly reports finding no matched pairs; that is the tool
+working, not failing. Kept because the archives it applies to are kept, and
+because a future change to the sensor or its cooling would make the question
+live again.
+
 Knows about four fixed regions of interest, defined in pixel coordinates
 (x, y, w, h) relative to the per-channel ROI layer arrays stored under
 /dark/<when>_<us>us/<ch> (typically 315x98 or 330x98, rows x cols):

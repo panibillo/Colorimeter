@@ -54,6 +54,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
+import capture_h5  # noqa: E402
 import version  # noqa: E402
 from hdf5read import Hdf5Reader  # noqa: E402
 
@@ -130,13 +131,59 @@ def has_jpeg(reader: Hdf5Reader, color: str) -> bool:
         return False
 
 
+def lit_stored_channels(reader: Hdf5Reader, color: str, label: str) -> list:
+    """
+    Return the Bayer channels one lit exposure actually stored an array for.
+
+    From capture_h5 schema 3 onward a layer with no usable signal is written
+    as an empty placeholder carrying its statistics — see capture_h5's
+    OMITTED_ATTR.  It is still a dataset, and still has its exposure_us, so
+    anything that only wants attributes can go on reading it; anything that
+    wants pixels must come through here first.
+
+    Args:
+        reader: Open Hdf5Reader for the archive.
+        color: LED color name.
+        label: Lit exposure label.
+
+    Returns:
+        Channel names in BAYER_CHANNELS order, possibly empty.
+    """
+    kept = []
+    for ch in BAYER_CHANNELS:
+        try:
+            attrs = reader.attrs(f"/leds/{color}/lit/{label}/{ch}")
+        except KeyError:
+            continue
+        if not capture_h5.is_omitted(attrs):
+            kept.append(ch)
+    return kept
+
+
 def lit_channel_shape(reader: Hdf5Reader, color: str, label: str):
-    """Return the (rows, cols) shape shared by all 4 channel datasets."""
-    return reader.read_array(f"/leds/{color}/lit/{label}/R").shape
+    """
+    Return the (rows, cols) shape shared by the stored channel datasets.
+
+    Reads the first channel that holds an array rather than always R: an
+    under-exposed R — royal_blue's, say — is stored empty, and its (0, 0) would
+    otherwise be reported as the archive's frame size.
+
+    Returns:
+        (rows, cols), or (0, 0) if this exposure stored no arrays at all.
+    """
+    kept = lit_stored_channels(reader, color, label)
+    if not kept:
+        return (0, 0)
+    return reader.read_array(f"/leds/{color}/lit/{label}/{kept[0]}").shape
 
 
 def lit_exposure_us(reader: Hdf5Reader, color: str, label: str) -> int:
-    """Return the exposure_us attr for one LED's lit exposure label."""
+    """
+    Return the exposure_us attr for one LED's lit exposure label.
+
+    Reads R unconditionally, and correctly so: an omitted layer keeps every
+    attribute a stored one has, exposure_us included.  Only pixels go missing.
+    """
     return reader.attrs(f"/leds/{color}/lit/{label}/R")["exposure_us"]
 
 
@@ -190,7 +237,7 @@ def summary_rows(reader: Hdf5Reader, color: str) -> list:
     if jpeg_present:
         labels.add("e3")
     if not labels:
-        return [(color, "-", "-", "-", "-")]
+        return [(color, "-", "-", "-", "-", "-")]
 
     jpeg_bytes = (
         len(reader.read_bytes(f"/leds/{color}/jpeg_e3"))
@@ -204,11 +251,17 @@ def summary_rows(reader: Hdf5Reader, color: str) -> list:
             exp = str(lit_exposure_us(reader, color, label))
             shape = lit_channel_shape(reader, color, label)
             shape_s = f"{shape[0]}x{shape[1]}"
+            # Which layers hold pixels. An archive from before capture_h5
+            # schema 3 always holds all four, so this reads as "R Gr Gb B"
+            # there and needs no version test.
+            kept = lit_stored_channels(reader, color, label)
+            layers_s = "+".join(kept) if kept else "(none)"
         else:
             exp = "-"
             shape_s = "-"
+            layers_s = "-"
         jpeg_s = str(jpeg_bytes) if (jpeg_present and label == "e3") else "-"
-        rows.append((color, label, exp, jpeg_s, shape_s))
+        rows.append((color, label, exp, jpeg_s, shape_s, layers_s))
     return rows
 
 
@@ -227,12 +280,13 @@ def cmd_summary(reader: Hdf5Reader, h5_path: Path) -> None:
     col_w = max(len("color_name"), max(len(r[0]) for r in all_rows)) + 1
     header = (
         f"{'color_name':<{col_w}}{'e#':<4}{'exposure_us':>12}  "
-        f"{'jpegsize':>10}  {'roi_shape':>10}"
+        f"{'jpegsize':>10}  {'roi_shape':>10}  {'layers':<12}"
     )
     print(header)
     print("-" * len(header))
-    for color, label, exp, jpeg, shape in all_rows:
-        print(f"{color:<{col_w}}{label:<4}{exp:>12}  {jpeg:>10}  {shape:>10}")
+    for color, label, exp, jpeg, shape, layers in all_rows:
+        print(f"{color:<{col_w}}{label:<4}{exp:>12}  {jpeg:>10}  "
+              f"{shape:>10}  {layers:<12}")
 
 
 # ── Mode 2: jpeg extraction ──────────────────────────────────────────
@@ -490,7 +544,19 @@ def cmd_write_db(reader: Hdf5Reader, h5_path: Path, db_path: Path) -> None:
 
                 exposure_us = int(lit_exposure_us(reader, color, label))
                 dark_group = f"/leds/{color}/dark/{dark_link}"
-                for ch in BAYER_CHANNELS:
+                stored = lit_stored_channels(reader, color, label)
+                if len(stored) < len(BAYER_CHANNELS):
+                    gone = [c for c in BAYER_CHANNELS if c not in stored]
+                    print(f"  {color}/{label}: {'+'.join(gone)} not stored "
+                          f"(too little signal)")
+                for ch in stored:
+                    # The dark layer can be omitted too — the capture path
+                    # stores one only where a lit layer needs it — so check
+                    # this side as well rather than assuming the pair.
+                    if capture_h5.is_omitted(reader.attrs(f"{dark_group}/{ch}")):
+                        print(f"  skip {color}/{label}/{ch}: dark not stored")
+                        skipped += 1
+                        continue
                     lit = reader.read_array(
                         f"/leds/{color}/lit/{label}/{ch}"
                     ).astype(np.float64)

@@ -79,7 +79,7 @@ from typing import Dict, Optional, Tuple
 __version__ = "0.3.0"
 
 # (oldest, newest) format version this checkout can read, inclusive.
-READS_SCHEMA: Tuple[int, int] = (1, 2)   # .h5 layout,  capture_h5
+READS_SCHEMA: Tuple[int, int] = (1, 3)   # .h5 layout,  capture_h5
 READS_META:   Tuple[int, int] = (1, 2)   # /meta shape, capture_meta
 READS_DB:     Tuple[int, int] = (2, 2)   # SQLite,      db_bootstrap
 

@@ -22,8 +22,18 @@ The archives were captured against bound roi.rowid 26 (806, 386, 732, 728);
 the analysis is over roi.rowid 39 (992, 588, 366, 260), which is interior to
 it, so every stored layer is subcropped before anything else happens.
 
+This run **publishes**: it puts its result in force in the instrument
+database's `layermodels` table, which is what the capture path screens Bayer
+layers with and what the analysis path will divide by.  Prior rows are
+superseded (active = 0), never deleted, so a publish is undoable by hand.  Pass
+--no-publish to analyse without touching that table.
+
+Note that src/colorimeter.sqlite here is the *desktop's* copy; the instrument
+carries its own.  Getting the rows across is a manual step.
+
 Usage:
     .venv/bin/python3 devdesk/run_bound39a.py
+    .venv/bin/python3 devdesk/run_bound39a.py --no-figures --no-publish
 """
 
 import sys
@@ -32,6 +42,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from flatfield_pool import analyze  # noqa: E402
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
 
 FILES = (
     ("ZP1001_grayA1a.h5", 26, "A1"),
@@ -42,6 +54,7 @@ FILES = (
 )
 
 if __name__ == "__main__":
+    publish = "--no-publish" not in sys.argv
     analyze(
         files=FILES,          # (archive, the roi.rowid it was cropped to,
                               #  placement); older archives record no bound,
@@ -51,4 +64,7 @@ if __name__ == "__main__":
         writedir="devdesk/flatfield/bound39a",
         rotated=("A180",),    # placements imaged end for end
         figures="--no-figures" not in sys.argv,
+        layermodels_db=(REPO_ROOT / "src" / "colorimeter.sqlite"
+                        if publish else None),
+        analysisref="bound39a",
     )

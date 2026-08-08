@@ -718,7 +718,7 @@ class TestNormalMode(RunnerTestCase):
 
 
 # ---------------------------------------------------------------------------
-# Normal path: prefetch/capture split (dark-frame prefetch during reagent2)
+# Normal path: prefetch/capture split (camera setup and focus during reagent2)
 # ---------------------------------------------------------------------------
 
 class TestNormalModePrefetchSplit(RunnerTestCase):
@@ -751,33 +751,52 @@ class TestNormalModePrefetchSplit(RunnerTestCase):
         super().tearDown()
 
     def make_runner(self, **kwargs):
-        """Defaults to both calibrated colors — the split is about the dark
-        batches either side of the sweep, so it needs more than one LED."""
+        """Defaults to both calibrated colors — the split is about what runs
+        before the sweep and what runs after it, so it needs more than one
+        LED."""
         kwargs.setdefault("led_colors", ["amber", "blue"])
         return super().make_runner(**kwargs)
 
-    def test_prefetch_then_capture_produces_before_and_after_darks(self):
+    def test_prefetch_takes_no_photographs(self):
+        """
+        The prefetch stage opens the archive and stops.
+
+        It used to take a whole "before" batch of dark frames here as well,
+        and both batches were kept so a reader could difference them for
+        sensor drift.  That question was answered; the batch was not worth 30
+        settled captures and 5.3 MB every run.  What is left is the work that
+        genuinely can happen before the operator is ready: camera setup and
+        focus.
+        """
         runner = self.make_runner(mode="normal", exposure_group="1")
         list(runner.run_prefetch())
         # Prefetch must leave the archive open for run_capture(), not closed.
         self.assertIsNotNone(runner._writer)
+        with self.archive(runner) as f:
+            self.assertNotIn("/dark", f)
+            self.assertNotIn("/leds", f)
+
+    def test_capture_produces_one_dark_batch_after_the_sweep(self):
+        runner = self.make_runner(mode="normal", exposure_group="1")
+        list(runner.run_prefetch())
         list(runner.run_capture())
         with self.archive(runner) as f:
             dark_groups = sorted(f["/dark"])
-            self.assertTrue(any(k.startswith("before_") for k in dark_groups))
-            self.assertTrue(any(k.startswith("after_") for k in dark_groups))
+            self.assertTrue(dark_groups)
+            self.assertFalse([k for k in dark_groups if k.startswith("before_")])
+            self.assertTrue(all(k.startswith("after_") for k in dark_groups))
             for color in ("amber", "blue"):
-                self.assertIn(f"/leds/{color}/dark/before_e0", f)
                 self.assertIn(f"/leds/{color}/dark/after_e0", f)
+                self.assertNotIn(f"/leds/{color}/dark/before_e0", f)
 
     def test_run_chains_prefetch_and_capture_for_fallback_path(self):
-        """run() (no split) must still produce both before/after batches."""
+        """run() (no split) must still produce the one dark batch."""
         runner = self.make_runner(mode="normal", exposure_group="1")
         self.run_to_completion(runner)
         with self.archive(runner) as f:
             dark_groups = sorted(f["/dark"])
-            self.assertTrue(any(k.startswith("before_") for k in dark_groups))
-            self.assertTrue(any(k.startswith("after_") for k in dark_groups))
+            self.assertTrue(dark_groups)
+            self.assertTrue(all(k.startswith("after_") for k in dark_groups))
 
     def test_abandoning_prefetch_closes_the_archive(self):
         """

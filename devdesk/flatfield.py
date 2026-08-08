@@ -117,6 +117,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
+import capture_h5  # noqa: E402
 import version  # noqa: E402
 from hdf5read import Hdf5Reader  # noqa: E402
 from rect import Rect  # noqa: E402
@@ -323,6 +324,42 @@ class Frame:
         return float(diff.std() / np.sqrt(2.0) / self.mean * 100.0)
 
 
+def read_layer(reader: Hdf5Reader, path: str) -> np.ndarray:
+    """
+    Read one Bayer-layer dataset, refusing one the archive did not store.
+
+    From capture_h5 schema 3 onward a layer with no usable signal is written as
+    an empty placeholder carrying its statistics instead of 45 kB of noise (see
+    capture_h5.OMITTED_ATTR).  An omitted layer is raised as KeyError, the same
+    thing an absent one raises, because every caller here already treats a
+    missing combination as one to skip — so this needs no new handling
+    anywhere, only this one place to translate.
+
+    Without it the failure would be silent and strange: a (0, 0) array
+    subtracted from another (0, 0) array is a perfectly well-formed frame with
+    no pixels in it, and the first thing to go wrong would be a fit reporting
+    nan several steps later.
+
+    Args:
+        reader: Open Hdf5Reader for the archive.
+        path: Dataset path, e.g. '/leds/green/lit/e1/Gr'.
+
+    Returns:
+        The layer as float64.
+
+    Raises:
+        KeyError: The dataset is absent, or is present but omitted.
+
+    Example:
+        >>> read_layer(reader, "/leds/green/lit/e1/Gr").shape  # doctest: +SKIP
+        (364, 366)
+    """
+    if capture_h5.is_omitted(reader.attrs(path)):
+        raise KeyError(f"{path} was measured and not stored (too little "
+                       f"signal); the archive keeps only its statistics")
+    return reader.read_array(path).astype(np.float64)
+
+
 def load_frame(reader: Hdf5Reader, led: str, label: str,
                channel: str) -> Frame:
     """
@@ -348,7 +385,8 @@ def load_frame(reader: Hdf5Reader, led: str, label: str,
         A Frame. Check `.usable` before fitting it.
 
     Raises:
-        KeyError: The lit dataset or its dark counterpart is absent.
+        KeyError: The lit dataset or its dark counterpart is absent, or was
+            measured and deliberately not stored — see read_layer().
 
     Example:
         >>> f = load_frame(reader, 'green', 'e1', 'Gr')    # doctest: +SKIP
@@ -359,10 +397,8 @@ def load_frame(reader: Hdf5Reader, led: str, label: str,
     if dark_link is None:
         raise KeyError(f"/leds/{led}/dark has no group matching '{label}'")
 
-    lit = reader.read_array(
-        f"/leds/{led}/lit/{label}/{channel}").astype(np.float64)
-    dark = reader.read_array(
-        f"/leds/{led}/dark/{dark_link}/{channel}").astype(np.float64)
+    lit = read_layer(reader, f"/leds/{led}/lit/{label}/{channel}")
+    dark = read_layer(reader, f"/leds/{led}/dark/{dark_link}/{channel}")
     signal = lit - dark
     mask = (lit < SATURATED_DN) & (signal > 0.0)
 

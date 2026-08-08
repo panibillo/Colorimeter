@@ -79,6 +79,27 @@ Three things follow, and they shape this module:
      sample lie along x, so predicting one from the other two is a question
      about curvature in x.  An (n,1) basis has none and misses by 1.7 - 4.6 %.
 
+Where the answers go
+--------------------
+Three destinations, and only the last one leaves the desktop:
+
+    devdesk/flatfield/<ref>/     five reports and the figures
+    devdesk/flatfield.sqlite     `flatfield` (coefficients) and `anchor`
+                                 (every rung's weights) — development history
+    src/colorimeter.sqlite       `layermodels` — one row per LED x layer, the
+                                 reduced result the instrument reads
+
+The last is opt-in: pass `layermodels_db=` to analyze(), which
+`run_bound39a.py` does.  It puts new weights **in force**, superseding the
+previous rows rather than deleting them.  See build_layermodels() for which
+cell becomes which row, and src/layermodel_repo.py for what reads them back.
+
+The `anchor` table keeps a row per (LED, layer, exposure); `layermodels` keeps
+one per (LED, layer).  That is not a loss: across the ladder the weights move
+under 0.2 %, against a 0.4-0.8 % placement floor, so the exposure axis carries
+no signal.  Only p10 and p90 depend on exposure, and those are published at a
+reference exposure for the capture path to scale.
+
 Coordinate spaces
 -----------------
 As in `flatfield.py`: everything works in **bound-crop Bayer-layer**
@@ -109,6 +130,8 @@ from flatfield import (BAYER_CHANNELS, FLOOR_PCT, MAX_MASKED_FRACTION,  # noqa: 
                        RAW_MAX, SATURATED_DN, STREAM_MODEL, STREAM_H, STREAM_W,
                        Frame, Patches)
 import db_manager  # noqa: E402
+import layermodel_repo  # noqa: E402
+from layermodel_repo import LayerModel  # noqa: E402
 from hdf5read import Hdf5Reader  # noqa: E402
 from rect import Rect  # noqa: E402
 import roi as roi_mod  # noqa: E402
@@ -130,6 +153,14 @@ DEGREES: Tuple[Tuple[int, int], ...] = (
 # electrons to measure, and over-exposed when its brightest are near the knee.
 UNDER_FRAC, UNDER_PCTL = 0.10, 1.0
 OVER_FRAC, OVER_PCTL = 0.90, 99.0
+
+# Percentiles published to the instrument as `layermodels.p10` and `p90`, taken
+# over the three patches together rather than the whole crop.  Wider than the
+# 1/99 pair above on purpose: those are extreme-value statistics for spotting
+# clipping and dead pixels in this analysis, whereas these describe the bulk of
+# the pixels a measurement will average, and the capture path screens layers
+# against them.  Two questions, two statistics — see Pool.patch_percentiles().
+KEEP_LO_PCTL, KEEP_HI_PCTL = 10.0, 90.0
 
 # Longest exposure the instrument will actually run, for the reachability flag
 # on the minimum-exposure advice.  Nothing enforces this; it is the number the
@@ -480,6 +511,49 @@ class Pool:
         return {f: {n: ff_mod.patch_mean(sig, r) for n, r in rects.items()}
                 for f, sig in self.by_file.items()}
 
+    def patch_percentiles(self, rects: Dict[str, Tuple[int, int, int, int]],
+                          lo: float, hi: float) -> Tuple[float, float]:
+        """
+        Return two percentiles of the pooled signal over the patches together.
+
+        Deliberately over the union of the patch pixels rather than the whole
+        crop: whether an exposure is worth capturing is a question about the
+        three little squares that get measured, not about the surrounding
+        field, which is a good deal darker at its corners and would drag the
+        low percentile down for no reason.
+
+        Masked pixels are excluded, so a dead pixel cannot masquerade as
+        under-exposure.  Every patch contributes every one of its pixels, so a
+        larger patch weighs proportionally more — which is what is wanted here,
+        since the question is about the population of pixels that will be
+        averaged.
+
+        Args:
+            rects: Patch rectangles in crop layer coordinates.
+            lo: Lower percentile, 0-100.
+            hi: Upper percentile, 0-100.
+
+        Returns:
+            (value at `lo`, value at `hi`) in DN.  (nan, nan) if the patches
+            hold no unmasked pixels at all.
+
+        Example:
+            >>> pool.patch_percentiles(geom.patches.rects, 10.0, 90.0)
+            ...                                             # doctest: +SKIP
+            (402.1, 790.4)
+        """
+        signal, mask = self.frame.signal, self.frame.mask
+        pixels: List[np.ndarray] = []
+        for x, y, w, h in rects.values():
+            sub = signal[y:y + h, x:x + w]
+            sub_mask = mask[y:y + h, x:x + w]
+            pixels.append(sub[sub_mask] if sub_mask.any() else sub.ravel())
+        pooled = np.concatenate(pixels) if pixels else np.empty(0)
+        if pooled.size == 0:
+            return (float("nan"), float("nan"))
+        return (float(np.percentile(pooled, lo)),
+                float(np.percentile(pooled, hi)))
+
 
 def load_pool(captures: Sequence[Capture], led: str, label: str,
               channel: str) -> Pool:
@@ -512,7 +586,10 @@ def load_pool(captures: Sequence[Capture], led: str, label: str,
         A Pool.
 
     Raises:
-        KeyError: The lit dataset or its dark counterpart is absent.
+        KeyError: The lit dataset or its dark counterpart is absent, or was
+            measured and deliberately not stored — see flatfield.read_layer().
+            analyze() catches this and moves on, which is what makes a pooled
+            run tolerate archives that dropped their under-exposed layers.
         ValueError: The captures disagree on exposure time, which would make
             the pooled frame a blend of two different measurements.
     """
@@ -530,11 +607,10 @@ def load_pool(captures: Sequence[Capture], led: str, label: str,
             raise KeyError(
                 f"{cap.name}: /leds/{led}/dark has no group matching "
                 f"'{label}'")
-        lit = r.read_array(
-            f"/leds/{led}/lit/{label}/{channel}").astype(np.float64)[cap.slices]
-        dark = r.read_array(
-            f"/leds/{led}/dark/{dark_link}/{channel}"
-        ).astype(np.float64)[cap.slices]
+        lit = ff_mod.read_layer(
+            r, f"/leds/{led}/lit/{label}/{channel}")[cap.slices]
+        dark = ff_mod.read_layer(
+            r, f"/leds/{led}/dark/{dark_link}/{channel}")[cap.slices]
 
         signal = lit - dark
         masks.append((lit < SATURATED_DN) & (signal > 0.0))
@@ -592,6 +668,11 @@ class Cell:
         noise_pct: The criterion-P noise floor this cell carries.
         spread_pct: Largest chip/sample patch-mean spread across the raw
             captures, relative to the pooled mean.
+        patch_p10, patch_p90: KEEP_LO_PCTL and KEEP_HI_PCTL of the signal over
+            the three patches together — the pair published to the instrument
+            as `layermodels.p10` and `p90`.  Not the same statistic as p_lo and
+            p_hi above, which are 1/99 over the whole crop; see
+            Pool.patch_percentiles() for why the two differ.
     """
     pool: Pool
     group: str
@@ -602,6 +683,8 @@ class Cell:
     reachable: bool
     noise_pct: float
     spread_pct: float
+    patch_p10: float
+    patch_p90: float
 
 
 def classify(pool: Pool, patches: Patches) -> Cell:
@@ -655,11 +738,15 @@ def classify(pool: Pool, patches: Patches) -> Cell:
         spread = max(spread, 100.0 * (max(vals) - min(vals))
                      / max(np.mean(vals), 1e-9))
 
+    patch_p10, patch_p90 = pool.patch_percentiles(
+        patches.rects, KEEP_LO_PCTL, KEEP_HI_PCTL)
+
     return Cell(pool=pool, group=group, p_lo=p_lo, p_hi=p_hi,
                 us_min=us_min, us_max=us_max,
                 reachable=advised is None or advised <= MAX_PRACTICAL_US,
                 noise_pct=ff_mod.p_noise_pct(pool.frame, patches),
-                spread_pct=spread)
+                spread_pct=spread,
+                patch_p10=patch_p10, patch_p90=patch_p90)
 
 
 # ── Anchoring: the deliverable ──────────────────────────────────────
@@ -996,6 +1083,9 @@ class Result:
         led, label, channel, exposure_us: What the cell is.
         group: ACCEPTABLE, OVER or UNDER.
         mean, p_lo, p_hi, masked_pct, black: Exposure statistics in DN.
+        patch_p10, patch_p90: The pair published as `layermodels.p10`/`p90`,
+            taken over the three patches together — see
+            Pool.patch_percentiles().
         noise_pct, spread_pct: The criterion-P noise floor and the largest
             patch-mean spread across raw captures.
         us_min, us_max, reachable: The exposure advice, if any.
@@ -1013,6 +1103,8 @@ class Result:
     mean: float
     p_lo: float
     p_hi: float
+    patch_p10: float
+    patch_p90: float
     masked_pct: float
     black: float
     noise_pct: float
@@ -1066,6 +1158,7 @@ def analyse_cell(pool: Pool, geom: Geometry,
         led=pool.led, label=pool.label, channel=pool.channel,
         exposure_us=pool.exposure_us, group=cell.group,
         mean=pool.frame.mean, p_lo=cell.p_lo, p_hi=cell.p_hi,
+        patch_p10=cell.patch_p10, patch_p90=cell.patch_p90,
         masked_pct=100.0 * pool.frame.masked_fraction, black=pool.black,
         noise_pct=cell.noise_pct, spread_pct=cell.spread_pct,
         us_min=cell.us_min, us_max=cell.us_max, reachable=cell.reachable,
@@ -1143,13 +1236,19 @@ def write_cells_report(path: Path, results: Sequence[Result],
         f"Advice is one linear scaling of the exposure used; the sensor is "
         f"linear to under 1.7 %\nacross the ladder, so the neighbouring rung "
         f"adds nothing.\n\n")
+    lines.append(
+        f"p01/p99 are over the whole crop, and decide the group. p10/p90 are "
+        f"over the three\npatches together, and are what reaches the "
+        f"instrument as layermodels.p10/p90.\n\n")
     lines.append(f"  {'led':<11} {'e#':<3} {'ch':<3} {'exp_us':>7} "
                  f"{'group':<10} {'mean':>7} {'p01':>7} {'p99':>7} "
+                 f"{'p10':>7} {'p90':>7} "
                  f"{'mask%':>6} {'sprd%':>6} {'noise%':>7}  advice\n")
     for r in results:
         lines.append(
             f"  {r.led:<11} {r.label:<3} {r.channel:<3} {r.exposure_us:>7} "
             f"{r.group:<10} {r.mean:>7.1f} {r.p_lo:>7.1f} {r.p_hi:>7.1f} "
+            f"{r.patch_p10:>7.1f} {r.patch_p90:>7.1f} "
             f"{r.masked_pct:>6.2f} {_pct(r.spread_pct)} "
             f"{_pct(r.noise_pct, 7, 3)}  {r.advice}\n")
 
@@ -1435,6 +1534,111 @@ def write_summary_report(path: Path, results: Sequence[Result],
     path.write_text("".join(lines))
 
 
+def write_layermodels_report(path: Path, models: Sequence["LayerModel"],
+                             captures: Sequence[Capture], geom: Geometry,
+                             db_path: Optional[Path] = None) -> None:
+    """
+    Write the rows published to the instrument, one line per LED x layer.
+
+    The last report in the run, and the only one describing something outside
+    devdesk/: everything else documents the analysis, this documents what was
+    handed over.  Read it to answer "what will the instrument actually do"
+    without opening colorimeter.sqlite.
+
+    Args:
+        path: Output file.
+        models: The rows, from build_layermodels().
+        captures: The open captures, for the heading.
+        geom: The target geometry.
+        db_path: The database written to, named in the heading, or None if the
+            rows were built but not published.
+
+    Returns:
+        None.
+    """
+    lines = [_preamble(captures, geom, "Published to the instrument "
+                                       "(layermodels)")]
+    lines.append(
+        f"target     : {db_path if db_path else '(not written)'}\n\n"
+        f"One row per LED colour x Bayer layer. w1 and w2 are what a "
+        f"measurement multiplies\nthe two chip means by:  divisor = w1 * "
+        f"mean(chip1) + w2 * mean(chip2).\n\n"
+        f"There is no exposure key. w1 and w2 move less than 0.2 % across the "
+        f"ladder, well\nunder the 0.4-0.8 % placement floor, so exposure_us is "
+        f"only the reference p10 and\np90 were measured at; the capture path "
+        f"scales them to whatever it is about to\nshoot.\n\n")
+
+    lines.append(f"  {'led':<11} {'ch':<3} {'use':>3} {'ref_us':>7} "
+                 f"{'w1':>8} {'w2':>8} {'wsum':>8} {'rho':>7} "
+                 f"{'p10':>7} {'p90':>7} {'deg':>6} {'form':<8} "
+                 f"{'loo%':>6}  remark\n")
+    for m in models:
+        w1 = f"{m.w1:>8.4f}" if m.w1 is not None else f"{'-':>8}"
+        w2 = f"{m.w2:>8.4f}" if m.w2 is not None else f"{'-':>8}"
+        wsum = (f"{m.w1 + m.w2:>8.4f}" if m.w1 is not None and m.w2 is not None
+                else f"{'-':>8}")
+        rho = f"{m.rho:>7.4f}" if m.rho is not None else f"{'-':>7}"
+        deg = (f"{f'({m.deg_y},{m.deg_x})':>6}" if m.deg_y is not None
+               else f"{'-':>6}")
+        loo = f"{m.loo_pct:>6.3f}" if m.loo_pct is not None else f"{'-':>6}"
+        lines.append(
+            f"  {m.led_color:<11} {m.bayer_layer:<3} "
+            f"{'yes' if m.usable else 'no':>3} {m.exposure_us:>7} "
+            f"{w1} {w2} {wsum} {rho} "
+            f"{m.p10:>7.1f} {m.p90:>7.1f} {deg} {(m.anchor_form or '-'):<8} "
+            f"{loo}  {m.remark or ''}\n")
+
+    usable = [m for m in models if m.usable]
+    lines.append(f"\n{len(models)} rows: {len(usable)} usable, "
+                 f"{len(models) - len(usable)} not.\n")
+    if usable:
+        sums = [m.w1 + m.w2 for m in usable]
+        lines.append(
+            f"w1 + w2 spans {min(sums):.4f} - {max(sums):.4f} "
+            f"(median {np.median(sums):.4f}).\nA sum of 1.0 would mean the "
+            f"sample's illumination is the plain interpolation of\nthe two "
+            f"chips; the departure is what the polynomial was fitted to find.\n")
+
+    # The verdict and the published window are two different statistics — the
+    # group came from p01/p99 over the whole crop, p10/p90 are over the patches
+    # — so they could in principle disagree, and a disagreement would have the
+    # instrument discard a layer this run fitted a model for.  Check, and say
+    # so either way rather than leaving it to be discovered later.
+    conflicts = []
+    for m in usable:
+        full = RAW_MAX - (m.black_dn if m.black_dn is not None else 0.0)
+        if m.p10 < UNDER_FRAC * full or m.p90 > OVER_FRAC * full:
+            conflicts.append(m)
+    if conflicts:
+        lines.append(
+            f"\nWARNING: {len(conflicts)} usable row(s) fall outside the "
+            f"{UNDER_FRAC:.0%}-{OVER_FRAC:.0%} window their own\np10/p90 will "
+            f"be screened against, so the instrument would drop a layer this "
+            f"run\nfitted a model for:\n")
+        for m in conflicts:
+            lines.append(f"    {m.led_color + '/' + m.bayer_layer:<15} "
+                         f"p10 {m.p10:.1f}, p90 {m.p90:.1f}\n")
+    else:
+        lines.append(
+            f"\nEvery usable row's p10/p90 sits inside the "
+            f"{UNDER_FRAC:.0%}-{OVER_FRAC:.0%} window it will be screened\n"
+            f"against, so the fit verdict and the capture-time gate agree on "
+            f"all {len(models)} rows.\n")
+
+    unusable = [m for m in models if not m.usable]
+    if unusable:
+        lines.append(
+            f"\nThe {len(unusable)} unusable rows are published, not omitted. "
+            f"An absent row means\n\"never analysed\" and the capture path "
+            f"keeps the layer; a usable = 0 row means\n\"measured, and "
+            f"hopeless\" and it stops storing it. The two must not look "
+            f"alike.\n")
+        for m in unusable:
+            lines.append(f"    {m.led_color + '/' + m.bayer_layer:<15} "
+                         f"{m.remark}\n")
+    path.write_text("".join(lines))
+
+
 def _best_result(results: Sequence[Result], led: str,
                  channel: str) -> Optional[Result]:
     """
@@ -1578,6 +1782,145 @@ def write_db(db_path: Path, results: Sequence[Result],
     finally:
         conn.close()
     return (ff_rows, an_rows)
+
+
+# ── Publishing to the instrument ────────────────────────────────────
+# Everything above writes to devdesk/flatfield.sqlite, which is a development
+# artifact the instrument never sees.  This is the crossing: the same result,
+# reduced to what a measurement actually needs, in the instrument's own
+# `layermodels` table.  src/layermodel_repo.py owns that table's schema and SQL;
+# this only decides which cell becomes each row.
+
+def build_layermodels(results: Sequence[Result], geom: Geometry,
+                      analysisref: str) -> List["LayerModel"]:
+    """
+    Reduce every cell to one row per (LED colour, Bayer layer).
+
+    The analysis visits each LED x layer at every rung of the exposure ladder;
+    the instrument wants one answer per LED x layer.  Two cases:
+
+      * **Some rung was usable** — take the brightest of them (_best_result(),
+        the same choice the figures draw) and publish its weights.  Its own
+        exposure becomes the row's reference exposure, the one p10 and p90 are
+        quoted at.  Publishing the brightest rather than averaging the rungs is
+        deliberate: they agree on the weights to better than 0.2 % anyway, and
+        the brightest carries the least shot noise in the percentiles, which
+        are the part that actually varies.
+      * **No rung was usable** — publish `usable = 0` with no weights, using
+        the brightest cell there was for the percentiles.  The row is not
+        filler: it is what tells the capture path to stop storing that layer,
+        and its p10/p90 are the evidence for the verdict.  Dropping these rows
+        instead would leave "measured, and hopeless" indistinguishable from
+        "never measured", which keep_channels() has to treat oppositely.
+
+    Args:
+        results: Every cell from analyze()'s first pass.
+        geom: The target geometry, for the roi rowids stamped on each row.
+        analysisref: Name of the report set, stamped on every row.
+
+    Returns:
+        LayerModels in (LED, layer) order — one per pair seen in `results`.
+
+    Example:
+        >>> len(build_layermodels(results, geom, "bound39a"))  # doctest: +SKIP
+        40
+    """
+    pairs = sorted({(r.led, r.channel) for r in results})
+    models: List[LayerModel] = []
+
+    for led, channel in pairs:
+        best = _best_result(results, led, channel)
+        if best is not None:
+            anchor, rung = best.anchor, best.chosen
+            models.append(LayerModel(
+                usable=True, led_color=led, bayer_layer=channel,
+                exposure_us=best.exposure_us,
+                roisamp=geom.rowid_of[geom.sample],
+                roi1=geom.rowid_of[geom.chip1],
+                roi2=geom.rowid_of[geom.chip2],
+                w1=anchor.w1, w2=anchor.w2,
+                p10=best.patch_p10, p90=best.patch_p90, black_dn=best.black,
+                roibound=geom.bound_rowid,
+                deg_y=rung.deg_y, deg_x=rung.deg_x,
+                coef_json=rung.field.coef_json(),
+                norm_mean=rung.field.norm_mean,
+                anchor_form=best.form, rho=anchor.curvature,
+                loo_pct=rung.loo_max[best.form],
+                analysisref=analysisref,
+                remark=f"{best.label} of {_rung_count(results, led, channel)} "
+                       f"rung(s), {rung.n_folds} placement(s)"))
+            continue
+
+        # Nothing usable.  Quote the brightest cell there was, and say why it
+        # failed in the operator's terms rather than leaving a bare zero.
+        pool_of_pair = [r for r in results
+                        if r.led == led and r.channel == channel]
+        fallback = max(pool_of_pair, key=lambda r: r.mean)
+        why = "under-exposed" if fallback.group == UNDER else fallback.group
+        reach = "" if fallback.reachable else ", unreachable at any exposure"
+        models.append(LayerModel(
+            usable=False, led_color=led, bayer_layer=channel,
+            exposure_us=fallback.exposure_us,
+            roisamp=geom.rowid_of[geom.sample],
+            roi1=geom.rowid_of[geom.chip1],
+            roi2=geom.rowid_of[geom.chip2],
+            p10=fallback.patch_p10, p90=fallback.patch_p90,
+            black_dn=fallback.black, roibound=geom.bound_rowid,
+            analysisref=analysisref,
+            remark=f"{why} at every rung{reach}; brightest was "
+                   f"{fallback.label} at {fallback.mean:.1f} DN"))
+
+    return models
+
+
+def _rung_count(results: Sequence[Result], led: str, channel: str) -> int:
+    """Return how many rungs of one LED x layer were usable."""
+    return sum(1 for r in results if r.led == led and r.channel == channel
+               and r.chosen is not None)
+
+
+def write_layermodels(db_path: Path, models: Sequence["LayerModel"],
+                      analysisref: str) -> int:
+    """
+    Put the models in force in an instrument database.
+
+    Writing goes through src/layermodel_repo.py rather than raw SQL here, so
+    the column list and the supersede-don't-delete rule have exactly one home —
+    the same reason the calibration capture path writes exposures through
+    exposure_repo instead of its own INSERT.
+
+    `db_manager` settles the database location process-wide, and reassigning
+    `DBNAME` to a scratch copy is its documented escape hatch (exposure_repo's
+    own self-test does it).  This borrows the module for the length of the call
+    and puts it back, so a caller that also reads the live database afterwards
+    is not left pointing somewhere else.
+
+    Args:
+        db_path: The instrument database — normally src/colorimeter.sqlite.
+            The `layermodels` table must already exist; db_bootstrap.ensure()
+            creates it at every launch, and running src/db_DDL.sql by hand does
+            the same.
+        models: Rows to put in force, from build_layermodels().
+        analysisref: Stamped on any row that does not carry its own.
+
+    Returns:
+        The number of rows inserted, or 0 if the write failed (which is
+        reported on stderr rather than raised — one bad database should not
+        cost a run its reports and figures).
+    """
+    import sqlite3
+
+    was = db_manager.DBNAME
+    db_manager.DBNAME = str(db_path)
+    try:
+        return layermodel_repo.write_models(models, analysisref=analysisref)
+    except sqlite3.Error as e:
+        print(f"error: layermodels write to {db_path} failed: {e}\n"
+              f"  is the table there? run: sqlite3 {db_path} < src/db_DDL.sql",
+              file=sys.stderr)
+        return 0
+    finally:
+        db_manager.DBNAME = was
 
 
 # ── Figures ─────────────────────────────────────────────────────────
@@ -1947,7 +2290,9 @@ def analyze(files: Sequence[Sequence], bound: int,
             leds: Optional[Sequence[str]] = None,
             labels: Optional[Sequence[str]] = None,
             captures_dir: Path = DEFAULT_CAPTURES_DIR,
-            figures: bool = True) -> List[Result]:
+            figures: bool = True,
+            layermodels_db=None,
+            analysisref: Optional[str] = None) -> List[Result]:
     """
     Pool a set of captures over one bound and settle its anchor weights.
 
@@ -1972,6 +2317,13 @@ def analyze(files: Sequence[Sequence], bound: int,
         captures_dir: Directory bare filenames resolve against.
         figures: Draw the PNGs.  False makes a run about ten times faster,
             for when only the tables are wanted.
+        layermodels_db: Instrument database to publish the reduced result to —
+            normally src/colorimeter.sqlite.  None analyses without publishing,
+            which is what an exploratory run wants: a `layermodels` write puts
+            new weights in force, and no run should do that by accident.
+        analysisref: Name stamped on the published rows, e.g. 'bound39a'.
+            Defaults to the writedir's own name, which is where the reports
+            backing those rows sit.
 
     Returns:
         Every Result, in visit order.
@@ -2020,11 +2372,25 @@ def analyze(files: Sequence[Sequence], bound: int,
                              captures, geom)
         write_summary_report(writedir / "report_summary.txt", results,
                              captures, geom, rotated)
-        print(f"  wrote 4 report(s) to {writedir}")
+
+        ref = analysisref or writedir.name
+        models = build_layermodels(results, geom, ref)
+        write_layermodels_report(writedir / "report_layermodels.txt", models,
+                                 captures, geom, layermodels_db)
+        print(f"  wrote 5 report(s) to {writedir}")
 
         ff_rows, an_rows = write_db(db_path, results, captures, geom)
         print(f"  wrote {ff_rows} flatfield and {an_rows} anchor row(s) "
               f"to {db_path}")
+
+        if layermodels_db is None:
+            print(f"  built {len(models)} layermodels row(s), not published "
+                  f"(pass layermodels_db= to put them in force)")
+        else:
+            n = write_layermodels(Path(layermodels_db), models, ref)
+            usable = sum(1 for m in models if m.usable)
+            print(f"  put {n} layermodels row(s) in force in "
+                  f"{layermodels_db} ({usable} usable) as '{ref}'")
 
         if figures:
             figdir = writedir / "figs"
@@ -2219,6 +2585,86 @@ def _selftest() -> int:
         finally:
             for c in caps:
                 c.reader.__exit__(None, None, None)
+
+    # The publishing path, end to end on a throwaway copy of the instrument
+    # database.  What matters is not that a row can be inserted but that the
+    # right cell becomes each row, and that the weights come back out the far
+    # side of layermodel_repo unchanged — the analysis and the instrument have
+    # to be reading the same two numbers.
+    good = Result(led="amber", label="e2", channel="R", exposure_us=58920,
+                  group=ACCEPTABLE, mean=610.0, p_lo=580.0, p_hi=640.0,
+                  patch_p10=599.5, patch_p90=632.0, masked_pct=0.0,
+                  black=64.0, noise_pct=0.05, spread_pct=0.3,
+                  us_min=None, us_max=None, reachable=True)
+    dimmer = Result(led="amber", label="e0", channel="R", exposure_us=26187,
+                    group=ACCEPTABLE, mean=271.0, p_lo=250.0, p_hi=290.0,
+                    patch_p10=266.0, patch_p90=281.0, masked_pct=0.0,
+                    black=64.0, noise_pct=0.08, spread_pct=0.3,
+                    us_min=None, us_max=None, reachable=True)
+    hopeless = Result(led="amber", label="e2", channel="B", exposure_us=58920,
+                      group=UNDER, mean=23.7, p_lo=18.0, p_hi=28.0,
+                      patch_p10=22.5, patch_p90=25.0, masked_pct=0.0,
+                      black=64.0, noise_pct=2.0, spread_pct=1.0,
+                      us_min=2.5e6, us_max=None, reachable=False)
+    for r in (good, dimmer):
+        r.rungs = loo_ladder(_synth_pool(geom, {"p1": curved, "p2": curved}),
+                             geom, ((1, 2),))
+        r.chosen = r.rungs[0]
+        r.form = "2anchor"
+
+    models = build_layermodels([dimmer, good, hopeless], geom, "selftest")
+    by_key = {(m.led_color, m.bayer_layer): m for m in models}
+    check("one row per LED x layer", len(models) == 2, f"{len(models)} rows")
+    check("brightest rung becomes the row",
+          by_key[("amber", "R")].exposure_us == 58920,
+          f"ref {by_key[('amber', 'R')].exposure_us} us")
+    check("percentiles come from that rung",
+          by_key[("amber", "R")].p10 == 599.5)
+    check("hopeless layer published as usable = 0",
+          by_key[("amber", "B")].usable is False
+          and by_key[("amber", "B")].w1 is None
+          and by_key[("amber", "B")].p10 == 22.5)
+    check("roi rowids stamped",
+          (by_key[("amber", "R")].roi1, by_key[("amber", "R")].roisamp,
+           by_key[("amber", "R")].roi2, by_key[("amber", "R")].roibound)
+          == (36, 32, 35, 39))
+
+    import shutil
+    import tempfile
+    live = REPO_ROOT / "src" / "colorimeter.sqlite"
+    if not live.exists():
+        print(f"  SKIP  layermodels round-trip ({live.name} not present)")
+    else:
+        tmpdir = Path(tempfile.mkdtemp())
+        scratch = tmpdir / "colorimeter.sqlite"
+        shutil.copy(live, scratch)
+        was = db_manager.DBNAME
+        try:
+            db_manager.DBNAME = str(scratch)
+            db_manager.write_one("DELETE FROM layermodels")
+            n = write_layermodels(scratch, models, "selftest")
+            back = layermodel_repo.read_active()
+            check("rows written", n == 2, f"{n}")
+            check("weights survive the round trip",
+                  back[("amber", "R")].w1 == by_key[("amber", "R")].w1
+                  and back[("amber", "R")].w2 == by_key[("amber", "R")].w2)
+            check("usable flag survives",
+                  back[("amber", "R")].usable is True
+                  and back[("amber", "B")].usable is False)
+            kept = layermodel_repo.keep_channels("amber", 58920)
+            check("capture gate drops the hopeless layer",
+                  kept == ("R", "Gr", "Gb"), f"{kept}")
+            # Gr and Gb are in that answer because they have no row at all —
+            # "never analysed" must keep the layer, not discard it.
+            check("re-publishing supersedes rather than duplicates",
+                  write_layermodels(scratch, models, "again") == 2
+                  and db_manager.read_val(
+                      "SELECT COUNT(*) FROM layermodels WHERE active = 1") == 2
+                  and db_manager.read_val(
+                      "SELECT COUNT(*) FROM layermodels") == 4)
+        finally:
+            db_manager.DBNAME = was
+            shutil.rmtree(tmpdir, ignore_errors=True)
 
     print(f"\n{'selftest passed' if not failures else f'{failures} FAILURE(S)'}")
     return 1 if failures else 0

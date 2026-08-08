@@ -58,9 +58,15 @@ Dark frames are captured with the LED off, so they depend only on the
 exposure time — not on which label or LED asked for it — and are shared
 across LEDs and labels rather than duplicated. They live under /dark keyed
 by (when, exposure), and each LED gets a soft link, named for its own label,
-to the shared group matching its exposure for that "when" (a normal-path
-capture takes two batches per run — "before" and "after" — to let a caller
-compare drift; the calibration path takes only "after").
+to the shared group matching its exposure for that "when".
+
+Both capture paths now take a single batch, "after", at the end of the run.
+A normal-path run used to take two — "before" as well, so a reader could
+difference them and measure the sensor's drift across the run (that reader is
+devdesk/roi_darkdiff.py). It answered its question; paying for it every run
+cost 30 settled captures and 5.3 MB per archive. The `when` parameter and the
+"before_<us>us" naming stay, because archives already written use them and
+must keep reading correctly.
 
 Usage:
     from capture_h5 import CaptureSuiteWriter
@@ -74,15 +80,41 @@ Usage:
         w.link_dark("amber", "e3", exposure_us=45691, when="before")
 """
 
+import numpy as np
+
 from hdf5write import Hdf5Writer
 
 # 1 -> 2: added /meta and the flattened root attrs. A version-1 archive has
 # no ROI geometry of its own; a reader must fall back to its `roi` table and
 # cannot verify the result. Readers should treat /meta as optional and check
 # schema_version before relying on it.
-SCHEMA_VERSION    = 2
+#
+# 2 -> 3: a layer dataset may be present but empty. See OMITTED_ATTR: a Bayer
+# layer with no usable signal is stored as a zero-size array carrying its
+# statistics, instead of 45 kB of noise. A reader that indexes a layer without
+# checking will get an empty array rather than the KeyError it would get from
+# an absent one, so every reader of image data needs is_omitted().
+SCHEMA_VERSION    = 3
 SUITE_DESCRIPTION = "Colorimeter camtest8 capture suite"
 METADATA_NAME     = "meta"
+
+# Marks a layer dataset that was measured and deliberately not stored.
+#
+# The alternatives were to leave the dataset out entirely, or to record the
+# omission somewhere central. A zero-size dataset in the layer's own place is
+# better than either: it costs nothing (HDF5 stores no bytes for it), it keeps
+# the archive's shape uniform so a reader walking /leds/<c>/lit/<label> still
+# sees four layers, and above all it puts the explanation exactly where someone
+# looking for the missing data will look. An absent dataset says nothing about
+# why it is absent.
+OMITTED_ATTR = "omitted"
+
+# Statistics kept for an omitted layer, so the archive still records what was
+# seen. Raw DN, not dark-subtracted: at the moment a lit frame is written no
+# dark frame exists yet — they are all taken at the end of the run — so there
+# is nothing to subtract. Named raw_* for that reason, and to keep them
+# distinct from the dark-subtracted signal DN that layermodels.p10/p90 hold.
+_OMITTED_PCTLS = (10, 90)
 
 
 def _frame_attrs(exposure_us: int, captured_dt: str) -> dict:
@@ -111,6 +143,62 @@ def _frame_attrs(exposure_us: int, captured_dt: str) -> dict:
     if captured_dt:
         attrs["captured_dt"] = captured_dt
     return attrs
+
+
+def _omitted_attrs(array) -> dict:
+    """
+    Build the statistics stored in place of a layer that is not being kept.
+
+    Five numbers standing in for 45 kB. They are what lets a later reader
+    answer "how dark was it, actually?" without the array — enough to confirm
+    the decision was right, or to notice that it stopped being right.
+
+    Args:
+        array: The layer that would have been stored, as captured.
+
+    Returns:
+        The attribute dict, including OMITTED_ATTR.
+
+    Example:
+        >>> _omitted_attrs(np.full((4, 4), 70, dtype=np.uint16))
+        ...                                            # doctest: +ELLIPSIS
+        {'omitted': True, 'raw_mean': 70.0, ...}
+    """
+    lo, hi = np.percentile(array, _OMITTED_PCTLS)
+    return {
+        OMITTED_ATTR: True,
+        "raw_mean": round(float(array.mean()), 3),
+        f"raw_p{_OMITTED_PCTLS[0]}": round(float(lo), 3),
+        f"raw_p{_OMITTED_PCTLS[1]}": round(float(hi), 3),
+        "raw_min": int(array.min()),
+        "raw_max": int(array.max()),
+    }
+
+
+def is_omitted(attrs: dict) -> bool:
+    """
+    Return whether a layer dataset's attributes mark it as not stored.
+
+    The read-side companion to add_lit()/add_dark()'s `omit`. Kept here, in the
+    module that owns the schema, so the two sides cannot drift — every reader
+    of archive image data should call this before using an array.
+
+    Treat an omitted layer exactly as an absent one. Both mean "there is no
+    image here"; the difference is only that this one says why.
+
+    Args:
+        attrs: The dataset's attributes, e.g. from Hdf5Reader.attrs(path).
+
+    Returns:
+        True if the dataset is an empty placeholder.
+
+    Example:
+        >>> is_omitted({"exposure_us": 26187})
+        False
+        >>> is_omitted({"exposure_us": 26187, "omitted": True})
+        True
+    """
+    return bool(attrs.get(OMITTED_ATTR, False))
 
 
 class CaptureSuiteWriter:
@@ -260,9 +348,37 @@ class CaptureSuiteWriter:
             attrs={"filename": filename, "format": "jpeg"},
         )
 
+    def _write_layers(self, group: str, layers: dict, exposure_us: int,
+                      captured_dt: str, omit) -> None:
+        """
+        Write one group's four layers, replacing the omitted ones with markers.
+
+        Shared by add_lit() and add_dark() so a lit layer and the dark frame
+        that would be subtracted from it are stored — or not stored — by
+        exactly the same rule.
+
+        Args:
+            group:       HDF5 group path to write under.
+            layers:      {channel_name: ndarray}.
+            exposure_us: Exposure time in microseconds.
+            captured_dt: Capture timestamp, or "".
+            omit:        Channel names to store as empty placeholders.
+        """
+        omit = set(omit or ())
+        for ch_name, array in layers.items():
+            attrs = _frame_attrs(exposure_us, captured_dt)
+            if ch_name in omit:
+                attrs.update(_omitted_attrs(array))
+                # Shape (0, 0) rather than (0,): a reader that unpacks
+                # array.shape into rows and columns still works. HDF5 accepts
+                # the compression setting on an empty dataset and stores no
+                # bytes for it.
+                array = np.empty((0, 0), dtype=array.dtype)
+            self._w.write_array(group, ch_name, array, attrs=attrs)
+
     def add_lit(
         self, color: str, label: str, layers: dict, exposure_us: int,
-        captured_dt: str = "",
+        captured_dt: str = "", omit=(),
     ) -> None:
         """
         Store the lit ROI crop for one LED at one exposure, all channels.
@@ -271,7 +387,10 @@ class CaptureSuiteWriter:
             color:       LED color name.
             label:       Exposure label ("e0" … "e6").
             layers:      {channel_name: ndarray}, as returned by
-                         BayerCam.extract_bayer_layers().
+                         BayerCam.extract_bayer_layers(). Pass all four
+                         whatever is being kept — `omit` decides what reaches
+                         the file, and the statistics of an omitted layer are
+                         computed from the array passed here.
             exposure_us: Exposure time in microseconds.
             captured_dt: When this photograph was taken, as text with
                          milliseconds — "2026-08-06 13:56:48.123". The runner
@@ -283,16 +402,20 @@ class CaptureSuiteWriter:
                          written as an empty string; the offline converter in
                          dev/build_h5_from_camtest8.py does that, because it
                          rebuilds an archive from files photographed long ago.
+            omit:        Channel names to store as empty placeholders instead
+                         of arrays — the layers that carry no usable signal for
+                         this LED at this exposure. The caller decides which:
+                         see layermodel_repo.keep_channels(). Default keeps
+                         everything, so a caller that knows nothing about the
+                         flat-field analysis behaves as it always did.
         """
-        group = self._lit_group(color, label)
-        for ch_name, array in layers.items():
-            self._w.write_array(group, ch_name, array,
-                                attrs=_frame_attrs(exposure_us, captured_dt))
+        self._write_layers(self._lit_group(color, label), layers,
+                           exposure_us, captured_dt, omit)
 
     # ── Shared dark frames ───────────────────────────────────────────
 
     def add_dark(self, layers: dict, exposure_us: int, when: str = "after",
-                 captured_dt: str = "") -> bool:
+                 captured_dt: str = "", omit=()) -> bool:
         """
         Store a dark ROI crop, unless one for this (when, exposure) already
         exists.
@@ -314,6 +437,13 @@ class CaptureSuiteWriter:
                          that later links to it was photographed at some
                          other moment, so do not read this as that LED's own
                          capture time.
+            omit:        Channel names to store as empty placeholders. A dark
+                         layer exists to be subtracted from a lit one, so a
+                         channel no lit frame at this exposure kept has nothing
+                         to subtract from and is not worth storing. The caller
+                         must therefore collect the lit sweep's decisions
+                         first and pass the complement here — which is why the
+                         dark batch runs after the sweep, not before it.
 
         Returns:
             True if the frames were written, False if an identical
@@ -323,10 +453,8 @@ class CaptureSuiteWriter:
         if key in self._dark_written:
             return False
 
-        group = self._dark_group(exposure_us, when)
-        for ch_name, array in layers.items():
-            self._w.write_array(group, ch_name, array,
-                                attrs=_frame_attrs(exposure_us, captured_dt))
+        self._write_layers(self._dark_group(exposure_us, when), layers,
+                           exposure_us, captured_dt, omit)
         self._dark_written.add(key)
         return True
 

@@ -152,8 +152,10 @@ def _cfge_fit(name: str, limit: int = 13) -> str:
     title, which has only the 120 px between the two corner buttons.
 
     Example:
-        >>> _cfge_fit("dark_prefetch_budget_s")
-        'dark_prefetch\\nbudget_s'
+        >>> _cfge_fit("prefetch_budget_s")
+        'prefetch\\nbudget_s'
+        >>> _cfge_fit("layer_keep_min_dn")
+        'layer_keep\\nmin_dn'
     """
     if len(name) <= limit:
         return name
@@ -203,7 +205,7 @@ class Arbiter:
         self._capture: CaptureSession | None = None
         self._capture_slot: Slot | None = None
 
-        # The normal path's dark-frame prefetch (CaptureRunner.run_prefetch()),
+        # The normal path's capture prefetch (CaptureRunner.run_prefetch()),
         # started automatically near the end of a slot's reagent2 countdown —
         # see _maybe_start_prefetch(). Parked (not pumped further) once done,
         # holding the camera/archive open, until request_capture() promotes it
@@ -1924,7 +1926,7 @@ class Arbiter:
 
     def _maybe_start_prefetch(self) -> None:
         """
-        Automatically begin the normal path's dark-frame prefetch once a
+        Automatically begin the normal path's capture prefetch once a
         slot's reagent2 countdown is within its budget of expiring — no user
         action; the operator is still watching the countdown, not yet at
         CAPTURE. Only applies to the normal capture path (self._cap_mode) —
@@ -1939,7 +1941,7 @@ class Arbiter:
             return
         if self._cap_mode != "normal":
             return
-        budget = config.capture_dark_prefetch_budget_s()
+        budget = config.capture_prefetch_budget_s()
         for slot in self._slots.values():
             if self._reagent2_within(slot, budget):
                 self._start_prefetch(slot)
@@ -1952,12 +1954,12 @@ class Arbiter:
                             sample_rowid=slot.record.get("db_rowid"))
         session = self._new_session(cfg)
         if not session.start_prefetch():
-            log.error("Arbiter: dark-frame prefetch failed to start for slot "
+            log.error("Arbiter: capture prefetch failed to start for slot "
                      "%s: %s", slot.name, session.error)
             return
         self._prefetch = session
         self._prefetch_slot = slot
-        log.info("Arbiter: dark-frame prefetch started for slot %s", slot.name)
+        log.info("Arbiter: capture prefetch started for slot %s", slot.name)
 
     def pump_prefetch(self) -> None:
         """
@@ -1980,10 +1982,10 @@ class Arbiter:
             return
         if session.prefetch_done:
             self._prefetch_epoch = self._camera_epoch
-            log.info("Arbiter: dark-frame prefetch parked for slot %s",
+            log.info("Arbiter: capture prefetch parked for slot %s",
                      self._prefetch_slot.name if self._prefetch_slot else "?")
             return
-        log.error("Arbiter: dark-frame prefetch failed for slot %s: %s",
+        log.error("Arbiter: capture prefetch failed for slot %s: %s",
                  self._prefetch_slot.name if self._prefetch_slot else "?",
                  session.error)
         self._prefetch = None
@@ -2078,9 +2080,9 @@ class Arbiter:
         """
         Seconds before a slot's reagent2 countdown expires within which the
         shared camera should be open: camera_warmup_s (thermal-stability
-        margin, on but idle) plus dark_prefetch_budget_s (the dark-frame
-        prefetch batch itself, scheduled to start dark_prefetch_budget_s
-        before expiry — see _maybe_start_prefetch()). Shared by
+        margin, on but idle) plus prefetch_budget_s (the prefetch stage
+        itself — camera setup and focus — scheduled to start
+        prefetch_budget_s before expiry, see _maybe_start_prefetch()). Shared by
         _camera_wanted() and _maybe_open_camera() so the two agree on when
         the camera should be open: were _camera_wanted()'s threshold any
         narrower than the one that opened it, the camera would open, then
@@ -2088,7 +2090,7 @@ class Arbiter:
         same main-loop pass, thrashing for the camera_warmup_s gap between
         the two thresholds.
         """
-        return config.capture_camera_warmup_s() + config.capture_dark_prefetch_budget_s()
+        return config.capture_camera_warmup_s() + config.capture_prefetch_budget_s()
 
     def _camera_wanted(self) -> bool:
         """
@@ -2112,7 +2114,7 @@ class Arbiter:
         """
         Open the shared camera within its lead window (_camera_open_lead_s())
         before a slot's reagent2 countdown expires — long enough for the
-        sensor to settle AND the dark-frame prefetch batch to run to
+        sensor to settle AND the capture prefetch stage to run to
         completion before CAPTURE becomes reachable. Gated on prewarm so the
         picamera2 import cost is already absorbed; a failure is logged and
         left for capture time.
@@ -3501,7 +3503,7 @@ def _selftest() -> None:
     arb._ensure_camera = _fake_ensure
 
     open_lead = (config.capture_camera_warmup_s()
-                + config.capture_dark_prefetch_budget_s())
+                + config.capture_prefetch_budget_s())
 
     check("no camera while idle",   arb._camera_wanted(), False)
     arb._maybe_open_camera()
@@ -3528,10 +3530,10 @@ def _selftest() -> None:
     check("camera stopped",          fake_cam.stopped, True)
     check("leds closed",             fake_leds.closed, True)
 
-    print("== dark-frame prefetch: scheduled near reagent2 expiry, "
+    print("== capture prefetch: scheduled near reagent2 expiry, "
           "promoted at CAPTURE ==")
     arb._cap_mode = "normal"
-    budget = config.capture_dark_prefetch_budget_s()
+    budget = config.capture_prefetch_budget_s()
 
     A.active_phase = "reagent2"
     A.timer = TimerState.down(budget * 10, arb.now())      # far from budget

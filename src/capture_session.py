@@ -22,7 +22,7 @@ Usage (a full run in one go):
     else:
         display(f"Saved {session.out_path}")
 
-Usage (split across a pause — the normal path's dark-frame prefetch):
+Usage (split across a pause — the normal path's prefetch stage):
     session.start_prefetch()
     while session.active:
         session.step()               # drives run_prefetch() only

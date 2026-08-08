@@ -13,6 +13,10 @@ Three-phase workflow:
   Phase 2: Per-LED: determine target channel, compute 7 exposures, capture
            and save lit frames, then LED-off dark frames at the same exposures.
 
+The Normal path is a different shape — see the section comment above
+run_prefetch(). It reads its exposures from the `exposure` table instead of
+searching for them, and takes every dark frame in one batch after the sweep.
+
 Exposure bracketing targets (50% of 10-bit saturation = 512):
   e0: e3 / E3_RATIO                                    (fixed ratio)
   e1: 89th-percentile pixel in the sample ROI → 512
@@ -60,6 +64,7 @@ import numpy as np
 import capture_meta
 import config_repo as config
 import exposure_repo
+import layermodel_repo
 import roi
 import sample_repo
 from bayer_cam import BayerCam
@@ -660,6 +665,12 @@ class CaptureRunner:
         self._color_labels: "dict[str, list[str]]" = {}
         self._color_fallback: "dict[str, bool]" = {}
         self._distinct_dark_us: "list[int]" = []
+        # {exposure_us: channels some lit frame at that exposure kept}, filled
+        # in during the sweep and read by the dark batch that follows it.
+        self._dark_keep: "dict[int, set]" = {}
+        # {(color, exposure_us): channels to keep}, so a repeated exposure does
+        # not re-query the database.
+        self._keep_cache: dict = {}
 
         # Wall-clock profiler (on unless COLORIMETER_PROFILE is false-y). Records
         # every frame, wait, numpy block, and archive write; its summary is
@@ -747,6 +758,44 @@ class CaptureRunner:
         with self.prof.time("cpu.extract"):
             return _roi_bound_layers(bayer, pattern,
                                      roi.by_role(self.rois, roi.ROLE_BOUND))
+
+    def _keep_channels(self, color: str, exposure_us: int,
+                       layers: dict) -> tuple:
+        """
+        Return the Bayer layers worth storing for one LED at one exposure.
+
+        Asks layermodel_repo, which knows what the flat-field analysis measured
+        for each LED colour and layer; see keep_channels() there for the rules,
+        the most important of which is that an un-analysed combination is kept.
+
+        Two ways this refuses to drop anything, and both are deliberate. A LED
+        with no rows keeps every layer, because "not analysed" must never look
+        like "no good". And a failure to reach the database at all keeps every
+        layer and logs it, because losing image data to a configuration problem
+        is far worse than storing a few dark frames — the archive is the only
+        copy, and this decision is not reversible.
+
+        Args:
+            color: LED colour name.
+            exposure_us: Exposure about to be stored, in microseconds.
+            layers: The extracted layers, whose keys bound the answer.
+
+        Returns:
+            The subset of `layers`' keys to store.
+        """
+        cached = self._keep_cache.get((color, exposure_us))
+        if cached is not None:
+            return cached
+
+        channels = tuple(layers)
+        try:
+            keep = layermodel_repo.keep_channels(color, exposure_us, channels)
+        except Exception:                             # noqa: BLE001
+            log.exception("could not read layermodels for %s at %dµs — "
+                          "storing every layer", color, exposure_us)
+            keep = channels
+        self._keep_cache[(color, exposure_us)] = keep
+        return keep
 
     def _choose_out_path(self) -> None:
         """
@@ -1285,18 +1334,30 @@ class CaptureRunner:
     #
     # Split into two generators sharing this instance's state, so a caller
     # (CaptureSession/Arbiter) can run run_prefetch() unattended during the
-    # reagent2 countdown — no LED needs to be lit for a dark frame — then
-    # pause for an arbitrary, user-controlled length of time before resuming
-    # run_capture() when CAPTURE is pressed. All dark frames are captured in
-    # two batches ("before" here, "after" at the end of run_capture()) rather
-    # than once per LED, so the many LED-off settle waits the old per-LED
-    # scheme paid collapse into one. A caller that never splits the run
-    # (camera contention, a short debug timer) still gets this benefit: run()
+    # reagent2 countdown — nothing there needs an LED lit — then pause for an
+    # arbitrary, user-controlled length of time before resuming run_capture()
+    # when CAPTURE is pressed. What that buys is the camera: setup and focus
+    # are the slow part of a run, and doing them while the operator is waiting
+    # out reagent2 takes them off the clock. A caller that never splits the run
+    # (camera contention, a short debug timer) loses only the overlap: run()
     # chains the two back-to-back for MODE_NORMAL.
+    #
+    # Dark frames are all taken in ONE batch, after the LED sweep ends. They
+    # used to be taken twice, "before" (here) and "after" (at the end of
+    # run_capture()), so a reader could measure the sensor's drift across the
+    # run by differencing them; devdesk/roi_darkdiff.py is that reader, and it
+    # did its job — the drift is not what limits this instrument. Paying for it
+    # every run cost 30 settled captures and 5.3 MB per archive, so the
+    # "before" batch is gone. The schema still names the batch ("after_<us>us")
+    # and readers still prefer it, so archives holding both remain readable.
 
     def run_prefetch(self) -> Iterator[Progress]:
         """
-        Normal-path stage 1: camera init, focus, and the "before" dark batch.
+        Normal-path stage 1: camera init, focus, and opening the archive.
+
+        No photographs are taken here — this is the part of a run that can
+        happen before the operator is ready, so that when CAPTURE is pressed
+        the only work left is the work that needs the sample in place.
 
         On successful completion, deliberately leaves the camera, LED bank,
         and archive open — NOT cleaned up — so run_capture() can pick up
@@ -1311,6 +1372,8 @@ class CaptureRunner:
 
             self._choose_out_path()
             self.results = []
+            self._dark_keep = {}
+            self._keep_cache = {}
 
             # ── Camera init ──────────────────────────────────────────
             cam.set_exposure(cfg.initial_us)
@@ -1363,31 +1426,15 @@ class CaptureRunner:
 
             self._distinct_dark_us = sorted(distinct_us)
 
-            # ── "before" dark batch — LED stays off throughout ────────
-            log.info(f"=== Dark prefetch (before): {len(self._distinct_dark_us)} "
-                     f"distinct exposure(s) — {self._distinct_dark_us} µs ===")
-            yield self._progress(
-                "capture",
-                f"Dark prefetch (before): {len(self._distinct_dark_us)} exposure(s)")
+            # Open the archive and write /meta now, before any photograph.
+            # The ROI geometry is what makes the stored arrays locatable, so a
+            # run that dies partway still leaves an interpretable file.
             w = self._writer = CaptureSuiteWriter(self.out_path, suite_id=self.suite_id)
             self._write_metadata(w)
 
-            for exp_us in self._distinct_dark_us:
-                _, bayer, _ = self._settle(exp_us)
-                layers_out = self._bound_layers(bayer, self._pattern)
-                with self.prof.time("io.hdf5"):
-                    stored = w.add_dark(layers_out, exposure_us=exp_us, when="before",
-                                        captured_dt=self._frame_captured_dt)
-                yield self._progress(
-                    "capture",
-                    f"    {'stored' if stored else 'reused'} dark before "
-                    f"({exp_us}µs)", step="dark before")
-
-            for color in self._color_order:
-                for label, exp_us in zip(self._color_labels[color],
-                                         self._color_exposures[color]):
-                    w.link_dark(color, label, exposure_us=exp_us, when="before")
-
+            log.info(f"=== Prefetch done: {len(self._distinct_dark_us)} "
+                     f"distinct dark exposure(s) to take at the end — "
+                     f"{self._distinct_dark_us} µs ===")
             yield self._progress(
                 "capture", "Ready — press CAPTURE to begin the LED sweep.",
                 step="prefetch-done")
@@ -1399,7 +1446,7 @@ class CaptureRunner:
 
     def run_capture(self) -> Iterator[Progress]:
         """
-        Normal-path stage 2: the lit-LED sweep, then the "after" dark batch.
+        Normal-path stage 2: the lit-LED sweep, then the dark batch.
 
         Assumes run_prefetch() already ran on this same instance — the
         archive is open, the camera is set up and focused, and the color
@@ -1407,6 +1454,10 @@ class CaptureRunner:
         resolved. Always cleans up (LED off, archive closed) on completion,
         abandonment, or failure — unlike run_prefetch(), there is no pause
         left to preserve after this.
+
+        Every dark frame in the archive is taken here, at the end, with the
+        LED bank off — one settle wait for the whole run instead of one per
+        LED, and one batch instead of the two this used to take.
         """
         leds = self._leds
         w    = self._writer
@@ -1441,22 +1492,39 @@ class CaptureRunner:
                 mid_frame: "tuple | None" = None
                 applied_us: dict = {}
 
+                kept_layers: dict = {}
+                omitted_layers: dict = {}
+
                 for i, (label, exp_us) in enumerate(zip(labels, exposures_us)):
                     rgb, bayer, meta = self._settle(exp_us)
                     applied_us[label] = int(meta.get("ExposureTime", 0))
                     layers_out = self._bound_layers(bayer, self._pattern)
+
+                    keep = self._keep_channels(color, exp_us, layers_out)
+                    omit = [ch for ch in layers_out if ch not in keep]
+                    kept_layers[label] = list(keep)
+                    omitted_layers[label] = omit
+                    # Remember what this exposure's darks will be needed for.
+                    # The same exposure can be reached by more than one LED, so
+                    # union rather than assign: a dark layer is worth storing
+                    # if ANY lit frame at that exposure kept it.
+                    self._dark_keep.setdefault(exp_us, set()).update(keep)
+
                     with self.prof.time("io.hdf5"):
                         w.add_lit(color, label, layers_out, exposure_us=exp_us,
-                                  captured_dt=self._frame_captured_dt)
+                                  captured_dt=self._frame_captured_dt,
+                                  omit=omit)
                     if i == mid_idx:
                         mid_frame = (rgb, bayer, meta)
                     self._captures_done += 1
+                    dropped = f", dropped {'+'.join(omit)}" if omit else ""
                     yield self._progress(
-                        "capture", f"    stored lit {label} ({exp_us // 1000}ms)",
+                        "capture",
+                        f"    stored lit {label} ({exp_us // 1000}ms){dropped}",
                         step=label)
 
-                # Darks are already batched (before) and will be again
-                # (after) — no per-LED settle wait needed here.
+                # Darks are all taken in one batch at the end of the sweep —
+                # no per-LED settle wait needed here.
                 self._led_off(led)
 
                 # ── Per-LED metadata, statistics and JPEG ──────────────
@@ -1480,6 +1548,13 @@ class CaptureRunner:
                     "exposure_source": "fallback" if used_fallback else "exposure_table",
                     "exposures_us": {lbl: int(us) for lbl, us in zip(labels, exposures_us)},
                     "applied_exposures_us": applied_us,
+                    # Which Bayer layers reached the file, per exposure, and
+                    # which were stored as empty markers instead. Recorded here
+                    # as well as on the datasets themselves so the decision can
+                    # be read off one JSON record rather than by walking forty
+                    # datasets' attributes.
+                    "layers_kept": kept_layers,
+                    "layers_omitted": omitted_layers,
                 }
                 with self.prof.time("io.hdf5"):
                     w.add_led(color, meta_json, led_channel=led)
@@ -1503,22 +1578,38 @@ class CaptureRunner:
                     metadata=meta_json,
                 ))
 
-            # ── "after" dark batch — LED stays off throughout ─────────
-            log.info(f"=== Dark prefetch (after): {len(self._distinct_dark_us)} "
+            # ── Dark batch — LED stays off throughout ─────────────────
+            # One settle wait for the whole run. It was not needed while the
+            # "before" batch existed, because that one ran with the bank never
+            # yet lit; now that this is the only batch, the last LED's
+            # afterglow is the only thing between the sweep and every dark
+            # frame the archive will hold, so it is waited out explicitly
+            # rather than left to however long the last JPEG took to encode.
+            yield from self._wait(LED_OFF_SETTLE_S,
+                                  "LEDs off, settling before dark frames")
+
+            log.info(f"=== Dark batch: {len(self._distinct_dark_us)} "
                      f"distinct exposure(s) — {self._distinct_dark_us} µs ===")
             yield self._progress(
                 "capture",
-                f"Dark prefetch (after): {len(self._distinct_dark_us)} exposure(s)")
+                f"Dark frames: {len(self._distinct_dark_us)} exposure(s)")
             for exp_us in self._distinct_dark_us:
                 _, bayer, _ = self._settle(exp_us)
                 layers_out = self._bound_layers(bayer, self._pattern)
+                # A dark layer is only ever used to be subtracted from a lit
+                # one, so store exactly the channels some lit frame at this
+                # exposure kept. The sweep has finished, so that is known.
+                needed = self._dark_keep.get(exp_us, set(layers_out))
+                omit = [ch for ch in layers_out if ch not in needed]
                 with self.prof.time("io.hdf5"):
                     stored = w.add_dark(layers_out, exposure_us=exp_us, when="after",
-                                        captured_dt=self._frame_captured_dt)
+                                        captured_dt=self._frame_captured_dt,
+                                        omit=omit)
+                dropped = f", dropped {'+'.join(omit)}" if omit else ""
                 yield self._progress(
                     "capture",
-                    f"    {'stored' if stored else 'reused'} dark after "
-                    f"({exp_us}µs)", step="dark after")
+                    f"    {'stored' if stored else 'reused'} dark "
+                    f"({exp_us}µs){dropped}", step="dark")
 
             for color in self._color_order:
                 for label, exp_us in zip(self._color_labels[color],

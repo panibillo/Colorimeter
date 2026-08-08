@@ -54,6 +54,26 @@
 -- the backlight.
 -- ────────────────────────────────────────────────────────────────────────────
 
+-- ── Renames ─────────────────────────────────────────────────────────────────
+-- A parameter that changed name, carried across in place so its value, its
+-- history and its isdefault row all come with it.  Without this the INSERTs
+-- below would seed the new name alongside the old, and the old would sit there
+-- active and unread — visible in the config editor, meaning nothing.
+--
+-- Idempotent like everything else here: after the first run there is nothing
+-- left to match.  A rename can be deleted from this list once every instrument
+-- has been through it, but there is no harm in leaving it.
+--
+-- capture.dark_prefetch_budget_s -> capture.prefetch_budget_s (2026-08)
+--   The stage it budgets no longer takes dark frames; they are all captured
+--   after the LED sweep now.  What is left is camera setup and focus.
+UPDATE config
+   SET name   = 'prefetch_budget_s',
+       remark = 'reserved time for camera setup and focus during the reagent2 countdown'
+ WHERE role = 'capture' AND name = 'dark_prefetch_budget_s'
+   AND NOT EXISTS (SELECT 1 FROM config
+                    WHERE role = 'capture' AND name = 'prefetch_budget_s');
+
 -- ── capture ─────────────────────────────────────────────────────────────────
 INSERT OR IGNORE INTO config (active, isdefault, editable, add_dt, role, name,
                               vtype, value, source, remark)
@@ -73,8 +93,12 @@ INSERT OR IGNORE INTO config (active, isdefault, editable, add_dt, role, name,
    'operator-saved focus diopter from the viewer''s Img recapture dialog'),
   (0, 1, 1, '2026-08-01 00:00:00', 'capture', 'camera_warmup_s', 'float', '5.0', 'seed',
    'seconds to warm the camera before captures (thermal-stability margin)'),
-  (0, 1, 1, '2026-08-01 00:00:00', 'capture', 'dark_prefetch_budget_s', 'float', '20.0', 'seed',
-   'reserved time for the dark-frame prefetch batch during the reagent2 countdown');
+  (0, 1, 1, '2026-08-01 00:00:00', 'capture', 'prefetch_budget_s', 'float', '20.0', 'seed',
+   'reserved time for camera setup and focus during the reagent2 countdown'),
+  (0, 1, 1, '2026-08-01 00:00:00', 'capture', 'layer_keep_min_dn', 'int', '96', 'seed',
+   'a Bayer layer is too dark to store when its scaled p10 falls below this (signal DN)'),
+  (0, 1, 1, '2026-08-01 00:00:00', 'capture', 'layer_keep_max_dn', 'int', '863', 'seed',
+   'a Bayer layer is too bright to store when its scaled p90 rises above this (signal DN)');
 
 -- ── protocol ────────────────────────────────────────────────────────────────
 -- These are the real durations.  A shorter pair used to be seeded under a

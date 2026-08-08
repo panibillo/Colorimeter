@@ -33,6 +33,40 @@ sqlite3 src/colorimeter.sqlite \
 
 ## [Unreleased]
 
+Writes: archive schema 3 · meta 2 · database 2
+Reads:  archive schema 1–3 · meta 1–2 · database 2
+
+### Added
+
+- `layermodels` table in `colorimeter.sqlite`: the flat-field result the
+  instrument reads, one row per LED colour × Bayer layer. Carries the two chip
+  weights a measurement multiplies by (`divisor = w1·mean(chip1) +
+  w2·mean(chip2)`), the percentiles the capture path screens layers against,
+  and the polynomial that produced them as provenance. Read through the new
+  `src/layermodel_repo.py`; written by `devdesk/flatfield_pool.py`.
+- Config `capture.layer_keep_min_dn` / `capture.layer_keep_max_dn` — the signal
+  window a Bayer layer must fall in to be worth storing.
+
+### Changed
+
+- **Archive schema 2 → 3.** A layer dataset may now be present but empty: one
+  with no usable signal is stored as a zero-size array carrying its statistics
+  (`omitted=True`, `raw_mean`, `raw_p10`, `raw_p90`, `raw_min`, `raw_max`)
+  instead of 45 kB of noise. Readers of image data must call
+  `capture_h5.is_omitted()` and treat an omitted layer as an absent one.
+- Normal-path captures take **one** dark batch, after the LED sweep, instead of
+  two. The "before" batch existed so a reader could difference the two and
+  measure sensor drift across a run; it cost 30 settled captures and 5.3 MB per
+  archive. `devdesk/roi_darkdiff.py`, which asked that question, now applies
+  only to archives captured before this change. A dark layer is stored only
+  where some lit frame at that exposure kept it.
+- Together those take about **40 %** off an archive — 28.8 MB → 17.3 MB on the
+  ZP1001 gray-card suite.
+- Config `capture.dark_prefetch_budget_s` → `capture.prefetch_budget_s`. The
+  stage it budgets no longer takes dark frames; what is left is camera setup
+  and focus. `provisioning/config_defaults.sql` renames it in place, so value,
+  history and commissioned default all come across.
+
 ## [0.3.0] — 2026-08-06
 
 Writes: archive schema 2 · meta 2 · database 2
