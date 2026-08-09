@@ -48,7 +48,7 @@ except ImportError:
     from mock.picamera2_mock import Picamera2, libcamera
 
 
-_DEFAULT_FOCUS_CAL_PATH = (
+DEFAULT_FOCUS_CAL_PATH = (
     Path.home() / "pi" / "Colorimeter" / "config" / "focus_cal.json"
 )
 
@@ -144,7 +144,7 @@ class BayerCam:
 
     def __init__(
         self,
-        focus_cal_path: Union[str, Path] = _DEFAULT_FOCUS_CAL_PATH,
+        focus_cal_path: Union[str, Path] = DEFAULT_FOCUS_CAL_PATH,
     ):
         """
         Initialize BayerCam: detect the attached camera model and set

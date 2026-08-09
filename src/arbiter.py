@@ -53,6 +53,9 @@ import config_repo as config
 import logging_manager
 import widgets
 import shutdown_screen
+import splash_screen
+import startup_checks
+import version
 import sample_repo
 import exposure_repo
 import layout
@@ -185,6 +188,14 @@ class Arbiter:
         self._beeper    = None
         self._temp      = None
         self._ILI9341   = None
+        self._kb_ok     = None      # what KbReader.open() said, for the checks
+
+        # The boot splash, live only between _init_display() and the operator
+        # pressing MENU or START.  _resume_display consults it, because an
+        # aborted shutdown screen during the boot has nothing else to go back
+        # to — there is no focused slot and no pool yet.
+        self._splash: "splash_screen.Splash | None" = None
+        self._boot:   "splash_screen.BootLog | None" = None
 
         # Model
         self._pool:   Pool | None = None
@@ -342,14 +353,87 @@ class Arbiter:
 
     # ── Lifecycle ──────────────────────────────────────────────────────────────
 
-    def start(self) -> None:
+    def start(self, boot=None) -> None:
+        """
+        Bring the instrument up behind the splash screen, then run.
+
+        The boot is in three acts, because the splash cannot narrate its own
+        preconditions: the database and the display come up silently (the
+        launcher having timed them into `boot`), the splash then replays those
+        and narrates everything after them, and finally the operator chooses
+        where to start.
+
+        Args:
+            boot: A splash_screen.BootLog the launcher filled in around
+                  db_bootstrap.ensure().  Omitted, the splash simply has one
+                  fewer line to show.
+        """
         self._init_logging()
         if _SIMULATION_MODE:
             log.info("SIMULATION MODE: mock hardware")
-        self._init_hardware()
-        self._build_model()
-        self.focus(self._slots["A"])
+
+        self._boot = boot or splash_screen.BootLog()
+        with self._boot.step("Display"):
+            self._init_drivers()
+            self._init_display()
+
+        splash = self._splash = splash_screen.Splash(
+            self._disp, simulation=_SIMULATION_MODE,
+            version=version.__version__)
+        splash.open()
+        splash.replay(self._boot)
+
+        self._init_peripherals(splash)
+        # Only now can anything press OK, so notices wait until here.
+        splash.attach_input(touch=self._touch, kb=self._kb)
+
+        with splash.running("Screens"):
+            self._build_model(splash)
+
+        report = self._run_startup_checks(splash)
+        choice = splash.finish(report.summary(), ok=report.ok)
+        self._splash = None
+
+        if choice == "menu":
+            # open_menu rather than focus: its OK/CANCEL returns the view to
+            # the slot passed here, so MENU still lands on the Begin screen,
+            # and the Begin screen is not painted twice to get there.
+            self.open_menu(self._slots["A"])
+        else:
+            self.focus(self._slots["A"])
         self._run()
+
+    def _run_startup_checks(self, splash):
+        """
+        Run the completeness checks as the splash's last narrated step.
+
+        Anything that had to be loaded from a default gets its own message and
+        its own OK press — the boot pauses on each one rather than letting a
+        recovered value scroll past unread.  Then the step list is replaced by
+        the warnings and failures, which is the only part of the boot the
+        operator has anything to do about.
+        """
+        i = splash.step("Configuration")
+        report = startup_checks.run_all(
+            restored=self._boot.restored if self._boot else None,
+            touch=self._touch, temp=self._temp, keyboard=self._kb_ok,
+            simulation=_SIMULATION_MODE,
+            progress=lambda label: splash.status(f"Checking {label}..."))
+        for message in (self._boot.notices if self._boot else []):
+            splash.notice(message)
+        for message in report.notices():
+            splash.notice(message)
+        if not report.ok:
+            splash.fail(i)
+        elif report.warnings():
+            splash.warn(i)
+        else:
+            splash.done(i)
+
+        # The steps have finished saying anything useful; hand the screen over
+        # to what the checks found.  Nothing is drawn when nothing went wrong.
+        splash.problems(report.problems())
+        return report
 
     @staticmethod
     def _init_logging() -> None:
@@ -360,6 +444,25 @@ class Arbiter:
         logging_manager.set_level(name if isinstance(level, int) else "INFO")
 
     def _init_hardware(self) -> None:
+        """
+        Bring up every device, unnarrated.
+
+        Kept for callers that have no splash to report to (the self-test at
+        the foot of this module); start() uses the three phases below so the
+        splash can time and show them one at a time.
+        """
+        self._init_drivers()
+        self._init_display()
+        self._init_peripherals(None)
+
+    def _init_drivers(self) -> None:
+        """
+        Import the drivers for this launch mode and construct them.
+
+        No device is talked to here beyond switching the backlight on, so this
+        is fast and cannot fail on absent hardware — the probing is in
+        _init_display and _init_peripherals.
+        """
         if _SIMULATION_MODE:
             from mock.gpiozero_mock import DigitalOutputDevice
             from mock.ili9341_mock import ILI9341
@@ -390,19 +493,72 @@ class Arbiter:
         signal.signal(signal.SIGINT,  _shutdown)
         signal.signal(signal.SIGTERM, _shutdown)
 
-        self._disp.init()
-        self._touch.init()
-        self._kb.open()
-        self._temp.init()
+        # Installed here rather than after the peripherals, so the splash's
+        # own buttons click like every other button.  Safe this early: beeper
+        # builds its singleton at import.
+        widgets.set_button_sound(beeper.click)
 
+    def _init_display(self) -> None:
+        """
+        Bring up the display — the one step the splash cannot narrate, being
+        the step that gives it somewhere to draw.
+        """
+        self._disp.init()
+
+        # Registered here, immediately after the display exists, rather than
+        # after the peripherals: the mock display is where simulated key and
+        # mouse events come from, so a splash pumping input during the steps
+        # below would otherwise be deaf for all of them.  Safe this early —
+        # the mock touch driver's handlers work before its init().
         if _SIMULATION_MODE and hasattr(self._disp, "register_key_handler"):
             self._disp.register_key_handler(self._kb._on_key_event)          # type: ignore
             self._disp.register_mouse_handler(self._touch._on_touch)         # type: ignore
             self._disp.register_touch_release_handler(self._touch._on_release)  # type: ignore
 
-        widgets.set_button_sound(beeper.click)
+    def _init_peripherals(self, splash) -> None:
+        """
+        Probe touch, keyboard and the temperature bus, narrating each.
 
-    def _build_model(self) -> None:
+        A step that runs without raising is not the same as a device that
+        answered: KbReader.open() returns False when no keyboard is on the
+        bus, and DS18B20.init() finds no probe just as quietly.  Both used to
+        report 'ok' — the step had, after all, completed — which said the
+        opposite of what the operator needed to know.  So the steps that can
+        come up empty are marked from what they found, not from whether they
+        returned, and startup_checks says what to do about it.
+
+        Args:
+            splash: The Splash to report to, or None to run silently.
+        """
+        def run(label, fn, found=None):
+            """Narrate `fn`; mark the step amber when `found` says it is empty."""
+            if splash is None:
+                return fn()
+            i = splash.step(label)
+            try:
+                out = fn()
+            except BaseException:
+                splash.fail(i)
+                raise
+            if found is not None and not found(out):
+                splash.warn(i)
+            else:
+                splash.done(i)
+            return out
+
+        run("Touch", self._touch.init)
+        self._kb_ok = run("Keyboard", self._kb.open, found=bool)
+        run("Temperature", self._temp.init,
+            found=lambda _: getattr(self._temp, "connected", False))
+
+    def _build_model(self, splash=None) -> None:
+        """
+        Build the widget pool, the phase registry and the two slots.
+
+        Args:
+            splash: Unused beyond keeping the call sites symmetrical — the
+                    step is narrated by the caller, which times it.
+        """
         self._pool = Pool.build()
         # Reagent countdowns come from config; the simulation profile shortens
         # them so runs are quick to test.
@@ -669,7 +825,13 @@ class Arbiter:
 
     def _resume_display(self) -> None:
         """Repaint whatever was on screen before a full-screen interruption
-        (e.g. an aborted shutdown screen) — a slot, or the Menu."""
+        (e.g. an aborted shutdown screen) — the splash, a slot, or the Menu."""
+        # During the boot there is no focused slot and often no pool, so
+        # without this an aborted shutdown screen would leave a blank panel
+        # with the splash still pumping input onto it.
+        if self._splash is not None:
+            self._splash.repaint()
+            return
         if self._focused is not None:
             self.render(self._focused)
         else:

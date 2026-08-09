@@ -802,6 +802,28 @@ def capture_layer_keep_max_dn() -> int:
     return int(get("capture", "layer_keep_max_dn"))
 
 
+# ── Image regions ───────────────────────────────────────────────────────────
+
+def required_roi_roles() -> tuple:
+    """
+    Return the ROI roles the instrument refuses to run without.
+
+    roi.required_roles, as a tuple of role names.  Stated in *roles* rather
+    than names because a name is an operator-editable label — see src/roi.py's
+    "Roles" section — and non-editable in the config table because it decides
+    what the capture and analysis paths may assume exists.
+
+    Returns:
+        Tuple of role strings, in the order they are listed.
+
+    Example:
+        >>> required_roi_roles()                        # doctest: +SKIP
+        ('bound', 'sample', 'white_balance')
+    """
+    raw = str(get("roi", "required_roles"))
+    return tuple(r.strip() for r in raw.split(",") if r.strip())
+
+
 # ── Protocol timing ─────────────────────────────────────────────────────────
 # Durations of the timed steps, in seconds.  A shorter pair used to be seeded
 # under a 'simulation' profile so desktop runs finished quickly; that profile
@@ -935,7 +957,7 @@ if __name__ == "__main__":
 
     print("== the editor's reads ==")
     check("roles", roles(), ["capture", "defaults", "device", "hardware",
-                             "protocol", "runtime"])
+                             "protocol", "roi", "runtime"])
     _items = dict((n, (v, t)) for n, t, v, _, _ in items("device"))
     check("device names", sorted(_items), ["description", "hardware_sn",
                                            "software_ver"])

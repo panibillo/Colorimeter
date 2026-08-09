@@ -124,6 +124,31 @@ INSERT OR IGNORE INTO config (active, isdefault, editable, add_dt, role, name,
   (0, 1, 1, '2026-08-01 00:00:00', 'runtime', 'shutdown_timeout_s', 'float', '15.0', 'seed',
    'shutdown screen auto-picks Exit after this');
 
+-- ── roi ─────────────────────────────────────────────────────────────────────
+-- Which ROI roles the instrument refuses to run without.  A *role* is what a
+-- region is for; its *name* is an operator-editable label, so the requirement
+-- is stated in roles (see src/roi.py's "Roles" section).
+--
+-- editable=0: this is not a preference.  Changing it changes what the capture
+-- and analysis paths are entitled to assume exists, so it moves with the code,
+-- not with the operator.  It lives here rather than in roi.py so a unit
+-- commissioned for a different card can be given a different requirement
+-- without a code change, and so the boot check and the capture path read one
+-- list instead of two.
+--
+--   bound          the crop written to the h5 archive; exactly one
+--   sample         the reacted cuvette — the measurement; one or more
+--   white_balance  reference patch the layers are balanced against; one or more
+--
+-- Any other role ('black', 'gray1', ...) may be active and is simply not
+-- checked at boot.
+INSERT OR IGNORE INTO config (active, isdefault, editable, add_dt, role, name,
+                              vtype, value, source, remark)
+     VALUES
+  (0, 1, 0, '2026-08-08 00:00:00', 'roi', 'required_roles', 'str',
+   'bound,sample,white_balance', 'seed',
+   'ROI roles a run cannot proceed without (comma-separated role names)');
+
 -- ── hardware ────────────────────────────────────────────────────────────────
 INSERT OR IGNORE INTO config (active, isdefault, editable, add_dt, role, name,
                               vtype, value, source, remark)
@@ -218,7 +243,7 @@ UPDATE config
 -- expects.
 --
 --   sample  the reacted sample cuvette — the measurement
---   white   white reference patch
+--   white   white reference patch (role 'white_balance')
 --   black1  black reference patch, above the sample
 --   black2  black reference patch, below the sample
 --   bound   the crop written to the h5 archive; contains all of the above
@@ -236,14 +261,27 @@ INSERT OR IGNORE INTO roi (rowid, active, isdefault, add_dt, name, role,
      VALUES
   ( 1, 0, 1, '2026-07-31 00:00:00', 'sample', 'sample', 1150, 790,  68,  68, 2304, 1296, 'imx708', NULL, 'commissioned default'),
   ( 2, 1, 0, '2026-07-31 00:00:00', 'sample', 'sample', 1150, 790,  68,  68, 2304, 1296, 'imx708', NULL, 'seed'),
-  ( 3, 0, 1, '2026-07-31 00:00:00', 'white',  'white',  1150, 496, 136,  68, 2304, 1296, 'imx708', NULL, 'commissioned default'),
-  ( 4, 1, 0, '2026-07-31 00:00:00', 'white',  'white',  1150, 496, 136,  68, 2304, 1296, 'imx708', NULL, 'seed'),
+  ( 3, 0, 1, '2026-07-31 00:00:00', 'white',  'white_balance', 1150, 496, 136,  68, 2304, 1296, 'imx708', NULL, 'commissioned default'),
+  ( 4, 1, 0, '2026-07-31 00:00:00', 'white',  'white_balance', 1150, 496, 136,  68, 2304, 1296, 'imx708', NULL, 'seed'),
   ( 5, 0, 1, '2026-07-31 00:00:00', 'black1', 'black',  1150, 380,  68,  68, 2304, 1296, 'imx708', NULL, 'commissioned default'),
   ( 6, 1, 0, '2026-07-31 00:00:00', 'black1', 'black',  1150, 380,  68,  68, 2304, 1296, 'imx708', NULL, 'seed'),
   ( 7, 0, 1, '2026-07-31 00:00:00', 'black2', 'black',  1150, 900,  68,  68, 2304, 1296, 'imx708', NULL, 'commissioned default'),
   ( 8, 1, 0, '2026-07-31 00:00:00', 'black2', 'black',  1150, 900,  68,  68, 2304, 1296, 'imx708', NULL, 'seed'),
   ( 9, 0, 1, '2026-07-31 00:00:00', 'bound',  'bound',  1090, 360, 196, 630, 2304, 1296, 'imx708', NULL, 'commissioned default'),
   (10, 1, 0, '2026-07-31 00:00:00', 'bound',  'bound',  1090, 360, 196, 630, 2304, 1296, 'imx708', NULL, 'seed');
+
+-- ── Role renames ────────────────────────────────────────────────────────────
+-- 'white' -> 'white_balance' (2026-08).  The role names what a region is FOR,
+-- and this one is not "the white patch" but "the patch the Bayer layers are
+-- balanced against" — which on this card is a pair of gray chips, not a white
+-- one.  Renaming the role rather than adding a second one keeps a single
+-- requirement to satisfy.
+--
+-- INSERT OR IGNORE above cannot carry this: the seed rows are pinned to
+-- explicit rowids, so on an existing database they are skipped and keep their
+-- old role.  This UPDATE is what actually migrates a commissioned unit, and
+-- is a no-op once no row is left matching.
+UPDATE roi SET role = 'white_balance' WHERE role = 'white';
 
 
 -- samples, exposure, colorcard and data are intentionally left empty: they

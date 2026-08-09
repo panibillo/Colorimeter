@@ -18,6 +18,7 @@ import sys
 import signal
 
 import db_bootstrap
+import splash_screen
 from arbiter import Arbiter
 
 
@@ -39,11 +40,16 @@ def main():
 
         # Create, repair and verify the database before anything reads it.
         # The Arbiter loads settings in its constructor, so this has to come
-        # first.
-        db_bootstrap.ensure()
+        # first — which also means it runs before there is any display to
+        # report it on, so it is timed into a BootLog for the splash screen to
+        # replay once there is.
+        boot = splash_screen.BootLog()
+        with boot.step("Database"):
+            result = db_bootstrap.ensure()
+        boot.restored = result.restored
 
         app = Arbiter()
-        app.start()
+        app.start(boot=boot)
 
     except db_bootstrap.DatabaseError as e:
         # A schema problem needs an operator decision (migrate, restore a

@@ -750,10 +750,10 @@ if __name__ == "__main__":
     # Keyed on role, not on name: names are operator-editable labels, so a
     # dict keyed on them silently falls through to white the moment someone
     # renames a patch. Anything with an unrecognised role still gets drawn.
-    ROLE_COLOURS = {roi_mod.ROLE_SAMPLE: (255, 255, 0),
-                    roi_mod.ROLE_WHITE:  (0, 255, 255),
-                    roi_mod.ROLE_BLACK:  (0, 255, 0),
-                    roi_mod.ROLE_BOUND:  (255, 0, 255)}
+    ROLE_COLOURS = {roi_mod.ROLE_SAMPLE:        (255, 255, 0),
+                    roi_mod.ROLE_WHITE_BALANCE: (0, 255, 255),
+                    roi_mod.ROLE_BLACK:         (0, 255, 0),
+                    roi_mod.ROLE_BOUND:         (255, 0, 255)}
     overlays = [(r, ROLE_COLOURS.get(getattr(r, "role", None),
                                      (255, 255, 255)))
                 for _, r in sorted(rois.items())]

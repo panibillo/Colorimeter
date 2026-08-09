@@ -17,14 +17,17 @@
 # (touchscreen application) and dev/camtest8.py (command-line capture) — plus
 # the data files they read. See the end of this file for how to regenerate it.
 
-# ── License ──────────────────────────────────────────────────────────────
+# ── License and Version ──────────────────────────────────────────────────
 LICENSE
+src/version.py
 
 # ── Entry points ─────────────────────────────────────────────────────────
 src/main.py
 dev/camtest8.py
 
 # ── Application core (arbiter + shutdown) ────────────────────────────────
+src/splash_screen.py
+src/startup_checks.py
 src/arbiter.py
 src/shutdown_screen.py
 
@@ -79,7 +82,6 @@ src/db_manager.py
 src/error_handler.py
 src/logging_manager.py
 src/utils.py
-src/version.py
 
 # ── Db schema and Configuration ──────────────────────────────────────────
 # The schema, so a unit with no reference colorimeter.sqlite to copy can build
@@ -96,6 +98,7 @@ src/mock/__init__.py
 # ── Configuration ────────────────────────────────────────────────────────
 # see provisioning/config_defaults.sql, synced with db_DDL.sql below.
 provisioning/config_defaults.sql
+provisioning/deploy/commissioning_status.sh
 
 # ── Instrument Lens Position ─────────────────────────────────────────────
 # The commissioned lens position.  bayer_cam.focus() restores this and skips

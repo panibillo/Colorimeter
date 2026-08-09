@@ -15,6 +15,19 @@
 # It changes nothing, needs no sudo, and is safe to run repeatedly on a unit in
 # any state — including one that has never been commissioned at all.
 #
+# Its in-app twin is src/startup_checks.py, which asks the overlapping
+# questions (config, ROIs, exposures, flat-field models, calibration files) at
+# every boot and shows them on the splash screen. It has since grown two of
+# this script's checks as well — the bus device nodes of step 2 and the
+# hardware groups of step 3e, as startup_checks.BUS_NODES and
+# HARDWARE_GROUPS — because both fail silently and an operator meets the
+# splash long before they think to run this. Keep those two lists and all the
+# shared labels identical, so an operator reads the same words from either.
+#
+# What is left here that an application cannot see about itself: the OS image,
+# the config.txt lines behind those device nodes, the venv, SSH and the
+# systemd units.
+#
 # What it deliberately does NOT do:
 #   • verify the venv's imports — that is make_venv.sh's job (safe to re-run)
 #   • verify the peripherals   — that is verify_peripherals.sh's job

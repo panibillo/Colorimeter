@@ -26,6 +26,15 @@ class TSC2007:
         self._last_position: Optional[Tuple[int, int]] = None
         log.info("TSC2007 (mock): initialized")
 
+    @property
+    def calibrated(self) -> bool:
+        """
+        Always True: mouse clicks arrive in display coordinates already, so
+        there is no affine transform to calibrate.  Mirrors the real driver's
+        property so the boot-time check needs no simulation special case.
+        """
+        return True
+
     def init(self) -> None:
         """Initialize the touch driver."""
         log.info("TSC2007 (mock): init")

@@ -42,8 +42,9 @@ Usage:
 """
 
 import sqlite3
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Dict, List, Optional, Tuple
 
 import config_repo as config
 import db_manager as db
@@ -70,21 +71,63 @@ class DatabaseError(RuntimeError):
     """The database cannot be brought to a state the application can run on."""
 
 
+@dataclass(frozen=True)
+class Restored:
+    """
+    One parameter that had to be brought back from its commissioned default.
+
+    Two ways a parameter can arrive here, both healed by the seed file before
+    anything reads the table:
+
+        reactivated  its rows were all inactive, and the closing UPDATE in
+                     config_defaults.sql put the isdefault row back in force.
+                     Completely invisible until now.
+        reseeded     it had no rows at all, and the seed INSERTed it.  This is
+                     what Result.added counts, as a number with no names.
+
+    Attributes:
+        rowid: The config row now in force — what to look at in the editor.
+        role:  The section the parameter sits under, e.g. 'protocol'.
+        name:  The parameter, e.g. 'reagent1_secs'.
+        value: Its value, as stored text.
+        how:   'reactivated' or 'reseeded'.
+    """
+    rowid: int
+    role:  str
+    name:  str
+    value: str
+    how:   str
+
+    def message(self) -> str:
+        """The one line the splash screen shows, with an OK button."""
+        return (f"Loading {self.role}.{self.name} = {self.value} "
+                f"(rowid {self.rowid})")
+
+
+REACTIVATED = "reactivated"
+RESEEDED    = "reseeded"
+
+
 @dataclass
 class Result:
     """
     What `ensure` did.
 
     Attributes:
-        state:  'created' if the database had no config table before this call,
-                'current' if it was already at SCHEMA_VERSION.
-        added:  config rows the seed file inserted this run.  0 on every run
-                after the first — that is the idempotency check.
-        params: distinct parameters now in force (one active row each).
+        state:    'created' if the database had no config table before this
+                  call, 'current' if it was already at SCHEMA_VERSION.
+        added:    config rows the seed file inserted this run.  0 on every run
+                  after the first — that is the idempotency check.
+        params:   distinct parameters now in force (one active row each).
+        restored: a Restored record per parameter that came back from its
+                  default this run, for the splash screen to report.  Always
+                  empty on a freshly created database, where every parameter
+                  is new and naming them all would say nothing.
     """
-    state:  str
-    added:  int
-    params: int
+    state:    str
+    added:    int
+    params:   int
+    restored: List[Restored] = field(default_factory=list)
 
 
 def _schema_state(con: sqlite3.Connection) -> str:
@@ -137,6 +180,58 @@ def _run_script(con: sqlite3.Connection, path: Path) -> None:
         raise DatabaseError(f"{path.name} failed: {e}") from e
 
 
+def _params_having(clause: str,
+                   con: Optional[sqlite3.Connection] = None
+                   ) -> List[Tuple[str, str]]:
+    """
+    Every parameter whose rows satisfy an aggregate condition.
+
+    Args:
+        clause: The HAVING expression, e.g. 'SUM(active) = 0'.
+        con:    An open connection, or None to go through db_manager.  Callers
+                outside a bootstrap transaction pass None.
+
+    Returns:
+        (role, name) pairs, ordered.
+    """
+    sql = ("SELECT role, name FROM config "
+           " GROUP BY role, name "
+           f"HAVING {clause} "
+           " ORDER BY role, name")
+    if con is not None:
+        return con.execute(sql).fetchall()
+    return [tuple(row) for row in db.read_all(sql)]
+
+
+def dead_params(con: Optional[sqlite3.Connection] = None
+                ) -> List[Tuple[str, str]]:
+    """
+    Parameters with no active row — every read of one raises ConfigMissing.
+
+    Only reachable by hand-editing the table: the seed file's closing UPDATE
+    reactivates any parameter that still has its commissioned default, so
+    anything left here has no default to fall back on either.
+
+    Example:
+        >>> dead_params()                              # doctest: +SKIP
+        []
+    """
+    return _params_having("SUM(active) = 0", con)
+
+
+def orphan_params(con: Optional[sqlite3.Connection] = None
+                  ) -> List[Tuple[str, str]]:
+    """
+    Parameters with no isdefault row — the value works, but Restore cannot
+    reach them.
+
+    Example:
+        >>> orphan_params()                            # doctest: +SKIP
+        []
+    """
+    return _params_having("SUM(isdefault) = 0", con)
+
+
 def _verify(con: sqlite3.Connection) -> int:
     """
     Check that every parameter in the table is usable, and count them.
@@ -163,12 +258,7 @@ def _verify(con: sqlite3.Connection) -> int:
     Raises:
         DatabaseError: One or more parameters have no active row.
     """
-    dead = con.execute(
-        "SELECT role, name FROM config "
-        " GROUP BY role, name "
-        "HAVING SUM(active) = 0 "
-        " ORDER BY role, name"
-    ).fetchall()
+    dead = dead_params(con)
     if dead:
         named = ", ".join(f"{r}.{n}" for r, n in dead)
         raise DatabaseError(
@@ -177,12 +267,7 @@ def _verify(con: sqlite3.Connection) -> int:
             "provisioning/config_defaults.sql after clearing them."
         )
 
-    orphans = con.execute(
-        "SELECT role, name FROM config "
-        " GROUP BY role, name "
-        "HAVING SUM(isdefault) = 0 "
-        " ORDER BY role, name"
-    ).fetchall()
+    orphans = orphan_params(con)
     if orphans:
         named = ", ".join(f"{r}.{n}" for r, n in orphans)
         log.warning(f"db_bootstrap: {len(orphans)} config parameter(s) have no "
@@ -192,6 +277,41 @@ def _verify(con: sqlite3.Connection) -> int:
     return con.execute(
         "SELECT COUNT(*) FROM config WHERE active = 1"
     ).fetchone()[0]
+
+
+def _active_counts(con: sqlite3.Connection) -> Dict[Tuple[str, str], int]:
+    """How many rows are in force per parameter, keyed by (role, name)."""
+    return {(role, name): n for role, name, n in con.execute(
+        "SELECT role, name, SUM(active) FROM config GROUP BY role, name")}
+
+
+def _restored(con: sqlite3.Connection,
+              was_active: Dict[Tuple[str, str], int]) -> List[Restored]:
+    """
+    Name the parameters the seed file just brought back.
+
+    Compares what is in force now against what was in force before the seed
+    ran.  A parameter absent from `was_active` had no rows at all and was
+    reseeded; one that was there with a count of zero had rows but none
+    active, and the seed file's closing UPDATE reactivated its default.
+
+    Args:
+        con:        An open connection, after the seed file has run.
+        was_active: The _active_counts() taken before it ran.
+
+    Returns:
+        A Restored per healed parameter, ordered by role and name.
+    """
+    out: List[Restored] = []
+    for rowid, role, name, value in con.execute(
+            "SELECT rowid, role, name, value FROM config "
+            " WHERE active = 1 ORDER BY role, name"):
+        seen = was_active.get((role, name))
+        if seen is None:
+            out.append(Restored(rowid, role, name, value, RESEEDED))
+        elif not seen:
+            out.append(Restored(rowid, role, name, value, REACTIVATED))
+    return out
 
 
 def ensure(path=None) -> Result:
@@ -257,11 +377,17 @@ def ensure(path=None) -> Result:
 
         before = 0 if state == "created" else con.execute(
             "SELECT COUNT(*) FROM config").fetchone()[0]
+        # What was in force before the seed file ran, so the rows it heals can
+        # be named afterwards rather than only counted.  Skipped on a new
+        # database, where nothing was in force and nothing was restored.
+        was_active = ({} if state == "created"
+                      else _active_counts(con))
 
         _run_script(con, DDL_PATH)
         _run_script(con, DEFAULTS_PATH)
 
         after  = con.execute("SELECT COUNT(*) FROM config").fetchone()[0]
+        restored = _restored(con, was_active) if state != "created" else []
 
         # Counted after `after`, so Result.added keeps meaning "seed rows the
         # file put back", and before _verify, so software_ver always has an
@@ -281,13 +407,20 @@ def ensure(path=None) -> Result:
         if con:
             con.close()
 
-    result = Result(state=state, added=after - before, params=params)
+    result = Result(state=state, added=after - before, params=params,
+                    restored=restored)
     if result.state == "created":
         log.info(f"db_bootstrap: created {path} with {result.params} "
                  f"parameters")
     elif result.added:
         log.info(f"db_bootstrap: restored {result.added} missing config "
                  f"row(s) in {path}")
+    # Logged as well as returned: the splash screen shows these with an OK
+    # button, but an unattended instrument nobody is watching still records
+    # that it came up on a default rather than on a commissioned value.
+    for r in result.restored:
+        log.warning(f"db_bootstrap: {r.how} {r.role}.{r.name} = {r.value} "
+                    f"(rowid {r.rowid})")
     return result
 
 
@@ -331,6 +464,10 @@ if __name__ == "__main__":
     check("roi seeded too",
           _con.execute("SELECT COUNT(*) FROM roi").fetchone()[0], 10)
     _con.close()
+    # Every parameter is new here, but none of them was "loaded from a
+    # default" in the sense worth telling an operator about — naming all 28
+    # would be one OK press each on a first boot.
+    check("a new database restores nothing", r1.restored, [])
 
     print("== the running software version is stamped in ==")
     _sw = ("SELECT value, editable, source, isdefault FROM config "
@@ -409,9 +546,17 @@ if __name__ == "__main__":
                        "AND name='shutdown_timeout_s' AND active=1"
                        ).fetchone()[0], "15.0")
     check("only the deleted one was added", r3.added, 1)
+    check("and it is named, not just counted",
+          [(r.role, r.name, r.value, r.how) for r in r3.restored],
+          [("runtime", "shutdown_timeout_s", "15.0", RESEEDED)])
+    check("every insert is accounted for",
+          len([r for r in r3.restored if r.how == RESEEDED]), r3.added)
+    check("the message names the row",
+          r3.restored[0].message().startswith(
+              "Loading runtime.shutdown_timeout_s = 15.0 (rowid "), True)
     _con.close()
 
-    print("== a deactivated parameter is healed, not reported ==")
+    print("== a deactivated parameter is healed, and named ==")
     # Its commissioned row is still flagged isdefault, so the seed file's
     # closing UPDATE puts it back in force without inserting anything.
     _con = sqlite3.connect(fresh)
@@ -426,7 +571,16 @@ if __name__ == "__main__":
                        "AND name='extension' AND active=1").fetchone()[0],
           ".h5")
     check("nothing inserted to do it", r4.added, 0)
+    check("reported as reactivated, not reseeded",
+          [(r.role, r.name, r.how) for r in r4.restored],
+          [("capture", "extension", REACTIVATED)])
+    check("no insert, so it does not count as added", r4.added, 0)
     _con.close()
+
+    print("== a healthy relaunch reports nothing ==")
+    r5 = ensure(fresh)
+    check("no rows added",    r5.added,    0)
+    check("nothing restored", r5.restored, [])
 
     print("== a parameter with no active and no default row is fatal ==")
     # Clearing both flags is past what the seed file can repair: it cannot

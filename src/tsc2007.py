@@ -209,6 +209,10 @@ class TSC2007:
         self._bus       = None
         self._irq_dev   = None
         self._cal       = dict(_DEFAULT_CAL)
+        # False until _load_cal finds a file with a full affine set.  The
+        # defaults are a guess good enough to press a button with, not a
+        # calibration; the boot-time check reports the difference.
+        self._calibrated = False
         self._initialised = False
 
     # ── Context manager ───────────────────────────────────────────────────────
@@ -414,6 +418,7 @@ class TSC2007:
             required = {"a", "b", "c", "d", "e", "f"}
             if required.issubset(loaded.keys()):
                 self._cal.update(loaded)
+                self._calibrated = True
                 if "threshold" in loaded:
                     self._threshold = int(loaded["threshold"])
                 log.info("cal loaded from %s  threshold=%d", self._cal_path, self._threshold)
@@ -421,6 +426,22 @@ class TSC2007:
                 log.warning("cal file missing affine keys — using defaults. Run calibrate().")
         except (OSError, json.JSONDecodeError):
             log.info("no cal file found at %s — using defaults", self._cal_path)
+
+    @property
+    def calibrated(self) -> bool:
+        """
+        True if this driver is running on a saved calibration.
+
+        False means _load_cal fell back to the built-in affine defaults —
+        touch still works, but positions are only approximately right.  Ask
+        the driver rather than looking for the file: only it knows whether
+        what it found was usable.
+
+        Example:
+            >>> TSC2007().calibrated                 # doctest: +SKIP
+            True
+        """
+        return self._calibrated
 
     def save_cal(self):
         """Save current calibration (affine coefficients + threshold) to JSON."""
@@ -435,7 +456,8 @@ class TSC2007:
         px = a*rx + b*ry + c
         py = d*rx + e*ry + f
         """
-        self._threshold = threshold
+        self._threshold  = threshold
+        self._calibrated = True
         self._cal = {
             "a": a, "b": b, "c": c,
             "d": d, "e": e, "f": f,

@@ -32,7 +32,11 @@ import sys
 log = logging.getLogger(__name__)
 
 # ── Constants ─────────────────────────────────────────────────
-_W1_ROOT     = "/sys/bus/w1/devices/"
+# Public: the boot-time completeness check reads it to tell "the 1-Wire bus
+# is not enabled in config.txt" apart from "the bus is up but no probe is
+# wired to it" — two different repairs, and only one of them needs a
+# screwdriver.  See provisioning/deploy/commissioning_status.sh, step 2.
+W1_ROOT      = "/sys/bus/w1/devices/"
 _DS18B20_PREFIX = "28-"          # DS18B20 family code
 _W1_SLAVE_FILE  = "w1_slave"
 
@@ -48,7 +52,7 @@ def find_sensors():
 
     Example return value: ['28-0123456789ab', '28-0123456789cd']
     """
-    paths = glob.glob(_W1_ROOT + _DS18B20_PREFIX + "*")
+    paths = glob.glob(W1_ROOT + _DS18B20_PREFIX + "*")
     return [p.split("/")[-1] for p in paths]
 
 
@@ -60,7 +64,7 @@ def read_raw(device_id):
     Returns the file contents as a list of two strings (lines),
     or raises OSError if the device is not accessible.
     """
-    path = _W1_ROOT + device_id + "/" + _W1_SLAVE_FILE
+    path = W1_ROOT + device_id + "/" + _W1_SLAVE_FILE
     with open(path, "r") as f:
         return f.readlines()
 
@@ -202,7 +206,7 @@ if __name__ == "__main__":
     # Check that the w1 bus is available
     try:
         import os
-        os.listdir(_W1_ROOT)
+        os.listdir(W1_ROOT)
     except FileNotFoundError:
         print("Error: /sys/bus/w1/devices/ not found.")
         print("Check that dtoverlay=w1-gpio,gpiopin=16 is in config.txt")

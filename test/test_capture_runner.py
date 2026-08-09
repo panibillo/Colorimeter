@@ -269,24 +269,32 @@ class TestLoadRoisHasNoFallback(unittest.TestCase):
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
     def test_a_freshly_bootstrapped_table_loads_fine(self):
+        import roi as roi_mod
         rois = capture_runner._load_rois(self.cam)
-        self.assertEqual(capture_runner.roi.missing_roles(
-            rois, capture_runner.REQUIRED_ROLES), [])
+        self.assertEqual(
+            roi_mod.missing_roles(rois, roi_mod.required_roles()), [])
+
+    def test_the_requirement_comes_from_the_config_table(self):
+        # Not a constant in either module: an instrument commissioned around a
+        # different card is given a different list, without a code change.
+        import roi as roi_mod
+        self.assertEqual(roi_mod.required_roles(),
+                         ("bound", "sample", "white_balance"))
 
     def test_a_role_left_unfilled_raises_rather_than_substitutes(self):
         import roi as roi_mod
         self._db.write_one("UPDATE roi SET active = 0 WHERE role = ?",
-                           (roi_mod.ROLE_WHITE,))
+                           (roi_mod.ROLE_WHITE_BALANCE,))
         with self.assertRaises(roi_mod.RoiMissing) as ctx:
             capture_runner._load_rois(self.cam)
-        self.assertIn(roi_mod.ROLE_WHITE, str(ctx.exception))
+        self.assertIn(roi_mod.ROLE_WHITE_BALANCE, str(ctx.exception))
 
     def test_an_empty_table_raises_naming_every_required_role(self):
         import roi as roi_mod
         self._db.write_one("UPDATE roi SET active = 0")
         with self.assertRaises(roi_mod.RoiMissing) as ctx:
             capture_runner._load_rois(self.cam)
-        for role in capture_runner.REQUIRED_ROLES:
+        for role in roi_mod.required_roles():
             self.assertIn(role, str(ctx.exception))
 
 
@@ -341,7 +349,7 @@ class TestSingleLedRun(RunnerTestCase):
         import roi as roi_mod
         self.assertEqual(
             roi_mod.missing_roles(self.runner.rois,
-                                  capture_runner.REQUIRED_ROLES), [],
+                                  roi_mod.required_roles()), [],
             "a role the capture path cannot run without is unfilled")
         for name, r in sorted(self.runner.rois.items()):
             with self.subTest(roi=name):

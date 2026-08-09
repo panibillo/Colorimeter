@@ -20,16 +20,22 @@ os.environ['COLORIMETER_SIMULATION'] = '1'
 
 # Import and run the app
 import db_bootstrap
+import splash_screen
 from arbiter import Arbiter
 
 if __name__ == "__main__":
     app = None
     try:
         # Create, repair and verify the database before anything reads it.
-        db_bootstrap.ensure()
+        # Timed into a BootLog because it runs before there is any display to
+        # report it on; the splash screen replays it once there is.
+        boot = splash_screen.BootLog()
+        with boot.step("Database"):
+            result = db_bootstrap.ensure()
+        boot.restored = result.restored
 
         app = Arbiter()
-        app.start()
+        app.start(boot=boot)
     except db_bootstrap.DatabaseError as e:
         print(f"Database error: {e}")
         sys.exit(1)

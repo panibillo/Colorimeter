@@ -16,7 +16,7 @@ Two launchers, each of which builds and runs one `Arbiter`:
 | `run_simulation.py` | Desktop dev | mock drivers (sets `COLORIMETER_SIMULATION=1`) |
 
 Platform is chosen by the **`COLORIMETER_SIMULATION`** environment variable, read
-once as `arbiter._SIMULATION_MODE`. `Arbiter._init_hardware()` imports drivers
+once as `arbiter._SIMULATION_MODE`. `Arbiter._init_drivers()` imports drivers
 **lazily**, so the modules import cleanly on any machine:
 
 - Real: `ili9341`, `tsc2007`, `kb_reader`, `beeper`, `gpiozero`, `DS18B20`
@@ -28,11 +28,68 @@ The mock display is a matplotlib window: mouse = touch, key presses = keyboard.
 
 ## Initialization sequence
 
-1. The launcher installs signal handlers and calls `Arbiter().start()`.
-2. `start()` → `_init_logging()` → `_init_hardware()` (lazy driver import;
-   display/touch/keyboard init) → `_build_model()` → `focus(slot A)` → `_run()`.
-3. `_build_model()` builds the shared `Pool`, the phase registry
-   (`build_phases()`), and slots A and B.
+The boot is in three acts, because the splash screen cannot narrate its own
+preconditions — the database and the display have to be up before anything can
+be shown at all.
+
+1. The launcher installs signal handlers, times `db_bootstrap.ensure()` into a
+   `splash_screen.BootLog`, and calls `Arbiter().start(boot=boot)`.
+2. `start()` → `_init_logging()` → `_init_drivers()` (lazy driver import,
+   backlight on, signal handlers) → `_init_display()`. Silent so far.
+3. The `Splash` opens and `replay()`s the BootLog, so the two steps that
+   happened before it existed appear as already done. From here every step is
+   narrated: `_init_peripherals()` (touch, keyboard, temperature),
+   `_build_model()` (the shared `Pool`, `build_phases()`, slots A and B), and
+   finally `startup_checks.run_all()`.
+4. Anything the seed file had to load from a default gets its own
+   `Loading {role}.{name} = {value} (rowid {n})` dialog and its own OK press.
+5. `splash.problems()` then **replaces** the step list with the warnings and
+   failures the checks found, one message each. Every step that ran, ran; what
+   the operator can act on is the exception, and only one of the two lists
+   fits on a 320×240 panel. Nothing is drawn when nothing went wrong.
+6. `splash.finish()` shows `Ready` (or the first failure, with START greyed
+   out) and waits. MENU → `open_menu(slot A)`, START → `focus(slot A)`; either
+   way the operator ends up on the Begin screen. Then `_run()`.
+
+A step is marked from **what it found**, not from whether it returned:
+`KbReader.open()` answers False when no keyboard is on the bus and
+`DS18B20.init()` finds no probe just as quietly, so both would otherwise
+report `ok` while saying the opposite of what the operator needs.
+
+`_init_hardware()` remains as the unnarrated equivalent of steps 2-3, for
+callers with no splash to report to (the self-test at the foot of `arbiter.py`).
+
+Severity rule for the checks: **a check may only FAIL if the operator can fix
+it from the Menu.** A missing config parameter or image region may stop a boot
+(Menu → Config, Menu → View Image); a missing flat-field model, exposure ladder
+or touch calibration may only warn, because each needs a desktop tool. So do
+the bus device nodes and the hardware group memberships, which need
+`/boot/firmware/config.txt` and `usermod`.
+
+### Image regions
+
+Which ROI roles a run cannot proceed without is **commissioned data, not a
+constant**: `config` holds `roi.required_roles` (`editable=0`), and
+`roi.required_roles()` reads it, so an instrument built around a different card
+is given a different requirement without a code change. Both the boot check
+and the capture path read that one list.
+
+The rules applied to those roles live in `roi.check_requirements()`, with the
+multiplicities in `roi.MULTIPLICITY`:
+
+| Role | In force | Over-filled |
+|---|---|---|
+| `bound` | exactly one — it is *the* crop the archive stores | warning |
+| `sample` | one is the design | warning, naming the one that wins |
+| `white_balance` | one or more — this card balances on a pair of gray chips | fine |
+
+A required role with nothing in force is restored from its commissioned
+default — every row of it, since a role may be filled by more than one region
+— and each restoration earns its own OK press. A role with no default to fall
+back on is the only ROI failure. A required region hanging outside `bound` is a
+warning: what is lost is the archive, not the reading. **Regions in any other
+role are not checked at all**, so a card may carry as many reference patches as
+its operator finds useful.
 
 ## Main event loop
 
@@ -54,7 +111,7 @@ a quad-core Zero 2 W. See WEB_INTERFACE.md and the capture review for detail.
 ## Shutdown
 
 `Arbiter.shutdown(error=None)` (`arbiter.py`) is the one shutdown entry point —
-reached from the SIGINT/SIGTERM handler installed in `_init_hardware()`, and
+reached from the SIGINT/SIGTERM handler installed in `_init_drivers()`, and
 from the launchers' top-level `except` clauses (a fallback for anything that
 happens before that handler is installed, or an unhandled exception inside the
 loop). Ctrl-Z (SIGTSTP) is unrelated — `main.py` lets it suspend the process
@@ -134,6 +191,19 @@ The arbiter owns at most one `CaptureSession` at a time (single camera).
   resolves the database path itself (`db_path()` / `$COLORIMETER_DB`), since
   `config_repo` reads its parameters out of the database and cannot be the one
   to say where it lives.
+- `splash_screen.py` — the boot splash, and the `BootLog` the launchers use to
+  record the steps that ran before there was a display. Deliberately
+  pool-free/layout-free, like `shutdown_screen.py`: it has to draw while the
+  `Pool` it is narrating the construction of does not exist yet.
+- `startup_checks.py` — the boot-time "is this instrument commissioned enough
+  to run?" aggregator, and the in-app twin of
+  `provisioning/deploy/commissioning_status.sh`. Defines no threshold, path or
+  required-name list of its own — the required ROI roles come from the config
+  table, the schema's tables are read back out of `db_DDL.sql` — and imports
+  each subsystem inside the check that needs it so `arbiter`'s header does not
+  pull in numpy or picamera2. Its two exceptions, `BUS_NODES` and
+  `HARDWARE_GROUPS`, are facts about the Pi that no module of ours owns; their
+  other copy is in `commissioning_status.sh`, and the two are kept in step.
 - `utils.py` — shared helpers (no hardware or DB access).
 - Hardware drivers: `ili9341.py` (display, SPI), `tsc2007.py` (touch, I²C),
   `kb_reader.py` (keyboard), `beeper.py` (buzzer), `DS18B20.py` (temperature,

@@ -105,12 +105,10 @@ OUT_STEM = "camtest8"
 # the time _load_rois() runs is a real bug, not a condition to work around —
 # it raises rather than falling back to a Python copy of the seed geometry.
 
-# The roles this module cannot run without: ROLE_WHITE drives exposure
-# calibration, ROLE_SAMPLE drives the exposure ladder, ROLE_BOUND is the crop
-# the archive stores. Roles, not names — a name is an operator-editable label
-# ('black1'/'black2' are already 'chip1'/'chip2'), so matching on one would
-# stop working silently. See the note in roi.py.
-REQUIRED_ROLES = (roi.ROLE_SAMPLE, roi.ROLE_WHITE, roi.ROLE_BOUND)
+# The roles this module cannot run without are commissioned data, not a
+# constant: roi.required_roles() reads them from the config table's
+# roi.required_roles (editable=0).  Read per run rather than at import, so a
+# unit re-commissioned for a different card does not need this module reloaded.
 
 # Exposure analysis constants (10-bit sensor: 0–1023)
 HALF_SAT        = 512      # target: 50% of full scale
@@ -277,7 +275,7 @@ def _load_rois(cam) -> "dict[str, Rect]":
     misapplied.
 
     db_bootstrap seeds the `roi` table at every launch, so by the time this
-    runs every REQUIRED_ROLES entry is guaranteed to have an active row.
+    runs every required role is guaranteed to have an active row.
     Raises roi.RoiMissing if one is unfilled anyway, rather than quietly
     substituting a Python copy of the seed geometry — that substitution is
     exactly the kind of value-lurking-in-Python this table was seeded to
@@ -293,7 +291,8 @@ def _load_rois(cam) -> "dict[str, Rect]":
         cam: The camera, already set up (config_size populated).
 
     Returns:
-        {name: Rect} in stream space, guaranteed to fill REQUIRED_ROLES.
+        {name: Rect} in stream space, guaranteed to fill every
+        required role.
 
     Raises:
         roi.RoiMissing: a required role has no active row.
@@ -302,37 +301,19 @@ def _load_rois(cam) -> "dict[str, Rect]":
     model = getattr(cam, "model", None)
     rois  = roi.load_active(size[0], size[1], model)
 
-    missing = roi.missing_roles(rois, REQUIRED_ROLES)
+    missing = roi.missing_roles(rois, roi.required_roles())
     if missing:
         raise roi.RoiMissing(
             f"the roi table has no active row for role(s) {missing} — "
             f"expected db_bootstrap.ensure() to have seeded it")
 
-    for name, r in sorted(rois.items()):
-        if not roi.is_bayer_safe(r):
-            log.error("capture: ROI %r is not Bayer-safe (%s) — layer "
-                      "coordinates will be off by up to one mosaic pixel",
-                      name, r.xywh())
-    # Containment in `bound` matters at two different severities. The run
-    # itself measures `white` and `sample` against whole-frame layers, so an
-    # overhang costs this run nothing; what it costs is the archive, which
-    # stores only the bound crop. Losing part of `sample` would make the
-    # reading unrecoverable, so that is an error; losing part of a reference
-    # patch degrades later re-analysis, so that is a warning.
-    bound = roi.by_role(rois, roi.ROLE_BOUND)
-    for name, r in sorted(rois.items()):
-        if r is bound or roi.contains_rect(bound, r):
-            continue
-        lost = "  ".join(
-            f"{edge} by {px}px" for edge, px in (
-                ("left",   bound.x - r.x),   ("right",  r.x2() - bound.x2()),
-                ("top",    bound.y - r.y),   ("bottom", r.y2() - bound.y2()))
-            if px > 0)
-        emit = (log.error if getattr(r, "role", None) == roi.ROLE_SAMPLE
-                else log.warning)
-        emit("capture: ROI %r %s extends outside bound %s (%s) — that part is "
-             "not stored in the archive and cannot be re-measured from it",
-             name, r.xywh(), bound.xywh(), lost)
+    # Bayer-safety and containment in `bound` — see roi.validate for what each
+    # severity costs.  Reported here rather than raised: the run measures
+    # against whole-frame layers, so what a bad ROI costs is the archive, and
+    # refusing to capture at all would cost more.
+    for severity, message in roi.validate(rois):
+        emit = log.error if severity == roi.ERROR else log.warning
+        emit("capture: %s", message)
 
     log.info("capture: ROIs " + "  ".join(
         f"{n}={r.xywh()}" for n, r in sorted(rois.items())))
@@ -1000,7 +981,7 @@ class CaptureRunner:
         # layers that _extract() produces — not the bound-crop layers
         # _bound_layers() produces. See roi.py, trap C.
         self.rois   = _load_rois(cam)
-        white_lr    = roi.to_layer_rect(roi.by_role(self.rois, roi.ROLE_WHITE))
+        white_lr    = roi.to_layer_rect(roi.by_role(self.rois, roi.ROLE_WHITE_BALANCE))
         sample_lr   = roi.to_layer_rect(roi.by_role(self.rois, roi.ROLE_SAMPLE))
 
         yield self._progress(

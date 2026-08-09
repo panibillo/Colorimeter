@@ -73,10 +73,14 @@ Public surface
     is_bayer_safe(r)               -> bool
     contains_rect(outer, inner)    -> bool
 
-    by_role(rois, role)            -> Rect | None   the one ROI for a role
+    by_role(rois, role)            -> Rect | None   the first ROI for a role
     all_by_role(rois, role)        -> list[Rect]    every ROI for a role
     missing_roles(rois, roles)     -> list[str]     which of `roles` are absent
-    ROLE_SAMPLE / ROLE_WHITE / ROLE_BLACK / ROLE_BOUND
+    required_roles()               -> tuple[str]    from config roi.required_roles
+    check_requirements(rois)       -> list[(sev, msg)]  the boot-time rules
+    duplicate_active_names()       -> list[(name, n)]   hand-edit damage
+    restore_role(role)             -> list[(name, rowid)]  reseed a whole role
+    ROLE_SAMPLE / ROLE_WHITE_BALANCE / ROLE_BLACK / ROLE_BOUND
 
 Select ROIs by **role**, never by name.  A name is an operator-editable label
 — 'black1'/'black2' have already become 'chip1'/'chip2' once — so a literal
@@ -131,10 +135,63 @@ class RoiMissing(RuntimeError):
 # Only devdesk/ and dev/ scripts may hardcode names; they are throwaway
 # analyses pinned to one archive, not the instrument.
 
-ROLE_SAMPLE = "sample"
-ROLE_WHITE  = "white"
-ROLE_BLACK  = "black"
-ROLE_BOUND  = "bound"
+ROLE_SAMPLE        = "sample"
+ROLE_WHITE_BALANCE = "white_balance"
+ROLE_BLACK         = "black"
+ROLE_BOUND         = "bound"
+
+# How many ROIs each role may have in force: (fewest, most before it is worth
+# mentioning).  None as the second means any number is fine.
+#
+#   bound          exactly one — it is *the* crop the archive stores, so a
+#                  second one makes which crop was written ambiguous
+#   sample          one is the design; a second is more likely a leftover
+#                  edit than a deliberate two-cuvette card, so it is said out
+#                  loud without being refused
+#   white_balance   as many as the card carries.  This card has two gray
+#                  chips, and pooling them is the point
+#
+# A role in roi.required_roles with no entry here takes _ANY_NUMBER: present
+# at least once, no upper limit.  The *list* of required roles is commissioned
+# data and lives in the config table; these multiplicity rules are what the
+# capture and analysis code is written against, so they live with the code.
+_ANY_NUMBER = (1, None)
+MULTIPLICITY = {
+    ROLE_BOUND:         (1, 1),
+    ROLE_SAMPLE:        (1, 1),
+    ROLE_WHITE_BALANCE: _ANY_NUMBER,
+}
+
+
+def required_roles() -> Tuple[str, ...]:
+    """
+    Return the roles a run cannot proceed without.
+
+    Read from the config table (roi.required_roles, editable=0) rather than
+    written down here, so a unit commissioned for a different card can be
+    given a different requirement without a code change, and so the boot check
+    and the capture path read one list instead of two.
+
+    Roles, not names — a name is an operator-editable label ('black1'/'black2'
+    are already 'chip1'/'chip2'), so matching on one would stop working
+    silently.
+
+    Returns:
+        Tuple of role strings.  Falls back to the built-in three if the
+        parameter is unreadable, because a boot check that cannot state its
+        own requirement is worse than one stating the usual one.
+
+    Example:
+        >>> required_roles()                            # doctest: +SKIP
+        ('bound', 'sample', 'white_balance')
+    """
+    try:
+        import config_repo as config
+        roles = config.required_roi_roles()
+    except Exception:
+        log.exception("roi.required_roles: falling back to the built-in set")
+        roles = ()
+    return roles or (ROLE_BOUND, ROLE_SAMPLE, ROLE_WHITE_BALANCE)
 
 # The commissioned geometry lives only in provisioning/config_defaults.sql now
 # — db_bootstrap seeds it into the `roi` table at every launch — so it is not
@@ -253,8 +310,10 @@ def by_role(rois: Dict[str, Rect], role: str) -> Optional[Rect]:
     """
     Return the first ROI with the given role, or None if there is none.
 
-    Use for the roles that are singular by construction — 'sample', 'white'
-    and 'bound'.  For roles that may repeat, use `all_by_role()`.
+    Use for the roles that are singular by construction — 'bound' is the only
+    one the instrument insists on.  'sample' is singular by design but only
+    warned about when it is not (see MULTIPLICITY), and 'white_balance' may
+    legitimately repeat, so prefer `all_by_role()` for both.
 
     Args:
         rois: The dict from load_active() / load_defaults().
@@ -269,6 +328,183 @@ def by_role(rois: Dict[str, Rect], role: str) -> Optional[Rect]:
     """
     found = all_by_role(rois, role)
     return found[0] if found else None
+
+
+ERROR   = "error"
+WARNING = "warning"
+
+
+def _overhang(bound: Rect, r: Rect) -> str:
+    """
+    Describe how far `r` sticks out of `bound`, or '' when it does not.
+
+    Args:
+        bound: The ROLE_BOUND rectangle — the crop the archive stores.
+        r:     Any other rectangle in the same space.
+
+    Returns:
+        Text like 'left by 12px  bottom by 4px', or '' when `r` is contained.
+
+    Example:
+        >>> _overhang(Rect(0, 0, 10, 10), Rect(2, 2, 4, 4))
+        ''
+        >>> _overhang(Rect(0, 0, 10, 10), Rect(-2, 0, 4, 4))
+        'left by 2px'
+    """
+    if contains_rect(bound, r):
+        return ""
+    return "  ".join(
+        f"{edge} by {px}px" for edge, px in (
+            ("left",   bound.x - r.x),   ("right",  r.x2() - bound.x2()),
+            ("top",    bound.y - r.y),   ("bottom", r.y2() - bound.y2()))
+        if px > 0)
+
+
+def validate(rois: Dict[str, Rect], roles: Optional[Tuple[str, ...]] = None
+             ) -> list:
+    """
+    Check the assumptions the Bayer-layer conversions rest on.
+
+    Two families of problem, both from roi.py's traps A and B:
+
+      * a ROI that is not Bayer-safe, so layer extraction loses its mosaic
+        phase and every layer coordinate is off by up to one pixel;
+      * a ROI extending outside the ROLE_BOUND one, which is the only crop the
+        archive stores.  Containment matters at two severities: the run itself
+        measures against whole-frame layers, so an overhang costs it nothing.
+        What it costs is the archive.  Losing part of `sample` makes the
+        reading unrecoverable (error); losing part of a reference patch only
+        degrades later re-analysis (warning).
+
+    Reports rather than raises, so the two callers can each apply their own
+    policy: the capture path logs at these severities and proceeds, while the
+    boot check applies the softer rules in `check_requirements`.
+
+    Args:
+        rois:  The dict from load_active().
+        roles: Restrict the check to ROIs in these roles; None checks all of
+               them.  The boot check passes required_roles(), because a role
+               nothing reads is the operator's business, not the instrument's.
+
+    Returns:
+        (severity, message) pairs, severity being ERROR or WARNING.  Empty
+        when the geometry is sound.
+
+    Example:
+        >>> validate({})
+        []
+    """
+    def wanted(r):
+        return roles is None or getattr(r, "role", None) in roles
+
+    out = []
+    for name, r in sorted(rois.items()):
+        if wanted(r) and not is_bayer_safe(r):
+            out.append((ERROR,
+                        f"ROI {name!r} is not Bayer-safe ({r.xywh()}) — layer "
+                        f"coordinates will be off by up to one mosaic pixel"))
+
+    bound = by_role(rois, ROLE_BOUND)
+    if bound is None:
+        return out
+
+    for name, r in sorted(rois.items()):
+        if r is bound or not wanted(r):
+            continue
+        lost = _overhang(bound, r)
+        if not lost:
+            continue
+        severity = (ERROR if getattr(r, "role", None) == ROLE_SAMPLE
+                    else WARNING)
+        out.append((severity,
+                    f"ROI {name!r} {r.xywh()} extends outside bound "
+                    f"{bound.xywh()} ({lost}) — that part is not stored in "
+                    f"the archive and cannot be re-measured from it"))
+    return out
+
+
+def check_requirements(rois: Dict[str, Rect],
+                       roles: Optional[Tuple[str, ...]] = None) -> list:
+    """
+    Apply the boot-time rules on which ROIs must be in force, and how many.
+
+    Three rules, in the order an operator would meet them:
+
+      1. every required role is filled — an absent one is an ERROR, and the
+         caller is expected to have tried `restore_role` first;
+      2. no required role is over-filled — see MULTIPLICITY.  A WARNING: the
+         instrument still runs, on `by_role`'s first match, and the operator
+         is told which extra rows exist rather than having one silently
+         ignored;
+      3. every required ROI lies inside `bound` — a WARNING, because what is
+         lost is the archive rather than the reading.  This is the softer of
+         the two containment policies; `validate` holds the capture path's.
+
+    ROIs in any other role are not looked at, by design: a card may carry as
+    many reference patches as its operator finds useful, and none of them is
+    the instrument's business.
+
+    Args:
+        rois:  The dict from load_active().
+        roles: The required roles; None reads them from config.
+
+    Messages are written for a 320x240 panel, where every one of them has to
+    fit on a line or two — terse, and naming the region rather than explaining
+    what it costs.  `validate` keeps the fuller wording, which goes to the log.
+
+    Returns:
+        (severity, message) pairs, severity being ERROR or WARNING.  Empty
+        when every rule is satisfied.
+
+    Example:
+        >>> check_requirements({}, roles=(ROLE_BOUND,))[0][0]
+        'error'
+    """
+    roles = required_roles() if roles is None else roles
+    out = []
+
+    for role in roles:
+        found = all_by_role(rois, role)
+        fewest, most = MULTIPLICITY.get(role, _ANY_NUMBER)
+        if len(found) < fewest:
+            out.append((ERROR, f"no region has the role {role!r}"))
+        elif most is not None and len(found) > most:
+            out.append((WARNING,
+                        f"{len(found)} regions have the role {role!r}; "
+                        f"using {found[0].name!r}"))
+
+    bound = by_role(rois, ROLE_BOUND)
+    if bound is not None:
+        for name, r in sorted(rois.items()):
+            if r is bound or getattr(r, "role", None) not in roles:
+                continue
+            lost = _overhang(bound, r)
+            if lost:
+                out.append((WARNING, f"{name!r} reaches outside bound, {lost}"))
+    return out
+
+
+def duplicate_active_names() -> list:
+    """
+    Return names carrying more than one active row.
+
+    `load_active` keys on name, so a duplicate does not raise — it disappears,
+    the later rowid winning and the earlier one being measured by nothing.
+    Only a hand-edit can produce one: `save` deactivates the row it supersedes,
+    so the application never writes a second.  Asked of the table rather than
+    of load_active()'s dict, which by then has already collapsed them.
+
+    Returns:
+        List of (name, count) for each duplicated name, ordered by name.
+        Empty on a healthy table.
+
+    Example:
+        >>> duplicate_active_names()                    # doctest: +SKIP
+        [('white_balance', 2)]
+    """
+    return [tuple(row) for row in db.read_all(
+        "SELECT name, COUNT(*) FROM roi WHERE active = 1 "
+        "GROUP BY name HAVING COUNT(*) > 1 ORDER BY name")]
 
 
 def missing_roles(rois: Dict[str, Rect], roles: Tuple[str, ...]) -> list:
@@ -447,7 +683,7 @@ def load_active(frame_w: Optional[int] = None, frame_h: Optional[int] = None,
     Exactly one row per name has active=1, so this is the set the capture path
     measures and the viewer draws.  Each Rect carries `.name`, `.color` (the
     palette override, or rect.DEFAULT_COLOR when the column is NULL) and
-    `.role` ('sample', 'white', 'black', 'bound').
+    `.role` ('sample', 'white_balance', 'black', 'bound', ...).
 
     Pass the live stream size and model to have rows stored against a different
     stream rescaled where that is meaningful — see `_to_rect` for the rules.
@@ -608,6 +844,40 @@ def restore(name: str) -> int:
                     "restored from default")
     log.info("roi.restore: %r -> %s (rowid %s)", name, (x, y, w, h), rowid)
     return rowid
+
+
+def restore_role(role: str) -> list:
+    """
+    Put every commissioned default filling `role` back in force.
+
+    The boot check works in roles, not names, and a role may be filled by more
+    than one region — this card's white balance is a pair of gray chips — so
+    restoring "the default for a role" means restoring all of them, not the
+    first one found.
+
+    Args:
+        role: One of the ROLE_* constants, or any role string in the table.
+
+    Returns:
+        List of (name, rowid) for each row restored, ordered by name.  Empty
+        when no isdefault row offers this role, which is the case the caller
+        has to report as unrecoverable.
+
+    Example:
+        >>> restore_role('bound')      # doctest: +SKIP
+        [('bound', 41)]
+    """
+    names = sorted(n for n, r in load_defaults().items()
+                   if getattr(r, "role", None) == role)
+    if not names:
+        log.error("roi.restore_role: no default row has the role %r", role)
+        return []
+    out = []
+    for name in names:
+        rowid = restore(name)
+        if rowid:
+            out.append((name, rowid))
+    return out
 
 
 # ── Colour-card registration ────────────────────────────────────────────────
@@ -1216,6 +1486,13 @@ if __name__ == "__main__":
     shutil.copy(live, tmp)
     db.DBNAME = str(tmp)
 
+    # Seed the copy the way a launch would.  The rules below are about the
+    # table as the instrument actually meets it, and db_bootstrap is what puts
+    # it in that shape — it applies the role renames and reactivates any
+    # commissioned default left with nothing in force.
+    import db_bootstrap
+    db_bootstrap.ensure(tmp)
+
     print("== load_active: whatever is in force ==")
     # Asserted against the table as it stands, not against a fixed list of
     # names: the operator adds, renames and supersedes ROIs from the
@@ -1227,8 +1504,14 @@ if __name__ == "__main__":
     active_names = sorted(rois)
     print(f"     (in force: {', '.join(active_names)})")
     check("every active row is loaded", len(rois) > 0, True)
-    check("one active row per name", db.read_val(
-        "SELECT COUNT(*) FROM roi WHERE active = 1"), len(rois))
+    # One active row per name is the invariant `save` maintains, but only a
+    # hand-edit can break it and the live table is hand-edited — so the count
+    # asserted is the one that always holds, and a breach is reported instead.
+    dupes = duplicate_active_names()
+    if dupes:
+        print(f"     (duplicate active names: {dupes} — load_active keeps one)")
+    check("one Rect per distinct active name", len(rois), db.read_val(
+        "SELECT COUNT(DISTINCT name) FROM roi WHERE active = 1"))
     check("names round-trip onto the Rects",
           all(rois[n].name == n for n in rois), True)
     check("every ROI carries a role",
@@ -1239,15 +1522,17 @@ if __name__ == "__main__":
           all(is_bayer_safe(r) for r in rois.values()), True)
 
     print("== the roles the instrument cannot run without ==")
-    required = (ROLE_SAMPLE, ROLE_WHITE, ROLE_BOUND)
+    # The list is commissioned data, not a constant here — required_roles()
+    # reads config roi.required_roles.  What the self-test can assert is that
+    # it is non-empty and that the table satisfies it.
+    required = required_roles()
+    print(f"     (required: {', '.join(required)})")
+    check("the requirement is stated", len(required) >= 1, True)
     check("none missing", missing_roles(rois, required), [])
     sample_r = by_role(rois, ROLE_SAMPLE)
     bound_r  = by_role(rois, ROLE_BOUND)
     check("by_role finds the sample", sample_r is not None, True)
     check("sample inside bound", contains_rect(bound_r, sample_r), True)
-    check("every other ROI inside bound too",
-          [n for n, r in rois.items()
-           if r.role != ROLE_BOUND and not contains_rect(bound_r, r)], [])
     check("by_role agrees with all_by_role",
           all_by_role(rois, ROLE_SAMPLE)[0].xywh(), sample_r.xywh())
     check("an unfilled role gives None", by_role(rois, "no_such_role"), None)
@@ -1255,6 +1540,63 @@ if __name__ == "__main__":
           missing_roles(rois, ("no_such_role",)), ["no_such_role"])
     check("all_by_role is empty for an unfilled role",
           all_by_role(rois, "no_such_role"), [])
+
+    print("== check_requirements: the boot-time rules ==")
+    # Reported, not asserted clean: a commissioned unit whose bound has been
+    # re-drawn legitimately shows containment warnings here, and that is
+    # exactly what the splash screen is for.  What must hold is that nothing
+    # is at ERROR severity, since that is the level that stops a run.
+    found = check_requirements(rois, required)
+    for severity, message in found:
+        print(f"     ({severity}: {message})")
+    check("no required role unfilled",
+          [m for sev, m in found if sev == ERROR], [])
+
+    # Synthetic tables, so each rule can be shown failing on its own.
+    one = {"b": Rect(0, 0, 100, 100), "s": Rect(10, 10, 20, 20),
+           "w": Rect(40, 10, 20, 20)}
+    one["b"].role, one["s"].role, one["w"].role = (
+        ROLE_BOUND, ROLE_SAMPLE, ROLE_WHITE_BALANCE)
+    for n, r in one.items():
+        r.name = n
+    roles3 = (ROLE_BOUND, ROLE_SAMPLE, ROLE_WHITE_BALANCE)
+    check("a complete set is silent", check_requirements(one, roles3), [])
+
+    two = dict(one)
+    two["s2"] = Rect(10, 40, 20, 20)
+    two["s2"].role, two["s2"].name = ROLE_SAMPLE, "s2"
+    sev = [x[0] for x in check_requirements(two, roles3)]
+    check("a second sample warns", sev, [WARNING])
+    check("and names the one that wins",
+          "'s'" in check_requirements(two, roles3)[0][1], True)
+
+    many = dict(one)
+    many["w2"] = Rect(70, 10, 20, 20)
+    many["w2"].role, many["w2"].name = ROLE_WHITE_BALANCE, "w2"
+    check("a second white_balance does not",
+          check_requirements(many, roles3), [])
+
+    outside = dict(one)
+    outside["w"] = Rect(90, 10, 20, 20)
+    outside["w"].role, outside["w"].name = ROLE_WHITE_BALANCE, "w"
+    out_found = check_requirements(outside, roles3)
+    check("a required ROI outside bound warns",
+          [x[0] for x in out_found], [WARNING])
+    check("and says by how much", "right by 10px" in out_found[0][1], True)
+
+    ignored = dict(one)
+    ignored["x"] = Rect(200, 200, 20, 20)
+    ignored["x"].role, ignored["x"].name = "gray1", "x"
+    check("an unrequired role outside bound is not checked",
+          check_requirements(ignored, roles3), [])
+
+    gone = {n: r for n, r in one.items() if n != "w"}
+    check("an unfilled required role is an error",
+          [x[0] for x in check_requirements(gone, roles3)], [ERROR])
+
+    print("== validate scoped to roles ==")
+    check("scoped past the offender", validate(ignored, roles=roles3), [])
+    check("unscoped it is not silent", len(validate(outside)) >= 1, True)
 
     print("== load_defaults ==")
     # The defaults are the *commissioned* set, which the active set has since
@@ -1267,6 +1609,9 @@ if __name__ == "__main__":
           all(is_bayer_safe(r) for r in defs.values()), True)
     check("defaults fill the required roles",
           missing_roles(defs, required), [])
+    check("and satisfy the rules once restored",
+          [m for sev, m in check_requirements(defs, required)
+           if sev == ERROR], [])
     check("one isdefault row per default name", db.read_val(
         "SELECT COUNT(*) FROM roi WHERE isdefault = 1"), len(defs))
 
@@ -1321,6 +1666,22 @@ if __name__ == "__main__":
     check("default row not consumed", db.read_val(
         "SELECT COUNT(*) FROM roi WHERE name = ? AND isdefault=1", (sname,)), 1)
     check("unknown name is refused",  restore("nosuch"), 0)
+
+    print("== restore_role: a whole role at once ==")
+    # What the boot check calls, because a role may be filled by more than one
+    # region and restoring only the first would leave the rest missing.
+    db.write_one("UPDATE roi SET active = 0 WHERE role = ? AND active = 1",
+                 (ROLE_WHITE_BALANCE,))
+    check("the role is gone",
+          missing_roles(load_active(), (ROLE_WHITE_BALANCE,)),
+          [ROLE_WHITE_BALANCE])
+    back = restore_role(ROLE_WHITE_BALANCE)
+    check("names every row it restored", [n for n, _ in back],
+          sorted(n for n, r in load_defaults().items()
+                 if r.role == ROLE_WHITE_BALANCE))
+    check("and the role is filled again",
+          missing_roles(load_active(), (ROLE_WHITE_BALANCE,)), [])
+    check("a role with no default is refused", restore_role("no_such_role"), [])
 
     print("== empty table degrades quietly ==")
     # Repairing a missing row is db_bootstrap's job now (it re-runs

@@ -211,7 +211,10 @@ CREATE TABLE IF NOT EXISTS roi (
     isdefault INTEGER NOT NULL DEFAULT 0,  -- 1 = commissioned fallback
     add_dt    TEXT,                        -- local timestamp of the write
     name      TEXT NOT NULL,               -- 'sample','white','black1',...
-    role      TEXT,                        -- what analysis does with it
+    role      TEXT,                        -- what analysis does with it;
+                                           -- 'bound','sample','white_balance'
+                                           -- are required, see config
+                                           -- roi.required_roles
     x         INTEGER NOT NULL,
     y         INTEGER NOT NULL,
     w         INTEGER NOT NULL,

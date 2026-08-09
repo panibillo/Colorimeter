@@ -22,9 +22,15 @@ class KbReader:
         self._display = None
         log.info("KbReader (mock): initialized")
 
-    def open(self) -> None:
-        """Open the keyboard input device."""
+    def open(self) -> bool:
+        """
+        Open the keyboard input device.
+
+        Returns True like the real driver does — the simulated keyboard is
+        always present, and the boot-time check reads this answer.
+        """
         log.info("KbReader (mock): open")
+        return True
 
     def cleanup(self) -> None:
         """Clean up resources."""

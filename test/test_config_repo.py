@@ -358,7 +358,7 @@ class TestEditorReads(ConfigTestCase):
     def test_roles_are_the_screens_worth_offering(self):
         self.assertEqual(config.roles(),
                          ["capture", "defaults", "device", "hardware",
-                          "protocol", "runtime"])
+                          "protocol", "roi", "runtime"])
 
     def test_items_are_alphabetical_with_type_and_lock(self):
         names = [row[0] for row in config.items("device")]
@@ -568,6 +568,115 @@ class TestBootstrap(ConfigTestCase):
             db_bootstrap.ensure(elsewhere)
         self.assertIn("DBNAME", str(caught.exception))
         self.assertFalse(elsewhere.exists())
+
+
+class TestRestoredReporting(ConfigTestCase):
+    """
+    What ensure() says about parameters it had to bring back from a default.
+
+    The recovery itself is not new — provisioning/config_defaults.sql has
+    always ended by reactivating any isdefault row with nothing in force.  It
+    used to happen silently, so an instrument could come up on a commissioned
+    default with nobody told.  These pin down the reporting the boot splash
+    shows, one dialog and one OK press per parameter.
+    """
+
+    PARAM = "role='protocol' AND name='reagent1_secs'"
+
+    def test_a_healthy_relaunch_reports_nothing(self):
+        result = db_bootstrap.ensure(self._tmpdb)
+        self.assertEqual(result.added, 0)
+        self.assertEqual(result.restored, [])
+
+    def test_a_new_database_restores_nothing_despite_every_row_being_new(self):
+        # setUp already created this one.  Naming all 28 parameters on a first
+        # boot would be one OK press each and would say nothing.
+        fresh = Path(self._tmpdir) / "brand_new.sqlite"
+        db.DBNAME = str(fresh)
+        result = db_bootstrap.ensure(fresh)
+        self.assertEqual(result.state, "created")
+        self.assertEqual(result.restored, [])
+
+    def test_a_deactivated_parameter_is_named_as_reactivated(self):
+        con = sqlite3.connect(self._tmpdb)
+        con.execute(f"UPDATE config SET active = 0 WHERE {self.PARAM}")
+        con.commit()
+        con.close()
+
+        result = db_bootstrap.ensure(self._tmpdb)
+
+        self.assertEqual(result.added, 0)      # nothing was inserted to do it
+        self.assertEqual([(r.role, r.name, r.value, r.how)
+                          for r in result.restored],
+                         [("protocol", "reagent1_secs", "120",
+                           db_bootstrap.REACTIVATED)])
+
+    def test_a_deleted_parameter_is_named_as_reseeded(self):
+        con = sqlite3.connect(self._tmpdb)
+        con.execute(f"DELETE FROM config WHERE {self.PARAM}")
+        con.commit()
+        con.close()
+
+        result = db_bootstrap.ensure(self._tmpdb)
+
+        reseeded = [r for r in result.restored
+                    if r.how == db_bootstrap.RESEEDED]
+        self.assertEqual([(r.role, r.name) for r in reseeded],
+                         [("protocol", "reagent1_secs")])
+        # Every insert is accounted for by a named record.
+        self.assertEqual(len(reseeded), result.added)
+
+    def test_the_message_names_the_row_an_operator_would_look_at(self):
+        con = sqlite3.connect(self._tmpdb)
+        con.execute(f"UPDATE config SET active = 0 WHERE {self.PARAM}")
+        con.commit()
+        con.close()
+
+        restored = db_bootstrap.ensure(self._tmpdb).restored[0]
+        rowid = self.rows(f"SELECT rowid FROM config "
+                          f"WHERE {self.PARAM} AND active = 1")[0][0]
+
+        self.assertEqual(restored.message(),
+                         f"Loading protocol.reagent1_secs = 120 "
+                         f"(rowid {rowid})")
+
+
+class TestDeadAndOrphanParams(ConfigTestCase):
+    """
+    The two structural queries db_bootstrap._verify and the boot-time
+    completeness check share, so there is one copy of the SQL.
+    """
+
+    PARAM = "role='protocol' AND name='reagent1_secs'"
+
+    def test_a_seeded_database_has_neither(self):
+        self.assertEqual(db_bootstrap.dead_params(), [])
+        self.assertEqual(db_bootstrap.orphan_params(), [])
+
+    def test_a_parameter_with_no_active_row_is_dead(self):
+        con = sqlite3.connect(self._tmpdb)
+        con.execute(f"UPDATE config SET active = 0 WHERE {self.PARAM}")
+        con.commit()
+        con.close()
+        self.assertIn(("protocol", "reagent1_secs"), db_bootstrap.dead_params())
+
+    def test_a_parameter_with_no_default_row_is_an_orphan(self):
+        con = sqlite3.connect(self._tmpdb)
+        con.execute(f"UPDATE config SET isdefault = 0 WHERE {self.PARAM}")
+        con.commit()
+        con.close()
+        self.assertIn(("protocol", "reagent1_secs"),
+                      db_bootstrap.orphan_params())
+
+    def test_they_read_the_same_database_with_or_without_a_connection(self):
+        con = sqlite3.connect(self._tmpdb)
+        try:
+            self.assertEqual(db_bootstrap.dead_params(con),
+                             db_bootstrap.dead_params())
+            self.assertEqual(db_bootstrap.orphan_params(con),
+                             db_bootstrap.orphan_params())
+        finally:
+            con.close()
 
 
 class TestSchemaConstraints(ConfigTestCase):
