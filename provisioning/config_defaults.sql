@@ -99,7 +99,6 @@ INSERT OR IGNORE INTO config (active, isdefault, editable, add_dt, role, name,
    'a Bayer layer is too dark to store when its scaled p10 falls below this (signal DN)'),
   (0, 1, 1, '2026-08-01 00:00:00', 'capture', 'layer_keep_max_dn', 'int', '863', 'seed',
    'a Bayer layer is too bright to store when its scaled p90 rises above this (signal DN)');
-
 -- ── protocol ────────────────────────────────────────────────────────────────
 -- These are the real durations.  A shorter pair used to be seeded under a
 -- 'simulation' profile so a desktop run finished quickly; that profile is
@@ -200,7 +199,9 @@ INSERT OR IGNORE INTO config (active, isdefault, editable, add_dt, role, name,
   (0, 1, 1, '2026-07-21 00:00:00', 'defaults', 'testlot', 'str', '0 12V601-HH', 'seed',
    'reagent lot number; the calibration curve is lot-specific'),
   (0, 1, 1, '2026-07-21 00:00:00', 'defaults', 'testlot_expire_dt', 'str', '2027-07', 'seed',
-   'expiry of the reagent lot in force');
+   'expiry of the reagent lot in force'),
+  (1, 1, 1, '2026-08-09 00:20:00', 'defaults', 'remark', 'str','', 'seed', 
+   'Default remark is an empty string.');
 
 -- The second kit from the old `testkit` table, carried in so it can be picked
 -- from the editor's Browse screen instead of retyped.  active=0, isdefault=0

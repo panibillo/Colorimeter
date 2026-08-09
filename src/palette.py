@@ -24,7 +24,7 @@ def rgb(r: int, g: int, b: int) -> int:
 
 # Name → RGB565.  Values match the legacy csv_to_widgets palette so mock
 # renders look identical, with two additions (timer_text, field_yellow).
-# RGB565 color picker:  https://barth-dev.de/online/rgb565-color-picker/
+# RGB565 color picker:  https://barth-dev.de/online/rgb565-color-picker/  0xFC20
 PALETTE: dict[str, int] = {
     "black":       0x0000,
     "white":       0xFFFF,
@@ -57,6 +57,9 @@ PALETTE: dict[str, int] = {
     # Visible alarm button: a backgrounded slot's timer expired unattended.
     "alarm_bg":    0xF800,   # red
     "alarm_text":  0xFFE0,   # yellow
+    # Splash screen
+    "warning_text":0x581F,   # purple   0xFC20,   # dark amber
+    "fail_text":   0xFC20,   # red
     # ROI overlay outlines in the image viewer, one per selection state.  These
     # are stroked into a PIL image over a photograph, not drawn as widgets, so
     # they are reached through rgb888() rather than color().  Chosen saturated

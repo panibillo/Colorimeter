@@ -195,6 +195,8 @@ class ILI9341:
             return
 
         text_color = self._rgb565_to_rgb(color)
+        
+        size *= 2
 
         # Map alignment to matplotlib ha/va
         ha_map = {"left": "left", "center": "center", "right": "right"}
@@ -233,7 +235,7 @@ class ILI9341:
 
             # Widget ID in top-left corner with larger bold font
             self.ax.text(rect.x + 1, rect.y + 1, widget_id,  # type: ignore
-                        color=(0.5, 0.5, 0.5), fontsize=12, va='top', ha='left',
+                        color=(0.5, 0.5, 0.5), fontsize=size, va='top', ha='left',
                         fontweight='bold', zorder=self._next_z())
 
         self.fig.canvas.draw_idle()

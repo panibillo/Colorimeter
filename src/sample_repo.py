@@ -55,6 +55,7 @@ class Defaults:
     testkit_vendor:    str
     testlot:           str
     testlot_expire_dt: str
+    remark:            str
     hardware_sn:       str      # role 'device' — stored on the sample as
     software_ver:      str      # instrument_sn / provenance
 
@@ -70,6 +71,7 @@ _DEFAULT_FIELDS: tuple[tuple[str, str, str], ...] = (
     ("testkit_vendor",    "defaults", "testkit_vendor"),
     ("testlot",           "defaults", "testlot"),
     ("testlot_expire_dt", "defaults", "testlot_expire_dt"),
+    ("remark",            "defaults", "remark"),
     ("hardware_sn",       "device",   "hardware_sn"),
     ("software_ver",      "device",   "software_ver"),
 )

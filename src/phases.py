@@ -270,7 +270,7 @@ class EntryPhase(Phase):
 
 
 class Entry2Phase(Phase):
-    """Sample entry (screen 2): temperature / weight / collect datetime."""
+    """Sample entry (screen 2): temperature / weight / collect datetime. / remark"""
 
     phase_id = "entry2"
     prior    = "entry"
@@ -282,6 +282,10 @@ class Entry2Phase(Phase):
 
     def enter(self, pool, slot, arb) -> None:
         r = slot.record
+        # Figure out how to call autofill only on first entry
+        # or leave it out
+        # self.autofill(arb, slot)
+        #
         # Temp label reads the DS18B20; Collect label stamps the current time.
         # Weight and Remark have no source yet — their labels are inert
         # placeholders.
@@ -291,11 +295,23 @@ class Entry2Phase(Phase):
         pool.put("weight_fld",    _text(r.get("samp_grams")))
         pool.put("collectdt_lbl", "Collect", on=lambda: self.fill_collect(arb, slot))
         pool.put("collectdt_fld", r.get("collect_dt") or "")
-        pool.put("remark_lbl",    "Remark")
+        pool.put("remark_lbl",    "Remark", on=lambda: self.fill_remark(arb, slot))
         pool.put("remark_fld",    r.get("remark") or "")
         pool.show("div1", "div2", "div3")
         self._chrome(pool, slot, arb, "Continue",
                      main_on=lambda: self.proceed(arb, slot))
+
+    def autofill(self, arb, slot) -> None:
+        """
+        Seed selected fields of a fresh run from the loaded defaults.
+
+        Called on the first view of a run, and again by the arbiter whenever a
+        config edit moves the defaults out from under a slot that has not begun.
+        """
+        r = slot.record
+        d = arb.defaults()
+        if d is not None:
+            r["remark"]          = d.remark
 
     def fill_temp(self, arb, slot) -> None:
         """Sample the temperature sensor into the Temp field (one-press read)."""
@@ -309,6 +325,13 @@ class Entry2Phase(Phase):
     def fill_collect(self, arb, slot) -> None:
         slot.record["collect_dt"] = arb.timestamp()
         arb.render(slot)
+
+    def fill_remark(self, arb, slot) -> None:
+        d = arb.defaults()
+        if d is not None:
+            slot.record["remark"] = d.remark
+            arb.render(slot)
+
 
     def proceed(self, arb, slot) -> None:
         r = slot.record
