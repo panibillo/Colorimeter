@@ -77,12 +77,15 @@ COLOR_LBL   = Rect(  8,  95, 110, 35);  COLOR_FLD  = Rect(120,  93, 130, 39)
 RESULT_LBL  = Rect(  8, 135,  68, 35);  RESULT_FLD = Rect( 82, 133, 230, 39)
 
 # ── body: read-strip prompt (ReadPhase) ────────────────────────────────────────
-# A wide multi-line label carries the capture instruction AND the "Read color"
-# prompt (black on white); the manual-reading entry sits to its right with its
-# left margin moved over to make room. Ends above COLLECT_LINE (y188) so the two
-# no longer overlap.
-READ_LBL    = Rect(  8, 128, 176, 58)   # instruction + "Read color:" (multi-line)
-READ_FLD    = Rect(190, 138, 122, 40)   # manual colour reading entry
+# Two stacked rows, same y128..186 footprint as before — bounded above by
+# CHIP_C's bottom (y122) and below by COLLECT_LINE's top (y188), so neither
+# overlaps:
+#   row 1 (y128..156): "Manually read color:" prompt + the reading entry,
+#                       side by side;
+#   row 2 (y158..186): the full-width capture instruction line.
+MANUAL_LBL  = Rect(  8, 128, 176, 28)   # "Manually read color:" prompt
+READ_FLD    = Rect(190, 128, 122, 28)   # manual colour reading entry
+READ_LBL    = Rect(  8, 158, 304, 28)   # capture instruction (single line)
 
 # ── modal overlay ──────────────────────────────────────────────────────────────
 MODAL_PANEL = Rect( 20,  50, 280, 140)

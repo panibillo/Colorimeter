@@ -138,14 +138,19 @@ class Pool:
         label("chip_b", L.CHIP_B, "body_text", "step_pending", 13, text="2")
         label("chip_c", L.CHIP_C, "body_text", "step_pending", 13, text="Capture")
 
-        # ── body: wide label/field pairs ───────────────────────────────────────
-        # color_lbl carries the read instruction + prompt (multi-line, black on
-        # white); the reading entry sits to its right (READ_FLD). Text is set
-        # per-render by ReadPhase.
-        label("color_lbl",  L.READ_LBL, "black", "white", 14, align="left", text="Read color")
-        field("color_fld",  L.READ_FLD, 18, "field_yellow")
-        label("result_lbl", L.BODY_LBL4, "white", "label_coral", 13, text="Result")
-        field("result_fld", L.BODY_FLD4, 18, "field_blue", editable=False)
+        # ── body: read-strip prompt (ReadPhase) ─────────────────────────────────
+        # manual_lbl is a fixed prompt ("Manually read color:") beside the entry
+        # field — red/larger to draw the eye there; color_fld's border matches
+        # (field_red) for the same reason. color_lbl (row 2, full width) carries
+        # the capture instruction only, black on white, larger. Text for both
+        # color_lbl states is set per-render by ReadPhase; manual_lbl's text
+        # never changes, so ReadPhase only show()s it.
+        label("manual_lbl", L.MANUAL_LBL, "alert_text", "white", 16, align="left",
+              text="Manually read color:")
+        field("color_fld",  L.READ_FLD, 18, "field_red")
+        label("color_lbl",  L.READ_LBL, "black", "white", 20, align="left")
+        label("result_lbl", L.BODY_LBL3, "white", "label_coral", 13, text="Result")
+        field("result_fld", L.BODY_FLD3, 18, "field_blue", editable=False)
 
         # ── header ─────────────────────────────────────────────────────────────
         label("title", L.TITLE, "black", "white", 22, align="left")

@@ -33,6 +33,57 @@ sqlite3 src/colorimeter.sqlite \
 
 ## [Unreleased]
 
+## [0.4.1] — 2026-08-09
+
+Writes: archive schema 3 · meta 2 · database 2
+Reads:  archive schema 1–3 · meta 1–2 · database 2
+
+### Added
+
+- Boot splash screen (`src/splash_screen.py`) and its completeness aggregator
+  `src/startup_checks.py`: narrates each boot step, replays what ran before
+  the display existed, and reports anything a default had to be loaded for
+  with its own message and OK press. Absorbs two checks from
+  `provisioning/deploy/commissioning_status.sh` that used to fail silently
+  (bus device nodes, hardware group membership).
+- Config `roi.required_roles` (non-editable): the ROI roles a run cannot
+  proceed without — exactly one `bound`, one or more `sample`, one or more
+  `white_balance` — moved out of code so a differently-commissioned unit can
+  be given a different requirement. The boot check now reports over-fill and
+  out-of-bound ROI problems as warnings instead of tolerating or failing on
+  them silently.
+- Config `defaults.remark` and a `remark` field on the Entry2 screen — a
+  free-text note carried onto the sample record. (Noted in its own commit as
+  an imperfect first pass: the default-autofill path is written but not yet
+  wired to run automatically.)
+- `pulldb.sh` / `pushdb.sh` — pull the instrument's sqlite database from the
+  Pi, or push a desktop copy to it; both back up the destination file before
+  overwriting.
+- Live capture progress on the per-slot Capture screen: while a capture is in
+  flight, the "Collected" timestamp is temporarily replaced with "Capturing
+  {color}, {n} exposures" / "Capturing dark images, {n} exposures", updating
+  per exposure and reverting to the timestamp once the run finishes.
+
+### Changed
+
+- ROI role `white` renamed to `white_balance`, to name what the region is for.
+- Capture screen: the manual colour-read prompt is now its own label
+  ("Manually read color:", red, above the instruction line) instead of being
+  appended to the capture instruction text, and its entry field's border is
+  now red. Capture instructions read "Insert strip & press Capture" /
+  "Imaging - DO NOT TOUCH".
+
+### Fixed
+
+- `bayer_cam.DEFAULT_FOCUS_CAL_PATH` was hardcoded to
+  `~/pi/Colorimeter/config/focus_cal.json`; it is now derived from the
+  module's own location, so startup finds `focus_cal.json` regardless of
+  checkout path. `startup_checks.check_focus_cal()` reads the same constant
+  instead of a second hardcoded copy that could disagree with it.
+- Saving a focus calibration from the recapture dialog now actually calls
+  `cam.save_focus_cal()` — previously only the diopter value was written to
+  config, not the calibration file itself.
+
 ## [0.4.0] — 2026-08-08
 
 Writes: archive schema 3 · meta 2 · database 2

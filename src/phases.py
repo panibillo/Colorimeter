@@ -456,13 +456,14 @@ class ReadPhase(Phase):
             preview.pause(arb.now())
             pool["timer"].bind(preview, interactive=False)
         pool.put("timer")
-        # The wide Read-color label carries the instruction too (multi-line), so
-        # there is no separate instr line to overlap it. The entry sits to its right.
+        # manual_lbl ("Manually read color:") is a fixed prompt beside the
+        # entry field — its text never changes, so a bare show() suffices.
+        pool.show("manual_lbl")
         pool.put("color_fld", slot.record.get("manual_read", ""))
         if is_live and slot.capturing:
             pool.put("run_btn", "RUNNING", enabled=False)
             pool["run_btn"].size = 18
-            pool.put("color_lbl", "Capturing...\nDon't touch strip.\nRead color:")
+            pool.put("color_lbl", "Imaging - DO NOT TOUCH")
         else:
             # Reflect what a press will actually do — the Menu -> Capture
             # screen's Path selection governs this capture too, so a stale
@@ -473,7 +474,7 @@ class ReadPhase(Phase):
                      on=lambda: self.capture(arb, slot, pool),
                      enabled=is_live and arb.capture_available())
             pool["run_btn"].size = 18
-            pool.put("color_lbl", "Insert strip &\npress CAPTURE.\nRead color:")
+            pool.put("color_lbl", "Insert strip & press Capture")
         self._show_steps(pool, slot)
         self._show_collect(pool, slot)
         # A capture in flight does NOT lock nav either: it is arbiter-owned and

@@ -47,6 +47,12 @@ PALETTE: dict[str, int] = {
     # Config editor: a field holding a typed value that has not been saved yet
     # reads red on field_yellow, so an unsaved edit is obvious at a glance.
     "edited_text": 0xF800,   # red
+    # Capture screen (ReadPhase): flags the manual colour-read prompt/field as
+    # something the operator must act on. Same red hex as edited_text/alarm_bg
+    # above, but a distinct name since the semantic role differs ("please
+    # read/enter this" vs "unsaved edit" / "timer expired unattended").
+    "alert_text":  0xF800,   # red
+    "field_red":   0xF800,   # red
     "status_bg":   0x0000,
     # Step-status chips (reagent 1 / 2 / Capture).  "ready" reuses start_green
     # (the RUN colour); the rest are its dim form and a running amber + dim.

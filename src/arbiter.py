@@ -215,6 +215,12 @@ class Arbiter:
         self._capture_factory = capture_factory
         self._capture: CaptureSession | None = None
         self._capture_slot: Slot | None = None
+        # Live "Capturing <color>, N exposures" / "Capturing dark images, N
+        # exposures" counter mirrored onto the read phase's collect_line while
+        # a capture is in flight — see pump_capture(). Reset at both
+        # request_capture() success paths below.
+        self._cap_progress_kind: str | None = None   # "lit" | "dark" | None
+        self._cap_progress_n:    int = 0
 
         # The normal path's capture prefetch (CaptureRunner.run_prefetch()),
         # started automatically near the end of a slot's reagent2 countdown —
@@ -1830,6 +1836,8 @@ class Arbiter:
                     self._capture = session
                     self._capture_slot = slot
                     slot.progress = "Starting camera..."
+                    self._cap_progress_kind = None
+                    self._cap_progress_n = 0
                     self.persist(slot, capture_start=self.epoch(),
                                 manual_read=slot.record.get("manual_read", ""))
                     log.info("Arbiter: capture resumed from prefetch for slot "
@@ -1856,6 +1864,8 @@ class Arbiter:
         self._capture = session
         self._capture_slot = slot
         slot.progress = "Starting camera..."
+        self._cap_progress_kind = None
+        self._cap_progress_n = 0
         self.persist(slot, capture_start=self.epoch(),
                      manual_read=slot.record.get("manual_read", ""))
         log.info("Arbiter: capture started for slot %s (mode=%s, group=%s)",
@@ -2038,13 +2048,30 @@ class Arbiter:
         progress = session.step()
 
         if progress is not None:
-            detail = progress.color or f"{progress.fraction * 100:.0f}%"
-            if progress.led_total:
-                detail = f"{progress.led_index}/{progress.led_total} {detail}"
-            owner.progress = detail
-            if owner is self._focused and owner.phase == "read":
-                self._pool.set("instr1", owner.progress)
-                self._pool.redraw(self._disp, "instr1")
+            # Only exposure-store ticks are countable: non-transient, with a
+            # non-empty step (excludes section headers like "Lit captures:" /
+            # "--- Red ---", which yield step="", and _wait()'s warmup/settle
+            # ticks, which yield step="wait" but transient=True). Classify
+            # lit vs dark from the step name and keep a running count that
+            # resets on each lit<->dark transition. Covers both the
+            # calibration path (lit 1..7, dark 1..7, repeated per LED) and
+            # the normal path (lit 1..len(group) per LED, one combined dark
+            # batch — step="dark" literally — at the end).
+            if progress.step and not progress.transient:
+                kind = "dark" if progress.step.startswith("dark") else "lit"
+                if kind != self._cap_progress_kind:
+                    self._cap_progress_kind = kind
+                    self._cap_progress_n = 0
+                self._cap_progress_n += 1
+                if kind == "dark":
+                    owner.progress = (
+                        f"Capturing dark images, {self._cap_progress_n} exposures")
+                else:
+                    owner.progress = (
+                        f"Capturing {progress.color}, {self._cap_progress_n} exposures")
+                if owner is self._focused and owner.phase == "read":
+                    self._pool.set("collect_line", owner.progress)
+                    self._pool.redraw(self._disp, "collect_line")
             return
 
         # step() returned None: the run ended.
