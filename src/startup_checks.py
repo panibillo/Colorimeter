@@ -411,16 +411,10 @@ def check_focus_cal(**_) -> CheckResult:
     Reads the path only; opening the camera to ask is exactly what the boot
     sequence declines to do, because a warm sensor changes what it measures.
     """
-    from pathlib import Path
+    import bayer_cam
 
     name = "Focus"
-    # bayer_cam imports picamera2, so take the constant without the module.
-    path = Path.home() / "pi" / "Colorimeter" / "config" / "focus_cal.json"
-    try:
-        import bayer_cam
-        path = Path(bayer_cam.DEFAULT_FOCUS_CAL_PATH)
-    except Exception:
-        pass
+    path = Path(bayer_cam.DEFAULT_FOCUS_CAL_PATH)
     if not path.is_file():
         return CheckResult(name, WARN,
                            "none saved; first capture will sweep",

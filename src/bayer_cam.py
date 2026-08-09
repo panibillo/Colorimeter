@@ -49,7 +49,7 @@ except ImportError:
 
 
 DEFAULT_FOCUS_CAL_PATH = (
-    Path.home() / "pi" / "Colorimeter" / "config" / "focus_cal.json"
+    Path(__file__).resolve().parent.parent / "config" / "focus_cal.json"
 )
 
 
@@ -153,7 +153,7 @@ class BayerCam:
 
         Args:
             focus_cal_path: Path to the focus calibration JSON file.
-                            Default: ~/pi/Colorimeter/config/focus_cal.json
+                            Default: <project_root>/config/focus_cal.json
         """
         self.camera           = None
         self.config_size      = None

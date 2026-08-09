@@ -2878,6 +2878,7 @@ class Arbiter:
                  self._view_exposure_us, self._recap_exp, not self._recap_dark)
 
         if self._recap_save_focus and diopter is not None:
+            cam.save_focus_cal()
             config.save("capture", "default_focus_diopter", diopter)
         if self._recap_save_exp and self._view_exposure_us is not None:
             config.save("capture", "inspection_exposure_us",
