@@ -732,6 +732,18 @@ class Arbiter:
             return None
         return self._temp.read_c()
 
+    def temperature_attached(self) -> bool:
+        """
+        Whether a DS18B20 was found on the 1-Wire bus.
+
+        Separate from read_temperature() because the two answer different
+        questions: a probe that is present but whose reading failed is an
+        error worth showing the operator, while no probe at all is the
+        ordinary case on a unit run without one — entry2 offers the
+        configured default temperature instead of an error there.
+        """
+        return bool(getattr(self._temp, "connected", False))
+
     # ── Phase contract: database / sample lifecycle ────────────────────────────
 
     def defaults(self):
@@ -3600,9 +3612,19 @@ def _selftest() -> None:
             self.images.append((image.size, x, y))
 
     class _FakeProgress:
-        def __init__(self, i, n):
+        """
+        Stands in for capture_runner.Progress — every field pump_capture reads.
+
+        `step` matters as much as the counts: pump_capture classifies a tick
+        as lit or dark from that label, and ignores ticks with an empty step
+        (section headers) or transient=True (wait ticks), so a fake without
+        one cannot exercise the live progress text at all.
+        """
+        def __init__(self, i, n, step="e1"):
             self.color = "blue"; self.fraction = i / n
             self.led_index = i; self.led_total = n; self.transient = False
+            self.step = step; self.message = f"{step} ({i}/{n})"
+            self.phase = "capture"
 
     from pathlib import Path
 
@@ -3645,7 +3667,11 @@ def _selftest() -> None:
             if self._i >= self._n:
                 self.active = False; return None
             self._i += 1
-            return _FakeProgress(self._i, self._n)
+            # Shaped like the normal path: the lit exposures first, then one
+            # combined dark batch to close the run, so the lit -> dark
+            # transition (and the counter reset it causes) is covered.
+            step = "dark" if self._i == self._n else f"e{self._i}"
+            return _FakeProgress(self._i, self._n, step)
         def cancel(self): self.active = False; self.prefetch_done = False
 
     def check(label, got, want):
@@ -3961,28 +3987,36 @@ def _selftest() -> None:
     check("stub2 enabled",       arb._pool["menu_stub2"].enabled, True)
     check("config slot is Phases", arb._pool["menu_config"].label, "Phases")
 
+    # Two different baselines, and the difference matters on a development
+    # instrument.  _file_* is what config_defaults.sql commissioned — what
+    # Restore goes back to, further down.  _live_* is what is in force right
+    # now, which is what the phases screen stages and shows; the copied
+    # database usually carries an operator's much shorter waits, so assuming
+    # the two are equal fails on any instrument that has ever been retimed.
     _file_r1 = int(config.default("protocol", "reagent1_secs"))
     _file_r2 = int(config.default("protocol", "reagent2_secs"))
+    _live_r1 = config.reagent1_secs()
+    _live_r2 = config.reagent2_secs()
 
     print("== phases screen: steps stage a duration; CANCEL discards it ==")
     arb._menu_open_config()
-    check("stages the live durations", arb._cfg_secs["r1"], config.reagent1_secs())
-    check("field shows the seconds",   arb._pool["cfg_r1_fld"].value, str(_file_r1))
+    check("stages the live durations", arb._cfg_secs["r1"], _live_r1)
+    check("field shows the seconds",   arb._pool["cfg_r1_fld"].value, str(_live_r1))
     arb._pool["cfg_r1_p60"].on_press()
-    check("+60 stepped",       arb._cfg_secs["r1"], _file_r1 + 60)
+    check("+60 stepped",       arb._cfg_secs["r1"], _live_r1 + 60)
     arb._cfg_cancel()
-    check("CANCEL saved nothing", config.reagent1_secs(), _file_r1)
+    check("CANCEL saved nothing", config.reagent1_secs(), _live_r1)
 
     print("== phases screen: OK saves the custom wait and applies it ==")
     arb._menu_open_config()
     arb._pool["cfg_r1_m10"].on_press()
     arb._cfg_ok()
-    # Clamped, not _file_r1 - 10: the configured wait may itself be under 10 s
+    # Clamped, not _live_r1 - 10: the configured wait may itself be under 10 s
     # (it is, on a development instrument), and -10 then floors at the minimum.
-    _stepped_r1 = _clamp_secs(_file_r1 - 10)
+    _stepped_r1 = _clamp_secs(_live_r1 - 10)
     check("saved",             config.reagent1_secs(), _stepped_r1)
     check("phases rebuilt",    arb._phases["reagent1"].secs, _stepped_r1)
-    check("reagent2 untouched", config.reagent2_secs(), _file_r2)
+    check("reagent2 untouched", config.reagent2_secs(), _live_r2)
 
     print("== phases screen: a typed duration is honoured and clamped ==")
     arb._menu_open_config()
@@ -4258,9 +4292,13 @@ def _selftest() -> None:
           [A.record["user"], B.record["user"]], [_was_user, _was_user])
     check("shutdown_timeout_s restored",
           config.shutdown_timeout_s() != 12.5, True)
+    # device.software_ver excepted: it has no factory row by design — the
+    # source tree owns it — so restore_all() re-stamps it with source='code'
+    # rather than leaving it with nothing active.  See config_repo.restore_all.
     check("every parameter on its seed row",
           _db.read_val("SELECT COUNT(*) FROM config WHERE active=1 "
-                       "AND source <> 'seed'"), 0)
+                       "AND source <> 'seed' "
+                       "AND NOT (role='device' AND name='software_ver')"), 0)
     arb._cfge_cancel()
 
     # ── Image viewer (Tool 1) ─────────────────────────────────────────────────
@@ -4277,6 +4315,14 @@ def _selftest() -> None:
         so the viewer's sample metering has something real to converge on: at
         the 40 ms fallback the sample reads clipped, exactly the overexposed
         preview the metering exists to fix.
+
+        The bright patch is painted at whatever rectangle the sample ROI
+        actually holds, read the same way _meter_sample_level() reads it,
+        rather than at the commissioned coordinates.  These tests run against
+        a copy of the live database, and an instrument whose sample ROI has
+        been nudged would otherwise meter a patch of zeros and drive the
+        exposure to the ceiling — a failure about the test's own geometry, not
+        about the metering.
         """
         config_size = (2304, 1296)
         model = "imx708"
@@ -4292,12 +4338,18 @@ def _selftest() -> None:
             self.exposure_us = int(us); self.exposures.append(int(us))
         def sample_level(self):
             return min(1023, int(self.exposure_us * self.COUNTS_PER_US))
+        def sample_rect(self):
+            """Where to paint the sample — the ROI in force, else as commissioned."""
+            r = _roi.by_role(arb._view_rois, _roi.ROLE_SAMPLE)
+            return ((r.y, r.y2(), r.x, r.x2()) if r is not None
+                    else (790, 858, 1150, 1218))
         def capture_frame(self):
             self.frames += 1
+            y0, y1, x0, x1 = self.sample_rect()
             f = _np.zeros((1296, 2304, 3), dtype=_np.uint8)
-            f[790:858, 1150:1218] = (0, 200, 250)     # BGR: the sample, orange
+            f[y0:y1, x0:x1] = (0, 200, 250)           # BGR: the sample, orange
             bayer = _np.zeros((1296, 2304), _np.uint16)
-            bayer[790:858, 1150:1218] = self.sample_level()
+            bayer[y0:y1, x0:x1] = self.sample_level()
             return f, bayer, {"ExposureTime": self.exposure_us}
         def stop(self): self.stopped = True
 
@@ -4406,6 +4458,9 @@ def _selftest() -> None:
     # The sample's median must land within tolerance of the target, and the
     # exposure that achieved it is remembered for the next preview.
     _lvl = pcam.sample_level()
+    # Printed before the checks, so a convergence failure says what it reached.
+    print(f"     converged to {pcam.exposure_us} us in {pcam.frames} frame(s), "
+          f"sample median {_lvl} of {_PREVIEW_TARGET}")
     check("sample median is on target",
           abs(_lvl - _PREVIEW_TARGET) <= _PREVIEW_AE_TOLERANCE * _PREVIEW_TARGET,
           True)
@@ -4531,8 +4586,17 @@ def _selftest() -> None:
     # ── Edit mode (step 8) ────────────────────────────────────────────────────
     # Runs against the scratch DB copy, so real roi.save()/restore() are
     # exercised without touching the live colorimeter.sqlite.
-    print("== edit mode: Edit takes a working copy and zooms to it ==")
+    print("== edit mode: Edit is refused while a slot is past entry ==")
+    # ROI geometry must not move under a run that has already read it, so
+    # _any_slot_active() gates Edit.  The Tool 2 block above left A on the
+    # read phase, which is exactly that case.
     arb._view_exit()
+    arb.open_image_view(slot=None, focus_role=_roi.ROLE_SAMPLE)
+    check("a live slot locks Edit", arb._pool["img_edit"].enabled, False)
+    arb._view_exit()
+
+    print("== edit mode: Edit takes a working copy and zooms to it ==")
+    A.active_phase = "entry"          # park the run; the geometry is free again
     arb.open_image_view(slot=None, focus_role=_roi.ROLE_SAMPLE)
     check("Edit enabled with a selection", arb._pool["img_edit"].enabled, True)
     check("Save/Cancel wait",
@@ -4631,6 +4695,10 @@ def _selftest() -> None:
 
     print("== edit mode: Save validates before writing ==")
     def _try_save(rect):
+        # A working copy carries its role — _view_edit() copies it out of
+        # _view_rois — and Save's sample-inside-bound rule looks the edited
+        # rectangle up by role, so a hand-built rect has to carry one too.
+        rect.role = _roi.ROLE_SAMPLE
         arb._view_edit()
         arb._view_editing = rect
         arb._view_save()
@@ -4654,6 +4722,7 @@ def _selftest() -> None:
     print("== edit mode: Save writes, snapping to even ==")
     arb._view_edit()
     arb._view_editing = _roi.Rect(1151, 791, 41, 41, name=_SAMPLE)
+    arb._view_editing.role = _roi.ROLE_SAMPLE
     arb._view_save()
     check("back to view mode",   arb._view_mode, "view")
     check("snapped even and stored",
@@ -4666,8 +4735,12 @@ def _selftest() -> None:
         "SELECT COUNT(*) FROM roi WHERE name='sample' AND active=0") >= 1, True)
 
     print("== edit mode: restore puts the commissioned default back ==")
+    # The commissioned rectangle, not _orig: _orig is what was in force when
+    # this block started, which on an instrument whose ROI has been nudged is
+    # an operator row, and restore() deliberately goes back past it.
+    _default_sample = _roi.load_defaults()[_SAMPLE].xywh()
     _roi.restore(_SAMPLE)
-    check("default is back", _roi.load_active()[_SAMPLE].xywh(), _orig)
+    check("default is back", _roi.load_active()[_SAMPLE].xywh(), _default_sample)
 
     print("== image viewer: reimaging keeps where you were looking ==")
     arb._view_state.fit_to(arb._view_rois[_SAMPLE])

@@ -44,6 +44,16 @@ sqlite3 src/colorimeter.sqlite \
   reports `err` — the two cases are told apart by the new
   `arb.temperature_attached()` on the phase contract.
 
+### Fixed
+
+- `roi.snap_even()` dropped the `role` attribute when it rebuilt a rectangle.
+  The image viewer's Save looks the edited rectangle up *by role* to check
+  that `sample` still lies inside `bound`, so the role-less copy made that
+  rule skip the one edit it exists to police: the sample ROI could be dragged
+  outside the bound crop and saved, leaving a sample the archive cannot
+  re-measure. The stored `role` column was never affected — `roi.save()`
+  carries it over from the row being superseded.
+
 ## [0.4.1] — 2026-08-09
 
 Writes: archive schema 3 · meta 2 · database 2

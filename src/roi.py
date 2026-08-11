@@ -248,16 +248,26 @@ def snap_even(r: Rect) -> Rect:
         r: Rectangle in stream space.
 
     Returns:
-        A new Rect, even on all four values, carrying `r`'s name and colour.
+        A new Rect, even on all four values, carrying `r`'s name, colour and
+        role.
 
     Example:
         >>> snap_even(Rect(1151, 791, 69, 69)).xywh()
         (1150, 790, 68, 68)
     """
-    return Rect(r.x & ~1, r.y & ~1,
-                max(MIN_SIDE_PX, r.w & ~1),
-                max(MIN_SIDE_PX, r.h & ~1),
-                name=r.name, color=r.color)
+    out = Rect(r.x & ~1, r.y & ~1,
+               max(MIN_SIDE_PX, r.w & ~1),
+               max(MIN_SIDE_PX, r.h & ~1),
+               name=r.name, color=r.color)
+    # `role` is not a Rect constructor argument — _to_rect() attaches it after
+    # building one — so it has to be carried across by hand.  Dropping it is
+    # not cosmetic: the image viewer's Save looks the edited rectangle up *by
+    # role* to check that `sample` still lies inside `bound`, so a role-less
+    # copy made that rule skip the one edit it exists to police.
+    role = getattr(r, "role", None)
+    if role is not None:
+        out.role = role
+    return out
 
 
 def contains_rect(outer: Rect, inner: Rect) -> bool:
