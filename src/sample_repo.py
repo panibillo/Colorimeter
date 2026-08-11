@@ -9,7 +9,8 @@ sample-number rule.
 Public surface
 --------------
     load_defaults()         -> Defaults | None    the entry-screen pre-fills
-    next_sample_no(template) -> str               the next sequential samp_no
+    next_sample_no(template, held) -> str         the next sequential samp_no
+    same_samp_no(a, b)      -> bool               do two numbers name one sample?
     insert_sample(...)      -> int                reserve a row (raises on dup)
     update_sample(rowid, **cols) -> int           write columns as the run proceeds
     delete_sample(rowid)    -> int                discard a reserved row
@@ -18,18 +19,24 @@ Sample-number rule (from defaults.samp_no_template, e.g. 'ZZ1000')
 ------------------------------------------------------------------
 - prefix  = the template up to and including its last alphabetic character.
 - integer = the remainder of the template (its digits).
-- Scan `samples` for the largest integer that follows the prefix; the next
-  number is that max + 1, or — if none exist — the template's integer + 1.
+- Scan `samples`, plus any numbers the caller says are spoken for, for the
+  largest integer that follows the prefix; the next number is that max + 1,
+  or — if none exist — the template's integer + 1.
 - Zero-pad to at least the template's digit width.
 - Matching is case-insensitive and ignores spaces.
   'ZZ1000' with an empty table -> 'ZZ1001'.
+
+A number is *claimed* only by a row in `samples`.  What a slot merely displays
+is not a claim, which is why the numbers to consider beyond the table are the
+caller's to supply rather than something this module can know.
 """
 
 from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Optional
+from itertools import chain
+from typing import Iterable, Optional
 
 import config_repo as config
 import db_manager as db
@@ -124,17 +131,35 @@ def _parse_template(template: str) -> tuple[str, int, int]:
     return prefix, 0, 1
 
 
-def next_sample_no(template: str) -> str:
+def same_samp_no(a: str, b: str) -> bool:
+    """
+    True when two sample numbers name the same sample.
+
+    `samples.samp_no` is UNIQUE COLLATE NOCASE, so the database reads 'zz1001'
+    and 'ZZ1001' as one number.  Anything comparing what a slot displays against
+    what is stored has to judge them the same way, so the rule lives here rather
+    than being spelled out again at each caller.
+    """
+    return _norm(a) == _norm(b)
+
+
+def next_sample_no(template: str, held: Iterable[str] = ()) -> str:
     """
     Compute the next sequential sample number for `template`, considering every
-    existing samp_no in the `samples` table (see the module docstring for the
-    rule).  Reads the DB; does not reserve anything.
+    existing samp_no in the `samples` table plus every number in `held` (see the
+    module docstring for the rule).  Reads the DB; does not reserve anything.
+
+    `held` carries the numbers that are spoken for but not yet in the table —
+    in practice the sample numbers the other slots are displaying.  Omitting it
+    asks a different and equally useful question: the next number the *table*
+    alone allows, which is what the entry screen's ID button wants.
     """
     prefix, start, width = _parse_template(template)
     nprefix = _norm(prefix)
 
     max_int: Optional[int] = None
-    for (samp_no,) in db.read_all("SELECT samp_no FROM samples"):
+    rows = (samp_no for (samp_no,) in db.read_all("SELECT samp_no FROM samples"))
+    for samp_no in chain(rows, held):
         n = _norm(samp_no)
         if not n.startswith(nprefix):
             continue
@@ -272,6 +297,39 @@ if __name__ == "__main__":
     except sqlite3.IntegrityError:
         dup = True
     check("IntegrityError on duplicate", dup, True)
+
+    print("== same_samp_no judges as the NOCASE column does ==")
+    check("case ignored",   same_samp_no("zz1001", "ZZ1001"), True)
+    check("spaces ignored", same_samp_no("ZZ 1001", "ZZ1001"), True)
+    check("different numbers", same_samp_no("ZZ1001", "ZZ1002"), False)
+
+    print("== held numbers count alongside the table ==")
+    # The table holds ZZ1001, so the table alone answers ZZ1002 throughout.
+    check("held above the table pushes past it",
+          next_sample_no("ZZ1000", held=["ZZ1002"]), "ZZ1003")
+    check("held below the table max changes nothing",
+          next_sample_no("ZZ1000", held=["ZZ1000"]), "ZZ1002")
+    check("held nobody asked about is not consulted",
+          next_sample_no("ZZ1000"), "ZZ1002")
+    check("non-conforming held is ignored",
+          next_sample_no("ZZ1000", held=["FIELD-7", ""]), "ZZ1002")
+
+    print("== two slots opening in turn get consecutive numbers ==")
+    a = next_sample_no("ZZ1000")             # slot A opens
+    b = next_sample_no("ZZ1000", held=[a])   # slot B opens while A holds `a`
+    check("A and B differ", (a, b), ("ZZ1002", "ZZ1003"))
+
+    print("== the ID press asks the table alone — hence the bump ==")
+    # Neither slot has begun, so neither number is claimed: the next unclaimed
+    # number is still the one slot A is displaying.  That is why the arbiter has
+    # to move A aside when B presses ID, rather than handing B a third number.
+    check("table-only answers the number A holds", next_sample_no("ZZ1000"), a)
+
+    print("== a number is claimed by a row, and released with it ==")
+    rid_a = insert_sample(a, "Ann", "", "", SN)
+    check("claimed, so the next ask advances", next_sample_no("ZZ1000"), b)
+    delete_sample(rid_a)
+    check("released, so it is offered again", next_sample_no("ZZ1000"), a)
 
     print("== numbering rules: width + prefix matching ==")
     db.write_one("DELETE FROM samples")

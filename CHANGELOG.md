@@ -31,7 +31,16 @@ sqlite3 src/colorimeter.sqlite \
 
 ---
 
-## [Unreleased]
+## [0.5.0] — 2026-08-11
+
+Writes: archive schema 3 · meta 2 · database 2
+Reads:  archive schema 1–3 · meta 1–2 · database 2
+
+MINOR, on two counts from the table in CODING_GUIDELINES: a config parameter
+was added (`defaults.default_temperature`), and the entry workflow changed —
+Begin now claims the sample number in place instead of advancing a screen. No
+format version moved, so the pair above is unchanged from 0.4.1 and archives
+written here are readable by any 0.4.x checkout.
 
 ### Added
 
@@ -44,7 +53,47 @@ sqlite3 src/colorimeter.sqlite \
   reports `err` — the two cases are told apart by the new
   `arb.temperature_attached()` on the phase contract.
 
+### Changed
+
+- Sample numbers are now coordinated between slots A and B, which previously
+  offered the same number and left the operator to keep them apart by hand.
+  A number is *claimed* only by a row in `samples`, which Begin still writes;
+  from that, two rules: no two slots ever display the same number, and the
+  `ID` button means "give me the next unclaimed number", taking it from the
+  table alone and moving any unclaimed slot showing it out of the way.
+  Pressing `ID` when you already hold that number does nothing.
+- Begin no longer jumps to entry screen 2. It claims the number, moves it into
+  the header, fills User / Test / Test lot from the defaults, and relabels
+  itself `Continue`; a second press advances. The operator therefore sees what
+  was claimed before entering anything against it.
+- The entry screens now lock in two states, flipped by Begin. Before it, the
+  sample number is the only editable thing in the slot and the identity fields
+  are empty — an unclaimed slot can be renumbered by the other slot's `ID`
+  button, so it holds nothing worth losing. Screen 2, reachable unclaimed only
+  as a `NEXT` preview, is visible but not typable. After Begin, the number
+  locks and the identity fields open, writing through to the claimed row.
+- Identity fields are filled from the defaults at Begin rather than when the
+  entry screen is first drawn, so a sample records the defaults as they read
+  at the moment it was claimed. `Arbiter._cfge_refill_slots()` existed to push
+  edited defaults back into open slots and is gone: there is nothing left in an
+  unclaimed slot for a config edit to land on.
+- `slot.ready_to_begin()` requires only a sample number. User is no longer
+  typable before Begin, so requiring it would have left the button unpressable
+  on an instrument whose defaults could not be read.
+- The "Sample number already in use" dialog offers `New number` and `Edit`
+  instead of a lone `OK`, which returned to the entry screen with the rejected
+  number still in the field and no way forward but retyping it.
+
 ### Fixed
+
+- Pressing `ID` on an entry screen previewed with `PRIOR` after Begin rewrote
+  the slot's sample number even though its row was already claimed, leaving the
+  screen permanently disagreeing with the database. The same hole let User /
+  Test / Test lot be retyped after Begin, where the edits reached no database
+  at all; those three now persist to the claimed row when the view leaves the
+  screen (`Arbiter._flush_entry`).
+- A config edit overwrote a hand-typed sample number in any slot that had not
+  begun, because the refill path reseeded the number along with the defaults.
 
 - `roi.snap_even()` dropped the `role` attribute when it rebuilt a rectangle.
   The image viewer's Save looks the edited rectangle up *by role* to check
@@ -201,5 +250,6 @@ come from it. Archives from this period are readable — schema 1 archives carry
 no ROI geometry of their own and fall back to the `roi` table, which cannot be
 verified against them.
 
-[Unreleased]: https://github.com/panibillo/Colorimeter/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/panibillo/Colorimeter/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/panibillo/Colorimeter/releases/tag/v0.5.0
 [0.3.0]: https://github.com/panibillo/Colorimeter/releases/tag/v0.3.0

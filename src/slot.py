@@ -83,9 +83,15 @@ class Slot:
     modal_return: Optional[str]        = None
 
     def ready_to_begin(self) -> bool:
-        """Begin is allowed once the sample number and user are filled."""
-        return bool(self.record.get("samp_no", "").strip()
-                    and self.record.get("user", "").strip())
+        """
+        Begin is allowed once there is a sample number to claim.
+
+        The number is the only thing the operator supplies before Begin — the
+        identity fields are filled from the defaults at the moment of claiming,
+        so requiring one of them here would leave the button unpressable on an
+        instrument whose defaults could not be read.
+        """
+        return bool(self.record.get("samp_no", "").strip())
 
     def clear_run(self) -> None:
         """Reset the per-run state (keeps name); used when starting a new sample."""

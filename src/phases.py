@@ -131,10 +131,25 @@ class Phase:
             pool.recolor(name, bg=tint)
             pool.put(name, text)
 
-    # ── shared header/footer chrome ────────────────────────────────────────────
+    # ── shared entry-row + header/footer chrome ────────────────────────────────
+
+    def _row(self, pool, lbl_name: str, lbl_text: str, fld_name: str, value,
+             on=None, enabled: bool = True) -> None:
+        """
+        One label/field row of an entry screen.
+
+        `on` is the label button's action — pressing a row label loads that
+        field's default value.  It is *cleared* rather than merely left unset
+        when the row is disabled, because Pool.put ignores on=None and a stale
+        handler from the last phase to draw this widget would otherwise survive.
+        """
+        pool.put(lbl_name, lbl_text, enabled=enabled)
+        pool.on(lbl_name, on if enabled else None)
+        pool.put(fld_name, value, enabled=enabled)
 
     def _chrome(self, pool, slot, arb, main_label: str, main_on,
-                main_enabled: bool = True, lock_nav: bool = False) -> None:
+                main_enabled: bool = True, lock_nav: bool = False,
+                title: str = None) -> None:
         """
         Title, the header main button, the slot toggle, and the footer.
 
@@ -150,6 +165,9 @@ class Phase:
         for any future phase that genuinely must trap the user.  The slot toggle's
         label and colour are the arbiter's concern (they depend on focus), so it
         is only shown here.
+
+        `title` overrides the phase's own: the entry screen names itself until a
+        sample number is claimed, and shows that number afterwards.
         """
         if slot.phase != slot.active_phase:                 # previewing another step
             main_label, main_enabled = "Resume", True
@@ -157,7 +175,9 @@ class Phase:
             lock_nav = False                                # previewing is safe
             pool.enable("run_btn", False)
 
-        pool.put("title", self.title or slot.record.get("samp_no", ""))
+        if title is None:
+            title = self.title or slot.record.get("samp_no", "")
+        pool.put("title", title)
         pool.put("main_btn", main_label, on=main_on, enabled=main_enabled)
         pool.show("slot_btn")
 
@@ -208,31 +228,48 @@ class EntryPhase(Phase):
         r = slot.record
         if not r.get("samp_no"):
             self.autofill(arb, slot)      # first view of a fresh run
-        pool.put("id_lbl",       "ID",       on=lambda: self.fill_id(arb, slot))
-        pool.put("id_fld",       r["samp_no"])
-        pool.put("user_lbl",     "User",     on=lambda: self.fill_user(arb, slot))
-        pool.put("user_fld",     r["user"])
-        pool.put("test_lbl",     "Test",     on=lambda: self.fill_test(arb, slot))
-        pool.put("test_fld",     r["test_kit"])
-        pool.put("test_lot_lbl", "Test lot", on=lambda: self.fill_test_lot(arb, slot))
-        pool.put("test_lot_fld", r["test_lot"])
+        claimed = r.get("db_rowid") is not None
+
+        # Exactly one group of rows is editable, and Begin is what flips it.
+        # While the number is unclaimed it is the only thing here, because the
+        # other slot's ID button can renumber this slot at any moment — so there
+        # must be nothing in it worth losing.  Claiming the number locks it and
+        # opens the identity fields, which from then on write through to the row.
+        self._row(pool, "id_lbl", "ID", "id_fld", r["samp_no"],
+                  on=lambda: self.fill_id(arb, slot), enabled=not claimed)
+        self._row(pool, "user_lbl", "User", "user_fld", r["user"],
+                  on=lambda: self.fill_user(arb, slot), enabled=claimed)
+        self._row(pool, "test_lbl", "Test", "test_fld", r["test_kit"],
+                  on=lambda: self.fill_test(arb, slot), enabled=claimed)
+        self._row(pool, "test_lot_lbl", "Test lot", "test_lot_fld", r["test_lot"],
+                  on=lambda: self.fill_test_lot(arb, slot), enabled=claimed)
         pool.show("div1", "div2", "div3")
-        self._chrome(pool, slot, arb, "Begin",
-                     main_on=lambda: self.begin(arb, slot),
-                     main_enabled=slot.ready_to_begin())
+        if claimed:
+            self._chrome(pool, slot, arb, "Continue",
+                         main_on=lambda: self.proceed(arb, slot),
+                         title=r["samp_no"])
+        else:
+            self._chrome(pool, slot, arb, "Begin",
+                         main_on=lambda: self.begin(arb, slot),
+                         main_enabled=slot.ready_to_begin())
 
     # ── defaults + label-button fills ───────────────────────────────────────────
     # Each row label is a Button: pressing it loads that field's default value.
 
     def autofill(self, arb, slot) -> None:
         """
-        Seed every field of a fresh run from the loaded defaults.
+        Give a fresh run the sample number it will offer to claim.
 
-        Called on the first view of a run, and again by the arbiter whenever a
-        config edit moves the defaults out from under a slot that has not begun.
+        Called on the first view of a run.  The identity fields are deliberately
+        left empty until Begin (see claim_defaults): a sample then records the
+        defaults as they read at the moment it was claimed, and an unclaimed
+        slot shows nothing but the number it is holding.
         """
+        slot.record["samp_no"] = arb.next_sample_no(slot)
+
+    def claim_defaults(self, arb, slot) -> None:
+        """Fill the identity fields from the defaults, as Begin claims the row."""
         r = slot.record
-        r["samp_no"] = arb.next_sample_no()
         d = arb.defaults()
         if d is not None:
             r["user"]          = d.user
@@ -240,8 +277,15 @@ class EntryPhase(Phase):
             r["test_lot"]      = d.testlot
             r["instrument_sn"] = d.hardware_sn
 
+    def clear_identity(self, slot) -> None:
+        """Empty the identity fields: an unclaimed slot shows only its number."""
+        r = slot.record
+        r["user"] = r["test_kit"] = r["test_lot"] = r["instrument_sn"] = ""
+
     def fill_id(self, arb, slot) -> None:
-        slot.record["samp_no"] = arb.next_sample_no()
+        if slot.record.get("db_rowid") is not None:
+            return                    # claimed — the button is inert anyway
+        arb.claim_next_no(slot)
         arb.render(slot)
 
     def fill_user(self, arb, slot) -> None:
@@ -263,11 +307,24 @@ class EntryPhase(Phase):
             arb.render(slot)
 
     def begin(self, arb, slot) -> None:
-        """Reserve the sample row (claims samp_no); on a duplicate, warn instead."""
+        """
+        Claim samp_no in the database; on a duplicate, warn instead.
+
+        The view stays on this screen, which now shows the claimed number in the
+        header and offers Continue — so the operator sees what was claimed before
+        entering anything against it.  The defaults have to reach the record
+        first, because begin_sample writes them as the row's identity.
+        """
+        self.claim_defaults(arb, slot)
         if arb.begin_sample(slot):
-            arb.goto(slot, self.next)
+            arb.render(slot)              # same screen, now in its claimed state
         else:
+            self.clear_identity(slot)     # still unclaimed: show only the number
             arb.open_modal(slot, "dup")
+
+    def proceed(self, arb, slot) -> None:
+        """Leave for screen 2; goto() flushes any identity edits on the way out."""
+        arb.goto(slot, self.next)
 
 
 class Entry2Phase(Phase):
@@ -283,22 +340,23 @@ class Entry2Phase(Phase):
 
     def enter(self, pool, slot, arb) -> None:
         r = slot.record
-        # Figure out how to call autofill only on first entry
-        # or leave it out
-        # self.autofill(arb, slot)
-        #
+        # Unclaimed, this screen is only reachable as a NEXT preview from screen
+        # 1 — visible, so the operator can see what is coming, but with nothing
+        # to type into until the slot owns a row to put it in.
+        claimed = r.get("db_rowid") is not None
         # Temp label reads the DS18B20; Collect label stamps the current time.
-        # Weight and Remark have no source yet — their labels are inert
-        # placeholders.
-        pool.put("temp_lbl",      self._temp_label(arb),
-                 on=lambda: self.fill_temp(arb, slot))
-        pool.put("temp_fld",      _text(r.get("samp_degC")))
-        pool.put("weight_lbl",    "Weight g")
-        pool.put("weight_fld",    _text(r.get("samp_grams")))
-        pool.put("collectdt_lbl", "Collect", on=lambda: self.fill_collect(arb, slot))
-        pool.put("collectdt_fld", r.get("collect_dt") or "")
-        pool.put("remark_lbl",    "Remark", on=lambda: self.fill_remark(arb, slot))
-        pool.put("remark_fld",    r.get("remark") or "")
+        # Weight has no source yet — its label is an inert placeholder.
+        self._row(pool, "temp_lbl", self._temp_label(arb),
+                  "temp_fld", _text(r.get("samp_degC")),
+                  on=lambda: self.fill_temp(arb, slot), enabled=claimed)
+        self._row(pool, "weight_lbl", "Weight g",
+                  "weight_fld", _text(r.get("samp_grams")), enabled=claimed)
+        self._row(pool, "collectdt_lbl", "Collect",
+                  "collectdt_fld", r.get("collect_dt") or "",
+                  on=lambda: self.fill_collect(arb, slot), enabled=claimed)
+        self._row(pool, "remark_lbl", "Remark",
+                  "remark_fld", r.get("remark") or "",
+                  on=lambda: self.fill_remark(arb, slot), enabled=claimed)
         pool.show("div1", "div2", "div3")
         self._chrome(pool, slot, arb, "Continue",
                      main_on=lambda: self.proceed(arb, slot))
@@ -594,6 +652,12 @@ class ModalPhase(Phase):
             pool.put(name, label, on=on)
 
 
+def _renumber(arb, slot) -> None:
+    """Dup modal: take the next unclaimed number and go back to the entry screen."""
+    arb.claim_next_no(slot)
+    arb.close_modal(slot)
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Registry
 # ─────────────────────────────────────────────────────────────────────────────
@@ -634,8 +698,10 @@ def build_phases(reagent1_secs: int = 120, reagent2_secs: int = 420) -> dict:
         ModalPhase("nosample", "INSERT SAMPLE AND CONTINUE",
                    [("CAPTURE", lambda arb, slot: arb.retry_capture(slot)),
                     ("RETURN",  None)]),
+        # The rejected number is by definition in the table, so New number
+        # always moves; Edit returns to the field to be corrected by hand.
         ModalPhase("dup", "Sample number already in use",
-                   [("OK", None)]),
+                   [("New number", _renumber), ("Edit", None)]),
     ]
     return {p.phase_id: p for p in phases}
 
@@ -684,6 +750,7 @@ if __name__ == "__main__":
             self.capturing_slot = None
             self.cap_mode = "normal"      # "calibration" | "normal"
             self.calls = []
+            self.claimed = []             # samp_nos with a row — the mock's table
             self.fail_begin = False       # flip on to simulate a duplicate samp_no
             self.temp_c = 21.7            # canned DS18B20 reading
             self.temp_probe = True        # flip off to simulate no probe
@@ -696,13 +763,39 @@ if __name__ == "__main__":
             return self.temp_c if self.temp_probe else None
         def temperature_attached(self):  return self.temp_probe
 
-        # database / sample lifecycle
+        # database / sample lifecycle.  The numbering is modelled rather than
+        # canned, because which number a slot ends up holding is exactly what
+        # the entry screen's behaviour turns on.
         def defaults(self):        return DEFAULTS
-        def next_sample_no(self):  return "ZZ1001"
+
+        @staticmethod
+        def _one_past(taken):
+            return "ZZ%d" % (max((int(n[2:]) for n in taken
+                                  if n[:2] == "ZZ" and n[2:].isdigit()),
+                                 default=1000) + 1)
+
+        def next_sample_no(self, slot=None):
+            """A fresh slot's number: past the table and past the other slots."""
+            held = [s.record.get("samp_no", "") for s in self.slots if s is not slot]
+            return self._one_past(self.claimed + held)
+
+        def claim_next_no(self, slot):
+            """The ID press: the next unclaimed number, bumping whoever shows it."""
+            want = self._one_past(self.claimed)
+            if slot.record.get("samp_no") == want:
+                return
+            slot.record["samp_no"] = want
+            for other in self.slots:
+                if other is slot or other.record.get("db_rowid") is not None:
+                    continue
+                if other.record.get("samp_no") == want:
+                    other.record["samp_no"] = self.next_sample_no(other)
+
         def begin_sample(self, slot):
             if self.fail_begin:
                 return False
             slot.record["db_rowid"] = 42
+            self.claimed.append(slot.record["samp_no"])
             return True
         def persist(self, slot, **cols):
             slot.record.update(cols)
@@ -773,7 +866,11 @@ if __name__ == "__main__":
         # actions invoked by buttons / modals
         def alarm(self, slot):        self.calls.append(("alarm", slot.name))
         def cancel_test(self, slot, delete=False):
-            self.calls.append(("cancel", delete)); slot.clear_run(); self.goto(slot, "entry")
+            self.calls.append(("cancel", delete))
+            if delete:                      # deleting the row frees its number
+                self.claimed = [n for n in self.claimed
+                                if n != slot.record.get("samp_no")]
+            slot.clear_run(); self.goto(slot, "entry")
         def reset_timer(self, slot):
             ap = slot.active_phase
             if ap in ("reagent1", "reagent2"):
@@ -801,28 +898,72 @@ if __name__ == "__main__":
     A    = Slot("A")
     arb.slots = [A]
 
-    print("== entry: autofills from defaults, Begin enabled ==")
+    print("== entry: only the ID row is live until the number is claimed ==")
     arb.goto(A, "entry")
-    check("main_btn label",       pool["main_btn"].label, "Begin")
-    check("id autofilled",        pool["id_fld"].value, "ZZ1001")
-    check("user autofilled",      pool["user_fld"].value, DEFAULTS.user)
-    check("test autofilled",      pool["test_fld"].value, DEFAULTS.testkit)
-    check("test-lot autofilled",  pool["test_lot_fld"].value, DEFAULTS.testlot)
-    check("Begin enabled",        pool["main_btn"].enabled, True)
+    check("main_btn label",        pool["main_btn"].label, "Begin")
+    check("title names the screen", pool["title"].text, "New Test")
+    check("id autofilled",         pool["id_fld"].value, "ZZ1001")
+    check("id editable",           pool["id_fld"].enabled, True)
+    check("id label live",         pool["id_lbl"].enabled, True)
+    check("user empty",            pool["user_fld"].value, "")
+    check("test empty",            pool["test_fld"].value, "")
+    check("test-lot empty",        pool["test_lot_fld"].value, "")
+    check("user locked",           pool["user_fld"].enabled, False)
+    check("user label inert",      pool["user_lbl"].enabled, False)
+    check("Begin enabled by the number alone", pool["main_btn"].enabled, True)
+
+    print("== ID keeps its number, or takes one from an unclaimed slot ==")
+    # Nothing is claimed, so the number A2 displays is still the next one going:
+    # pressing ID on B2 takes it and moves A2 aside rather than skipping past it.
+    A2, B2 = Slot("A"), Slot("B")
+    arb.slots = [A2, B2]
+    arb.goto(A2, "entry"); arb.goto(B2, "entry")
+    check("two slots never agree",
+          (A2.record["samp_no"], B2.record["samp_no"]), ("ZZ1001", "ZZ1002"))
+    arb.render(A2); press(pool, "id_lbl"); press(pool, "id_lbl")
+    check("ID is idempotent",   A2.record["samp_no"], "ZZ1001")
+    check("the other is untouched", B2.record["samp_no"], "ZZ1002")
+    arb.render(B2); press(pool, "id_lbl")
+    check("B takes the next unclaimed", B2.record["samp_no"], "ZZ1001")
+    check("A is bumped aside",          A2.record["samp_no"], "ZZ1002")
+    arb.slots = [A]; arb.render(A)
+
+    print("== entry2 previewed before Begin is look-but-don't-touch ==")
+    arb.view(A, "entry2")
+    check("fields are visible",   pool["temp_fld"].visible, True)
+    check("temp locked",          pool["temp_fld"].enabled, False)
+    check("remark locked",        pool["remark_fld"].enabled, False)
+    check("temp label inert",     pool["temp_lbl"].enabled, False)
+    check("header offers Resume", pool["main_btn"].label, "Resume")
+    press(pool, "main_btn")                        # Resume -> back to entry
+    check("back on entry",        A.phase, "entry")
+
+    print("== Begin claims the number and stays on screen 1 ==")
+    press(pool, "main_btn")
+    check("still on entry",        A.phase, "entry")
+    check("row claimed",           A.record["db_rowid"], 42)
+    check("title is the number",   pool["title"].text, "ZZ1001")
+    check("main is Continue",      pool["main_btn"].label, "Continue")
+    check("id locked",             pool["id_fld"].enabled, False)
+    check("id label inert",        pool["id_lbl"].enabled, False)
+    check("user filled at claim",  pool["user_fld"].value, DEFAULTS.user)
+    check("test filled at claim",  pool["test_fld"].value, DEFAULTS.testkit)
+    check("test-lot filled",       pool["test_lot_fld"].value, DEFAULTS.testlot)
+    check("identity now editable", pool["user_fld"].enabled, True)
     check("instrument_sn carried", A.record["instrument_sn"], DEFAULTS.hardware_sn)
 
-    print("== label-button refills a cleared field ==")
+    print("== label-button refills a cleared field (claimed slot) ==")
     A.record["user"] = ""; arb.render(A)
     check("user cleared",   pool["user_fld"].value, "")
     press(pool, "user_lbl")                        # User label = load-default button
     check("user refilled",  pool["user_fld"].value, DEFAULTS.user)
 
-    print("== Begin reserves the row -> entry2 ==")
+    print("== Continue -> entry2 ==")
     press(pool, "main_btn")
     check("phase entry2",      A.phase, "entry2")
-    check("row reserved",      A.record["db_rowid"], 42)
     check("main is Continue",  pool["main_btn"].label, "Continue")
     check("temp label shown",  pool["temp_lbl"].visible, True)
+    check("entry2 now editable", pool["temp_fld"].enabled, True)
 
     print("== entry2: Temp label reads the sensor into temp_fld ==")
     check("plain label with a probe", pool["temp_lbl"].label, "Temp °C")
@@ -932,7 +1073,8 @@ if __name__ == "__main__":
 
     print("== cancel offers 3 choices; Delete row deletes ==")
     B = Slot("B"); arb.slots = [B]
-    arb.goto(B, "entry"); press(pool, "main_btn")  # Begin -> entry2 (reserved)
+    arb.goto(B, "entry"); press(pool, "main_btn")  # Begin -> claims, stays on entry
+    press(pool, "main_btn")                         # Continue -> entry2
     press(pool, "main_btn")                         # Continue -> reagent1
     press(pool, "main_btn")                         # CANCEL -> cancel modal
     check("cancel modal",      B.phase, "cancel")
@@ -950,11 +1092,25 @@ if __name__ == "__main__":
     arb.fail_begin = True
     C = Slot("C"); arb.slots = [C]
     arb.goto(C, "entry")
+    was = C.record["samp_no"]
     press(pool, "main_btn")                         # Begin -> begin_sample fails
-    check("dup modal shown",   C.phase, "dup")
-    check("dup message",       pool["modal_msg"].text, "Sample number already in use")
-    check("single button",     pool["modal_no"].visible, False)
-    press(pool, "modal_yes")                        # OK -> close back to entry
-    check("back to entry",     C.phase, "entry")
+    check("dup modal shown",     C.phase, "dup")
+    check("dup message",         pool["modal_msg"].text, "Sample number already in use")
+    check("two buttons",         pool["modal_no"].visible, True)
+    check("first is New number", pool["modal_yes"].label, "New number")
+    check("second is Edit",      pool["modal_no"].label, "Edit")
+    check("identity left empty", C.record["user"], "")
+    press(pool, "modal_no")                         # Edit -> correct it by hand
+    check("back to entry",       C.phase, "entry")
+    check("number kept to edit", C.record["samp_no"], was)
+
+    print("== dup modal: New number takes the next unclaimed one ==")
+    arb.claimed.append(was)          # the real dup case: someone else holds it
+    press(pool, "main_btn")                         # Begin fails again
+    check("dup modal shown",     C.phase, "dup")
+    press(pool, "modal_yes")                        # New number
+    check("back to entry",       C.phase, "entry")
+    check("number moved on",     C.record["samp_no"] != was, True)
+    check("still unclaimed",     C.record["db_rowid"], None)
 
     print("\n== all phase self-tests passed ==")

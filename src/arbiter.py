@@ -750,14 +750,52 @@ class Arbiter:
         """The loaded GUI defaults (entry pre-fills), or None if unavailable."""
         return self._defaults
 
-    def next_sample_no(self) -> str:
-        """The next sequential sample number for the current default template."""
-        template = self._defaults.samp_no_template if self._defaults else ""
+    def _samp_no_template(self) -> str:
+        return self._defaults.samp_no_template if self._defaults else ""
+
+    def next_sample_no(self, slot: Slot | None = None) -> str:
+        """
+        The next sample number for a slot opening fresh: one past the database
+        and past whatever the *other* slots are displaying, so two slots never
+        show the same number.  The asking slot is left out of that comparison —
+        it is asking what to hold, so its own value cannot stand in its way.
+        """
+        held = [s.record.get("samp_no", "")
+                for s in self._slots.values() if s is not slot]
         try:
-            return sample_repo.next_sample_no(template)
+            return sample_repo.next_sample_no(self._samp_no_template(), held)
         except sqlite3.Error:
             log.exception("Arbiter: next_sample_no failed")
             return ""
+
+    def claim_next_no(self, slot: Slot) -> None:
+        """
+        Put the next unclaimed number in `slot`, moving any slot showing it aside.
+
+        Unclaimed means "no row in samples" — Begin inserts synchronously, so the
+        table is the whole claim registry and what another slot merely displays
+        is not a claim.  This therefore takes the true next number and bumps that
+        slot, rather than skipping past it.  (Were the insert ever deferred, this
+        would have to consult the begun slots as well.)
+
+        Returning early when the slot already holds that number is what makes
+        repeated ID presses idempotent.
+        """
+        template = self._samp_no_template()
+        try:
+            want = sample_repo.next_sample_no(template)      # the table alone
+            if sample_repo.same_samp_no(slot.record.get("samp_no", ""), want):
+                return                                       # already ours
+            slot.record["samp_no"] = want
+            for other in self._slots.values():
+                # A claimed number is in the table, so next_sample_no could not
+                # have offered it; skipping those slots is belt and braces.
+                if other is slot or other.record.get("db_rowid") is not None:
+                    continue
+                if sample_repo.same_samp_no(other.record.get("samp_no", ""), want):
+                    other.record["samp_no"] = self.next_sample_no(other)
+        except sqlite3.Error:
+            log.exception("Arbiter: claim_next_no failed for slot %s", slot.name)
 
     def begin_sample(self, slot: Slot) -> bool:
         """
@@ -797,6 +835,26 @@ class Arbiter:
             log.exception("Arbiter: persist failed for slot %s (rowid=%s)",
                           slot.name, rowid)
 
+    def _flush_entry(self, slot: Slot) -> None:
+        """
+        Write screen-1 identity edits to the claimed row before the view leaves it.
+
+        Those three fields are editable only once the row exists, and keystrokes
+        land in the record rather than the database (write_one opens its own
+        connection, far too costly per character).  So the record is flushed at
+        the moments the operator navigates away, which is every way out of the
+        screen bar losing power.  samp_no is deliberately absent: it is claimed,
+        and the screen locks it.
+
+        Gated on the *viewed* phase, so edits made while previewing screen 1 from
+        entry2 are flushed too.
+        """
+        if slot.phase != "entry" or slot.record.get("db_rowid") is None:
+            return
+        r = slot.record
+        self.persist(slot, user=r["user"], test_kit=r["test_kit"],
+                     test_lot=r["test_lot"])
+
     # ── Phase contract: navigation / render ────────────────────────────────────
 
     def goto(self, slot: Slot, phase_id: str) -> None:
@@ -804,6 +862,7 @@ class Arbiter:
         Advance a slot to a phase (the real protocol flow): this becomes the
         slot's live phase.  Runs its once-only activate, then draws if focused.
         """
+        self._flush_entry(slot)
         slot.phase = slot.active_phase = phase_id
         self._phases[phase_id].activate(self, slot)
         self.render(slot)
@@ -814,6 +873,7 @@ class Arbiter:
         the viewed phase changes — the live phase, its timer, and any capture
         keep running untouched.  No activate(), so nothing is started or reset.
         """
+        self._flush_entry(slot)
         slot.phase = phase_id
         self.render(slot)
 
@@ -837,6 +897,8 @@ class Arbiter:
 
     def focus(self, slot: Slot) -> None:
         """Make a slot the displayed one and render it (user-initiated only)."""
+        if self._focused is not None and self._focused is not slot:
+            self._flush_entry(self._focused)   # the slot being left behind
         self._focused = slot
         self._disarm_alarm(slot)     # regaining focus clears its visible alarm
         self.render(slot)
@@ -885,6 +947,7 @@ class Arbiter:
 
     def open_menu(self, slot: Slot) -> None:
         """Open the Menu screen; `slot` is who OK/CANCEL will return the view to."""
+        self._flush_entry(slot)
         self._pre_menu_slot = slot
         self._focused = None
         self._render_menu()
@@ -1461,35 +1524,15 @@ class Arbiter:
 
         Called after any write rather than only for the roles that matter, so
         no list of "settings with a consumer" has to be kept in step here —
-        all three calls are cheap and idempotent.
+        both calls are cheap and idempotent.
+
+        Nothing has to be pushed back into the slots: a slot takes its identity
+        fields from the defaults at Begin, not when its entry screen is first
+        drawn, so an unclaimed slot is holding none of them and a claimed one
+        must keep the values it was claimed with.
         """
         self._load_defaults()
         self._apply_reagent_secs()
-        self._cfge_refill_slots()
-
-    def _cfge_refill_slots(self) -> None:
-        """
-        Put the new defaults into every slot, so both read the same instrument.
-
-        A slot fills its identity fields from the defaults the first time its
-        entry screen is drawn and never again.  Without this, a slot already
-        looked at would keep showing the user, kit and lot that were current
-        when it was opened, while a slot not yet opened picked up the edited
-        ones — two slots disagreeing about the same instrument.
-
-        Safe unconditionally because editing is locked out once any slot is
-        past entry (_cfge_editable): every slot reachable from here is still
-        on its entry screen with nothing reserved in the database.  Nothing is
-        redrawn — the editor is what is on screen, and the entry phase reads
-        the record afresh when the operator comes back to it.
-        """
-        entry = self._phases.get("entry")
-        if entry is None:
-            return
-        for slot in self._slots.values():
-            if slot.record.get("db_rowid") is not None:
-                continue           # belt and braces: a reserved row never moves
-            entry.autofill(self, slot)
 
     # ── confirms ───────────────────────────────────────────────────────────────
 
@@ -1796,6 +1839,7 @@ class Arbiter:
     # ── Phase contract: modals ─────────────────────────────────────────────────
 
     def open_modal(self, slot: Slot, modal_id: str) -> None:
+        self._flush_entry(slot)
         slot.modal_return = slot.phase
         slot.phase = modal_id
         self.render(slot)
@@ -3530,7 +3574,10 @@ class Arbiter:
         if key is None:
             return
         slot.record[key] = textbox.value
-        if slot.phase == "entry":
+        # Only while the number is unclaimed does typing decide whether Begin is
+        # available.  Once it is claimed the button reads Continue and stays lit;
+        # what is being typed then is identity, which cannot un-claim a row.
+        if slot.phase == "entry" and slot.record.get("db_rowid") is None:
             begin = self._pool["main_btn"]
             want = slot.ready_to_begin()
             if begin.enabled != want:
@@ -4261,14 +4308,16 @@ def _selftest() -> None:
     check("roles → menu",      arb._cfge_view, None)
     check("the Menu is up",    arb._pool["menu_capture"].visible, True)
 
-    print("== config editor: a saved default reaches both slots ==")
-    # A gets looked at, B does not: render() is a no-op for the unfocused slot,
-    # so only A's record is filled from the defaults in force right now.
+    print("== config editor: a saved default reaches the next sample claimed ==")
+    # Nothing is pushed back into the slots any more.  An unclaimed slot holds
+    # no identity at all, so an edit has nothing to land on — and, the reason
+    # this used to matter, nothing to clobber: a hand-typed sample number is no
+    # longer overwritten by a config save.  The defaults are read at Begin, so
+    # it is the next claim that picks them up.
     A.clear_run(); B.clear_run()
-    _was_user = config.get("defaults", "user")
     arb.focus(A)
-    check("A filled from the defaults", A.record["user"], _was_user)
-    check("B never opened, still blank", B.record["user"], "")
+    check("an unclaimed slot holds no identity", A.record["user"], "")
+    A.record["samp_no"] = "ZZ8888"             # hand-typed: must survive the edit
     arb._cfge_open_role("defaults")
     while cfge_row_of("user") is None:          # 'user' sits on a later page
         arb._pool["cfge_next"].on_press()
@@ -4276,11 +4325,19 @@ def _selftest() -> None:
     _fld.set_value("R. Feynman")
     arb._writethrough(_fld)
     arb._pool["cfge_save"].on_press()
-    check("saved",             config.get("defaults", "user"), "R. Feynman")
-    check("the slot already opened caught up", A.record["user"], "R. Feynman")
-    check("and so did the one that was not",   B.record["user"], "R. Feynman")
+    check("saved", config.get("defaults", "user"), "R. Feynman")
+    check("a hand-typed number survives the save", A.record["samp_no"], "ZZ8888")
+    check("still nothing to clobber",            A.record["user"], "")
     arb._cfge_cancel()
     arb._cfge_cancel()
+
+    arb.focus(A)
+    arb._phases["entry"].begin(arb, A)          # Begin is what reads the defaults
+    check("the claim picked up the new default", A.record["user"], "R. Feynman")
+    check("and it reached the row",
+          _db.read_val("SELECT user FROM samples WHERE rowid = ?",
+                       (A.record["db_rowid"],)), "R. Feynman")
+    A.clear_run(); B.clear_run()
 
     print("== config editor: Restore Factory Defaults undoes all of it ==")
     arb._cfge_open()
@@ -4288,8 +4345,10 @@ def _selftest() -> None:
     arb._pool["modal_yes"].on_press()
     check("back on the roles",  arb._cfge_view, "roles")
     check("description restored", config.get("device", "description"), _was_desc)
-    check("both slots followed it back",
-          [A.record["user"], B.record["user"]], [_was_user, _was_user])
+    # Restoring reaches the slots the same way a save does: not at all until
+    # one of them claims a sample.  Both were cleared just above.
+    check("the slots are left alone",
+          [A.record["user"], B.record["user"]], ["", ""])
     check("shutdown_timeout_s restored",
           config.shutdown_timeout_s() != 12.5, True)
     # device.software_ver excepted: it has no factory row by design — the
