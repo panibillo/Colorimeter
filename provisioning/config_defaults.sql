@@ -200,8 +200,10 @@ INSERT OR IGNORE INTO config (active, isdefault, editable, add_dt, role, name,
    'reagent lot number; the calibration curve is lot-specific'),
   (0, 1, 1, '2026-07-21 00:00:00', 'defaults', 'testlot_expire_dt', 'str', '2027-07', 'seed',
    'expiry of the reagent lot in force'),
-  (1, 1, 1, '2026-08-09 00:20:00', 'defaults', 'remark', 'str','', 'seed', 
-   'Default remark is an empty string.');
+  (1, 1, 1, '2026-08-09 00:20:00', 'defaults', 'remark', 'str','', 'seed',
+   'Default remark is an empty string.'),
+  (0, 1, 1, '2026-08-11 00:00:00', 'defaults', 'default_temperature', 'float', '21.0', 'seed',
+   'sample temperature (degrees C) the entry2 Temp button fills in when no thermometer is attached');
 
 -- The second kit from the old `testkit` table, carried in so it can be picked
 -- from the editor's Browse screen instead of retyped.  active=0, isdefault=0

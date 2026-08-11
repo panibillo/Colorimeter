@@ -56,6 +56,7 @@ class Defaults:
     testlot:           str
     testlot_expire_dt: str
     remark:            str
+    default_temperature: float  # entry2 fills this in when no probe answers
     hardware_sn:       str      # role 'device' — stored on the sample as
     software_ver:      str      # instrument_sn / provenance
 
@@ -72,6 +73,7 @@ _DEFAULT_FIELDS: tuple[tuple[str, str, str], ...] = (
     ("testlot",           "defaults", "testlot"),
     ("testlot_expire_dt", "defaults", "testlot_expire_dt"),
     ("remark",            "defaults", "remark"),
+    ("default_temperature", "defaults", "default_temperature"),
     ("hardware_sn",       "device",   "hardware_sn"),
     ("software_ver",      "device",   "software_ver"),
 )
@@ -306,6 +308,8 @@ if __name__ == "__main__":
     check("testlot adjacent to its expiry",
           bool(d.testlot) and bool(d.testlot_expire_dt), True)
     check("device role folded in", d.hardware_sn, SN)
+    check("default temperature is a number", isinstance(d.default_temperature, float),
+          True)
 
     print("== an edited value shows up on the next load ==")
     config.save("defaults", "user", "Barbara Olsen")

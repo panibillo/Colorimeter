@@ -32,6 +32,7 @@ Arbiter contract (what phases call; arbiter.py implements it)
     arb.now() -> float              monotonic time (for creating timers)
     arb.timestamp() -> str          wall-clock string for the collect stamp
     arb.read_temperature()->float   sample the DS18B20 (°C), or None on failure
+    arb.temperature_attached()->bool  is a DS18B20 on the bus at all
     arb.goto(slot, phase_id)        advance slot to a phase — the live phase
                                     (runs activate, renders)
     arb.view(slot, phase_id)        preview a phase without advancing (no activate)
@@ -289,7 +290,8 @@ class Entry2Phase(Phase):
         # Temp label reads the DS18B20; Collect label stamps the current time.
         # Weight and Remark have no source yet — their labels are inert
         # placeholders.
-        pool.put("temp_lbl",      "Temp °C", on=lambda: self.fill_temp(arb, slot))
+        pool.put("temp_lbl",      self._temp_label(arb),
+                 on=lambda: self.fill_temp(arb, slot))
         pool.put("temp_fld",      _text(r.get("samp_degC")))
         pool.put("weight_lbl",    "Weight g")
         pool.put("weight_fld",    _text(r.get("samp_grams")))
@@ -313,12 +315,37 @@ class Entry2Phase(Phase):
         if d is not None:
             r["remark"]          = d.remark
 
+    def _default_temp(self, arb) -> Optional[float]:
+        """The configured stand-in temperature (defaults.default_temperature)."""
+        d = arb.defaults()
+        return None if d is None else d.default_temperature
+
+    def _temp_label(self, arb) -> str:
+        """
+        Text for the Temp button: the plain label when a probe is on the bus,
+        and the stand-in value in brackets when there is none, so the operator
+        can see what one press is about to write before pressing it.
+        """
+        if arb.temperature_attached():
+            return "Temp °C"
+        t = self._default_temp(arb)
+        return "Temp °C" if t is None else f"[{t:.1f} °C]"
+
     def fill_temp(self, arb, slot) -> None:
-        """Sample the temperature sensor into the Temp field (one-press read)."""
+        """
+        Fill the Temp field in one press: the sensor's reading, or — on a unit
+        with no probe attached — the configured default temperature.
+
+        The read is attempted first either way, because the driver re-probes
+        the bus and so picks up a sensor plugged in after start.
+        """
         c = arb.read_temperature()
+        if c is None and not arb.temperature_attached():
+            c = self._default_temp(arb)
         # samp_degC is a string here, exactly as a typed entry would leave it
-        # (proceed() converts it with _to_float); "err" marks a failed read so
-        # the operator sees the press registered but no sensor responded.
+        # (proceed() converts it with _to_float); "err" marks a failed read of
+        # a probe that IS attached, so the operator sees the press registered
+        # but the sensor did not answer.
         slot.record["samp_degC"] = "err" if c is None else f"{c:.1f}"
         arb.render(slot)
 
@@ -643,6 +670,7 @@ if __name__ == "__main__":
         user="William Olsen", user_email="w@example.org", user_org="MGWWG",
         testkit="Ascel 458201", testkit_vendor="Industrial Test Systems, Inc.",
         testlot="0 12V601-HH", testlot_expire_dt="2027-07",
+        remark="", default_temperature=21.0,
         hardware_sn="XCN-001", software_ver=version.__version__,
     )
 
@@ -658,12 +686,15 @@ if __name__ == "__main__":
             self.calls = []
             self.fail_begin = False       # flip on to simulate a duplicate samp_no
             self.temp_c = 21.7            # canned DS18B20 reading
+            self.temp_probe = True        # flip off to simulate no probe
 
         # clock / stamps
         def now(self):        return self.clock
         def timestamp(self):  return "2026-07-20 14:00:00"
         def epoch(self):      return self.epoch_s
-        def read_temperature(self):  return self.temp_c
+        def read_temperature(self):
+            return self.temp_c if self.temp_probe else None
+        def temperature_attached(self):  return self.temp_probe
 
         # database / sample lifecycle
         def defaults(self):        return DEFAULTS
@@ -794,9 +825,24 @@ if __name__ == "__main__":
     check("temp label shown",  pool["temp_lbl"].visible, True)
 
     print("== entry2: Temp label reads the sensor into temp_fld ==")
+    check("plain label with a probe", pool["temp_lbl"].label, "Temp °C")
     press(pool, "temp_lbl")                        # Temp label = sensor-read button
     check("temp read into field",  pool["temp_fld"].value, "21.7")
     check("temp stored in record", A.record["samp_degC"], "21.7")
+
+    print("== entry2: with no probe, the Temp button offers the default ==")
+    arb.temp_probe = False
+    A.record["samp_degC"] = ""; arb.render(A)
+    check("label shows the default", pool["temp_lbl"].label, "[21.0 °C]")
+    press(pool, "temp_lbl")
+    check("default filled in",     pool["temp_fld"].value, "21.0")
+    check("default in record",     A.record["samp_degC"], "21.0")
+
+    print("== entry2: an attached probe that fails still says err ==")
+    arb.temp_probe = True; arb.temp_c = None
+    press(pool, "temp_lbl")
+    check("failed read marked",    A.record["samp_degC"], "err")
+    arb.temp_c = 21.7
 
     print("== entry2: collect stamp + Continue persists -> reagent1 ==")
     A.record["samp_degC"] = "21.5"; A.record["samp_grams"] = "3.2"   # writethrough sim

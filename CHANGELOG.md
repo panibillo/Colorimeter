@@ -33,6 +33,17 @@ sqlite3 src/colorimeter.sqlite \
 
 ## [Unreleased]
 
+### Added
+
+- Config `defaults.default_temperature` (float, seeded 21.0 °C) — the sample
+  temperature to record on an instrument run without a thermometer. Editable
+  from Menu → Config → defaults like any other parameter. The Entry2 screen's
+  Temp button reads it: with no probe on the 1-Wire bus the button is labelled
+  `[21.0 °C]` and one press writes that value into the field, instead of the
+  `err` it used to write. A probe that is attached but does not answer still
+  reports `err` — the two cases are told apart by the new
+  `arb.temperature_attached()` on the phase contract.
+
 ## [0.4.1] — 2026-08-09
 
 Writes: archive schema 3 · meta 2 · database 2
