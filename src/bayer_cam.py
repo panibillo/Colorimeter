@@ -116,6 +116,25 @@ class BayerCam:
     DEFAULT_ANALOG_GAIN = 1.0
     DEFAULT_WB_GAINS = (1.0, 1.0)  # (Red, Blue)
 
+    # The ISP stages that decide how the *main* (RGB) stream looks.  They do
+    # not touch the raw Bayer stream: libcamera taps that off before white
+    # balance, the colour matrix, gamma, sharpening and saturation are
+    # applied, so these can be changed mid-run — see set_color_rendering() —
+    # without the objective data changing by a single DN.
+    #
+    # Everything here is neutral, which is what makes the RGB stream a fair
+    # preview of the Bayer data rather than a prettier picture than the
+    # measurement.  NoiseReductionMode belongs to the same family but is set
+    # in setup_camera() instead, because it needs libcamera imported and is
+    # left Off for photographs too.
+    OBJECTIVE_RENDERING = {
+        "AwbEnable":   False,
+        "ColourGains": DEFAULT_WB_GAINS,
+        "Sharpness":   0.0,
+        "Contrast":    1.0,
+        "Saturation":  1.0,
+    }
+
     @staticmethod
     def detect_model() -> str:
         """
@@ -245,12 +264,8 @@ class BayerCam:
                 "AeEnable":       False,
                 "ExposureTime":   self.exposure_us,
                 "AnalogueGain":   self.analog_gain,
-                "AwbEnable":      False,
-                "ColourGains":    self.DEFAULT_WB_GAINS,
                 "NoiseReductionMode": libcamera.controls.draft.NoiseReductionModeEnum.Off,
-                "Sharpness":      0.0,
-                "Contrast":       1.0,
-                "Saturation":     1.0,
+                **self.OBJECTIVE_RENDERING,
             }
             if self.has_autofocus:
                 # Disable autofocus on Module 3 — fixed focus needed for colorimetry
@@ -542,6 +557,51 @@ class BayerCam:
             except Exception as e:
                 err.handle(e, f"Setting exposure to {exposure_us}µs", recoverable=True)
     
+    def _set_rendering(self, controls: Dict, what: str) -> None:
+        """Apply a rendering control set, logging and swallowing failures."""
+        log.debug(f"Setting {what} rendering: {controls}")
+        if self.camera is None:
+            return
+        try:
+            self.camera.set_controls(controls)
+        except Exception as e:
+            err.handle(e, f"Setting {what} rendering", recoverable=True)
+
+    def set_color_rendering(self, wb_gains: Tuple[float, float]) -> None:
+        """
+        Render the main (RGB) stream colour-balanced, for a viewable photo.
+
+        Applies fixed colour gains rather than enabling AWB.  The light is
+        known — this is only ever used under the white LED — so the gains can
+        be measured once per unit and applied instantly, where AWB would need
+        several frames to converge on a narrow-spectrum source it was never
+        tuned for, and might not land in the same place twice.
+
+        The raw Bayer stream is unaffected: it is tapped off upstream of every
+        control set here.  A frame captured while this is in force therefore
+        still yields objective Bayer layers alongside the balanced RGB.
+
+        Call set_objective_rendering() afterwards to put the RGB stream back
+        to matching the raw data.
+
+        Args:
+            wb_gains: (red, blue) colour gains, e.g. from
+                      config_repo.capture_photo_wb_gains().
+        """
+        self._set_rendering({
+            **self.OBJECTIVE_RENDERING,
+            "ColourGains": (float(wb_gains[0]), float(wb_gains[1])),
+        }, "colour-balanced")
+
+    def set_objective_rendering(self) -> None:
+        """
+        Restore the neutral rendering the RGB stream uses for measurement.
+
+        The inverse of set_color_rendering(); safe to call when it was never
+        applied, since it just re-asserts what setup_camera() already set.
+        """
+        self._set_rendering(dict(self.OBJECTIVE_RENDERING), "objective")
+
     def set_analog_gain(self, gain: float) -> None:
         """
         Set camera analogue gain and apply to camera.

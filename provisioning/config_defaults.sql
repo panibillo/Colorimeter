@@ -98,7 +98,11 @@ INSERT OR IGNORE INTO config (active, isdefault, editable, add_dt, role, name,
   (0, 1, 1, '2026-08-01 00:00:00', 'capture', 'layer_keep_min_dn', 'int', '96', 'seed',
    'a Bayer layer is too dark to store when its scaled p10 falls below this (signal DN)'),
   (0, 1, 1, '2026-08-01 00:00:00', 'capture', 'layer_keep_max_dn', 'int', '863', 'seed',
-   'a Bayer layer is too bright to store when its scaled p90 rises above this (signal DN)');
+   'a Bayer layer is too bright to store when its scaled p90 rises above this (signal DN)'),
+  (0, 1, 1, '2026-08-12 00:00:00', 'capture', 'photo_enabled', 'bool', '1', 'seed',
+   'take a colour-balanced JPEG under the white LED as the last step of a run'),
+  (0, 1, 1, '2026-08-12 00:00:00', 'capture', 'photo_wb_gains', 'str', '1.0,1.0', 'seed',
+   'white-LED colour gains (red,blue) rendering that photo; commission per unit');
 -- ── protocol ────────────────────────────────────────────────────────────────
 -- These are the real durations.  A shorter pair used to be seeded under a
 -- 'simulation' profile so a desktop run finished quickly; that profile is

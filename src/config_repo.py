@@ -802,6 +802,38 @@ def capture_layer_keep_max_dn() -> int:
     return int(get("capture", "layer_keep_max_dn"))
 
 
+def capture_photo_enabled() -> bool:
+    """True when a run ends by photographing the sample under the white LED."""
+    return bool(get("capture", "photo_enabled"))
+
+
+def capture_photo_wb_gains() -> tuple:
+    """
+    Colour gains (red, blue) rendering the final photo, as a 2-tuple.
+
+    Fixed gains rather than libcamera's AWB because the light is known: the
+    photo is always taken under the white LED, so what a general-purpose AWB
+    algorithm would spend several frames converging towards can simply be
+    written down once per unit and applied instantly.  Commission them by
+    photographing a neutral card and dividing its green mean by its red and
+    blue means; the seeded 1.0,1.0 is the uncorrected sensor response, which
+    looks the same as today's objective capture until somebody measures it.
+
+    Returns:
+        (red_gain, blue_gain).  Falls back to (1.0, 1.0) if the stored text
+        is not two numbers, since an unusable photo is a far smaller loss
+        than a run that stops.
+    """
+    raw = str(get("capture", "photo_wb_gains"))
+    try:
+        red, blue = (float(p) for p in raw.split(","))
+        return (red, blue)
+    except ValueError:
+        log.error("config: capture.photo_wb_gains = %r is not 'red,blue' — "
+                  "using 1.0,1.0", raw)
+        return (1.0, 1.0)
+
+
 # ── Image regions ───────────────────────────────────────────────────────────
 
 def required_roi_roles() -> tuple:

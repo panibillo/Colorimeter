@@ -276,6 +276,41 @@ class CaptureSuiteWriter:
         if root_attrs:
             self._w.set_attrs("/", root_attrs)
 
+    def add_photo(self, jpeg_bytes: bytes, filename: str, crop,
+                  attrs: dict = None) -> None:
+        """
+        Store the run's colour-balanced photograph of the sample.
+
+        Suite-level, not per-LED: there is one of these per run, taken under
+        the white LED after every LED's frames are in, so it hangs off "/"
+        rather than off any /leds group.  Contrast add_jpeg(), which stores
+        one neutral preview per LED.
+
+        The image is a crop, so the crop rectangle is stored beside it.
+        Without it the photograph cannot be placed in the sensor frame, and a
+        reader comparing it against the Bayer layers has no way to know the
+        two cover the same ground — which they do: `crop` is the ROLE_BOUND
+        rectangle the layers are cropped to as well.
+
+        Args:
+            jpeg_bytes: Raw contents of the JPEG.
+            filename:   Original filename, kept as a provenance attribute.
+            crop:       The Rect the photo was cropped to, in stream space.
+            attrs:      Extra attributes to record alongside (exposure, LED,
+                        colour gains) — whatever the caller knows that makes
+                        the picture interpretable later.
+        """
+        meta = {
+            "filename": filename,
+            "format":   "jpeg",
+            "crop_x":   int(crop.x),
+            "crop_y":   int(crop.y),
+            "crop_w":   int(crop.w),
+            "crop_h":   int(crop.h),
+        }
+        meta.update(attrs or {})
+        self._w.write_bytes("/", "photo", jpeg_bytes, attrs=meta)
+
     # ── Path construction (the schema lives here) ────────────────────
 
     @staticmethod

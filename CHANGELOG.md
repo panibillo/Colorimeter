@@ -31,6 +31,46 @@ sqlite3 src/colorimeter.sqlite \
 
 ---
 
+## [0.6.0] — 2026-08-12
+
+Writes: archive schema 3 · meta 2 · database 2
+Reads:  archive schema 1–3 · meta 1–2 · database 2
+
+MINOR, on two counts from the table in CODING_GUIDELINES: config parameters
+were added (`capture.photo_enabled`, `capture.photo_wb_gains`), and both
+capture paths gained a step. No format version moved: the archive gains a
+`/photo` dataset, but it is additive and optional — absent when the photo is
+disabled or fails — so a reader must probe for it rather than infer it from
+`schema_version`, and one that ignores it is unaffected. Archives written here
+remain readable by any 0.4.x or 0.5.x checkout.
+
+### Added
+
+- A run now ends by photographing the sample under the white LED, rendered in
+  colour, and stores it as `/photo` in the archive. Every other frame the
+  instrument takes is deliberately colour-neutral because the measurement is
+  the Bayer data; this one exists for a person to look at. It is taken after
+  the dark frames, when all measurement is complete.
+- The photograph is cropped to the `bound` ROI — the same region the archived
+  Bayer layers cover — so it shows exactly what was measured and costs a
+  fraction of a frame to encode and store. The crop rectangle is stored beside
+  it, since a crop cannot otherwise be located in the sensor frame.
+- Config `capture.photo_enabled` (bool, seeded on) turns the step off, and
+  `capture.photo_wb_gains` (str, seeded `1.0,1.0`) holds the white LED's
+  colour gains. **The seeded gains are uncorrected**, so until they are
+  commissioned the photo looks like the neutral RGB stream; measure them by
+  photographing a neutral card and dividing its green mean by red and blue.
+- `BayerCam.set_color_rendering()` / `set_objective_rendering()` switch how the
+  main RGB stream is rendered. The raw Bayer stream is tapped off upstream of
+  every control involved, so this cannot change the objective data — which is
+  what makes the photograph free of consequence for the measurement.
+
+### Changed
+
+- Normal-path runs now light the white LED once, at the very end, for the
+  photograph. They still run no white calibration phase: white never comes on
+  before or during the LED sweep, which is what that path exists to avoid.
+
 ## [0.5.0] — 2026-08-11
 
 Writes: archive schema 3 · meta 2 · database 2
@@ -250,6 +290,7 @@ come from it. Archives from this period are readable — schema 1 archives carry
 no ROI geometry of their own and fall back to the `roi` table, which cannot be
 verified against them.
 
-[Unreleased]: https://github.com/panibillo/Colorimeter/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/panibillo/Colorimeter/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/panibillo/Colorimeter/releases/tag/v0.6.0
 [0.5.0]: https://github.com/panibillo/Colorimeter/releases/tag/v0.5.0
 [0.3.0]: https://github.com/panibillo/Colorimeter/releases/tag/v0.3.0

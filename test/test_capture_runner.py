@@ -22,6 +22,7 @@ import shutil
 import sys
 import tempfile
 import unittest
+import unittest.mock
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -34,6 +35,7 @@ sys.path.insert(0, str(_ROOT / "dev"))
 
 import capture_runner
 import config_repo
+import roi
 from capture_runner import CaptureConfig, CaptureRunner, EXP_LABELS
 
 # Full-sensor frame size the ROI constants are defined against.
@@ -80,9 +82,19 @@ class FakeCam:
         self._exposure_us = 0
         self.exposures_captured: list = []
         self.stopped = False
+        # Every rendering switch, in order, as ("color", gains) / ("objective",
+        # None) — so a test can check the objective rendering the Bayer data
+        # depends on is put back after the closing photograph.
+        self.rendering: list = []
 
     def set_exposure(self, exposure_us: int) -> None:
         self._exposure_us = int(exposure_us)
+
+    def set_color_rendering(self, wb_gains) -> None:
+        self.rendering.append(("color", tuple(float(g) for g in wb_gains)))
+
+    def set_objective_rendering(self) -> None:
+        self.rendering.append(("objective", None))
 
     def setup_camera(self) -> None:
         self.config_size = (FRAME_W, FRAME_H)
@@ -691,11 +703,33 @@ class TestNormalMode(RunnerTestCase):
         self.assertEqual(progress[-1].fraction, 1.0)
 
     def test_no_white_calibration_phase(self):
-        """Normal mode must not switch the white calibration LED on at all."""
+        """
+        Normal mode must not run a white calibration phase.
+
+        The white LED does light once, at the very end, for the closing colour
+        photograph — that is after every measurement is taken and stored, so
+        it cannot influence a reading.  What this guards is the other end of
+        the run: white must not come on before or during the sweep, because
+        that is the Phase 0 calibration the normal path exists to avoid.
+        """
         runner = self.make_runner(mode="normal", exposure_group="1")
         self.run_to_completion(runner)
         white = capture_runner.WHITE_LED_CH
-        self.assertNotIn((white, True), self.leds.history)
+
+        lit = [i for i, (ch, on) in enumerate(self.leds.history) if ch == white and on]
+        self.assertEqual(len(lit), 1, "white should be lit exactly once")
+        sweep = [i for i, (ch, _) in enumerate(self.leds.history) if ch != white]
+        self.assertGreater(lit[0], max(sweep),
+                           "white must light only after the LED sweep has ended")
+
+    def test_closing_photo_is_stored(self):
+        """The normal path takes the photograph too — see TestClosingPhoto."""
+        runner = self.make_runner(mode="normal", exposure_group="1")
+        self.run_to_completion(runner)
+        bound = roi.by_role(runner.rois, roi.ROLE_BOUND)
+        with h5py.File(runner.out_path, "r") as f:
+            self.assertIn("photo", f)
+            self.assertEqual(f["photo"].attrs["crop_w"], bound.w)
 
     def test_metadata_records_group_and_source(self):
         runner = self.make_runner(mode="normal", exposure_group="4")
@@ -827,6 +861,130 @@ class TestNormalModePrefetchSplit(RunnerTestCase):
                                   led_colors=["blue", "amber"])
         self.run_to_completion(runner)
         self.assertEqual([r.color for r in runner.results], ["blue", "amber"])
+
+
+# ---------------------------------------------------------------------------
+# Closing colour photograph
+# ---------------------------------------------------------------------------
+
+class TestClosingPhoto(RunnerTestCase):
+    """
+    The one colour-balanced frame a run takes, after all measurement is done.
+
+    Two things matter and are checked separately: that the photograph is
+    stored cropped to ROLE_BOUND (so it frames exactly what was measured, and
+    costs a fraction of a frame), and that the neutral rendering every Bayer
+    measurement depends on is put back afterwards.
+    """
+
+    def bound(self, runner):
+        """The ROLE_BOUND rect the run actually used."""
+        return roi.by_role(runner.rois, roi.ROLE_BOUND)
+
+    def test_photo_is_stored_cropped_to_bound(self):
+        runner = self.make_runner(led_colors=["amber"])
+        self.run_to_completion(runner)
+        bound = self.bound(runner)
+
+        with self.archive(runner) as f:
+            self.assertIn("photo", f, "the archive should hold a closing photo")
+            attrs = dict(f["photo"].attrs)
+            jpeg = f["photo"][()].tobytes()
+
+        self.assertEqual(
+            (attrs["crop_x"], attrs["crop_y"], attrs["crop_w"], attrs["crop_h"]),
+            (bound.x, bound.y, bound.w, bound.h))
+
+        # The stored bytes must really be the crop, not a full frame labelled
+        # with a crop rect — decode and measure rather than trusting the attrs.
+        import cv2
+        img = cv2.imdecode(np.frombuffer(jpeg, np.uint8), cv2.IMREAD_COLOR)
+        self.assertEqual((img.shape[1], img.shape[0]), (bound.w, bound.h))
+
+    def test_photo_is_smaller_than_the_frame_it_came_from(self):
+        """The point of cropping: the stored image is a fraction of a frame."""
+        runner = self.make_runner(led_colors=["amber"])
+        self.run_to_completion(runner)
+        bound = self.bound(runner)
+        self.assertLess(bound.w * bound.h, 0.25 * FRAME_W * FRAME_H)
+
+    def test_objective_rendering_is_restored(self):
+        """
+        The colour balance must not outlive the photograph.
+
+        If it did, the next run's RGB stream would be tinted — so the last
+        rendering switch of a run has to be back to objective.
+        """
+        runner = self.make_runner(led_colors=["amber"])
+        self.run_to_completion(runner)
+        self.assertIn(("objective", None), self.cam.rendering)
+        self.assertEqual(self.cam.rendering[-1], ("objective", None))
+        self.assertEqual(self.cam.rendering[0][0], "color")
+
+    def test_photo_uses_the_configured_gains(self):
+        runner = self.make_runner(led_colors=["amber"])
+        self.run_to_completion(runner)
+        expected = config_repo.capture_photo_wb_gains()
+        self.assertEqual(self.cam.rendering[0], ("color", tuple(expected)))
+        with self.archive(runner) as f:
+            attrs = dict(f["photo"].attrs)
+        self.assertAlmostEqual(attrs["colour_gain_r"], expected[0])
+        self.assertAlmostEqual(attrs["colour_gain_b"], expected[1])
+
+    def test_photo_is_taken_with_the_white_led_lit(self):
+        runner = self.make_runner(led_colors=["amber"])
+        self.run_to_completion(runner)
+        white = capture_runner.WHITE_LED_CH
+        self.assertIn((white, True), self.leds.history)
+        self.assertFalse(self.leds.lit_channels(),
+                         "every LED must be off once the run ends")
+
+    def test_disabled_by_config(self):
+        with unittest.mock.patch.object(
+                capture_runner.config, "capture_photo_enabled", return_value=False):
+            runner = self.make_runner(led_colors=["amber"])
+            self.run_to_completion(runner)
+        with self.archive(runner) as f:
+            self.assertNotIn("photo", f)
+        self.assertEqual(self.cam.rendering, [],
+                         "a disabled photo should not touch rendering at all")
+
+    def test_unreadable_config_does_not_abort_the_run(self):
+        """
+        An instrument whose config predates this feature still finishes.
+
+        capture.photo_enabled is read from the database, so it can raise on a
+        unit that has not been re-bootstrapped.  That must cost the photo and
+        nothing else — the measurements are already written by then.
+        """
+        with unittest.mock.patch.object(
+                capture_runner.config, "capture_photo_enabled",
+                side_effect=config_repo.ConfigMissing("capture.photo_enabled")):
+            runner = self.make_runner(led_colors=["amber"])
+            progress = self.run_to_completion(runner)
+
+        self.assertEqual(progress[-1].phase, "done")
+        with self.archive(runner) as f:
+            self.assertNotIn("photo", f)
+            self.assertIn("/leds/amber", f)
+
+    def test_failure_does_not_abort_the_run(self):
+        """
+        A photograph is the last and least important thing a run does.
+
+        Everything measured is already written by the time it is attempted, so
+        a camera that fails here must cost the photo and nothing else.
+        """
+        self.cam.set_color_rendering = lambda *_: (_ for _ in ()).throw(
+            RuntimeError("ISP refused"))
+        runner = self.make_runner(led_colors=["amber"])
+        progress = self.run_to_completion(runner)
+
+        self.assertEqual(progress[-1].phase, "done")
+        with self.archive(runner) as f:
+            self.assertNotIn("photo", f)
+            self.assertIn("/leds/amber", f)   # the measurements survived
+        self.assertFalse(self.leds.lit_channels())
 
 
 if __name__ == "__main__":

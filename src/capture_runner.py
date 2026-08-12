@@ -865,6 +865,96 @@ class CaptureRunner:
         log.info(f"Focus: autofocus  {raw_pos:.4f} diopters (within cap)")
         return raw_pos, "autofocus", raw_pos
 
+    # ── Final colour photograph ──────────────────────────────────────
+
+    def _capture_photo(self, exposure_us: int) -> Iterator[Progress]:
+        """
+        Photograph the sample under the white LED, colour-balanced, last of all.
+
+        Every frame before this one is deliberately colour-neutral, because
+        the measurement is the Bayer data and a prettier RGB stream would only
+        misrepresent it.  This frame is the exception: it exists for a person
+        to look at, so the ISP is briefly told to render the main stream with
+        the white LED's commissioned colour gains and told to stop again
+        immediately afterwards.
+
+        The raw stream is untouched throughout — libcamera taps it off
+        upstream of every control involved, see BayerCam.set_color_rendering()
+        — so this cannot change the objective data, and the camera is handed
+        back to the next run rendering exactly as it expects.
+
+        Only the ROLE_BOUND crop is stored, which is both the region the
+        archived Bayer layers cover and a small fraction of the frame: the
+        photograph therefore shows precisely what was measured, and cropping
+        before the encode means the discarded pixels are never compressed at
+        all — the part of this that costs real time on a Zero 2 W.
+
+        Skipped when config's capture.photo_enabled is off.  Any failure is
+        logged and swallowed rather than raised: the run's measurements are
+        complete and written by the time this is reached, and losing them to a
+        photograph would be absurd.
+
+        Args:
+            exposure_us: Exposure to photograph at.  A white-LED exposure the
+                         run already established, not a fresh search — this
+                         step is meant to be quick.
+        """
+        w = self._writer
+        if w is None:
+            return
+        # Deciding whether to photograph reads the database, so it can fail on
+        # an instrument whose config predates this feature. Guarded like the
+        # capture itself: a missing row costs the photo, never the run.
+        try:
+            if not config.capture_photo_enabled():
+                return
+            bound = roi.by_role(self.rois, roi.ROLE_BOUND)
+        except Exception:                                  # noqa: BLE001
+            log.exception("photo: cannot tell whether to photograph — skipping")
+            return
+        if bound is None:
+            log.warning("photo: no active ROLE_BOUND ROI — skipping the photo")
+            return
+
+        self.prof.set_section("photo")
+        yield self._progress("capture", "Photo: colour-balanced, white LED",
+                             color="white", step="photo")
+        self._led_on(WHITE_LED_CH)
+        try:
+            yield from self._wait(LED_ON_WARMUP_S, "White LED on, warming up")
+
+            gains = config.capture_photo_wb_gains()
+            self._cam.set_color_rendering(gains)
+            try:
+                rgb, _, meta = self._settle(exposure_us)
+                with self.prof.time("io.jpeg"):
+                    jpeg = _encode_jpeg(BayerCam.crop_rgb(rgb, bound))
+            finally:
+                # Restored even if the capture or encode failed, so a failed
+                # photograph cannot leave the next run's RGB stream tinted.
+                self._cam.set_objective_rendering()
+
+            with self.prof.time("io.hdf5"):
+                w.add_photo(
+                    jpeg, filename=f"{OUT_STEM}_photo.jpg", crop=bound,
+                    attrs={
+                        "exposure_us":   int(meta.get("ExposureTime", exposure_us)),
+                        "led_color":     "white",
+                        "colour_gain_r": float(gains[0]),
+                        "colour_gain_b": float(gains[1]),
+                        "captured_dt":   self._frame_captured_dt,
+                    })
+            log.info("photo: stored %d bytes, cropped to %s", len(jpeg), bound.xywh())
+            yield self._progress(
+                "capture", f"    stored photo ({len(jpeg) // 1024} kB)",
+                color="white", step="photo")
+        except Exception:                                  # noqa: BLE001
+            log.exception("photo: failed — the run's measurements are unaffected")
+            yield self._progress("capture", "    photo failed (measurements intact)",
+                                 color="white", step="photo")
+        finally:
+            self._led_off(WHITE_LED_CH)
+
     # ── Run ──────────────────────────────────────────────────────────
 
     def run(self) -> Iterator[Progress]:
@@ -1295,6 +1385,10 @@ class CaptureRunner:
                 metadata=meta_json,
             ))
 
+        # The white LED's Phase 0 exposure was measured unsaturated on this
+        # very scene, so the photograph reuses it rather than searching again.
+        yield from self._capture_photo(calibrated_us)
+
         self._close_writer()
         self._current_color = ""
         yield Progress(
@@ -1596,6 +1690,15 @@ class CaptureRunner:
                 for label, exp_us in zip(self._color_labels[color],
                                          self._color_exposures[color]):
                     w.link_dark(color, label, exposure_us=exp_us, when="after")
+
+            # After the darks, not before: they need every LED off, and this
+            # needs the white one on. The exposure comes from what calibration
+            # stored for white — the middle of its group, as elsewhere on this
+            # path — falling back to the run's default if white was not swept.
+            white_us = self._color_exposures.get("white") or []
+            yield from self._capture_photo(
+                white_us[len(white_us) // 2] if white_us
+                else self.config.initial_us)
 
             self._current_color = ""
             yield Progress(
