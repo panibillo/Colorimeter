@@ -24,6 +24,12 @@ class ILI9341:
     WIDTH = 320
     HEIGHT = 240
 
+    # Ceiling on retained artists.  _cover() keeps the scene graph naturally
+    # bounded, but a draw that nothing ever paints over would still accumulate,
+    # so cap it as a backstop: an unbounded scene graph here is not a slow
+    # display, it is a wedged process (see _cover).
+    MAX_ARTISTS = 4000
+
     # RGB565 constants (same as real driver)
     WHITE = 0xFFFF
     BLACK = 0x0000
@@ -51,6 +57,56 @@ class ILI9341:
         """
         self._z += 1
         return self._z
+
+    @staticmethod
+    def _area(rect) -> Tuple[float, float, float, float]:
+        """A rect as (x0, y0, x1, y1) in screen coordinates."""
+        return (rect.x, rect.y, rect.x + rect.w, rect.y + rect.h)
+
+    def _stamp(self, artist, area: Tuple[float, float, float, float]) -> None:
+        """
+        Record the screen area an artist occupies, so a later opaque fill over
+        that area can discard it.  Text is stamped with the rect it was asked
+        to fill rather than its rendered extent: that is the widget contract,
+        and it is what the hardware clips to.
+        """
+        artist._cm_area = area
+
+    def _cover(self, area: Tuple[float, float, float, float]) -> None:
+        """
+        Discard every artist wholly inside `area`.
+
+        The panel has no scene graph: filling a rectangle overwrites those
+        pixels and what was under them is gone.  matplotlib is retained-mode,
+        so an opaque repaint only *hides* the old artist — it keeps rendering
+        it forever.  Without this the 1 Hz clock alone grows the scene graph
+        without bound, and every frame re-rasterises every glyph ever drawn;
+        the font file is re-read per glyph, so the redraw eventually takes
+        longer than the interval that triggers it and the loop never returns.
+        """
+        x0, y0, x1, y1 = area
+        for group in (self.ax.texts, self.ax.patches, self.ax.images):
+            for artist in list(group):
+                covered = getattr(artist, "_cm_area", None)
+                if covered is None:
+                    continue
+                ax0, ay0, ax1, ay1 = covered
+                if ax0 >= x0 and ay0 >= y0 and ax1 <= x1 and ay1 <= y1:
+                    artist.remove()
+
+    def _trim(self) -> None:
+        """Drop the oldest artists once past MAX_ARTISTS.  zorder is paint
+        order, so it doubles as age."""
+        artists = [a for group in (self.ax.texts, self.ax.patches, self.ax.images)
+                   for a in group]
+        excess = len(artists) - self.MAX_ARTISTS
+        if excess <= 0:
+            return
+        artists.sort(key=lambda a: a.get_zorder())
+        for artist in artists[:excess]:
+            artist.remove()
+        log.warning("ILI9341 (mock): artist cap hit, trimmed %d; some draw is "
+                    "never being painted over", excess)
 
     def init(self) -> None:
         """Initialize the display and matplotlib figure."""
@@ -127,11 +183,14 @@ class ILI9341:
         if not self._initialized:
             return
         rgb = self._rgb565_to_rgb(color)
+        area = self._area(rect)
+        self._cover(area)          # opaque fill: what was under it is gone
         rect_patch = patches.Rectangle(
             (rect.x, rect.y), rect.w, rect.h,
             linewidth=0, facecolor=rgb, edgecolor='none', zorder=self._next_z()
         )
         self.ax.add_patch(rect_patch)
+        self._stamp(rect_patch, area)
 
         # Draw widget bounds outline and ID if provided
         if widget_id:
@@ -142,12 +201,15 @@ class ILI9341:
                 linestyle='--', zorder=self._next_z()
             )
             self.ax.add_patch(outline)
+            self._stamp(outline, area)
 
             # Widget ID in corner with larger bold font
-            self.ax.text(rect.x + 1, rect.y + 1, widget_id,  # type: ignore
+            label = self.ax.text(rect.x + 1, rect.y + 1, widget_id,  # type: ignore
                         color=(0.5, 0.5, 0.5), fontsize=12, va='top', ha='left',
                         fontweight='bold', zorder=self._next_z())
+            self._stamp(label, area)
 
+        self._trim()
         self.fig.canvas.draw_idle()
 
     def draw_rect(self, rect, color: int, fill: bool = False, thickness: int = 1, widget_id: str = "") -> None:
@@ -155,12 +217,16 @@ class ILI9341:
         if not self._initialized:
             return
         rgb = self._rgb565_to_rgb(color)
+        area = self._area(rect)
+        if fill:                   # only a filled rect is opaque
+            self._cover(area)
         rect_patch = patches.Rectangle(
             (rect.x, rect.y), rect.w, rect.h,
             linewidth=thickness, facecolor='none' if not fill else rgb,
             edgecolor=rgb, zorder=self._next_z()
         )
         self.ax.add_patch(rect_patch)  # type: ignore
+        self._stamp(rect_patch, area)
 
         # Draw widget bounds outline and ID if provided
         if widget_id:
@@ -171,12 +237,15 @@ class ILI9341:
                 linestyle=':', zorder=self._next_z()
             )
             self.ax.add_patch(outline)  # type: ignore
+            self._stamp(outline, area)
 
             # Widget ID in corner with larger bold font
-            self.ax.text(rect.x + 1, rect.y + 1, widget_id,  # type: ignore
+            label = self.ax.text(rect.x + 1, rect.y + 1, widget_id,  # type: ignore
                         color=(0.5, 0.5, 0.5), fontsize=12, va='top', ha='left',
                         fontweight='bold', zorder=self._next_z())
+            self._stamp(label, area)
 
+        self._trim()
         self.fig.canvas.draw_idle()
 
     def draw_text(
@@ -220,8 +289,10 @@ class ILI9341:
             y = rect.y + rect.h - 2
 
         fontsize = max(6, size // 2)  # Scale down matplotlib fontsize
-        self.ax.text(x, y, text, color=text_color, ha=ha, va=va,  # type: ignore
+        area = self._area(rect)
+        glyphs = self.ax.text(x, y, text, color=text_color, ha=ha, va=va,  # type: ignore
                      fontsize=fontsize, zorder=self._next_z())
+        self._stamp(glyphs, area)
 
         # Draw widget bounds outline and ID if provided
         if widget_id:
@@ -232,12 +303,15 @@ class ILI9341:
                 linestyle=':', zorder=self._next_z()
             )
             self.ax.add_patch(outline)  # type: ignore
+            self._stamp(outline, area)
 
             # Widget ID in top-left corner with larger bold font
-            self.ax.text(rect.x + 1, rect.y + 1, widget_id,  # type: ignore
+            label = self.ax.text(rect.x + 1, rect.y + 1, widget_id,  # type: ignore
                         color=(0.5, 0.5, 0.5), fontsize=size, va='top', ha='left',
                         fontweight='bold', zorder=self._next_z())
+            self._stamp(label, area)
 
+        self._trim()
         self.fig.canvas.draw_idle()
 
     def draw_image(self, image, x: int = 0, y: int = 0) -> None:
@@ -268,10 +342,14 @@ class ILI9341:
         if (x0, y0, x1, y1) != (x, y, x + iw, y + ih):
             image = image.crop((x0 - x, y0 - y, x1 - x, y1 - y))
 
-        self.ax.imshow(np.asarray(image.convert("RGB")),
+        area = (x0, y0, x1, y1)
+        self._cover(area)          # an image is opaque over its extent
+        blit = self.ax.imshow(np.asarray(image.convert("RGB")),
                        extent=(x0, x1, y1, y0),      # left, right, bottom, top
                        interpolation="nearest",
                        zorder=self._next_z())
+        self._stamp(blit, area)
+        self._trim()
         self.fig.canvas.draw_idle()
 
     def register_key_handler(self, handler) -> None:
