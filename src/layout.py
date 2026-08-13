@@ -106,7 +106,12 @@ MODAL_3C    = Rect(208, 134,  84,  46)
 #       Defaults | Config
 #       Phases   | Power
 MENU_CANCEL_BTN = Rect(  0,   0, 100,  50)   # top-left: discard staged choices
-MENU_TITLE      = Rect(100,   5, 120,  40)
+MENU_TITLE      = Rect(100,   5, 120,  40)   # borrowed by the config/phases/capture titles
+# The menu's own title carries the version on a second line, so it needs room
+# for a 44px two-line block; 6px taller than MENU_TITLE, still clear of the
+# option grid at y=54.  Same background as the screen, so the extra height
+# does not show.
+MENU_VER_TITLE  = Rect(100,   5, 120,  46)
 MENU_OK_BTN     = Rect(220,   0, 100,  50)   # top-right: save staged choices
 MENU_CAPTURE    = Rect(  8,  54, 148,  56)   # row 1 left: capture choice screen
 MENU_STUB1      = Rect(164,  54, 148,  56)   # row 1 right: image viewer

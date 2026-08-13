@@ -36,6 +36,7 @@ from typing import Callable, Dict, List, Optional
 import layout
 from palette import color
 from widgets import Button, ImageWidget, Label, RectWidget, TextBox, Widget
+import version
 from timer import TimerWidget
 
 log = logging.getLogger(__name__)
@@ -169,7 +170,7 @@ class Pool:
         # not part of the A/B toggle).  OK/CANCEL save or discard the choices
         # made while in the menu and return to the A/B slot that was showing.
         button("menu_cancel_btn", L.MENU_CANCEL_BTN, "hdr_text", "btn_gray",   18, text="CANCEL")
-        label("menu_title",       L.MENU_TITLE,       "black",   "white",     20, text="Menu")
+        label("menu_title",       L.MENU_VER_TITLE,   "black",   "white",     20, text=f"Menu\nV {version.__version__}")
         button("menu_ok_btn",     L.MENU_OK_BTN,       "hdr_text", "start_green", 18, text="OK")
         # The 3x2 option grid: left column Capture/Defaults/Phases, right column
         # View Image/Config/Power.  The two grid slots still named for the stubs
