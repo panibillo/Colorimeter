@@ -180,21 +180,24 @@ class Pool:
         button("menu_stub1",      L.MENU_STUB1,        "hdr_text", "btn_gray",    18, text="View\nImage")
         button("menu_defaults",   L.MENU_DEFAULTS,     "hdr_text", "slot_a_bg",   18, text="Defaults")
         button("menu_stub2",      L.MENU_STUB2,        "hdr_text", "btn_gray",    18, text="Config")
-        button("menu_config",     L.MENU_CONFIG,       "hdr_text", "slot_b_bg",   18, text="Phases")
+        button("menu_config",     L.MENU_CONFIG,       "hdr_text", "slot_b_bg",   18, text="Reagent\nPhases")
         button("menu_power",      L.MENU_POWER,        "hdr_text", "label_coral", 18, text="Power")
 
         # ── config editor (Menu → Config): roles, one role, one parameter ──────
-        # Four body rows, each built both ways — one full-width button for the
-        # role and history lists, and a name/value/action triple for the role
-        # view — because the three views never share the screen.  The arbiter
-        # decides per render which set it shows.
+        # Built two ways — 8 grid buttons for the roles list, and 4 rows of a
+        # name/value/action triple for the role and browse views — because the
+        # three views never share the screen.  The arbiter decides per render
+        # which set it shows.
         label("cfge_title", L.MENU_TITLE, "black", "white", 11)
-        cfge_rows = ((L.CFGE_ROW1, L.CFGE_LBL1, L.CFGE_FLD1, L.CFGE_BTN1),
-                     (L.CFGE_ROW2, L.CFGE_LBL2, L.CFGE_FLD2, L.CFGE_BTN2),
-                     (L.CFGE_ROW3, L.CFGE_LBL3, L.CFGE_FLD3, L.CFGE_BTN3),
-                     (L.CFGE_ROW4, L.CFGE_LBL4, L.CFGE_FLD4, L.CFGE_BTN4))
-        for i, (row_r, lbl_r, fld_r, btn_r) in enumerate(cfge_rows, 1):
+        cfge_role_rows = (L.CFGE_ROW1, L.CFGE_ROW2, L.CFGE_ROW3, L.CFGE_ROW4,
+                          L.CFGE_ROW5, L.CFGE_ROW6, L.CFGE_ROW7, L.CFGE_ROW8)
+        for i, row_r in enumerate(cfge_role_rows, 1):
             button(f"cfge_row{i}", row_r, "hdr_text", "slot_b_bg", 16)
+        cfge_rows = ((L.CFGE_LBL1, L.CFGE_FLD1, L.CFGE_BTN1),
+                     (L.CFGE_LBL2, L.CFGE_FLD2, L.CFGE_BTN2),
+                     (L.CFGE_LBL3, L.CFGE_FLD3, L.CFGE_BTN3),
+                     (L.CFGE_LBL4, L.CFGE_FLD4, L.CFGE_BTN4))
+        for i, (lbl_r, fld_r, btn_r) in enumerate(cfge_rows, 1):
             label(f"cfge_lbl{i}", lbl_r, "black", "white", 11, align="left")
             field(f"cfge_fld{i}", fld_r, 13, "field_blue")
             button(f"cfge_btn{i}", btn_r, "btn_text", "btn_gray", 13)

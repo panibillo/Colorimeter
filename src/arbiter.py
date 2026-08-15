@@ -124,10 +124,13 @@ _CFG_MIN_SECS, _CFG_MAX_SECS = 1, 3600
 # The step buttons on each phases row, in the order they are laid out.
 _CFG_STEPS = (-60, -10, 10, 60)
 
-# Config editor: body rows per page (layout.py draws four), and the label of the
-# entry that sits at the end of the role list rather than naming a role.
-_CFGE_ROWS    = 4
-_CFGE_RESTORE = "Restore Factory Defaults"
+# Config editor: body rows per page for the role/browse views (layout.py draws
+# four), the roles view's grid size (4 rows x 2 columns, all on one page —
+# layout.py draws eight), and the label of the entry that sits at the end of
+# the role list rather than naming a role.
+_CFGE_ROWS       = 4
+_CFGE_ROLE_SLOTS = 8
+_CFGE_RESTORE    = "Restore Factory Defaults"
 
 # Tunables (LED range, loop cadence, timeouts, reagent durations, rowid, the
 # backlight pin) are rows in the database's `config` table and are read through
@@ -961,16 +964,16 @@ class Arbiter:
         self._pool.put("menu_ok_btn",     "OK",     on=self._menu_ok)
         # The 3x2 option grid, laid out in layout.py.  "View Image" is disabled
         # while a capture is in flight — the imaging tools share the camera and
-        # LED bank with the capture path.  "Phases" edits the two reagent
-        # countdowns; "Config" is the general editor over every setting,
-        # reagent countdowns included.
+        # LED bank with the capture path.  "Reagent Phases" edits the two
+        # reagent countdowns; "Config" is the general editor over every
+        # setting, reagent countdowns included.
         self._pool.put("menu_capture",    "Capture",  on=self._menu_open_capture)
         self._pool.put("menu_stub1",      "View\nImage",
                        on=self._menu_open_image_view,
                        enabled=self.capture_available())
         self._pool.put("menu_defaults",   "Defaults", on=self._menu_open_defaults)
         self._pool.put("menu_stub2",      "Config",   on=self._cfge_open)
-        self._pool.put("menu_config",     "Phases",   on=self._menu_open_config)
+        self._pool.put("menu_config",     "Reagent\nPhases", on=self._menu_open_config)
         self._pool.put("menu_power",      "Power",    on=self._menu_power)
         self._pool.render(self._disp)
         self._rebuild_focus()
@@ -1234,14 +1237,19 @@ class Arbiter:
 
     # ── paging ─────────────────────────────────────────────────────────────────
 
+    def _cfge_page_size(self) -> int:
+        """Roles view shows all 8 at once (4x2 grid); role/browse page by 4."""
+        return _CFGE_ROLE_SLOTS if self._cfge_view == "roles" else _CFGE_ROWS
+
     def _cfge_pages(self) -> int:
         """How many pages the current list fills (at least one, even if empty)."""
-        return max(1, -(-len(self._cfge_list) // _CFGE_ROWS))
+        return max(1, -(-len(self._cfge_list) // self._cfge_page_size()))
 
     def _cfge_page_rows(self) -> list:
-        """The slice of the list the four body rows are showing."""
-        first = self._cfge_page * _CFGE_ROWS
-        return self._cfge_list[first:first + _CFGE_ROWS]
+        """The slice of the list the current view's body slots are showing."""
+        size  = self._cfge_page_size()
+        first = self._cfge_page * size
+        return self._cfge_list[first:first + size]
 
     def _cfge_goto(self, page: int) -> None:
         """
@@ -4027,12 +4035,14 @@ def _selftest() -> None:
                   "menu_stub2", "menu_config", "menu_power"):
         check(f"{_name} shown", arb._pool[_name].visible, True)
     # Every grid slot opens a screen now: the two that were stubs became the
-    # image viewer and the config editor, and menu_config narrowed to "Phases"
-    # (the reagent countdowns) since the editor covers every setting.
+    # image viewer and the config editor, and menu_config narrowed to
+    # "Reagent Phases" (the reagent countdowns) since the editor covers every
+    # setting.
     check("stub1 is View Image", arb._pool["menu_stub1"].label, "View\nImage")
     check("stub2 is Config",     arb._pool["menu_stub2"].label, "Config")
     check("stub2 enabled",       arb._pool["menu_stub2"].enabled, True)
-    check("config slot is Phases", arb._pool["menu_config"].label, "Phases")
+    check("config slot is Reagent Phases",
+          arb._pool["menu_config"].label, "Reagent\nPhases")
 
     # Two different baselines, and the difference matters on a development
     # instrument.  _file_* is what config_defaults.sql commissioned — what
@@ -4108,54 +4118,43 @@ def _selftest() -> None:
         _s.clear_run()
 
     def cfge_row_of(name):
-        """Body row (1..4) showing `name` on the page that is up, or None."""
+        """Body row showing `name` on the page that is up, or None."""
         for i, row in enumerate(arb._cfge_page_rows(), 1):
             if row[0] == name:
                 return i
         return None
 
-    print("== config editor: opens on the roles, Restore last ==")
+    print("== config editor: opens on the roles, Restore last, one page of eight ==")
     arb.open_menu(A)
     arb._pool["menu_stub2"].on_press()
     check("roles view",        arb._cfge_view, "roles")
     check("lists every role",  arb._cfge_list[:-1], config.roles())
     check("Restore rides last", arb._cfge_list[-1], _CFGE_RESTORE)
-    check("first page of four", len(arb._cfge_page_rows()), 4)
-    check("Prior dead on page 1", arb._pool["cfge_prior"].enabled, False)
-    check("Next live",         arb._pool["cfge_next"].enabled, True)
+    check("all eight on one page", len(arb._cfge_page_rows()), _CFGE_ROLE_SLOTS)
+    check("Prior dead, one page", arb._pool["cfge_prior"].enabled, False)
+    check("Next dead, one page",  arb._pool["cfge_next"].enabled, False)
     check("nothing to save",   arb._pool["cfge_save"].enabled, False)
     check("row 1 opens a role", arb._pool["cfge_row1"].label, config.roles()[0])
+    check("row 8 is Restore",
+          arb._pool["cfge_row8"].label.startswith("Restore"), True)
 
-    print("== config editor: paging reaches the Restore entry ==")
-    arb._pool["cfge_next"].on_press()
-    check("page 2",            arb._cfge_page, 1)
-    check("Next dead at the end", arb._pool["cfge_next"].enabled, False)
-    check("Prior live",        arb._pool["cfge_prior"].enabled, True)
-    _restore_row = [i for i in (1, 2, 3, 4)
-                    if arb._pool[f"cfge_row{i}"].visible
-                    and arb._pool[f"cfge_row{i}"].label.startswith("Restore")]
-    check("Restore is on the last page", len(_restore_row), 1)
-    arb._pool["cfge_prior"].on_press()
-    check("back to page 1",    arb._cfge_page, 0)
-
-    print("== config editor: stepping back lands on the page it left ==")
+    print("== config editor: stepping back returns to the roles grid ==")
 
     def cfge_shown(kind):
         """The text of the visible body widgets of one kind, top to bottom."""
         attr = {"cfge_row": "label", "cfge_lbl": "text"}[kind]
-        return [getattr(arb._pool[f"{kind}{i}"], attr) for i in (1, 2, 3, 4)
+        n = _CFGE_ROLE_SLOTS if kind == "cfge_row" else _CFGE_ROWS
+        return [getattr(arb._pool[f"{kind}{i}"], attr) for i in range(1, n + 1)
                 if arb._pool[f"{kind}{i}"].visible]
 
-    arb._pool["cfge_next"].on_press()
-    _roles_p2 = cfge_shown("cfge_row")
-    arb._pool["cfge_row1"].on_press()          # a role picked off page 2
-    check("a role opened from page 2", arb._cfge_view, "role")
+    _roles_shown = cfge_shown("cfge_row")
+    arb._pool["cfge_row1"].on_press()          # a role picked off the grid
+    check("opened a role", arb._cfge_view, "role")
     check("the role starts at its own top", arb._cfge_page, 0)
     arb._pool["menu_cancel_btn"].on_press()
     check("back on the roles",  arb._cfge_view, "roles")
-    check("on the page it left", arb._cfge_page, 1)
-    check("showing the same roles", cfge_shown("cfge_row"), _roles_p2)
-    # And one level further down: Browse leaves a page of names and CANCEL has
+    check("showing the same roles", cfge_shown("cfge_row"), _roles_shown)
+    # One level further down: Browse leaves a page of names and CANCEL has
     # to hand back that page, not the first one.
     _long = next(r for r in config.roles() if len(config.items(r)) > _CFGE_ROWS)
     arb._cfge_open_role(_long)

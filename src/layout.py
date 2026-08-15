@@ -104,6 +104,7 @@ MODAL_3C    = Rect(208, 134,  84,  46)
 #
 #       Capture  | View Image
 #       Defaults | Config
+#       Reagent
 #       Phases   | Power
 MENU_CANCEL_BTN = Rect(  0,   0, 100,  50)   # top-left: discard staged choices
 MENU_TITLE      = Rect(100,   5, 120,  40)   # borrowed by the config/phases/capture titles
@@ -121,29 +122,38 @@ MENU_CONFIG     = Rect(  8, 182, 148,  56)   # row 3 left: reagent durations
 MENU_POWER      = Rect(164, 182, 148,  56)   # row 3 right
 
 # ── config editor (Menu → Config: every setting in the config table) ───────────
-# Four body rows on a 38 px pitch (y 52..202), then a five-button footer band.
-# One row is drawn two ways, and the two are never shown together:
+# Four body-row slots on a 38 px pitch (y 52..202), then a five-button footer
+# band. The roles list and the role/browse views are never shown together, and
+# use that space differently:
 #
-#   Roles / Restore  ┌──────────────── CFGE_ROW ─────────────────┐
-#   Role view        ┌── CFGE_LBL (name) ───┐  ┌─── CFGE_BTN ────┐
-#                    └── CFGE_FLD (value) ──┘  └── Browse / Use ─┘
+#   Roles / Restore  ┌── CFGE_ROW (left) ──┐  ┌── CFGE_ROW (right) ──┐
+#   Role view        ┌── CFGE_LBL (name) ───────┐  ┌─── CFGE_BTN ────┐
+#                    └── CFGE_FLD (value) ──────┘  └── Browse / Use ─┘
 #
-# The name gets its own line above the value so a long value — a vendor name,
-# the LED colour order — is readable at full width instead of clipped into a
+# Roles: 8 buttons (7 roles + Restore) in a 4-row x 2-column grid, width
+# matching the Menu screen's grid buttons (148 px) so the two screens read as
+# one family. Row-major fill: ROW1/ROW2 are row 1 left/right, and so on.
+CFGE_ROW1   = Rect(  8,  52, 148, 36)
+CFGE_ROW2   = Rect(164,  52, 148, 36)
+CFGE_ROW3   = Rect(  8,  90, 148, 36)
+CFGE_ROW4   = Rect(164,  90, 148, 36)
+CFGE_ROW5   = Rect(  8, 128, 148, 36)
+CFGE_ROW6   = Rect(164, 128, 148, 36)
+CFGE_ROW7   = Rect(  8, 166, 148, 36)
+CFGE_ROW8   = Rect(164, 166, 148, 36)
+# Role view / Browse view: one row's label/value/action, four to a page. The
+# name gets its own line above the value so a long value — a vendor name, the
+# LED colour order — is readable at full width instead of clipped into a
 # column beside its label.
-CFGE_ROW1   = Rect(  4,  52, 312, 36)
 CFGE_LBL1   = Rect(  6,  52, 246, 14)
 CFGE_FLD1   = Rect(  4,  66, 248, 22)
 CFGE_BTN1   = Rect(256,  52,  60, 36)
-CFGE_ROW2   = Rect(  4,  90, 312, 36)
 CFGE_LBL2   = Rect(  6,  90, 246, 14)
 CFGE_FLD2   = Rect(  4, 104, 248, 22)
 CFGE_BTN2   = Rect(256,  90,  60, 36)
-CFGE_ROW3   = Rect(  4, 128, 312, 36)
 CFGE_LBL3   = Rect(  6, 128, 246, 14)
 CFGE_FLD3   = Rect(  4, 142, 248, 22)
 CFGE_BTN3   = Rect(256, 128,  60, 36)
-CFGE_ROW4   = Rect(  4, 166, 312, 36)
 CFGE_LBL4   = Rect(  6, 166, 246, 14)
 CFGE_FLD4   = Rect(  4, 180, 248, 22)
 CFGE_BTN4   = Rect(256, 166,  60, 36)
