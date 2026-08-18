@@ -132,6 +132,57 @@ _CFGE_ROWS       = 4
 _CFGE_ROLE_SLOTS = 8
 _CFGE_RESTORE    = "Restore Factory Defaults"
 
+# LED Color picker (Menu → LED Colors): 'dark' and 'jpg' are drawn fixed at
+# the end of the active row for operator awareness only (a dark frame and a
+# colour-corrected white-light photo are taken as part of every capture,
+# automatically — see capture_runner.py). They are never offered in the
+# inactive row, never selectable, and never written into led_color_order.
+_LEDPICK_SPECIALS = ("dark", "jpg")
+
+# Approximate (r, g, b) swatch colour per LED name — close enough to its
+# wavelength to read at a glance — and the text colour that reads on it.
+_LEDPICK_SWATCH = {
+    "violet":     ((138,  43, 226), "white"),
+    "royal_blue": (( 65, 105, 225), "white"),
+    "blue":       ((  0,   0, 255), "white"),
+    "cyan":       ((  0, 255, 255), "black"),
+    "green":      ((  0, 170,   0), "white"),
+    "amber":      ((255, 191,   0), "black"),
+    "red_orange": ((255,  69,   0), "white"),
+    "red":        ((213,   0,   0), "white"),
+    "photo_red":  ((139,   0,   0), "white"),
+    "white":      ((255, 255, 255), "black"),
+    "dark":       ((  0,   0,   0), "white"),
+    "jpg":        ((255, 255, 255), "black"),
+}
+
+
+def _led_initials(name: str) -> str:
+    """'blue' -> 'B'; 'royal_blue' -> 'R B' — initials of each '_'-separated word."""
+    return " ".join(w[0].upper() for w in name.split("_") if w)
+
+
+def _wrap_csv(text: str, max_len: int) -> "tuple[str, str]":
+    """
+    Split a comma-separated string onto two lines, breaking only at a comma so
+    no color name is cut mid-word. Whatever does not fit on line 1 goes onto
+    line 2 whole, even past max_len — ten LED names fit two lines at the
+    picker's font size with room to spare, and a line that ran long once would
+    still rather show the whole value than silently truncate it.
+    """
+    parts = text.split(",") if text else []
+    line1 = ""
+    i = 0
+    while i < len(parts):
+        candidate = parts[i] if not line1 else f"{line1},{parts[i]}"
+        if len(candidate) > max_len and line1:
+            break
+        line1 = candidate
+        i += 1
+    line2 = ",".join(parts[i:])
+    return line1, line2
+
+
 # Tunables (LED range, loop cadence, timeouts, reagent durations, rowid, the
 # backlight pin) are rows in the database's `config` table and are read through
 # config_repo — see the config.* calls throughout this module.
@@ -359,6 +410,16 @@ class Arbiter:
         # When True, Capture takes a white-LED-off frame instead of the usual
         # briefly-lit one — for a dark reference at the same exposure.
         self._recap_dark       = False
+
+        # LED Color picker state (Menu → LED Colors): the staged active-LED
+        # sequence (LED names only — 'dark'/'jpg' never appear in it), which
+        # LED is selected (present in exactly one of the two rows at a time,
+        # so its name alone identifies it), and the history Prior/Next pages
+        # through.
+        self._ledpick_colors:   list = []            # staged order, LED names only
+        self._ledpick_selected: "str | None" = None
+        self._ledpick_history:  list = []             # [(rowid, value)] loaded on open
+        self._ledpick_idx:      int = 0                # position in _ledpick_history
 
     # ── Lifecycle ──────────────────────────────────────────────────────────────
 
@@ -971,7 +1032,7 @@ class Arbiter:
         self._pool.put("menu_stub1",      "View\nImage",
                        on=self._menu_open_image_view,
                        enabled=self.capture_available())
-        self._pool.put("menu_defaults",   "Defaults", on=self._menu_open_defaults)
+        self._pool.put("menu_defaults",   "LED\nColors", on=self._menu_open_ledpick)
         self._pool.put("menu_stub2",      "Config",   on=self._cfge_open)
         self._pool.put("menu_config",     "Reagent\nPhases", on=self._menu_open_config)
         self._pool.put("menu_power",      "Power",    on=self._menu_power)
@@ -1007,34 +1068,6 @@ class Arbiter:
         still get their say over anything staged before the viewer was opened.
         """
         self.open_image_view(slot=None)
-
-    def _menu_open_defaults(self) -> None:
-        """
-        Show the pre-fills the entry screens will use.
-
-        Read-only: the values are ordinary config parameters now, so editing
-        them belongs to the config editor rather than to a screen of its own.
-        Reload picks up an edit made there without leaving the menu.
-        """
-        if self._pool is None:
-            return
-        d = self._defaults
-        msg = (f"{d.user}\n{d.testkit}\nlot {d.testlot}" if d
-               else "No defaults loaded")
-        self._pool.hide_all()
-        self._pool.put("modal_panel")
-        self._pool.put("modal_msg", msg)
-        names = self._pool.layout_modal_buttons(2)
-        self._pool.put(names[0], "Reload", on=self._menu_reload_defaults)
-        self._pool.put(names[1], "Back",   on=self._render_menu)
-        self._pool.render(self._disp)
-        self._rebuild_focus()
-
-    def _menu_reload_defaults(self) -> None:
-        """Re-read the pre-fills from the config table and redisplay them."""
-        config.load(reload=True)
-        self._load_defaults()
-        self._menu_open_defaults()
 
     # ── Phases screen (Menu → Phases) ──────────────────────────────────────────
     # Custom reagent countdowns, entered on the instrument itself.  The two
@@ -1613,6 +1646,229 @@ class Arbiter:
         else:
             self._cfge_view = None
             self._render_menu()
+
+    # ── LED Color picker (Menu → LED Colors) ────────────────────────────────────
+    # Edits capture.led_color_order without free-text typing: an active row
+    # (the sequence, in capture order, plus the fixed 'dark'/'jpg' awareness
+    # markers) and an inactive row (every LED not currently in the sequence,
+    # each in its own fixed wavelength-order slot). A tap selects a swatch;
+    # the four arrows between the rows move it. Nothing reaches the database
+    # until Save — the footer's Prior/Rollbk/Save/Default/Next follow the
+    # config editor's pending-edit rules exactly (_cfge_put_footer above),
+    # reusing its five widgets since the two screens never share the display.
+
+    def _menu_open_ledpick(self) -> None:
+        """Menu → LED Colors: open the picker on the order now in force."""
+        self._ledpick_history = config.capture_led_color_order_history()
+        self._ledpick_colors  = list(config.capture_led_color_order())
+        self._ledpick_idx     = self._ledpick_history_index(
+            ",".join(self._ledpick_colors))
+        self._ledpick_selected = None
+        self._ledpick_render()
+
+    def _ledpick_history_index(self, value: str) -> int:
+        """Position of `value` in _ledpick_history, or 0 if it is not there."""
+        for i, (_rowid, v) in enumerate(self._ledpick_history):
+            if v == value:
+                return i
+        return 0
+
+    def _ledpick_pending(self) -> bool:
+        """True if the staged sequence differs from the value in force."""
+        return ",".join(self._ledpick_colors) != config.get("capture", "led_color_order")
+
+    def _ledpick_editable(self) -> bool:
+        """False while a slot is mid-protocol — a live sample already read this."""
+        return not self._any_slot_active()
+
+    # ── selection + edits (nothing here touches the database) ──────────────────
+
+    def _ledpick_select(self, led: str) -> None:
+        """A tap on a swatch: select it, or deselect if it was already selected."""
+        self._ledpick_selected = None if self._ledpick_selected == led else led
+        self._ledpick_render()
+
+    def _ledpick_add(self) -> None:
+        """▲ : append the selected inactive color to the end of the sequence."""
+        sel = self._ledpick_selected
+        if sel is None or sel in self._ledpick_colors:
+            return
+        self._ledpick_colors.append(sel)
+        self._ledpick_render()
+
+    def _ledpick_remove(self) -> None:
+        """▼ : drop the selected active color out of the sequence."""
+        sel = self._ledpick_selected
+        if sel is None or sel not in self._ledpick_colors:
+            return
+        self._ledpick_colors.remove(sel)
+        self._ledpick_selected = None
+        self._ledpick_render()
+
+    def _ledpick_move(self, delta: int) -> None:
+        """◀ / ▶ : swap the selected active color with its neighbour."""
+        sel = self._ledpick_selected
+        if sel is None or sel not in self._ledpick_colors:
+            return
+        i = self._ledpick_colors.index(sel)
+        j = i + delta
+        if not 0 <= j < len(self._ledpick_colors):
+            return
+        self._ledpick_colors[i], self._ledpick_colors[j] = \
+            self._ledpick_colors[j], self._ledpick_colors[i]
+        self._ledpick_render()
+
+    # ── paging + writes ──────────────────────────────────────────────────────
+
+    def _ledpick_goto(self, idx: int) -> None:
+        """Load history[idx] as the staged sequence (a clean baseline)."""
+        self._ledpick_idx = idx
+        value = self._ledpick_history[idx][1] if self._ledpick_history else ""
+        self._ledpick_colors = [c.strip() for c in value.split(",") if c.strip()]
+        self._ledpick_selected = None
+        self._ledpick_render()
+
+    def _ledpick_page_step(self, delta: int) -> None:
+        if self._ledpick_pending():
+            return
+        idx = max(0, min(len(self._ledpick_history) - 1, self._ledpick_idx + delta))
+        self._ledpick_goto(idx)
+
+    def _ledpick_default(self) -> None:
+        """Jump to the commissioned order, like Prior/Next a browse — no write."""
+        if self._ledpick_pending():
+            return
+        default_value = config.default("capture", "led_color_order")
+        if default_value is None:
+            return
+        self._ledpick_goto(self._ledpick_history_index(str(default_value)))
+
+    def _ledpick_rollback(self) -> None:
+        """Put the sequence back to the value it was loaded/paged to."""
+        self._ledpick_goto(self._ledpick_idx)
+
+    def _ledpick_save(self) -> None:
+        """Put the staged sequence in force, reusing a matching history row."""
+        config.save("capture", "led_color_order", ",".join(self._ledpick_colors))
+        self._ledpick_history = config.capture_led_color_order_history()
+        self._ledpick_idx = self._ledpick_history_index(",".join(self._ledpick_colors))
+        self._ledpick_selected = None
+        self._ledpick_render()
+
+    def _ledpick_ok(self) -> None:
+        """Save any pending edit, then return to the Menu."""
+        if self._ledpick_pending():
+            self._ledpick_save()
+        self._render_menu()
+
+    def _ledpick_cancel(self) -> None:
+        """Discard any pending edit and return to the Menu."""
+        self._render_menu()
+
+    # ── rendering ──────────────────────────────────────────────────────────────
+
+    def _ledpick_render(self) -> None:
+        if self._pool is None:
+            return
+        p = self._pool
+        p.hide_all()
+        p.put("menu_cancel_btn", "CANCEL", on=self._ledpick_cancel)
+        p.put("ledpick_title", "LED\nColors")
+        p.put("menu_ok_btn", "OK", on=self._ledpick_ok)
+        self._ledpick_put_rows()
+        self._ledpick_put_arrows()
+        self._ledpick_put_footer()
+        self._ledpick_put_value()
+        p.render(self._disp)
+        self._rebuild_focus()
+
+    def _ledpick_put_rows(self) -> None:
+        """
+        Active row: the staged sequence, then the fixed 'dark'/'jpg' markers,
+        one widget slot each, trailing slots hidden. Inactive row: the 10 LEDs
+        in fixed wavelength-order slots, a slot hidden when that LED is
+        currently active — each LED shows in exactly one row at a time.
+        """
+        from palette import color, rgb
+        from lighting_cal8 import LEDBank
+        p = self._pool
+        editable = self._ledpick_editable()
+        sequence = list(self._ledpick_colors) + list(_LEDPICK_SPECIALS)
+        for i in range(1, 13):
+            name = f"ledpick_act{i}"
+            if i - 1 >= len(sequence):
+                p.hide(name)
+                continue
+            led = sequence[i - 1]
+            special = led in _LEDPICK_SPECIALS
+            fill_rgb, text_name = _LEDPICK_SWATCH.get(led, ((128, 128, 128), "white"))
+            p.put(name, led if special else _led_initials(led),
+                  on=(lambda: None) if special
+                     else (lambda l=led: self._ledpick_select(l)),
+                  enabled=editable and not special)
+            w = p[name]
+            w.color = w.disabled_color = rgb(*fill_rgb)
+            w.text_color = color(text_name)
+            w.border_color = color("roi_selected") if led == self._ledpick_selected else None
+        for i, led in enumerate(LEDBank.color_names(), 1):
+            name = f"ledpick_ina{i}"
+            if led in self._ledpick_colors:
+                p.hide(name)
+                continue
+            fill_rgb, text_name = _LEDPICK_SWATCH[led]
+            p.put(name, _led_initials(led),
+                  on=lambda l=led: self._ledpick_select(l),
+                  enabled=editable)
+            w = p[name]
+            w.color = w.disabled_color = rgb(*fill_rgb)
+            w.text_color = color(text_name)
+            w.border_color = color("roi_selected") if led == self._ledpick_selected else None
+
+    def _ledpick_put_arrows(self) -> None:
+        p = self._pool
+        editable = self._ledpick_editable()
+        sel = self._ledpick_selected
+        is_active   = sel is not None and sel in self._ledpick_colors
+        is_inactive = sel is not None and not is_active
+        p.put("ledpick_arr_left",  "◀", on=lambda: self._ledpick_move(-1),
+              enabled=editable and is_active)
+        p.put("ledpick_arr_up",    "▲", on=self._ledpick_add,
+              enabled=editable and is_inactive)
+        p.put("ledpick_arr_down",  "▼", on=self._ledpick_remove,
+              enabled=editable and is_active)
+        p.put("ledpick_arr_right", "▶", on=lambda: self._ledpick_move(1),
+              enabled=editable and is_active)
+
+    def _ledpick_put_footer(self) -> None:
+        """The config editor's five footer widgets, restyled for this screen."""
+        p = self._pool
+        editable = self._ledpick_editable()
+        pending = self._ledpick_pending()
+        p.put("cfge_prior", "< Prior", on=lambda: self._ledpick_page_step(-1),
+              enabled=editable and not pending and self._ledpick_idx > 0)
+        p.put("cfge_rollback", "Rollbk", on=self._ledpick_rollback,
+              enabled=editable and pending)
+        p.put("cfge_save", "Save", on=self._ledpick_save,
+              enabled=editable and pending)
+        p.put("cfge_default", "Default", on=self._ledpick_default,
+              enabled=editable and not pending)
+        p.put("cfge_next", "Next >", on=lambda: self._ledpick_page_step(1),
+              enabled=editable and not pending
+                      and self._ledpick_idx < len(self._ledpick_history) - 1)
+
+    def _ledpick_put_value(self) -> None:
+        """The rowid and text of the sequence on screen, yellow while unsaved."""
+        from palette import color
+        p = self._pool
+        value = ",".join(self._ledpick_colors)
+        rowid = next((rid for rid, v in self._ledpick_history if v == value), None)
+        p.put("ledpick_rowid", f"rowid {rowid}" if rowid else "rowid (unsaved)")
+        line1, line2 = _wrap_csv(value, 46)
+        p.put("ledpick_value1", line1)
+        p.put("ledpick_value2", line2)
+        bg = color("field_yellow") if self._ledpick_pending() else color("white")
+        for name in ("ledpick_rowid", "ledpick_value1", "ledpick_value2"):
+            p[name].bg = bg
 
     # ── Capture screen (Menu → Capture) ────────────────────────────────────────
     # A standalone capture launched from the Menu: pick a path (Calibration or
@@ -4358,6 +4614,117 @@ def _selftest() -> None:
                        "AND source <> 'seed' "
                        "AND NOT (role='device' AND name='software_ver')"), 0)
     arb._cfge_cancel()
+
+    # ── LED Color picker (Menu → LED Colors) ─────────────────────────────────
+    # Also against the throwaway copy — Restore Factory Defaults just put
+    # led_color_order back on its seed row, a known starting sequence.
+    _seed_leds = list(config.capture_led_color_order())
+
+    print("== LED picker: opens on the order in force ==")
+    arb.open_menu(A)
+    arb._pool["menu_defaults"].on_press()
+    check("colors staged from config", arb._ledpick_colors, _seed_leds)
+    check("nothing selected",  arb._ledpick_selected, None)
+    check("nothing pending",   arb._ledpick_pending(), False)
+    check("Save dead, clean",  arb._pool["cfge_save"].enabled, False)
+    check("Rollbk dead, clean", arb._pool["cfge_rollback"].enabled, False)
+    check("Default live, clean", arb._pool["cfge_default"].enabled, True)
+    # The active row sorts first in history (ORDER BY active DESC), so the
+    # freshly-opened screen sits at index 0 — Prior has nothing before it.
+    check("opens at history index 0", arb._ledpick_idx, 0)
+    check("Prior dead at index 0", arb._pool["cfge_prior"].enabled, False)
+    check("Next enabled iff more history follows",
+          arb._pool["cfge_next"].enabled, len(arb._ledpick_history) > 1)
+    # dark/jpg trail every active color, fixed, and are never selectable. The
+    # seed order fills all 10 LED slots, so dark/jpg land in the last two of
+    # the 12 widget slots with none spare — the "hidden when unused" case is
+    # exercised below once a color is dropped.
+    _n = len(_seed_leds)
+    check("dark trails the sequence",
+          arb._pool[f"ledpick_act{_n + 1}"].label, "dark")
+    check("jpg follows dark",
+          arb._pool[f"ledpick_act{_n + 2}"].label, "jpg")
+    check("dark is not selectable",
+          arb._pool[f"ledpick_act{_n + 1}"].enabled, False)
+    # A LED shows in exactly one row: active ones are hidden from "inactive".
+    from lighting_cal8 import LEDBank as _LB
+    _all_leds = _LB.color_names()
+    for _i, _led in enumerate(_all_leds, 1):
+        _shown = arb._pool[f"ledpick_ina{_i}"].visible
+        check(f"inactive slot for {_led} hidden iff active",
+              _shown, _led not in arb._ledpick_colors)
+
+    print("== LED picker: select inactive + up arrow appends it ==")
+    # The seed order carries every LED, so drop one first to have somewhere
+    # to add it back to.
+    _dropped = _seed_leds[-1]
+    _drop_i = next(i for i, led in enumerate(_seed_leds, 1)
+                   if led == _dropped)
+    arb._pool[f"ledpick_act{_drop_i}"].on_press()
+    check("selected the dropped-to-be LED", arb._ledpick_selected, _dropped)
+    arb._pool["ledpick_arr_down"].on_press()
+    check("removed from the sequence", _dropped in arb._ledpick_colors, False)
+    check("selection cleared by remove", arb._ledpick_selected, None)
+    check("now pending", arb._ledpick_pending(), True)
+    # 9 LEDs + dark + jpg = 11 of the 12 widget slots; the 12th sits unused.
+    check("the spare trailing slot is hidden",
+          arb._pool["ledpick_act12"].visible, False)
+    check("Save live, dirty", arb._pool["cfge_save"].enabled, True)
+    check("Prior dead while dirty", arb._pool["cfge_prior"].enabled, False)
+    _ina_i = _all_leds.index(_dropped) + 1
+    arb._pool[f"ledpick_ina{_ina_i}"].on_press()
+    check("selected it in the inactive row", arb._ledpick_selected, _dropped)
+    check("up arrow live, inactive selected",
+          arb._pool["ledpick_arr_up"].enabled, True)
+    check("down arrow dead, inactive selected",
+          arb._pool["ledpick_arr_down"].enabled, False)
+    arb._pool["ledpick_arr_up"].on_press()
+    check("appended to the end", arb._ledpick_colors[-1], _dropped)
+    check("still selected after adding", arb._ledpick_selected, _dropped)
+
+    print("== LED picker: left/right reorder the selection ==")
+    _last_two = arb._ledpick_colors[-2:]
+    arb._pool["ledpick_arr_left"].on_press()
+    check("swapped with its left neighbour",
+          arb._ledpick_colors[-2:], list(reversed(_last_two)))
+    arb._pool["ledpick_arr_right"].on_press()
+    check("swapped back", arb._ledpick_colors[-2:], _last_two)
+
+    print("== LED picker: Rollbk discards, Save writes and re-bases pending ==")
+    arb._pool["cfge_rollback"].on_press()
+    check("back to the value in force", arb._ledpick_colors, _seed_leds)
+    check("selection cleared",  arb._ledpick_selected, None)
+    check("clean again",        arb._ledpick_pending(), False)
+    arb._ledpick_colors.remove(_dropped)
+    _staged = list(arb._ledpick_colors)
+    arb._pool["cfge_save"].on_press()
+    check("config now holds the staged order",
+          config.capture_led_color_order(), _staged)
+    check("clean after save",   arb._ledpick_pending(), False)
+    check("rowid shown, not '(unsaved)'",
+          arb._pool["ledpick_rowid"].text.startswith("rowid "), True)
+
+    print("== LED picker: Default jumps to the seed order without saving ==")
+    arb._pool["cfge_default"].on_press()
+    check("staged back to the seed order", arb._ledpick_colors, _seed_leds)
+    check("Default is a jump, not a write — config unchanged",
+          config.capture_led_color_order(), _staged)
+    check("now pending (differs from what's in force)",
+          arb._ledpick_pending(), True)
+    check("Default itself goes dead while pending",
+          arb._pool["cfge_default"].enabled, False)
+
+    print("== LED picker: locked while a slot is mid-protocol ==")
+    arb._pool["cfge_rollback"].on_press()      # back to the clean, in-force value
+    A.active_phase = "reagent1"                 # marks A as past entry
+    arb._menu_open_ledpick()
+    check("swatches disabled while a slot is active",
+          arb._pool["ledpick_act1"].enabled, False)
+    check("arrows disabled too",
+          arb._pool["ledpick_arr_up"].enabled, False)
+    A.active_phase = "entry"
+    config.save("capture", "led_color_order", ",".join(_seed_leds))
+    arb._ledpick_cancel()
 
     # ── Image viewer (Tool 1) ─────────────────────────────────────────────────
     print("== image viewer: camera guard ==")

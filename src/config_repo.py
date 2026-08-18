@@ -754,6 +754,20 @@ def capture_led_color_order() -> list:
     return [c.strip() for c in raw.split(",") if c.strip()]
 
 
+def capture_led_color_order_history() -> List[Tuple[int, str]]:
+    """
+    (rowid, value) for every led_color_order this instrument has ever held,
+    for the LED Color picker screen's Prior/Next paging.
+
+    Ordered like history(): the value in force first, then the commissioned
+    default, then the rest newest first.
+    """
+    return db.read_all(
+        "SELECT rowid, value FROM config WHERE role = 'capture' "
+        "AND name = 'led_color_order' "
+        "ORDER BY active DESC, isdefault DESC, add_dt DESC, rowid DESC")
+
+
 def capture_camera_warmup_s() -> float:
     """Seconds to warm the camera before captures (thermal-stability margin)."""
     return float(get("capture", "camera_warmup_s"))

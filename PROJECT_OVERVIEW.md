@@ -26,7 +26,7 @@ The SQLite database on the Pi:
 
 ### Measurement Principles
 
-- The colorimeter reads 8 mm square color indicators from chemical testing strips
+- The colorimeter reads 5 mm x 6.25 mm color indicators on chemical testing strips
 - Color density measures the concentration of chemical in a sample
 - Color space analyzed: white → yellow → brown
 - Target precision: 2.5–3 digits; accuracy: 1.5–2.5 digits

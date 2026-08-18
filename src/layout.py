@@ -165,6 +165,46 @@ CFGE_SAVE     = Rect(128, 206,  62, 33)
 CFGE_DEFAULT  = Rect(192, 206,  62, 33)
 CFGE_NEXT     = Rect(256, 206,  62, 33)
 
+# ── LED Color picker (Menu → LED Colors: edit capture.led_color_order) ─────────
+# A 12-slot grid pitch (24 px box, 2 px gap) shared by both rows so the active
+# and inactive rows read as one family: row ACT holds the active sweep in
+# capture order (up to 10 LEDs, plus two fixed trailing markers — 'dark' and
+# 'jpg' — that are informational only and never move into the inactive row or
+# the saved value); row INA holds all 10 LEDs in fixed wavelength-order slots,
+# regardless of which are active. Between them, the four move/reorder arrows,
+# the same glyphs as the image viewer's pan pad. Below row INA, the rowid and
+# text of the order currently on screen, two lines so a ten-color list is
+# never clipped.
+LEDPICK_ACT1  = Rect(  4,  52, 24, 30)
+LEDPICK_ACT2  = Rect( 30,  52, 24, 30)
+LEDPICK_ACT3  = Rect( 56,  52, 24, 30)
+LEDPICK_ACT4  = Rect( 82,  52, 24, 30)
+LEDPICK_ACT5  = Rect(108,  52, 24, 30)
+LEDPICK_ACT6  = Rect(134,  52, 24, 30)
+LEDPICK_ACT7  = Rect(160,  52, 24, 30)
+LEDPICK_ACT8  = Rect(186,  52, 24, 30)
+LEDPICK_ACT9  = Rect(212,  52, 24, 30)
+LEDPICK_ACT10 = Rect(238,  52, 24, 30)
+LEDPICK_ACT11 = Rect(264,  52, 24, 30)   # 'dark' marker, fixed at sequence end
+LEDPICK_ACT12 = Rect(290,  52, 24, 30)   # 'jpg' marker, fixed at sequence end
+LEDPICK_ARR_LEFT  = Rect( 10,  86,  60, 36)   # ◀ earlier in sequence
+LEDPICK_ARR_UP    = Rect( 90,  86,  60, 36)   # ▲ add selected inactive color
+LEDPICK_ARR_DOWN  = Rect(170,  86,  60, 36)   # ▼ remove selected active color
+LEDPICK_ARR_RIGHT = Rect(250,  86,  60, 36)   # ▶ later in sequence
+LEDPICK_INA1  = Rect(  4, 126, 24, 30)
+LEDPICK_INA2  = Rect( 30, 126, 24, 30)
+LEDPICK_INA3  = Rect( 56, 126, 24, 30)
+LEDPICK_INA4  = Rect( 82, 126, 24, 30)
+LEDPICK_INA5  = Rect(108, 126, 24, 30)
+LEDPICK_INA6  = Rect(134, 126, 24, 30)
+LEDPICK_INA7  = Rect(160, 126, 24, 30)
+LEDPICK_INA8  = Rect(186, 126, 24, 30)
+LEDPICK_INA9  = Rect(212, 126, 24, 30)
+LEDPICK_INA10 = Rect(238, 126, 24, 30)
+LEDPICK_ROWID  = Rect(  8, 160, 304, 14)
+LEDPICK_VALUE1 = Rect(  8, 176, 304, 14)
+LEDPICK_VALUE2 = Rect(  8, 192, 304, 14)
+
 # ── phases screen (Menu → Phases: the reagent countdown durations) ─────────────
 # Two identical rows — a label, the value in seconds, and four step buttons
 # (-60 / -10 / +10 / +60).  The value is an editable field as well, so a

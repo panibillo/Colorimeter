@@ -178,7 +178,7 @@ class Pool:
         # what each one opens.
         button("menu_capture",    L.MENU_CAPTURE,      "hdr_text", "start_green", 18, text="Capture")
         button("menu_stub1",      L.MENU_STUB1,        "hdr_text", "btn_gray",    18, text="View\nImage")
-        button("menu_defaults",   L.MENU_DEFAULTS,     "hdr_text", "slot_a_bg",   18, text="Defaults")
+        button("menu_defaults",   L.MENU_DEFAULTS,     "hdr_text", "slot_a_bg",   18, text="LED\nColors")
         button("menu_stub2",      L.MENU_STUB2,        "hdr_text", "btn_gray",    18, text="Config")
         button("menu_config",     L.MENU_CONFIG,       "hdr_text", "slot_b_bg",   18, text="Reagent\nPhases")
         button("menu_power",      L.MENU_POWER,        "hdr_text", "label_coral", 18, text="Power")
@@ -206,6 +206,36 @@ class Pool:
         button("cfge_save",     L.CFGE_SAVE,     "btn_text", "start_green", 13, text="Save")
         button("cfge_default",  L.CFGE_DEFAULT,  "btn_text", "btn_gray", 13, text="Default")
         button("cfge_next",     L.CFGE_NEXT,     "btn_text", "btn_gray", 13, text="Next >")
+
+        # ── LED Color picker (Menu → LED Colors): edit capture.led_color_order ──
+        # Two 12/10-slot rows of colour swatches (arbiter recolours each one to
+        # the LED it currently represents, or hides the slot) plus four move
+        # arrows between them. Face colour starts grey; the arbiter paints the
+        # real swatch colour and selection border every render, the same
+        # "put() then recolour" idiom the config editor's role grid uses.
+        # Reuses cfge_prior/rollback/save/default/next and menu_cancel_btn/
+        # menu_ok_btn for its footer/header chrome — one more screen sharing
+        # that chrome, like the config editor and phases screens already do.
+        label("ledpick_title", L.MENU_TITLE, "black", "white", 14, text="LED\nColors")
+        ledpick_act_rows = (L.LEDPICK_ACT1, L.LEDPICK_ACT2, L.LEDPICK_ACT3,
+                            L.LEDPICK_ACT4, L.LEDPICK_ACT5, L.LEDPICK_ACT6,
+                            L.LEDPICK_ACT7, L.LEDPICK_ACT8, L.LEDPICK_ACT9,
+                            L.LEDPICK_ACT10, L.LEDPICK_ACT11, L.LEDPICK_ACT12)
+        for i, r in enumerate(ledpick_act_rows, 1):
+            button(f"ledpick_act{i}", r, "black", "btn_gray", 10)
+        ledpick_ina_rows = (L.LEDPICK_INA1, L.LEDPICK_INA2, L.LEDPICK_INA3,
+                            L.LEDPICK_INA4, L.LEDPICK_INA5, L.LEDPICK_INA6,
+                            L.LEDPICK_INA7, L.LEDPICK_INA8, L.LEDPICK_INA9,
+                            L.LEDPICK_INA10)
+        for i, r in enumerate(ledpick_ina_rows, 1):
+            button(f"ledpick_ina{i}", r, "black", "btn_gray", 10)
+        button("ledpick_arr_left",  L.LEDPICK_ARR_LEFT,  "btn_text", "btn_gray", 20, text="◀")
+        button("ledpick_arr_up",    L.LEDPICK_ARR_UP,    "btn_text", "btn_gray", 20, text="▲")
+        button("ledpick_arr_down",  L.LEDPICK_ARR_DOWN,  "btn_text", "btn_gray", 20, text="▼")
+        button("ledpick_arr_right", L.LEDPICK_ARR_RIGHT, "btn_text", "btn_gray", 20, text="▶")
+        label("ledpick_rowid",  L.LEDPICK_ROWID,  "black", "white", 12, align="left")
+        label("ledpick_value1", L.LEDPICK_VALUE1, "black", "white", 12, align="left")
+        label("ledpick_value2", L.LEDPICK_VALUE2, "black", "white", 12, align="left")
 
         # ── phases screen (Menu → Phases): the two reagent countdowns ───────────
         # Each row is label / seconds field / four step buttons; the arbiter

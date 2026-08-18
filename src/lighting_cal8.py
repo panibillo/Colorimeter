@@ -216,6 +216,21 @@ class LEDBank:
         """
         return self._resolve(name)
 
+    @classmethod
+    def color_names(cls) -> list:
+        """
+        Every LED color name, in wavelength/channel order (channel 1..10).
+
+        Class-level: reads the fixed `_LED_DEFS` table only, so a caller that
+        just wants the name list (the LED Color picker screen) never opens
+        SPI/GPIO the way constructing a LEDBank would.
+
+        Example:
+            >>> LEDBank.color_names()[:3]
+            ['violet', 'royal_blue', 'blue']
+        """
+        return [name for name, _ in cls._LED_DEFS]
+
     # ── Low-level SPI ─────────────────────────────────────────
 
     def _write_sr(self, byte_val: int) -> None:
