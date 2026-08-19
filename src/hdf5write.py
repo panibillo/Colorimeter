@@ -102,6 +102,26 @@ class Hdf5Writer:
         grp = self._require_group(group_path)
         grp.create_dataset(name, data=json.dumps(data))
 
+    def attrs_of(self, path: str) -> dict:
+        """
+        Return the attributes already on a group or dataset.
+
+        The read half of set_attrs(), and the only reading this writer does.
+        It exists for one job: a writer opened with mode="a" needs to know
+        what the run that created the file already stamped, so it can leave
+        those values alone instead of overwriting them.
+
+        Args:
+            path:  HDF5 path to a group or dataset.
+
+        Returns:
+            A plain dict of the attributes, empty if `path` does not exist —
+            "nothing there" and "nothing set" call for the same handling.
+        """
+        if path not in self._file:
+            return {}
+        return dict(self._file[path].attrs)
+
     def set_attrs(self, path: str, attrs: dict) -> None:
         """
         Set attributes on a group or dataset, creating the group if needed.

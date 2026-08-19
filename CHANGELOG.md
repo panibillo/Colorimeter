@@ -31,6 +31,91 @@ sqlite3 src/colorimeter.sqlite \
 
 ---
 
+## [0.7.0] — 2026-08-18
+
+Writes: archive schema 4 · meta 2 · database 2
+Reads:  archive schema 1–4 · meta 1–2 · database 2
+
+Two protocol changes in one release: the strip is now photographed before it
+meets any reagent, and reagent step 2 is timed against the sample's
+temperature instead of by a fixed countdown.
+
+MINOR, on four counts from the table in CODING_GUIDELINES: config parameters
+were added (`capture.preimage_enabled`, `capture.preimage_led_order`,
+`capture.preimage_rung_shift`, `protocol.t2ref25_secs`, `protocol.q10`), one
+was retired (`protocol.reagent2_secs`), the protocol gained a step, and the
+archive schema moved to 4. The schema change is additive — everything a schema-3
+reader knows about is exactly where it was, and the new content hangs off a
+`/pre` group it will simply not see — but it is a layout change and so the
+version moves. Archives written here are readable by a 0.4.x–0.6.x checkout,
+which will find the measurement sweep and miss the pre-image. Reading the
+pre-image needs this release or later.
+
+### Added
+
+- **The pre-image.** A run now photographs the dry, unreacted strip before
+  reagent 1, so the reading can be divided by *this* pad rather than by an
+  average pad. A reagent pad carries a colour of its own that varies from
+  strip to strip by about as much as 5 ppb of arsenic develops, so near the
+  bottom of the range the blank is a thing to measure, not a constant to
+  assume. Both sweeps of one strip land in one archive: the pre-image creates
+  it and writes under `/pre`; the measurement reopens the same file and writes
+  at the root as before.
+- A new protocol step, `PreImagePhase`, between entry screen 2 and reagent 1.
+  One button, shaped like a reagent step — the run itself advances the slot.
+  It stamps `samples.h5file`, being the run that creates the archive.
+- Config `capture.preimage_enabled` (bool, seeded on) puts the step in or
+  leaves it out of the chain entirely; `capture.preimage_led_order` (str,
+  seeded `royal_blue,red`) is the sweep; `capture.preimage_rung_shift` (int,
+  seeded −2) is how far below e\* it shoots. They are deliberately separate
+  from the measurement's own `led_color_order` and exposure group, because the
+  two sweeps are tuned against opposite constraints.
+- `exposure_repo.shift_exposures()` — move a calibrated ladder by whole rungs.
+  The ladder puts the *gray card* near half scale, and an undyed pad reflects
+  about 2.2x the card in royal blue, so it would clip at e\*; two rungs down
+  is 1/2.25, which lands it near mid-scale.
+- `CaptureSuiteWriter` takes a `section` (the group prefix a run writes under)
+  and a `mode` (`"w"` to create, `"a"` to add to an archive another run
+  opened). Each section carries its own `<section>/meta`, because the ROI can
+  be edited between the two sweeps and each one's layers are a crop of
+  whatever `bound` was in force when it ran.
+
+- **Temperature-compensated reagent 2.** The Gutzeit colour development runs
+  faster warm and slower cold, so a fixed wait does not develop every sample
+  to the same extent. Step 2's countdown is now
+  `t2ref25_secs · q10 ** ((25 − θ) / 10)`, computed per sample from the
+  temperature entered on entry screen 2. `protocol.reagent2_secs` (420 s) is
+  replaced by `protocol.t2ref25_secs` (720 s — the wait at the 25 °C
+  reference) and `protocol.q10` (2.0); `q10 = 1` removes the compensation
+  entirely. The reagent 2 screen shows where its duration came from.
+
+### Removed
+
+- `protocol.reagent2_secs`, deleted rather than deactivated or renamed. Nothing
+  reads it, a parameter with no active row fails `db_bootstrap._verify()`, and
+  renaming would carry 420 s across as if it had been measured at 25 °C, which
+  it never was. Its history goes with it — the values only ever answered a
+  question that is no longer asked.
+
+### Why these LEDs, and this exposure
+
+Measured on the fifteen-strip archive (`desktop/padanalysis`), not chosen by
+eye:
+
+- At 5 ppb the dye moves `royal_blue/B` by 0.0126 absorbance, `blue/B` by
+  0.0051, `cyan/B` by 0.0030, and every red, amber and photo_red cell not at
+  all below 64 ppb. Only royal blue needs a blank; red is carried as the
+  dye-blind control, and it is long-wavelength light, which is the cheap kind.
+- Strip-to-strip blank variation is 0.002–0.007 A at `royal_blue/B` — 16–56 %
+  of the 5 ppb signal, 2–6 % at 16 ppb, 1–3 % at 25. The pre-image is worth
+  having below about 10 ppb and does nothing above it.
+- One exposure loses nothing: on an undyed pad the ladder's upper rungs clip
+  and are discarded anyway, and where three rungs did survive ρ agreed to
+  0.1–0.45 %.
+- Dose is set by the LED count, not the rung count — each LED is lit 3.7–4.2 s
+  whatever the ladder, of which 2.0 s is `LED_ON_WARMUP_S`. Two LEDs at one
+  rung is ~5.3 s of LED-on against a measurement sweep's 31 s.
+
 ## [0.6.0] — 2026-08-12
 
 Writes: archive schema 3 · meta 2 · database 2

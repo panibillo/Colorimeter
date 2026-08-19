@@ -144,8 +144,43 @@ _CAPTURES_PER_LED = 2 * len(EXP_LABELS)
 #                   discovered e* as exposure groups via exposure_repo.
 #   "normal"      — capture only the exposures stored in the `exposure` table for
 #                   the chosen group (images-per-LED), no e* search.
+#   "pre"         — the pre-image: the same machinery as "normal", run before
+#                   the strip has met any reagent, and deliberately starved of
+#                   light. See below.
 MODE_CALIBRATION = "calibration"
 MODE_NORMAL      = "normal"
+MODE_PRE         = "pre"
+
+# The pre-image path
+# ------------------
+# A reagent pad is not white. It carries a colour of its own before anything
+# is done to it, and that colour varies from strip to strip by roughly as much
+# as 5 ppb of arsenic develops — so at the bottom of the range the blank is
+# not a constant to be assumed but a thing to be measured, on the very strip
+# being read. That is all a pre-image is: the same sweep, taken early, so the
+# measurement can be divided by the pad instead of by an average pad.
+#
+# It differs from a normal capture in three ways, and every one of them is
+# about not putting light on an unreacted pad:
+#
+#   Fewer LEDs.  Only the illuminants the measurement actually uses need a
+#     blank. capture.preimage_led_order holds them (royal_blue and red).
+#   One exposure, shifted down.  capture.preimage_rung_shift moves it two
+#     rungs below e* — see exposure_repo.shift_exposures() for why an
+#     undyed pad needs a shorter exposure than the gray card does.
+#   No photograph.  The closing colour photo is taken under the white LED,
+#     which is exactly the broadband flash this path exists to avoid.
+#
+# What it does NOT do is skip the LED warm-up: a blank must be measured to the
+# same standard as the reading it corrects, and the warm-up is what makes the
+# two comparable. That leaves ~2.6 s of royal blue on the pad against the
+# ~3.8 s the measurement sweep itself delivers.
+#
+# The images land in the same archive as the measurement, under the "/pre"
+# section — see capture_h5's module docstring. The pre-image run creates the
+# file; the measurement run reopens it with mode="a", by way of
+# CaptureConfig.archive_path.
+PRE_SECTION = "/pre"
 
 # TODO(undecided): consider moving exposure calibration WHOLLY to the
 # Menu → Capture screen as a standalone operation, run outside the context of a
@@ -167,10 +202,24 @@ class CaptureConfig:
     led_colors:     "list[str]" = field(
         default_factory=config.capture_led_color_order)
     focus_diopter:  "float | None" = None
-    # Which capture path to run, and (normal only) which stored exposure group
-    # to use — its name is the number of images per LED ('1'..'5').
+    # Which capture path to run, and (normal/pre only) which stored exposure
+    # group to use — its name is the number of images per LED ('1'..'5').
     mode:           str = MODE_CALIBRATION
     exposure_group: str = "1"
+    # Whole ladder rungs to move every stored exposure by before capturing
+    # (normal/pre only) — negative shortens. 0 shoots the group as calibrated,
+    # which is what a measurement wants: e* puts the gray card near half scale
+    # and the card is what the measurement is referred to. A pre-image is
+    # photographing an undyed pad instead, which reflects about 2.2x the card
+    # in royal blue and would clip at e*, so it asks for -2. See
+    # exposure_repo.shift_exposures().
+    rung_shift:     int = 0
+    # An existing archive to add this run to, instead of creating one. Set by
+    # the measurement run of a sample whose pre-image already opened the file,
+    # so both sweeps of one strip land together. None (the default) creates a
+    # new archive, which is what every run did before pre-images existed and
+    # what a run still does when no pre-image was taken.
+    archive_path:   "Path | None" = None
     # A config-table row under role `capture`. default_factory,
     # not a plain default, so the location is resolved when a config is built
     # rather than baked in when this module is first imported.
@@ -794,12 +843,53 @@ class CaptureRunner:
         stored inside the archive as the suite_id attribute and repeated in
         each LED's metadata as "timestamp". It is no longer necessarily part
         of the filename, so do not use one to work out the other.
+
+        A run handed cfg.archive_path skips the naming entirely and writes
+        into that file: it is joining a strip's pre-image rather than opening
+        an archive of its own, and picking a free name is the last thing it
+        wants. The name is only chosen once, by whichever run gets there
+        first.
         """
         cfg = self.config
         self.suite_id = config.capture_suite_id()
         cfg.out_dir.mkdir(parents=True, exist_ok=True)
+        if cfg.archive_path is not None:
+            self.out_path = Path(cfg.archive_path)
+            return
         stem = sample_repo.samp_no_for(cfg.sample_rowid) or self.suite_id
         self.out_path = config.capture_archive_path(cfg.out_dir, stem)
+
+    def _open_writer(self) -> CaptureSuiteWriter:
+        """
+        Open this run's archive and remember it for cleanup.
+
+        Where the run writes inside the file, and whether the file is created
+        or added to, are both decided here so the two capture paths cannot
+        answer them differently.
+
+        A pre-image writes under PRE_SECTION; everything else writes at the
+        root. Appending is decided by what is on disk rather than by the mode,
+        because the two facts that matter are "somebody named this file for me"
+        and "it is already there" — a measurement run resuming a pre-imaged
+        sample meets both, and a pre-image whose archive somehow already exists
+        must add to it rather than destroy a capture that cannot be retaken.
+
+        Returns:
+            The open writer, also stored in self._writer.
+        """
+        section = PRE_SECTION if self._is_pre() else ""
+        appending = (self.config.archive_path is not None
+                     and self.out_path.exists())
+        w = self._writer = CaptureSuiteWriter(
+            self.out_path, suite_id=self.suite_id,
+            section=section, mode="a" if appending else "w")
+        log.info("archive %s %s%s", "appending to" if appending else "creating",
+                 self.out_path, f" (section {section})" if section else "")
+        return w
+
+    def _is_pre(self) -> bool:
+        """True when this run is a pre-image — see MODE_PRE."""
+        return str(self.config.mode).lower() == MODE_PRE
 
     def _write_metadata(self, w: CaptureSuiteWriter) -> None:
         """
@@ -889,9 +979,12 @@ class CaptureRunner:
         before the encode means the discarded pixels are never compressed at
         all — the part of this that costs real time on a Zero 2 W.
 
-        Skipped when config's capture.photo_enabled is off.  Any failure is
-        logged and swallowed rather than raised: the run's measurements are
-        complete and written by the time this is reached, and losing them to a
+        Skipped when config's capture.photo_enabled is off, and always on a
+        pre-image: the white LED is broadband, so this one frame would put
+        more blue on an unreacted pad than the whole rest of that path, and
+        there is nothing to look at yet anyway.  Any other failure is logged
+        and swallowed rather than raised: the run's measurements are complete
+        and written by the time this is reached, and losing them to a
         photograph would be absurd.
 
         Args:
@@ -900,7 +993,7 @@ class CaptureRunner:
                          step is meant to be quick.
         """
         w = self._writer
-        if w is None:
+        if w is None or self._is_pre():
             return
         # Deciding whether to photograph reads the database, so it can fail on
         # an instrument whose config predates this feature. Guarded like the
@@ -972,11 +1065,16 @@ class CaptureRunner:
             during a wait and carry no new information beyond the countdown.
         """
         try:
-            if str(self.config.mode).lower() == MODE_NORMAL:
+            if str(self.config.mode).lower() in (MODE_NORMAL, MODE_PRE):
                 # Chained fallback: a caller that never split the run across
                 # the reagent2 pause (camera contention, a short debug timer)
                 # still gets the new capture order and dark-frame dedup, just
                 # without the latency-hiding — see run_prefetch()/run_capture().
+                #
+                # A pre-image always comes through here rather than being
+                # split: there is no pause to hide latency behind. The operator
+                # is standing at the instrument having just seated the strip,
+                # and the whole run is two LEDs long.
                 yield from self.run_prefetch()
                 yield from self.run_capture()
             else:
@@ -1139,7 +1237,7 @@ class CaptureRunner:
 
         # Opened here rather than at the top of the run so a failure during
         # calibration or focus leaves no empty archive behind.
-        w = self._writer = CaptureSuiteWriter(self.out_path, suite_id=self.suite_id)
+        w = self._open_writer()
         self._write_metadata(w)
 
         for led, color in _resolve_color_order(leds, cfg.led_colors):
@@ -1467,7 +1565,8 @@ class CaptureRunner:
             yield self._progress(
                 "setup",
                 f"Camera {cam.model_description}  pattern={self._pattern}  "
-                f"{self._cam_w}×{self._cam_h}  (normal, group {group})")
+                f"{self._cam_w}×{self._cam_h}  "
+                f"({str(cfg.mode).lower()}, group {group})")
 
             # ── Focus (still needed; exposures are stored, focus is not) ──
             self.prof.set_section("focus")
@@ -1494,6 +1593,15 @@ class CaptureRunner:
                     exposures_us = [cfg.initial_us]
                     log.warning("LED %s has no exposures for group %s — "
                                 "falling back to %d µs", color, group, cfg.initial_us)
+                elif cfg.rung_shift:
+                    # Only a calibrated ladder is shifted. The fallback is a
+                    # bare guess with no rung to be two rungs below, so moving
+                    # it would be arithmetic on a number that means nothing.
+                    shifted = exposure_repo.shift_exposures(
+                        exposures_us, cfg.rung_shift)
+                    log.info("LED %s: %+d rung(s) — %s µs -> %s µs",
+                             color, cfg.rung_shift, exposures_us, shifted)
+                    exposures_us = shifted
                 self._color_exposures[color] = exposures_us
                 self._color_labels[color]    = [f"e{i}" for i in range(len(exposures_us))]
                 self._color_fallback[color]  = used_fallback
@@ -1504,7 +1612,7 @@ class CaptureRunner:
             # Open the archive and write /meta now, before any photograph.
             # The ROI geometry is what makes the stored arrays locatable, so a
             # run that dies partway still leaves an interpretable file.
-            w = self._writer = CaptureSuiteWriter(self.out_path, suite_id=self.suite_id)
+            w = self._open_writer()
             self._write_metadata(w)
 
             log.info(f"=== Prefetch done: {len(self._distinct_dark_us)} "
@@ -1537,8 +1645,12 @@ class CaptureRunner:
         leds = self._leds
         w    = self._writer
         try:
+            shift = self.config.rung_shift
             yield self._progress(
-                "capture", f"Normal capture — exposure group {self._group}")
+                "capture",
+                f"{'Pre-image' if self._is_pre() else 'Normal capture'} — "
+                f"exposure group {self._group}"
+                f"{f', {shift:+d} rung(s)' if shift else ''}")
 
             for color in self._color_order:
                 self._led_index    += 1
@@ -1604,7 +1716,10 @@ class CaptureRunner:
 
                 # ── Per-LED metadata, statistics and JPEG ──────────────
                 meta_json: dict = {
-                    "mode": MODE_NORMAL,
+                    # The path's own name, not the path it shares code with:
+                    # a reader must be able to tell a pre-image's frames from
+                    # a measurement's without inferring it from the group.
+                    "mode": str(self.config.mode).lower(),
                     "timestamp": self.suite_id,
                     "led_channel": led,
                     "led_color": color,

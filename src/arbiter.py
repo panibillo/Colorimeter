@@ -41,6 +41,7 @@ import signal
 import subprocess
 import sys
 import time
+from pathlib import Path
 
 _SIMULATION_MODE = os.environ.get("COLORIMETER_SIMULATION", "0") == "1"
 
@@ -62,7 +63,7 @@ import layout
 from widgets import Button, TextBox
 from pool import Pool
 from slot import Slot
-from phases import build_phases, EntryPhase, Entry2Phase
+from phases import build_phases, EntryPhase, Entry2Phase, _mmss, _to_float
 
 log = logging.getLogger(__name__)
 
@@ -120,7 +121,10 @@ _EDIT_MIN_SIDE       = 16       # smallest ROI a Save will accept, image px
 # Bounds for a reagent countdown entered on the Menu → Phases screen.  Zero is
 # excluded (a wait that expires the instant it starts is never what was meant)
 # and the ceiling is one hour, well past the longest protocol step.
-_CFG_MIN_SECS, _CFG_MAX_SECS = 1, 3600
+# The range a reagent countdown may hold, shared with the Q10 formula's clamp
+# so a hand-typed duration and a computed one are held to one answer about
+# what is runnable.
+_CFG_MIN_SECS, _CFG_MAX_SECS = config.MIN_REAGENT_SECS, config.MAX_REAGENT_SECS
 # The step buttons on each phases row, in the order they are laid out.
 _CFG_STEPS = (-60, -10, 10, 60)
 
@@ -196,11 +200,6 @@ def _clamp_secs(secs: int) -> int:
 def _clamp_us(us: float) -> int:
     """Hold a preview exposure inside the range the viewer will ask the sensor for."""
     return max(_PREVIEW_MIN_US, min(_PREVIEW_MAX_US, int(us)))
-
-
-def _mmss(secs: int) -> str:
-    """Seconds as m:ss, so the phases screen shows what a duration means."""
-    return f"{secs // 60}:{secs % 60:02d}"
 
 
 def _cfge_fit(name: str, limit: int = 13) -> str:
@@ -630,10 +629,12 @@ class Arbiter:
                     step is narrated by the caller, which times it.
         """
         self._pool = Pool.build()
-        # Reagent countdowns come from config; the simulation profile shortens
-        # them so runs are quick to test.
-        self._phases = build_phases(reagent1_secs=config.reagent1_secs(),
-                                    reagent2_secs=config.reagent2_secs())
+        # Step 1's countdown is a configured constant, so it is baked into the
+        # phase here.  Step 2's is not passed at all: it depends on the sample,
+        # and Reagent2Phase asks reagent2_plan() for it when it needs one.
+        self._phases = build_phases(
+            reagent1_secs=config.reagent1_secs(),
+            preimage=config.capture_preimage_enabled())
         self._slots = {"A": Slot("A"), "B": Slot("B")}
         self._load_defaults()
 
@@ -807,6 +808,49 @@ class Arbiter:
         configured default temperature instead of an error there.
         """
         return bool(getattr(self._temp, "connected", False))
+
+    # ── Phase contract: reagent 2's temperature-compensated countdown ──────────
+
+    def t2ref25_secs(self) -> int:
+        """protocol.t2ref25_secs — reagent 2's wait at the 25 °C reference."""
+        return config.t2ref25_secs()
+
+    def reagent2_plan(self, slot: Slot) -> tuple:
+        """
+        How long reagent step 2 should run for this slot, and on what grounds.
+
+        The duration is config_repo.reagent2_secs(theta); this method's job is
+        only to decide which theta answers.  The sample's own temperature is
+        preferred — entered or probe-read on Entry screen 2 and persisted as a
+        float — and defaults.default_temperature stands in when the field was
+        left empty, which is the same stand-in Entry 2's Temp button offers on a
+        unit with no probe.
+
+        The stand-in is reported rather than hidden: a wait computed from an
+        assumed temperature is a weaker claim than one computed from a measured
+        one, so Reagent2Phase brackets it on screen and the operator can see
+        which they are looking at before pressing START.
+
+        Args:
+            slot: The slot whose sample temperature to read.
+
+        Returns:
+            (secs, temp_c, measured) — the countdown in seconds, the
+            temperature it came from in °C, and whether that temperature came
+            from the sample rather than the configured stand-in.
+        """
+        temp_c = _to_float(slot.record.get("samp_degC"))
+        measured = temp_c is not None
+        if not measured:
+            temp_c = getattr(self._defaults, "default_temperature", None)
+            if temp_c is None:
+                # No sample temperature and no stand-in: the only honest answer
+                # left is the reference itself, which is the uncompensated wait.
+                temp_c = config.REF_TEMP_C
+                log.warning("Arbiter: slot %s has no sample temperature and no "
+                            "configured default — reagent 2 will run "
+                            "uncompensated", slot.name)
+        return config.reagent2_secs(temp_c), float(temp_c), measured
 
     # ── Phase contract: database / sample lifecycle ────────────────────────────
 
@@ -1080,11 +1124,18 @@ class Arbiter:
     # against a mm:ss readout is the way an operator actually wants to set one.
     # Restore supersedes a custom value with the commissioned row again; the
     # edit stays in the table as history either way.
+    #
+    # The R2 row edits protocol.t2ref25_secs — the step 2 wait at 25 °C, not
+    # the wait any particular sample will get, which is computed from its own
+    # temperature (see reagent2_plan()).  protocol.q10 is deliberately NOT here:
+    # a stepper invites nudging, and Q10 is a calibration constant for a test
+    # kit rather than something to adjust between runs.  It is edited in
+    # Menu -> Config, where changing it looks like the commissioning act it is.
 
     def _menu_open_config(self) -> None:
         """Open the phases screen, staging the durations now in force."""
         self._cfg_secs = {"r1": config.reagent1_secs(),
-                          "r2": config.reagent2_secs()}
+                          "r2": config.t2ref25_secs()}
         self._render_config()
 
     def _render_config(self) -> None:
@@ -1100,8 +1151,11 @@ class Arbiter:
         p.put("menu_cancel_btn", "CANCEL", on=self._cfg_cancel)
         p.put("cfg_title",       "Phases")
         p.put("menu_ok_btn",     "OK",     on=self._cfg_ok)
-        for row, n in (("r1", 1), ("r2", 2)):
-            p.put(f"cfg_{row}_lbl", f"Reagent {n}")
+        # R2's label carries the reference temperature, because the number in
+        # that field is not the wait a sample gets — it is the wait at 25 °C
+        # that every sample's wait is scaled from.
+        for row, lbl in (("r1", "Reagent 1"), ("r2", "Reagent 2\n@25°C")):
+            p.put(f"cfg_{row}_lbl", lbl)
             for step in _CFG_STEPS:
                 p.put(self._cfg_step_widget(row, step), f"{step:+d}",
                       on=(lambda r=row, d=step: self._cfg_step(r, d)),
@@ -1133,7 +1187,7 @@ class Arbiter:
         for row in ("r1", "r2"):
             p.set(f"cfg_{row}_fld", str(self._cfg_secs[row]))
         p.set("cfg_hint", f"seconds     R1 {_mmss(self._cfg_secs['r1'])}"
-                          f"     R2 {_mmss(self._cfg_secs['r2'])}")
+                          f"     R2 {_mmss(self._cfg_secs['r2'])} @25°C")
         if redraw:
             for name in ("cfg_r1_fld", "cfg_r2_fld", "cfg_hint"):
                 p.redraw(self._disp, name)
@@ -1158,12 +1212,12 @@ class Arbiter:
     def _cfg_restore(self) -> None:
         """Stage the commissioned durations (saved only if OK follows)."""
         self._cfg_secs = {"r1": int(config.default("protocol", "reagent1_secs")),
-                          "r2": int(config.default("protocol", "reagent2_secs"))}
+                          "r2": int(config.default("protocol", "t2ref25_secs"))}
         self._cfg_paint_values()
 
     def _cfg_ok(self) -> None:
         """Save the staged durations, apply them, and return to the Menu."""
-        for row, key in (("r1", "reagent1_secs"), ("r2", "reagent2_secs")):
+        for row, key in (("r1", "reagent1_secs"), ("r2", "t2ref25_secs")):
             secs = self._cfg_staged(row)
             self._cfg_secs[row] = secs
             # Matching the commissioned value again means there is nothing
@@ -1187,10 +1241,19 @@ class Arbiter:
         Phases hold no run state (slots do), so this is safe mid-run: a
         countdown already running lives on its slot and is untouched — only
         what the next START arms changes.
+
+        Only step 1 needs the rebuild.  Step 2's phase holds no duration to
+        replace — it reads t2ref25_secs and q10 through reagent2_plan() every
+        time it arms — so an edit to either is already in force by the time
+        this is called.  It is rebuilt along with step 1 regardless, because
+        build_phases() makes the whole registry or none of it.
         """
-        r1, r2 = config.reagent1_secs(), config.reagent2_secs()
-        self._phases = build_phases(reagent1_secs=r1, reagent2_secs=r2)
-        log.info("Arbiter: reagent countdowns set to %ds / %ds", r1, r2)
+        r1 = config.reagent1_secs()
+        self._phases = build_phases(reagent1_secs=r1,
+                                    preimage=config.capture_preimage_enabled())
+        log.info("Arbiter: reagent 1 countdown set to %ds; reagent 2 reference "
+                 "%ds @%.0f °C, Q10 %.2f",
+                 r1, config.t2ref25_secs(), config.REF_TEMP_C, config.q10())
 
     # ── Config editor (Menu → Config) ──────────────────────────────────────────
     # Every setting the instrument has, in one screen with three views: the list
@@ -2132,6 +2195,93 @@ class Arbiter:
         """Current Menu -> Capture path selection: 'calibration' | 'normal'."""
         return self._cap_mode
 
+    def _measurement_config(self, slot: Slot):
+        """
+        Build the CaptureConfig for `slot`'s measurement sweep.
+
+        One builder for both the prefetched and the fully-synchronous route,
+        so a run cannot get a different archive or a different path depending
+        on whether its reagent2 countdown left time to prefetch.
+
+        Uses the Menu -> Capture screen's staged path + images choice, same as
+        the standalone menu capture — a sample's Read-phase capture must not
+        silently fall back to a full calibration sweep.
+
+        When the slot has already been pre-imaged its archive exists, and this
+        run adds to it rather than opening a second file: one strip, one .h5.
+        The file is checked for rather than trusted, because the record can
+        outlive it — an archive deleted or moved between the two sweeps must
+        cost the pre-image, never the reading.
+        """
+        from capture_runner import CaptureConfig
+        pre = str(slot.record.get("h5file") or "")
+        archive = Path(pre) if pre and Path(pre).exists() else None
+        if pre and archive is None:
+            log.warning("Arbiter: slot %s pre-image archive %s is gone — "
+                        "the measurement opens a new one", slot.name, pre)
+        return CaptureConfig(mode=self._cap_mode, exposure_group=self._cap_group,
+                             sample_rowid=slot.record.get("db_rowid"),
+                             archive_path=archive)
+
+    def _preimage_config(self, slot: Slot):
+        """
+        Build the CaptureConfig for `slot`'s pre-image.
+
+        Everything that makes this run different from the measurement is
+        configuration, not code: which LEDs, how far down the exposure ladder,
+        and the mode that turns off the closing white-LED photograph.  See
+        capture_runner's MODE_PRE.
+
+        Group '1' — one exposure per LED.  Extra rungs would buy nothing on an
+        undyed pad (the longer ones clip) and cost light on a strip that has
+        not reacted yet.
+        """
+        from capture_runner import CaptureConfig, MODE_PRE
+        return CaptureConfig(mode=MODE_PRE, exposure_group="1",
+                             led_colors=config.capture_preimage_led_order(),
+                             rung_shift=config.capture_preimage_rung_shift(),
+                             sample_rowid=slot.record.get("db_rowid"))
+
+    def request_preimage(self, slot: Slot) -> bool:
+        """
+        Photograph the unreacted strip for `slot`.  Returns granted.
+
+        The pre-image opens the sample's archive; the measurement sweep later
+        adds to the same file.  Unlike the measurement it is never prefetched
+        — the operator has just seated the strip and is standing there, and
+        there is no countdown to hide the setup behind.
+
+        Returns:
+            True if the camera was free and the run started, False if it was
+            busy — in which case the phase leaves its button as it was and the
+            operator can press again.
+        """
+        if self._capture is not None:
+            log.info("Arbiter: pre-image denied — camera busy (slot %s)",
+                     self._capture_slot.name if self._capture_slot else "?")
+            return False
+        # A parked prefetch belongs to some other slot's reading; this run is
+        # about to drive the shared camera, so it cannot be left to resume.
+        if self._prefetch is not None:
+            self._prefetch.cancel()
+            self._prefetch = None
+            self._prefetch_slot = None
+            self._prefetch_epoch = None
+
+        session = self._new_session(self._preimage_config(slot))
+        if not session.start():
+            log.error("Arbiter: pre-image failed to start: %s", session.error)
+            slot.progress = "Camera failed"
+            return False
+        self._capture = session
+        self._capture_slot = slot
+        slot.progress = "Starting camera..."
+        self._cap_progress_kind = None
+        self._cap_progress_n = 0
+        log.info("Arbiter: pre-image started for slot %s (LEDs %s)",
+                 slot.name, ", ".join(session.config.led_colors))
+        return True
+
     def request_capture(self, slot: Slot) -> bool:
         """Start a capture for slot if the camera is free.  Returns granted."""
         if self._capture is not None:
@@ -2170,13 +2320,7 @@ class Arbiter:
                 return False
             session.cancel()
 
-        # Use the Menu -> Capture screen's staged path + images choice, same
-        # as the standalone menu capture — a sample's Read-phase capture must
-        # not silently fall back to a full calibration sweep.
-        from capture_runner import CaptureConfig
-        cfg = CaptureConfig(mode=self._cap_mode, exposure_group=self._cap_group,
-                            sample_rowid=slot.record.get("db_rowid"))
-        session = self._new_session(cfg)
+        session = self._new_session(self._measurement_config(slot))
         if not session.start():
             log.error("Arbiter: capture failed to start: %s", session.error)
             slot.progress = "Camera failed"
@@ -2397,9 +2541,27 @@ class Arbiter:
         # step() returned None: the run ended.
         self._capture = None
         self._capture_slot = None
+        from capture_runner import MODE_PRE   # lazy, like the other capture
+                                             # imports; loaded already by now
+        is_pre = str(session.config.mode).lower() == MODE_PRE
         if session.error is not None:
-            owner.progress = f"Capture failed: {str(session.error)[:30]}"
+            owner.progress = (f"Pre-image failed: {str(session.error)[:28]}"
+                              if is_pre else
+                              f"Capture failed: {str(session.error)[:30]}")
+            owner.capturing = False
             self.render(owner)
+            return
+        if is_pre:
+            # A pre-image ends by handing the reading its archive and getting
+            # out of the way. It stamps h5file — that column names the file
+            # holding this sample's images, and this run is what created it —
+            # but not capture_end, which belongs to the measurement. Nothing
+            # is analysed yet, so the run simply moves on to reagent 1.
+            owner.capturing = False
+            self.persist(owner, h5file=str(session.out_path)
+                                       if session.out_path else "")
+            owner.progress = "Pre-image stored"
+            self.goto(owner, "reagent1")
             return
         if owner.timer is not None:
             owner.timer.stop(self.now())     # freeze the final elapsed time
@@ -2458,10 +2620,7 @@ class Arbiter:
 
     def _start_prefetch(self, slot: Slot) -> None:
         """Build a session and begin run_prefetch() for `slot`'s upcoming capture."""
-        from capture_runner import CaptureConfig
-        cfg = CaptureConfig(mode=self._cap_mode, exposure_group=self._cap_group,
-                            sample_rowid=slot.record.get("db_rowid"))
-        session = self._new_session(cfg)
+        session = self._new_session(self._measurement_config(slot))
         if not session.start_prefetch():
             log.error("Arbiter: capture prefetch failed to start for slot "
                      "%s: %s", slot.name, session.error)
@@ -3913,6 +4072,13 @@ def _selftest() -> None:
     logging.basicConfig(level=logging.WARNING,
                         format="%(levelname)-8s [%(name)s] %(message)s")
 
+    # The same guarantee main.py gives the real Arbiter: every parameter this
+    # test reads has an active row before anything reads it.  Without it the
+    # test runs against whatever the developer's database happens to hold, so
+    # adding a parameter breaks it with ConfigMissing rather than seeding it.
+    import db_bootstrap
+    db_bootstrap.ensure()
+
     class _MockDisplay:
         def fill_screen(self, c): pass
         def fill_rect(self, *a, **k): pass
@@ -3937,7 +4103,7 @@ def _selftest() -> None:
             self.step = step; self.message = f"{step} ({i}/{n})"
             self.phase = "capture"
 
-    from pathlib import Path
+    from types import SimpleNamespace
 
     class _FakeRunner:
         """Stands in for CaptureRunner: what the arbiter reads after a run."""
@@ -3952,13 +4118,18 @@ def _selftest() -> None:
         run_prefetch() takes one step, then parks without releasing anything;
         start_capture() resumes the same fake into its ordinary step() count.
         """
-        def __init__(self, config=None, steps=3):
+        def __init__(self, config=None, steps=3, mode="normal"):
             self.active = False; self.error = None
             self.out_path = Path("fake.h5")
             self.runner = _FakeRunner()
             self._i = 0; self._n = steps
             self.prefetch_done = False
             self._prefetching = False
+            # CaptureSession carries the config it was built from, and
+            # pump_capture() reads .mode off it to tell a pre-image's ending
+            # from a measurement's. The stand-in has to carry one too.
+            self.config = config or SimpleNamespace(
+                mode=mode, led_colors=["royal_blue", "red"])
         def start(self): self.active = True; return True
         def start_prefetch(self):
             self.active = True; self._prefetching = True
@@ -4167,6 +4338,35 @@ def _selftest() -> None:
     check("result set",           bool(A.result), True)
     check("POST enabled",         arb._pool["run_btn"].enabled, True)
 
+    print("== pre-image completes -> reagent1, stamping h5file and not capture_end ==")
+    arb.goto(A, "entry")
+    A.record["db_rowid"] = 7
+    A.record["h5file"] = ""
+    A.record["capture_end"] = None
+    A.active_phase = A.phase = "preimage"
+    cap_pre = _FakeCapture(mode="pre")
+    arb._capture_factory = lambda: cap_pre
+    check("pre-image granted",   arb.request_preimage(A), True)
+    A.capturing = True
+    for _ in range(5):
+        arb.pump_capture()
+    check("A moved to reagent1", A.phase, "reagent1")
+    check("archive recorded",    A.record["h5file"], "fake.h5")
+    check("capture_end untouched", A.record["capture_end"], None)
+    check("camera freed",        arb.capture_available(), True)
+    check("not capturing",       A.capturing, False)
+
+    print("== the measurement adds to the pre-image's archive ==")
+    cfg = arb._measurement_config(A)
+    check("no archive to join (fake.h5 is not on disk)", cfg.archive_path, None)
+    import tempfile as _tf
+    with _tf.NamedTemporaryFile(suffix=".h5") as fh:
+        A.record["h5file"] = fh.name
+        cfg = arb._measurement_config(A)
+        check("joins the file that is there", str(cfg.archive_path), fh.name)
+    A.record["h5file"] = ""
+    arb._capture_factory = _FakeCapture
+
     # ── Capture screen (Menu → Capture) ──────────────────────────────────────
     # Runs against a throwaway copy of the DB so the exposure table and the
     # saved default group are exercised for real without touching live data.
@@ -4307,9 +4507,9 @@ def _selftest() -> None:
     # database usually carries an operator's much shorter waits, so assuming
     # the two are equal fails on any instrument that has ever been retimed.
     _file_r1 = int(config.default("protocol", "reagent1_secs"))
-    _file_r2 = int(config.default("protocol", "reagent2_secs"))
+    _file_r2 = int(config.default("protocol", "t2ref25_secs"))
     _live_r1 = config.reagent1_secs()
-    _live_r2 = config.reagent2_secs()
+    _live_r2 = config.t2ref25_secs()
 
     print("== phases screen: steps stage a duration; CANCEL discards it ==")
     arb._menu_open_config()
@@ -4329,13 +4529,13 @@ def _selftest() -> None:
     _stepped_r1 = _clamp_secs(_live_r1 - 10)
     check("saved",             config.reagent1_secs(), _stepped_r1)
     check("phases rebuilt",    arb._phases["reagent1"].secs, _stepped_r1)
-    check("reagent2 untouched", config.reagent2_secs(), _live_r2)
+    check("reagent2 reference untouched", config.t2ref25_secs(), _live_r2)
 
     print("== phases screen: a typed duration is honoured and clamped ==")
     arb._menu_open_config()
     arb._pool.set("cfg_r2_fld", "45")          # as a keyboard would leave it
     arb._cfg_ok()
-    check("typed value saved", config.reagent2_secs(), 45)
+    check("typed value saved", config.t2ref25_secs(), 45)
     arb._menu_open_config()
     arb._pool.set("cfg_r1_fld", "99999")
     check("clamped to the max", arb._cfg_staged("r1"), _CFG_MAX_SECS)
@@ -4352,7 +4552,8 @@ def _selftest() -> None:
     check("staged from the commissioned row", arb._cfg_secs["r2"], _file_r2)
     arb._cfg_ok()
     check("reagent1 back to commissioned", config.reagent1_secs(), _file_r1)
-    check("reagent2 back to commissioned", config.reagent2_secs(), _file_r2)
+    check("reagent2 reference back to commissioned",
+          config.t2ref25_secs(), _file_r2)
     # Only the two durations this screen touches: the copied database carries
     # whatever else the instrument has been set to, which is not this test's
     # business.

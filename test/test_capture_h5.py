@@ -446,5 +446,94 @@ class TestMetadataRewrite(CaptureSuiteWriterTestCase):
             "0.42 ppm")
 
 
+# ---------------------------------------------------------------------------
+# Sections — two sweeps of one strip in one archive
+# ---------------------------------------------------------------------------
+
+class TestSections(CaptureSuiteWriterTestCase):
+    """
+    A section moves the whole layout under a prefix, or none of it.
+
+    The case it exists for: a pre-image and a measurement both sweep royal
+    blue, so without a prefix the second would collide with the first. What is
+    checked here is that the prefix is total — lit frames, dark frames, the
+    per-LED links and the metadata all move together — because a layout that
+    moved only partly would put a pre-image's frames where a reader looking
+    for the measurement would find them.
+    """
+
+    def _sweep(self, w, color="amber", exposure_us=1462):
+        """One LED's worth of content, the way a run writes it."""
+        w.add_led(color, {"led_color": color}, led_channel=1)
+        w.add_lit(color, "e0", _layers(10), exposure_us=exposure_us)
+        w.add_dark(_layers(1), exposure_us=exposure_us, when="after")
+        w.link_dark(color, "e0", exposure_us=exposure_us, when="after")
+
+    def test_a_section_moves_the_whole_layout(self):
+        with self.writer(section="/pre") as w:
+            w.add_metadata({"meta_version": 2}, {"samp_no": "ZP1007"})
+            self._sweep(w)
+
+        with h5py.File(self.path, "r") as f:
+            self.assertIn("/pre/leds/amber/lit/e0/B", f)
+            self.assertIn("/pre/dark/after_1462us/B", f)
+            self.assertIn("/pre/leds/amber/dark/after_e0/B", f)
+            self.assertIn("/pre/meta", f)
+            self.assertNotIn("/leds", f)
+            self.assertNotIn("/dark", f)
+            # The root record is written too: it describes the archive as a
+            # whole, and until a measurement rewrites it the pre-image is all
+            # the archive holds.
+            self.assertIn("/meta", f)
+            self.assertEqual(f.attrs["samp_no"], "ZP1007")
+
+    def test_appending_adds_beside_what_is_there(self):
+        with self.writer(section="/pre") as w:
+            w.add_metadata({"meta_version": 2})
+            self._sweep(w)
+        with self.writer(mode="a") as w:
+            w.add_metadata({"meta_version": 2})
+            self._sweep(w, exposure_us=3290)
+
+        with h5py.File(self.path, "r") as f:
+            self.assertIn("/pre/leds/amber/lit/e0/B", f)
+            self.assertIn("/leds/amber/lit/e0/B", f)
+            self.assertIn("/pre/dark/after_1462us/B", f)
+            self.assertIn("/dark/after_3290us/B", f)
+
+    def test_appending_leaves_the_root_stamp_alone(self):
+        """suite_id names the moment the archive was opened, not the last write."""
+        with self.writer(section="/pre") as w:
+            w.add_metadata({"meta_version": 2})
+        with CaptureSuiteWriter(self.path, suite_id="20260615_2200", mode="a") as w:
+            w.add_metadata({"meta_version": 2})
+
+        with h5py.File(self.path, "r") as f:
+            self.assertEqual(f.attrs["suite_id"], "20260615_2120")
+
+    def test_the_second_run_rewrites_the_root_record(self):
+        """
+        Two records, saying different things on purpose: the root describes
+        the last sweep written, the section preserves its own.
+        """
+        with self.writer(section="/pre") as w:
+            w.add_metadata({"meta_version": 2, "who": "pre"})
+        with self.writer(mode="a") as w:
+            w.add_metadata({"meta_version": 2, "who": "measurement"})
+
+        with h5py.File(self.path, "r") as f:
+            self.assertEqual(json.loads(f["/meta"][()])["who"], "measurement")
+            self.assertEqual(json.loads(f["/pre/meta"][()])["who"], "pre")
+
+    def test_no_section_is_the_layout_it_always_was(self):
+        with self.writer() as w:
+            w.add_metadata({"meta_version": 2})
+            self._sweep(w)
+        with h5py.File(self.path, "r") as f:
+            self.assertIn("/leds/amber/lit/e0/B", f)
+            self.assertIn("/dark/after_1462us/B", f)
+            self.assertNotIn("/pre", f)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

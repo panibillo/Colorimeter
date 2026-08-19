@@ -102,19 +102,36 @@ INSERT OR IGNORE INTO config (active, isdefault, editable, add_dt, role, name,
   (0, 1, 1, '2026-08-12 00:00:00', 'capture', 'photo_enabled', 'bool', '1', 'seed',
    'take a colour-balanced JPEG under the white LED as the last step of a run'),
   (0, 1, 1, '2026-08-12 00:00:00', 'capture', 'photo_wb_gains', 'str', '1.0,1.0', 'seed',
-   'white-LED colour gains (red,blue) rendering that photo; commission per unit');
+   'white-LED colour gains (red,blue) rendering that photo; commission per unit'),
+  (0, 1, 1, '2026-08-18 00:00:00', 'capture', 'preimage_enabled', 'bool', '1', 'seed',
+   'offer a pre-image of the unreacted strip before reagent 1'),
+  (0, 1, 1, '2026-08-18 00:00:00', 'capture', 'preimage_led_order', 'str',
+   'royal_blue,red', 'seed',
+   'LEDs the pre-image sweeps; keep it short — this light falls on an unreacted pad'),
+  (0, 1, 1, '2026-08-18 00:00:00', 'capture', 'preimage_rung_shift', 'int', '-2', 'seed',
+   'ladder rungs below e* the pre-image shoots at; an undyed pad clips at e*');
 -- ── protocol ────────────────────────────────────────────────────────────────
 -- These are the real durations.  A shorter pair used to be seeded under a
 -- 'simulation' profile so a desktop run finished quickly; that profile is
 -- gone, and a developer who wants short waits sets them in their own database
 -- (COLORIMETER_DB) or from the config editor.
+--
+-- Reagent step 2 is not a fixed duration.  It is temperature-compensated:
+--
+--     t2(theta) = t2ref25_secs * q10 ** ((25 - theta) / 10)
+--
+-- so a cold sample is given proportionally longer.  Both constants are
+-- calibratable per test kit; q10 = 1 removes the compensation entirely and
+-- makes t2 a constant t2ref25_secs.  See config_repo.reagent2_secs().
 INSERT OR IGNORE INTO config (active, isdefault, editable, add_dt, role, name,
                               vtype, value, source, remark)
      VALUES
   (0, 1, 1, '2026-08-01 00:00:00', 'protocol', 'reagent1_secs', 'int', '120', 'seed',
    'countdown for reagent step 1'),
-  (0, 1, 1, '2026-08-01 00:00:00', 'protocol', 'reagent2_secs', 'int', '420', 'seed',
-   'countdown for reagent step 2'),
+  (0, 1, 1, '2026-08-18 00:00:00', 'protocol', 't2ref25_secs', 'int', '720', 'seed',
+   'reagent step 2 countdown at the 25 C reference temperature'),
+  (0, 1, 1, '2026-08-18 00:00:00', 'protocol', 'q10', 'float', '2.0', 'seed',
+   'factor the reagent 2 rate changes by per 10 C; 1 = no compensation'),
   (0, 1, 1, '2026-08-01 00:00:00', 'protocol', 'analysis_secs', 'float', '1.5', 'seed',
    'placeholder analysis duration until the analysis engine lands');
 
@@ -289,6 +306,27 @@ INSERT OR IGNORE INTO roi (rowid, active, isdefault, add_dt, name, role,
 -- old role.  This UPDATE is what actually migrates a commissioned unit, and
 -- is a no-op once no row is left matching.
 UPDATE roi SET role = 'white_balance' WHERE role = 'white';
+
+-- ── Retired parameters ──────────────────────────────────────────────────────
+-- protocol.reagent2_secs -> protocol.t2ref25_secs + protocol.q10 (2026-08).
+-- Reagent step 2 stopped being a fixed duration when it became temperature-
+-- compensated, so the old parameter has no reader left.
+--
+-- Deleted rather than deactivated, and deleted rather than renamed:
+--
+--   deactivating is not available — db_bootstrap._verify() treats a parameter
+--   with no active row as fatal, so leaving the rows in place inactive would
+--   refuse to launch;
+--   renaming would be a lie — 420 s meant "how long step 2 runs", while
+--   t2ref25_secs means "how long step 2 runs at 25 C", and carrying the old
+--   number across would silently commission a reference that was never
+--   measured as one;
+--   leaving it active would put a parameter in the config editor that nothing
+--   reads, which is the same failure the seeded-fallback purge removed.
+--
+-- The cost is this parameter's history.  Accepted: its values only ever
+-- answered a question that is no longer asked.  A no-op once nothing matches.
+DELETE FROM config WHERE role = 'protocol' AND name = 'reagent2_secs';
 
 
 -- samples, exposure, colorcard and data are intentionally left empty: they

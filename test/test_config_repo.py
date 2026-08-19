@@ -84,16 +84,38 @@ class TestSeededValues(ConfigTestCase):
 
     def test_protocol_durations(self):
         self.assertEqual(config.reagent1_secs(), 120)
-        self.assertEqual(config.reagent2_secs(), 420)
+        self.assertEqual(config.t2ref25_secs(), 720)
+        self.assertEqual(config.q10(), 2.0)
         self.assertEqual(config.analysis_secs(), 1.5)
 
     def test_runtime_timing(self):
         self.assertEqual(config.main_loop_poll_s(), 0.02)
         self.assertEqual(config.shutdown_timeout_s(), 15.0)
 
+
+
     def test_capture_selection(self):
         self.assertEqual(config.capture_led_color_order()[0], "photo_red")
         self.assertEqual(len(config.capture_led_color_order()), 10)
+
+    def test_preimage_selection(self):
+        """
+        The pre-image's own sweep, separate from the measurement's.
+
+        Two LEDs and a negative shift are not arbitrary defaults: royal blue
+        is the only illuminant the dye moves at low concentrations, red is the
+        dye-blind control, and an undyed pad clips at e* so the exposure has
+        to come down.  A change here changes what lands on an unreacted strip.
+        """
+        self.assertTrue(config.capture_preimage_enabled())
+        self.assertEqual(config.capture_preimage_led_order(),
+                         ["royal_blue", "red"])
+        self.assertEqual(config.capture_preimage_rung_shift(), -2)
+
+    def test_the_preimage_sweeps_fewer_leds_than_the_measurement(self):
+        """The whole point of the path: less light on an unreacted pad."""
+        self.assertLess(len(config.capture_preimage_led_order()),
+                        len(config.capture_led_color_order()))
 
     def test_backlight_pin(self):
         self.assertEqual(config.backlight_pin(), 13)
@@ -109,6 +131,54 @@ class TestSeededValues(ConfigTestCase):
         self.assertEqual(config.overrides(), [])
         self.assertOneActiveRowPerParameter()
 
+
+class TestReagent2Compensation(ConfigTestCase):
+    """
+    reagent2_secs(theta) = t2ref25_secs * q10 ** ((25 - theta) / 10).
+
+    The Gutzeit colour development runs faster warm and slower cold, so the
+    wait is scaled to develop every sample to the same extent rather than for
+    the same time.
+    """
+
+    def test_at_the_reference_it_is_the_reference(self):
+        self.assertEqual(config.reagent2_secs(25.0), 720)
+
+    def test_ten_degrees_colder_doubles_the_wait(self):
+        self.assertEqual(config.reagent2_secs(15.0), 1440)
+
+    def test_ten_degrees_warmer_halves_the_wait(self):
+        self.assertEqual(config.reagent2_secs(35.0), 360)
+
+    def test_it_interpolates_between_the_decades(self):
+        # 720 * sqrt(2), rounded to whole seconds.
+        self.assertEqual(config.reagent2_secs(20.0), 1018)
+
+    def test_q10_of_one_removes_the_compensation(self):
+        """The documented off switch: 1 ** anything is 1, so t2 is constant."""
+        config.save("protocol", "q10", 1.0)
+        waits = {config.reagent2_secs(t) for t in (0.0, 12.5, 25.0, 40.0)}
+        self.assertEqual(waits, {720})
+
+    def test_both_constants_are_calibratable(self):
+        config.save("protocol", "t2ref25_secs", 600)
+        config.save("protocol", "q10", 3.0)
+        self.assertEqual(config.reagent2_secs(25.0), 600)
+        self.assertEqual(config.reagent2_secs(15.0), 1800)
+
+    def test_a_freezing_sample_is_clamped_rather_than_run_for_hours(self):
+        """
+        At Q10 = 2 the wait doubles per 10 C below the reference, so an
+        unclamped near-freezing sample would ask for over an hour.
+        """
+        self.assertEqual(config.reagent2_secs(-20.0), config.MAX_REAGENT_SECS)
+
+    def test_the_result_is_whole_seconds(self):
+        self.assertIsInstance(config.reagent2_secs(21.5), int)
+
+    def test_it_is_monotonic_in_temperature(self):
+        waits = [config.reagent2_secs(t) for t in range(5, 41)]
+        self.assertEqual(waits, sorted(waits, reverse=True))
 
 class TestCaptureDir(ConfigTestCase):
     """capture_dir() resolves capture.directory; there is no env override."""
@@ -224,7 +294,7 @@ class TestSaving(ConfigTestCase):
 
     def test_saving_one_parameter_leaves_its_siblings_alone(self):
         config.save("protocol", "reagent1_secs", 45)
-        self.assertEqual(config.reagent2_secs(), 420)
+        self.assertEqual(config.t2ref25_secs(), 720)
 
     def test_the_superseded_value_is_kept_as_history(self):
         config.save("protocol", "reagent1_secs", 45)

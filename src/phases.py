@@ -33,6 +33,8 @@ Arbiter contract (what phases call; arbiter.py implements it)
     arb.timestamp() -> str          wall-clock string for the collect stamp
     arb.read_temperature()->float   sample the DS18B20 (°C), or None on failure
     arb.temperature_attached()->bool  is a DS18B20 on the bus at all
+    arb.reagent2_plan(slot)         (secs, temp_c, measured) for this slot's
+                                    reagent-2 countdown — see Reagent2Phase
     arb.goto(slot, phase_id)        advance slot to a phase — the live phase
                                     (runs activate, renders)
     arb.view(slot, phase_id)        preview a phase without advancing (no activate)
@@ -62,8 +64,11 @@ log = logging.getLogger(__name__)
 
 
 # Ordered protocol steps, used to place the reagent/capture status chips
-# relative to where the run actually is (slot.active_phase).
-_STEP_SEQUENCE = ("entry", "entry2", "reagent1", "reagent2", "read", "analysis")
+# relative to where the run actually is (slot.active_phase).  "preimage" is in
+# the sequence whether or not the chain includes it: it only has to sort in the
+# right place for the chips, and an id that never comes up costs nothing.
+_STEP_SEQUENCE = ("entry", "entry2", "preimage",
+                  "reagent1", "reagent2", "read", "analysis")
 _STEP_POS = {pid: i for i, pid in enumerate(_STEP_SEQUENCE)}
 
 # Font size of the timer label ("Remaining"/"Elapsed"/"Final"), set per phase
@@ -79,6 +84,21 @@ _STEP_INDICATORS = (
     ("chip_b", "reagent2", "2"),
     ("chip_c", "read",     "Capture"),
 )
+
+
+def _mmss(secs: int) -> str:
+    """
+    Seconds as m:ss, so a duration reads as the wait it is.
+
+    Lives here rather than in the arbiter because the reagent phases are what
+    put a duration in front of an operator; the arbiter's phases screen imports
+    it so both spell a countdown the same way.
+
+    Example:
+        >>> _mmss(720)
+        '12:00'
+    """
+    return f"{secs // 60}:{secs % 60:02d}"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -332,6 +352,9 @@ class Entry2Phase(Phase):
 
     phase_id = "entry2"
     prior    = "entry"
+    # Whichever step follows entry is decided per build, because the pre-image
+    # may or may not be in the chain — build_phases() sets this on the
+    # instance.  The class value is the no-pre-image protocol.
     next     = "reagent1"
     title    = ""                 # header shows the sample id
 
@@ -430,6 +453,90 @@ class Entry2Phase(Phase):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Pre-image  (the strip photographed before it meets any reagent)
+# ─────────────────────────────────────────────────────────────────────────────
+
+class PreImagePhase(Phase):
+    """
+    Photograph the dry, unreacted strip, so the reading can be divided by this
+    pad rather than by an average pad.
+
+    A reagent pad carries a colour of its own before anything is done to it,
+    and that colour varies from strip to strip by about as much as 5 ppb of
+    arsenic develops.  At the bottom of the range the blank is therefore not a
+    constant to assume but a thing to measure, and the only strip whose blank
+    is certainly right is this one.
+
+    Shaped like a reagent step rather than like Read: one button that runs it,
+    and the run itself advances the slot.  There is no skip, because a run
+    either follows the protocol or does not — an instrument that should not
+    pre-image is one with capture.preimage_enabled off, which drops this phase
+    out of the chain entirely (see build_phases()).
+
+    The images go into the sample's archive under /pre; the measurement sweep
+    later adds to the same file.  This step is what creates it, so h5file is
+    stamped here.
+    """
+
+    phase_id = "preimage"
+    prior    = "entry2"
+    next     = "reagent1"          # reached on completion, not by a button
+
+    def enter(self, pool, slot, arb) -> None:
+        is_live = slot.active_phase == self.phase_id
+        # Same reasoning as ReadPhase: a look at the sample ROI is most useful
+        # immediately before imaging, to confirm the strip is seated where the
+        # rectangle expects it — and the imaging tools share the camera with
+        # the capture path, so the button must be gone while one is running.
+        if arb.capture_available() and not slot.capturing:
+            import roi as _roi
+            pool.put("view_sample_btn", "View\nSample",
+                     on=lambda: arb.open_image_view(
+                         slot=slot, focus_role=_roi.ROLE_SAMPLE))
+        if is_live and slot.capturing:
+            pool.put("run_btn", "RUNNING", enabled=False)
+            pool["run_btn"].size = 18
+            pool.put("instr1", "Imaging - DO NOT TOUCH")
+            pool.put("instr2", "Blank image of the dry strip")
+        else:
+            pool.put("run_btn", f"Pre-image\n{slot.name}",
+                     on=lambda: self.capture(arb, slot),
+                     enabled=is_live and arb.capture_available())
+            pool["run_btn"].size = 18
+            pool.put("instr1", "Insert the dry strip")
+            pool.put("instr2", "Blank image, before reagent 1")
+        pool.put("instr3", self._leds_line())
+        self._show_steps(pool, slot)
+        self._show_collect(pool, slot)
+        self._chrome(pool, slot, arb, "CANCEL",
+                     main_on=lambda: arb.open_modal(slot, "cancel"))
+
+    def _leds_line(self) -> str:
+        """
+        The instr3 line naming what light this step will put on the strip.
+
+        Worth the line: the whole design of this step is about how little of
+        it there is, and an operator changing capture.preimage_led_order in
+        Menu should be able to see the change land here.  A configuration
+        that cannot be read is not gone unread by chance, so a failure to
+        reach the database leaves the line blank rather than the run stopped.
+        """
+        try:
+            import config_repo as config
+            return ", ".join(config.capture_preimage_led_order())
+        except Exception:                                  # noqa: BLE001
+            log.exception("preimage: cannot read the LED list")
+            return ""
+
+    def capture(self, arb, slot) -> None:
+        if arb.request_preimage(slot):
+            slot.capturing = True
+            arb.render(slot)
+        # Denied means the camera is busy; the arbiter leaves the button as it
+        # was and the operator can press again.
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Reagent  (armed <-> running, two instances)
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -451,6 +558,24 @@ class ReagentPhase(Phase):
         self.running     = running      # (instr1, instr2) while counting down
         self.start_label = start_label  # armed START button text (may be multi-line)
 
+    def duration(self, slot, arb) -> int:
+        """
+        Seconds this step counts down for `slot`.
+
+        Fixed here, and read fresh on every render and every START rather than
+        cached, so a duration edited in Menu takes effect on the next run
+        without a rebuild.  Overridden by Reagent2Phase, whose answer depends on
+        the sample.
+        """
+        return self.secs
+
+    def _basis(self, slot, arb) -> str:
+        """
+        The instr3 line explaining where this step's duration came from, or ""
+        to leave that line blank.  Only reagent 2 has anything to explain.
+        """
+        return ""
+
     def enter(self, pool, slot, arb) -> None:
         # Show the live countdown only when this reagent is the slot's live phase;
         # while it is merely being previewed, show the armed duration instead.
@@ -464,7 +589,7 @@ class ReagentPhase(Phase):
             i1, i2 = self.running
         else:
             # Armed: a paused, display-only preview at the full duration.
-            preview = TimerState.down(self.secs, arb.now())
+            preview = TimerState.down(self.duration(slot, arb), arb.now())
             preview.pause(arb.now())
             pool["timer"].bind(preview, interactive=False)
             pool.put("timer")
@@ -472,6 +597,9 @@ class ReagentPhase(Phase):
             i1, i2 = self.armed
         pool.put("instr1", i1)
         pool.put("instr2", i2)
+        basis = self._basis(slot, arb)
+        if basis:
+            pool.put("instr3", basis)
         self._show_steps(pool, slot)
         self._show_collect(pool, slot)
         # A running countdown does NOT lock nav: the timer keeps running in the
@@ -481,7 +609,7 @@ class ReagentPhase(Phase):
                      main_on=lambda: arb.open_modal(slot, "cancel"))
 
     def start(self, arb, slot) -> None:
-        slot.timer   = TimerState.down(self.secs, arb.now())
+        slot.timer   = TimerState.down(self.duration(slot, arb), arb.now())
         slot.running = True
         arb.persist(slot, **{f"{self.phase_id}_start": arb.epoch()})
         arb.render(slot)
@@ -491,6 +619,42 @@ class ReagentPhase(Phase):
         slot.timer   = None
         arb.persist(slot, **{f"{self.phase_id}_end": arb.epoch()})
         arb.goto(slot, self.next)
+
+
+class Reagent2Phase(ReagentPhase):
+    """
+    Reagent step 2, whose countdown is temperature-compensated.
+
+    The Gutzeit reaction runs faster warm and slower cold, so a fixed wait does
+    not develop every sample to the same extent.  The duration is therefore
+    computed per sample from the temperature entered on Entry screen 2:
+
+        t2(theta) = protocol.t2ref25_secs * protocol.q10 ** ((25 - theta) / 10)
+
+    Both constants live in the config table and are editable in Menu -> Config;
+    the reference duration is also on the Menu -> Reagent Phases stepper.
+    config_repo.reagent2_secs() owns the arithmetic and the clamp, and the
+    arbiter owns deciding which temperature answers — see arb.reagent2_plan().
+
+    Nothing is cached: the duration is recomputed on every render and again at
+    START, so correcting the temperature on Entry 2 and stepping back here
+    shows the corrected wait rather than a stale one.
+    """
+
+    def duration(self, slot, arb) -> int:
+        return arb.reagent2_plan(slot)[0]
+
+    def _basis(self, slot, arb) -> str:
+        """
+        Say which temperature the countdown was computed from, because the
+        operator is otherwise looking at a wait that changes between samples
+        with nothing on screen to explain it.  A stand-in temperature is shown
+        in brackets, the same convention Entry 2's Temp button uses for a value
+        that was not measured.
+        """
+        _, temp_c, measured = arb.reagent2_plan(slot)
+        shown = f"{temp_c:.1f} °C" if measured else f"[{temp_c:.1f} °C]"
+        return f"{shown}  ref {_mmss(arb.t2ref25_secs())} @25 °C"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -662,28 +826,48 @@ def _renumber(arb, slot) -> None:
 # Registry
 # ─────────────────────────────────────────────────────────────────────────────
 
-def build_phases(reagent1_secs: int = 120, reagent2_secs: int = 420) -> dict:
+def build_phases(reagent1_secs: int = 120, preimage: bool = True) -> dict:
     """
     Return {phase_id: Phase}, the whole protocol.
 
-    reagent1_secs / reagent2_secs let the caller set the reagent countdowns; the
-    arbiter passes the configured durations (config_repo.reagent{1,2}_secs),
-    which the simulation profile shortens so runs are quick to test and the
-    Menu -> Config screen overrides on the instrument itself.  That screen
-    rebuilds the phases through this function, so a new duration takes effect
-    without a restart.
+    reagent1_secs lets the caller set step 1's countdown; the arbiter passes the
+    configured duration (config_repo.reagent1_secs), which the Menu -> Reagent
+    Phases screen overrides on the instrument itself.  That screen rebuilds the
+    phases through this function, so a new duration takes effect without a
+    restart.
+
+    Step 2 takes no duration argument, because it does not have one duration:
+    Reagent2Phase asks the arbiter for a countdown computed from the sample's
+    temperature each time it needs one.  A change to protocol.t2ref25_secs or
+    protocol.q10 therefore lands without a rebuild at all.
+
+    `preimage` (config_repo.capture_preimage_enabled) inserts PreImagePhase
+    between entry 2 and reagent 1.  It is left OUT of the chain rather than
+    made skippable when off, so there is no half-state: a protocol either
+    blanks every strip or none of them, and a run cannot end up with some
+    strips carrying their own blank and some not.  The link is written in one
+    place here — the phases either side take their neighbour from this
+    function, not from their own class attributes.
+
+    Args:
+        reagent1_secs: Countdown for reagent step 1, in seconds.
+        preimage:      Whether the protocol includes the pre-image step.
     """
+    entry2 = Entry2Phase()
+    entry2.next = "preimage" if preimage else "reagent1"
     phases = [
         EntryPhase(),
-        Entry2Phase(),
-        ReagentPhase("reagent1", reagent1_secs, "reagent2", prior="entry2",
+        entry2,
+        ReagentPhase("reagent1", reagent1_secs, "reagent2",
+                     prior="preimage" if preimage else "entry2",
                      armed=("Add Reagent 1", "and press START"),
                      running=("Stir 20 sec, then rest", "Prepare reagent 2 and strip"),
                      start_label="START\n1"),
-        ReagentPhase("reagent2", reagent2_secs, "read", prior="reagent1",
-                     armed=("Add reagent 2 and cap/strip", "Ventilate and press START"),
-                     running=("Stir 20 sec, then rest", "Ventilate"),
-                     start_label="START\n2"),
+        # secs=0 is never read: Reagent2Phase.duration() overrides it outright.
+        Reagent2Phase("reagent2", 0, "read", prior="reagent1",
+                      armed=("Add reagent 2 and cap/strip", "Ventilate and press START"),
+                      running=("Stir 20 sec, then rest", "Ventilate"),
+                      start_label="START\n2"),
         ReadPhase(),
         AnalysisPhase(),
         # Cancel offers three outcomes: stop the run but keep the reserved DB row
@@ -703,6 +887,8 @@ def build_phases(reagent1_secs: int = 120, reagent2_secs: int = 420) -> dict:
         ModalPhase("dup", "Sample number already in use",
                    [("New number", _renumber), ("Edit", None)]),
     ]
+    if preimage:
+        phases.append(PreImagePhase())
     return {p.phase_id: p for p in phases}
 
 
@@ -754,6 +940,9 @@ if __name__ == "__main__":
             self.fail_begin = False       # flip on to simulate a duplicate samp_no
             self.temp_c = 21.7            # canned DS18B20 reading
             self.temp_probe = True        # flip off to simulate no probe
+            # protocol.t2ref25_secs / protocol.q10, canned like the defaults.
+            self.t2ref25 = 720
+            self.q10 = 2.0
 
         # clock / stamps
         def now(self):        return self.clock
@@ -762,6 +951,18 @@ if __name__ == "__main__":
         def read_temperature(self):
             return self.temp_c if self.temp_probe else None
         def temperature_attached(self):  return self.temp_probe
+
+        # reagent 2's temperature-compensated countdown.  Mirrors the real
+        # arbiter: the sample's own temperature when it has one, otherwise the
+        # configured stand-in, flagged so the screen can bracket it.
+        def t2ref25_secs(self):  return self.t2ref25
+        def reagent2_plan(self, slot):
+            t = _to_float(slot.record.get("samp_degC"))
+            measured = t is not None
+            if not measured:
+                t = DEFAULTS.default_temperature
+            secs = round(self.t2ref25 * self.q10 ** ((25.0 - t) / 10.0))
+            return max(1, min(3600, secs)), t, measured
 
         # database / sample lifecycle.  The numbering is modelled rather than
         # canned, because which number a slot ends up holding is exactly what
@@ -847,6 +1048,20 @@ if __name__ == "__main__":
             self.capturing_slot = None
             self.persist(slot, capture_end=self.epoch(), h5file="fake.h5")
             self.goto(slot, "analysis")
+
+        # pre-image.  Note what it does NOT do: no capture_start, no timer.
+        # It stamps h5file because it is the run that creates the archive,
+        # and it advances to reagent 1 rather than to analysis.
+        def request_preimage(self, slot):
+            if self.capturing_slot is not None:
+                return False
+            self.capturing_slot = slot
+            return True
+        def complete_preimage(self, slot):
+            slot.capturing = False
+            self.capturing_slot = None
+            self.persist(slot, h5file="fake.h5")
+            self.goto(slot, "reagent1")
         def start_analysis(self, slot):  self.calls.append("start_analysis")
         def analysis_done(self, slot, text):
             slot.result = text
@@ -985,19 +1200,42 @@ if __name__ == "__main__":
     check("failed read marked",    A.record["samp_degC"], "err")
     arb.temp_c = 21.7
 
-    print("== entry2: collect stamp + Continue persists -> reagent1 ==")
+    print("== entry2: collect stamp + Continue persists -> preimage ==")
     A.record["samp_degC"] = "21.5"; A.record["samp_grams"] = "3.2"   # writethrough sim
     A.record["remark"] = "cloudy sample"                             # writethrough sim
     press(pool, "collectdt_lbl")                   # Collect label stamps the datetime
     check("collect stamped",  bool(A.record["collect_dt"]), True)
     press(pool, "main_btn")                        # Continue
-    check("phase reagent1",   A.phase, "reagent1")
+    check("phase preimage",   A.phase, "preimage")
     check("degC persisted (float)",  A.record["samp_degC"], 21.5)
     check("grams persisted (float)", A.record["samp_grams"], 3.2)
     check("remark persisted",        A.record["remark"], "cloudy sample")
+    check("run_btn label",    pool["run_btn"].label, "Pre-image\nA")
+    check("instr1",           pool["instr1"].text, "Insert the dry strip")
+    check("main is CANCEL",   pool["main_btn"].label, "CANCEL")
+
+    print("== preimage runs, stamps h5file, and advances to reagent1 ==")
+    press(pool, "run_btn")
+    check("capturing",        A.capturing, True)
+    check("run_btn is RUNNING", pool["run_btn"].label, "RUNNING")
+    check("no View Sample while imaging",
+          pool["view_sample_btn"].visible, False)
+    check("no capture_start",  A.record["capture_start"], None)
+    arb.complete_preimage(A)
+    check("phase reagent1",   A.phase, "reagent1")
+    check("h5file stamped",   A.record["h5file"], "fake.h5")
+    check("capture_end still empty", A.record["capture_end"], None)
     check("run_btn label",    pool["run_btn"].label, "START\n1")
     check("instr1",           pool["instr1"].text, "Add Reagent 1")
-    check("main is CANCEL",   pool["main_btn"].label, "CANCEL")
+
+    print("== a protocol without the pre-image links entry2 straight to reagent1 ==")
+    plain = build_phases(preimage=False)
+    check("no preimage phase",  "preimage" in plain, False)
+    check("entry2 -> reagent1", plain["entry2"].next, "reagent1")
+    check("reagent1 <- entry2", plain["reagent1"].prior, "entry2")
+    check("with it, entry2 -> preimage", arb.phases["entry2"].next, "preimage")
+    check("with it, reagent1 <- preimage",
+          arb.phases["reagent1"].prior, "preimage")
 
     print("== reagent1 START stamps reagent1_start ==")
     press(pool, "run_btn")
@@ -1024,9 +1262,38 @@ if __name__ == "__main__":
     check("advanced to reagent2", A.phase, "reagent2")
     check("alarm sounded",     ("alarm", "A") in arb.calls, True)
 
+    print("== reagent2's countdown is computed from the sample temperature ==")
+    # 21.5 C was persisted on entry2, so the wait is longer than the 12:00
+    # reference: 720 * 2 ** ((25 - 21.5) / 10) = 918 s.
+    check("armed at the compensated wait",
+          arb.reagent2_plan(A)[0], 918)
+    check("and says what it was computed from",
+          pool["instr3"].text, "21.5 °C  ref 12:00 @25 °C")
+
+    print("== a colder sample waits longer, a warmer one less ==")
+    A.record["samp_degC"] = 15.0; arb.render(A)
+    check("10 C below the reference doubles it", arb.reagent2_plan(A)[0], 1440)
+    A.record["samp_degC"] = 35.0; arb.render(A)
+    check("10 C above halves it",                arb.reagent2_plan(A)[0], 360)
+
+    print("== Q10 = 1 turns the compensation off ==")
+    arb.q10 = 1.0
+    check("constant, whatever the temperature",
+          {arb.reagent2_plan(A)[0] for A.record["samp_degC"] in (5.0, 25.0, 40.0)},
+          {720})
+    arb.q10 = 2.0
+
+    print("== with no temperature at all, the stand-in is used and bracketed ==")
+    A.record["samp_degC"] = None; arb.render(A)
+    _secs, _t, _measured = arb.reagent2_plan(A)
+    check("falls back to the default", _t, DEFAULTS.default_temperature)
+    check("flagged as not measured",   _measured, False)
+    check("bracketed on screen",  pool["instr3"].text.startswith("[21.0 °C]"), True)
+
     print("== reagent2 -> read (capture) ==")
+    A.record["samp_degC"] = 21.5; arb.render(A)
     press(pool, "run_btn")                         # START reagent2
-    arb.clock += 421
+    arb.clock += 919                               # past the computed deadline
     arb.poll()
     check("advanced to read",  A.phase, "read")
     check("CAPTURE enabled",   pool["run_btn"].enabled, True)

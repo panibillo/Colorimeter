@@ -26,6 +26,31 @@ Layout:
     /leds/<color>/lit/<label>/<ch>        attrs: exposure_us, captured_dt
     /leds/<color>/dark/<when>_<label>     soft link → /dark/<when>_<us>us
     /dark/<when>_<us>us/<ch>              attrs: exposure_us, captured_dt
+    /photo                                raw JPEG bytes  (optional)
+    /pre/…                                the same shape again, for the
+                                          pre-image of the unreacted strip
+
+Sections
+--------
+Everything from `/meta` down repeats under a *section* prefix, and `section`
+is the constructor argument that chooses it.  There is exactly one section in
+use — "/pre", holding the pre-image: a short, deliberately low-dose sweep of
+the strip taken *before* it meets any reagent, so the pad's own manufactured
+colour can be divided out of the measurement rather than assumed from a
+shared blank.  The measurement sweep itself writes at the root (section "").
+
+The two sweeps are separate runs minutes apart, and they land in one archive
+because they describe one strip: the pre-image is only meaningful beside the
+measurement it corrects.  The pre-image run creates the file; the measurement
+run reopens it with mode="a".  A run that finds no pre-image behaves exactly
+as it always did, so an archive with no /pre is not a broken one — it is a
+strip that was not pre-imaged.
+
+Each section carries its own `<section>/meta`, because the ROI geometry can
+be edited between the two sweeps and each one's layers are a crop of whatever
+`bound` was in force when *it* ran.  The root attributes belong to whichever
+run created the file and are not restamped by the second, so `suite_id` names
+the moment the archive was opened.
 
 `/meta` carries the ROI geometry, camera configuration, instrument identity
 and sample record, so an archive can be interpreted without consulting any
@@ -94,7 +119,13 @@ from hdf5write import Hdf5Writer
 # statistics, instead of 45 kB of noise. A reader that indexes a layer without
 # checking will get an empty array rather than the KeyError it would get from
 # an absent one, so every reader of image data needs is_omitted().
-SCHEMA_VERSION    = 3
+# 3 -> 4: an archive may carry a section prefix holding a second sweep of the
+# same strip — "/pre", the pre-image taken before the reagents. Everything a
+# version-3 reader knows about is still exactly where it was, so a version-3
+# reader gets the measurement sweep right and simply does not see the
+# pre-image; a reader that wants the blank looks under /pre and accepts its
+# absence.
+SCHEMA_VERSION    = 4
 SUITE_DESCRIPTION = "Colorimeter camtest8 capture suite"
 METADATA_NAME     = "meta"
 
@@ -213,23 +244,42 @@ class CaptureSuiteWriter:
         self, path, suite_id: str,
         description: str = SUITE_DESCRIPTION,
         schema_version: int = SCHEMA_VERSION,
+        section: str = "",
+        mode: str = "w",
     ):
         """
-        Open a new archive and stamp the root attributes.
+        Open an archive and stamp the root attributes.
 
         Args:
-            path:           Path of the .h5 file to create (overwritten).
+            path:           Path of the .h5 file to write.
             suite_id:       Identifier for this capture suite, conventionally
                             the capture timestamp (e.g. "20260615_2120").
             description:    Human-readable description stored at the root.
             schema_version: Layout version stored at the root.
+            section:        Group prefix everything this run writes hangs off,
+                            e.g. "/pre" for a pre-image.  "" (the default) is
+                            the measurement sweep, at the root.  See the module
+                            docstring.
+            mode:           "w" to create the archive, overwriting any file of
+                            that name, or "a" to add to one that already exists
+                            — which is how the measurement sweep joins the
+                            pre-image that opened the file.
+
+        Raises:
+            OSError: mode="a" and the file cannot be opened for appending.
         """
-        self._w = Hdf5Writer(path, mode="w")
-        self._w.set_attrs("/", {
-            "suite_id":       suite_id,
-            "description":    description,
-            "schema_version": schema_version,
-        })
+        self._w = Hdf5Writer(path, mode=mode)
+        self._section = section.rstrip("/")
+        # The root belongs to whoever created the file: a second run appending
+        # to it describes itself in its own section and leaves these alone, so
+        # suite_id keeps naming the moment the archive was opened rather than
+        # sliding forward to the last thing written into it.
+        if "suite_id" not in self._w.attrs_of("/"):
+            self._w.set_attrs("/", {
+                "suite_id":       suite_id,
+                "description":    description,
+                "schema_version": schema_version,
+            })
         # Exposure keys of the dark groups already written, so a dark frame
         # shared by several LEDs is stored once.
         self._dark_written: set = set()
@@ -272,7 +322,23 @@ class CaptureSuiteWriter:
             >>> attrs = capture_meta.root_attrs(meta)   # doctest: +SKIP
             >>> w.add_metadata(meta, attrs)            # doctest: +SKIP
         """
-        self._w.write_metadata("/", METADATA_NAME, meta)
+        # Written in two places when this run is a section, and the two say
+        # different things. The root record describes the archive as a whole
+        # and every run rewrites it, so it ends up describing the last sweep
+        # written — which is the measurement, the one an analysis wants. The
+        # section's own copy is never touched again, so it preserves the ROI
+        # geometry and sample record as they stood when *that* sweep ran. If
+        # `bound` is edited between the pre-image and the measurement, only
+        # the section copy can still locate the pre-image's layers.
+        #
+        # Delete first: a run appending to an archive a pre-image opened finds
+        # a record already at the root, and HDF5 will not write over a dataset
+        # that exists. Only ever a few hundred bytes of JSON, which is the case
+        # delete() documents as safe.
+        for path in ("/", self._section):
+            if path:
+                self._w.delete(f"{path.rstrip('/')}/{METADATA_NAME}")
+                self._w.write_metadata(path, METADATA_NAME, meta)
         if root_attrs:
             self._w.set_attrs("/", root_attrs)
 
@@ -312,16 +378,19 @@ class CaptureSuiteWriter:
         self._w.write_bytes("/", "photo", jpeg_bytes, attrs=meta)
 
     # ── Path construction (the schema lives here) ────────────────────
+    #
+    # Every path below is built from self._section, so the whole layout moves
+    # under a prefix together or not at all. That is what keeps a pre-image
+    # from colliding with the measurement sweep: both sweep royal_blue, and
+    # only the prefix tells /pre/leds/royal_blue from /leds/royal_blue.
 
-    @staticmethod
-    def _led_group(color: str) -> str:
+    def _led_group(self, color: str) -> str:
         """Return the group path holding everything for one LED color."""
-        return f"/leds/{color}"
+        return f"{self._section}/leds/{color}"
 
-    @staticmethod
-    def _lit_group(color: str, label: str) -> str:
+    def _lit_group(self, color: str, label: str) -> str:
         """Return the group path for one LED's lit frames at one exposure."""
-        return f"/leds/{color}/lit/{label}"
+        return f"{self._section}/leds/{color}/lit/{label}"
 
     @staticmethod
     def _dark_key(exposure_us: int, when: str = "after") -> str:
@@ -342,10 +411,9 @@ class CaptureSuiteWriter:
         """
         return f"{when}_{exposure_us}us"
 
-    @classmethod
-    def _dark_group(cls, exposure_us: int, when: str = "after") -> str:
+    def _dark_group(self, exposure_us: int, when: str = "after") -> str:
         """Return the group path of the shared dark frames for an exposure."""
-        return f"/dark/{cls._dark_key(exposure_us, when)}"
+        return f"{self._section}/dark/{self._dark_key(exposure_us, when)}"
 
     # ── Per-LED content ──────────────────────────────────────────────
 
@@ -515,7 +583,7 @@ class CaptureSuiteWriter:
             return False
         self._w.link(
             self._dark_group(exposure_us, when),
-            f"/leds/{color}/dark/{when}_{label}",
+            f"{self._section}/leds/{color}/dark/{when}_{label}",
         )
         return True
 

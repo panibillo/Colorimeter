@@ -87,10 +87,13 @@ Public surface
 
     capture_dir() / capture_suite_id() / capture_archive_name()
     capture_led_color_order() / capture_camera_warmup_s()
+    capture_preimage_enabled() / capture_preimage_led_order()
+    capture_preimage_rung_shift()
     capture_prefetch_budget_s()
     capture_layer_keep_min_dn() / capture_layer_keep_max_dn()
     inspection_exposure_us() / default_focus_diopter()
-    reagent1_secs() / reagent2_secs() / analysis_secs()
+    reagent1_secs() / analysis_secs()
+    t2ref25_secs() / q10() / reagent2_secs(temp_c)
     main_loop_poll_s() / shutdown_timeout_s()
     backlight_pin()
 
@@ -821,6 +824,46 @@ def capture_photo_enabled() -> bool:
     return bool(get("capture", "photo_enabled"))
 
 
+# ── The pre-image ───────────────────────────────────────────────────────────
+# Three parameters, deliberately separate from the measurement sweep's own
+# (led_color_order, photo_enabled, the exposure group), because the two sweeps
+# answer different questions and are tuned against different constraints: the
+# measurement wants every illuminant it can use, and the pre-image wants as
+# little light on an unreacted pad as will still measure the blank.  Folding
+# either into the other would mean an edit made for one silently retuning the
+# other.  See capture_runner's MODE_PRE for what the values mean physically.
+
+def capture_preimage_enabled() -> bool:
+    """True when a run offers a pre-image of the strip before reagent 1."""
+    return bool(get("capture", "preimage_enabled"))
+
+
+def capture_preimage_led_order() -> list:
+    """
+    LED color-name sweep order for the pre-image, as a list.
+
+    Seeded royal_blue,red.  Royal blue is the only illuminant whose reading
+    the arsenic dye moves at the concentrations where a per-strip blank is
+    worth having; red is dye-blind, so it costs only long-wavelength light and
+    measures how much of a strip's blank is a plain brightness offset.
+    """
+    raw = str(get("capture", "preimage_led_order"))
+    return [c.strip() for c in raw.split(",") if c.strip()]
+
+
+def capture_preimage_rung_shift() -> int:
+    """
+    Whole ladder rungs below e* the pre-image shoots at (negative shortens).
+
+    Seeded -2.  The exposure ladder is calibrated so e* puts the gray card near
+    half scale, and an unexposed pad reflects about 2.2x the card in royal
+    blue: at e* it would clip, and a clipped blank is no blank at all.  Two
+    rungs is 1/2.25, which lands it near mid-scale.  See
+    exposure_repo.shift_exposures().
+    """
+    return int(get("capture", "preimage_rung_shift"))
+
+
 def capture_photo_wb_gains() -> tuple:
     """
     Colour gains (red, blue) rendering the final photo, as a 2-tuple.
@@ -875,15 +918,87 @@ def required_roi_roles() -> tuple:
 # under a 'simulation' profile so desktop runs finished quickly; that profile
 # is gone, so a developer wanting short waits sets them in their own database
 # ($COLORIMETER_DB) or from the config editor.
+#
+# Step 1 is a fixed duration.  Step 2 is not — see reagent2_secs().
+
+# The temperature protocol.t2ref25_secs is quoted at.  A code constant, not a
+# setting: it is baked into that parameter's name, and moving it would change
+# what every stored t2ref25_secs value means without changing the value.
+REF_TEMP_C = 25.0
+
+# Bounds on a reagent countdown, in seconds.  Also the range the phases screen
+# holds a typed duration inside (arbiter._clamp_secs), so both the operator's
+# hand and the Q10 formula are held to one answer about what is runnable.
+# These are limits on the code's behaviour rather than values that could
+# reasonably differ per instrument, which is why they are here and not rows.
+MIN_REAGENT_SECS, MAX_REAGENT_SECS = 1, 3600
+
 
 def reagent1_secs() -> int:
     """Countdown for reagent step 1, in seconds."""
     return int(get("protocol", "reagent1_secs"))
 
 
-def reagent2_secs() -> int:
-    """Countdown for reagent step 2, in seconds."""
-    return int(get("protocol", "reagent2_secs"))
+def t2ref25_secs() -> int:
+    """Reagent step 2's countdown at the 25 °C reference, in seconds."""
+    return int(get("protocol", "t2ref25_secs"))
+
+
+def q10() -> float:
+    """Factor the reagent step 2 reaction rate changes by per 10 °C."""
+    return float(get("protocol", "q10"))
+
+
+def reagent2_secs(temp_c: float) -> int:
+    """
+    Countdown for reagent step 2 at a sample temperature, in seconds.
+
+        t2(theta) = t2ref25_secs * q10 ** ((25 - theta) / 10)
+
+    The Gutzeit colour development is a chemical reaction, so it runs faster
+    when the sample is warm and slower when it is cold.  Holding the *time*
+    fixed therefore does not hold the *extent of reaction* fixed, which is what
+    the strip is read against — a cold sample read at a warm sample's schedule
+    is read early, and reads low.  Q10 is the standard way to state that
+    sensitivity: the factor the rate changes by per 10 °C, an empirical stand-in
+    for the Arrhenius activation energy over the narrow range field samples
+    actually span.
+
+    Both constants are calibratable, and the two limiting cases are worth
+    knowing:
+
+        q10 = 1     no compensation at all — 1 ** anything is 1, so this
+                    reduces to the constant t2ref25_secs.  This is how an
+                    operator turns the feature off without a second flag.
+        q10 = 2     the generic value derived from Arrhenius: the rate doubles
+                    per 10 °C, so the wait halves.  What the instrument ships
+                    with, and a reasonable starting point for a kit nobody has
+                    characterised yet.
+
+    Calibrate t2ref25_secs by developing strips of a known standard at 25 °C
+    and taking the time the colour stops advancing; calibrate q10 by repeating
+    that at a second temperature and solving the formula for it.
+
+    Args:
+        temp_c: The sample's initial temperature in °C, entered before the run
+                starts (Entry screen 2).
+
+    Returns:
+        Whole seconds, held inside MIN_REAGENT_SECS..MAX_REAGENT_SECS.  The
+        clamp matters at the cold end: at q10 = 2 the wait doubles per 10 °C
+        below the reference, so a near-freezing sample would otherwise ask for
+        over an hour.  A clamped countdown means the strip is read before the
+        reaction has finished, so the result is a floor, not a measurement —
+        the caller is expected to say so.
+
+    Example:
+        >>> reagent2_secs(25.0)                        # doctest: +SKIP
+        720
+        >>> reagent2_secs(15.0)                        # doctest: +SKIP
+        1440
+    """
+    secs = t2ref25_secs() * q10() ** ((REF_TEMP_C - float(temp_c)) / 10.0)
+    return max(MIN_REAGENT_SECS, min(MAX_REAGENT_SECS, round(secs)))
 
 
 def analysis_secs() -> float:
@@ -940,10 +1055,24 @@ if __name__ == "__main__":
 
     print("== the seeded values are what the table holds ==")
     check("reagent1", reagent1_secs(), 120)
+    check("t2 reference", t2ref25_secs(), 720)
+    check("Q10", q10(), 2.0)
     check("extension", capture_archive_name("X"), "X.h5")
     check("dir is absolute", capture_dir().is_absolute(), True)
     check("colour order", capture_led_color_order()[0], "photo_red")
     check("backlight", backlight_pin(), 13)
+
+    print("== reagent 2 is computed from the sample temperature ==")
+    check("at the reference, the reference value", reagent2_secs(25.0), 720)
+    check("10 C colder doubles",                   reagent2_secs(15.0), 1440)
+    check("10 C warmer halves",                    reagent2_secs(35.0), 360)
+    check("and it interpolates",                   reagent2_secs(20.0), 1018)
+    save("protocol", "q10", 1.0)
+    check("Q10=1 is a constant, whatever the temperature",
+          {reagent2_secs(t) for t in (0.0, 25.0, 40.0)}, {720})
+    restore("protocol", "q10")
+    check("a freezing sample is clamped, not left to run for hours",
+          reagent2_secs(-20.0), MAX_REAGENT_SECS)
 
     print("== a missing parameter raises, it does not quietly work ==")
     try:

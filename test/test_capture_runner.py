@@ -641,12 +641,14 @@ class TestColorOrderResolution(RunnerTestCase):
 # Normal capture path — captures only the exposures stored in the DB
 # ---------------------------------------------------------------------------
 
-class TestNormalMode(RunnerTestCase):
+class CalibratedExposures(RunnerTestCase):
     """
-    The normal path reads each LED's exposures from the `exposure` table for a
-    chosen group and captures exactly those — no white-LED calibration, no e*
-    search. Tests run against a throwaway copy of the real DB so the live one
-    is never touched.
+    A runner test with an `exposure` table to read from.
+
+    Every path that is not the calibration search needs stored exposures, so
+    the fixture is shared: a throwaway copy of the real database, emptied of
+    exposures and refilled with two LEDs the FakeLeds bank actually has
+    (1 -> amber, 2 -> blue, 10 -> white). The live database is never touched.
     """
 
     def setUp(self):
@@ -662,7 +664,6 @@ class TestNormalMode(RunnerTestCase):
         shutil.copy(_ROOT / "src" / "colorimeter.sqlite", tmpdb)
         db.DBNAME = str(tmpdb)
         db.write_one("DELETE FROM exposure")
-        # FakeLeds colors: 1 -> amber, 2 -> blue, 10 -> white.
         exposure_repo.write_all_groups("amber", exposure_repo.groups_from_estar(30_000))
         exposure_repo.write_all_groups("blue",  exposure_repo.groups_from_estar(20_000))
 
@@ -670,6 +671,14 @@ class TestNormalMode(RunnerTestCase):
         self._db.DBNAME = self._saved_dbname
         self._dbdir.cleanup()
         super().tearDown()
+
+
+class TestNormalMode(CalibratedExposures):
+    """
+    The normal path reads each LED's exposures from the `exposure` table for a
+    chosen group and captures exactly those — no white-LED calibration, no e*
+    search.
+    """
 
     def make_runner(self, **kwargs):
         """Both capture paths sweep CaptureConfig.led_colors, so that is where
@@ -760,37 +769,166 @@ class TestNormalMode(RunnerTestCase):
 
 
 # ---------------------------------------------------------------------------
+# Pre-image path — the unreacted strip, photographed into the same archive
+# ---------------------------------------------------------------------------
+
+class TestPreImage(CalibratedExposures):
+    """
+    MODE_PRE is the normal path with three deliberate differences, and each is
+    about not putting light on a pad that has not reacted yet: fewer LEDs, one
+    exposure shifted down the ladder, and no closing white-LED photograph.
+
+    The fourth thing that matters is not about light at all — where the frames
+    land. Both sweeps of one strip belong in one archive, so the pre-image
+    creates the file and writes under /pre, and the measurement reopens it and
+    writes at the root beside it.
+    """
+
+    def make_runner(self, **kwargs):
+        kwargs.setdefault("led_colors", ["amber"])
+        return super().make_runner(**kwargs)
+
+    def pre_runner(self, **kwargs):
+        """A pre-image run: one exposure, two rungs down, as configured."""
+        kwargs.setdefault("mode", capture_runner.MODE_PRE)
+        kwargs.setdefault("exposure_group", "1")
+        kwargs.setdefault("rung_shift", -2)
+        return self.make_runner(**kwargs)
+
+    # ── where the frames land ───────────────────────────────────────────
+
+    def test_frames_land_under_the_pre_section(self):
+        runner = self.pre_runner()
+        self.run_to_completion(runner)
+        with self.archive(runner) as f:
+            for ch in ("B", "Gb", "Gr", "R"):
+                self.assertIn(f"/pre/leds/amber/lit/e0/{ch}", f)
+            self.assertIn("/pre/meta", f)
+            # Nothing of a pre-image belongs at the root, where a reader
+            # looking for the measurement would find it and use it as one.
+            self.assertNotIn("/leds", f)
+            self.assertNotIn("/dark", f)
+
+    def test_the_measurement_adds_to_the_preimage_archive(self):
+        """One strip, one .h5 — the whole reason for the section prefix."""
+        pre = self.pre_runner()
+        self.run_to_completion(pre)
+
+        measurement = self.make_runner(mode="normal", exposure_group="2",
+                                       archive_path=pre.out_path)
+        self.run_to_completion(measurement)
+
+        self.assertEqual(measurement.out_path, pre.out_path)
+        with self.archive(measurement) as f:
+            self.assertIn("/pre/leds/amber/lit/e0/B", f)   # survived the append
+            self.assertIn("/leds/amber/lit/e0/B", f)       # and the reading is in
+            self.assertIn("/leds/amber/lit/e1/B", f)
+            self.assertIn("/meta", f)
+            self.assertIn("/pre/meta", f)
+
+    def test_the_root_keeps_the_suite_id_of_whoever_opened_the_file(self):
+        """
+        The archive is named by the run that created it, not the last one to
+        write into it — otherwise suite_id would silently slide forward and
+        stop meaning what the /meta records say it means.
+        """
+        pre = self.pre_runner()
+        self.run_to_completion(pre)
+        with self.archive(pre) as f:
+            opened = f.attrs["suite_id"]
+
+        measurement = self.make_runner(mode="normal", exposure_group="1",
+                                       archive_path=pre.out_path)
+        self.run_to_completion(measurement)
+        with self.archive(measurement) as f:
+            self.assertEqual(f.attrs["suite_id"], opened)
+
+    def test_a_measurement_without_a_preimage_still_opens_its_own_archive(self):
+        """A strip that was not pre-imaged is not a broken run."""
+        runner = self.make_runner(mode="normal", exposure_group="1")
+        self.run_to_completion(runner)
+        with self.archive(runner) as f:
+            self.assertIn("/leds/amber/lit/e0/B", f)
+            self.assertNotIn("/pre", f)
+
+    # ── how little light it uses ────────────────────────────────────────
+
+    def test_one_exposure_two_rungs_below_the_group(self):
+        runner = self.pre_runner()
+        self.run_to_completion(runner)
+        want = self._er.shift_exposures(self._er.read_exposures("amber", "1"), -2)
+
+        self.assertEqual(runner.results[0].exposures_us, want)
+        self.assertEqual(len(want), 1)
+        self.assertLess(want[0], self._er.read_exposures("amber", "1")[0])
+
+    def test_no_shift_leaves_the_calibrated_ladder_alone(self):
+        """rung_shift is opt-in: a measurement must get e* exactly."""
+        runner = self.make_runner(mode="normal", exposure_group="3")
+        self.run_to_completion(runner)
+        self.assertEqual(runner.results[0].exposures_us,
+                         self._er.read_exposures("amber", "3"))
+
+    def test_no_closing_photograph(self):
+        """
+        The photo is taken under the white LED — broadband, and so more blue
+        on an unreacted pad than the whole rest of this path.
+        """
+        runner = self.pre_runner()
+        self.run_to_completion(runner)
+        with self.archive(runner) as f:
+            self.assertNotIn("photo", f)
+        self.assertNotIn(capture_runner.WHITE_LED_CH,
+                         [ch for ch, on in self.leds.history if on])
+
+    def test_the_leds_it_sweeps_are_the_ones_it_was_given(self):
+        """Nothing else comes on — the LED list is the whole light budget."""
+        runner = self.pre_runner(led_colors=["amber", "blue"])
+        self.run_to_completion(runner)
+        lit = {ch for ch, on in self.leds.history if on}
+        self.assertEqual(lit, {self.leds.channel_of("amber"),
+                               self.leds.channel_of("blue")})
+
+    # ── what the archive says about itself ──────────────────────────────
+
+    def test_the_metadata_names_the_path_that_wrote_it(self):
+        """
+        A reader must be able to tell a pre-image's frames from a
+        measurement's without inferring it from the exposure group.
+        """
+        runner = self.pre_runner()
+        self.run_to_completion(runner)
+        with self.archive(runner) as f:
+            meta = json.loads(f["/pre/leds/amber/led_metadata"][()])
+        self.assertEqual(meta["mode"], capture_runner.MODE_PRE)
+
+    def test_the_two_sweeps_are_told_apart_in_one_archive(self):
+        pre = self.pre_runner()
+        self.run_to_completion(pre)
+        measurement = self.make_runner(mode="normal", exposure_group="1",
+                                       archive_path=pre.out_path)
+        self.run_to_completion(measurement)
+
+        with self.archive(measurement) as f:
+            pre_meta  = json.loads(f["/pre/leds/amber/led_metadata"][()])
+            meas_meta = json.loads(f["/leds/amber/led_metadata"][()])
+        self.assertEqual(pre_meta["mode"], capture_runner.MODE_PRE)
+        self.assertEqual(meas_meta["mode"], capture_runner.MODE_NORMAL)
+        self.assertLess(pre_meta["exposures_us"]["e0"],
+                        meas_meta["exposures_us"]["e0"])
+
+
+# ---------------------------------------------------------------------------
 # Normal path: prefetch/capture split (camera setup and focus during reagent2)
 # ---------------------------------------------------------------------------
 
-class TestNormalModePrefetchSplit(RunnerTestCase):
+class TestNormalModePrefetchSplit(CalibratedExposures):
     """
     run_prefetch() and run_capture() are meant to be driven as two separate
     generators on the same CaptureRunner instance, with an arbitrary pause
     between them (the reagent2 countdown, then whenever CAPTURE is pressed).
     run() chains them back-to-back for a caller that never splits the run.
     """
-
-    def setUp(self):
-        super().setUp()
-        import db_manager as db
-        import exposure_repo
-        self._db = db
-        self._er = exposure_repo
-
-        self._saved_dbname = db.DBNAME
-        self._dbdir = tempfile.TemporaryDirectory()
-        tmpdb = Path(self._dbdir.name) / "test.sqlite"
-        shutil.copy(_ROOT / "src" / "colorimeter.sqlite", tmpdb)
-        db.DBNAME = str(tmpdb)
-        db.write_one("DELETE FROM exposure")
-        exposure_repo.write_all_groups("amber", exposure_repo.groups_from_estar(30_000))
-        exposure_repo.write_all_groups("blue",  exposure_repo.groups_from_estar(20_000))
-
-    def tearDown(self):
-        self._db.DBNAME = self._saved_dbname
-        self._dbdir.cleanup()
-        super().tearDown()
 
     def make_runner(self, **kwargs):
         """Defaults to both calibrated colors — the split is about what runs

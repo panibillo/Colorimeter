@@ -76,10 +76,10 @@ Usage:
 
 from typing import Dict, Optional, Tuple
 
-__version__ = "0.6.0"
+__version__ = "0.7.0"
 
 # (oldest, newest) format version this checkout can read, inclusive.
-READS_SCHEMA: Tuple[int, int] = (1, 3)   # .h5 layout,  capture_h5
+READS_SCHEMA: Tuple[int, int] = (1, 4)   # .h5 layout,  capture_h5
 READS_META:   Tuple[int, int] = (1, 2)   # /meta shape, capture_meta
 READS_DB:     Tuple[int, int] = (2, 2)   # SQLite,      db_bootstrap
 

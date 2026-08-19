@@ -53,6 +53,7 @@ Public surface
 --------------
     exposure_ladder(e_star_us, n, ratio=DEFAULT_RATIO) -> list[int]
     groups_from_estar(e_star_us, ratio=DEFAULT_RATIO, max_n=MAX_GROUP) -> dict
+    shift_exposures(exposures_us, rungs, ratio=DEFAULT_RATIO) -> list[int]
     read_exposures(led, group) -> list[int]        active exposures, one LED+group
     read_group(group) -> dict[str, list[int]]      {led: exposures} for a group
     available_groups() -> list[str]                distinct active groups present
@@ -113,6 +114,45 @@ def exposure_ladder(e_star_us: float, n: int,
         us = max(MIN_EXPOSURE_US, round(e_star_us * (ratio ** k)))
         ladder.append(int(us))
     return sorted(ladder)
+
+
+def shift_exposures(exposures_us: List[int], rungs: int,
+                    ratio: float = DEFAULT_RATIO) -> List[int]:
+    """
+    Move a set of exposures up or down the ladder by whole rungs.
+
+    The ladder is calibrated against the gray card: e* is the exposure that
+    puts the chips near half scale.  A subject that is not the card wants a
+    different exposure, and the honest way to say so is in ladder rungs rather
+    than a made-up microsecond count — one rung is one ⅔-stop step of the same
+    geometric scheme the groups are built from, so a shifted exposure is still
+    a member of the family and still comparable with the rest.
+
+    The pre-image is what needs this.  An unexposed reagent pad reflects about
+    2.2x what the gray chips do in royal blue, so at e* it would read past the
+    sensor's ceiling and clip; two rungs down is 1/2.25, which lands it near
+    mid-scale.  See capture_runner's MODE_PRE.
+
+    Args:
+        exposures_us: Exposure times in microseconds.
+        rungs:        Whole rungs to move by — negative shortens, positive
+                      lengthens, 0 returns the input unchanged.
+        ratio:        The ladder's step, the same one the groups use.
+
+    Returns:
+        A new list, ascending, floored at MIN_EXPOSURE_US.
+
+    Example:
+        >>> shift_exposures([3290], -2)
+        [1462]
+        >>> shift_exposures([2193, 3290, 4935], 0)
+        [2193, 3290, 4935]
+    """
+    if not rungs:
+        return list(exposures_us)
+    factor = ratio ** rungs
+    return sorted(max(MIN_EXPOSURE_US, int(round(us * factor)))
+                  for us in exposures_us)
 
 
 def groups_from_estar(e_star_us: float, ratio: float = DEFAULT_RATIO,
