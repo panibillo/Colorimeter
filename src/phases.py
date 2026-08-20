@@ -684,7 +684,9 @@ class ReagentPhase(Phase):
                 _line(pool, "instr1",
                      f"Add {target_wt:4.3f}g of Reagent {n}", yellow=True)
                 _line(pool, "instr2", "Weigh again after adding")
-                pool.put("instr3", "")
+                # Show net weight from packet and target amount to add
+                pool.put("instr3",
+                        f"R{n}: Net {packet_net:4.3f}g. Add {target_wt:4.3f}g")
 
                 # Show weight row for the next reagent's initial (prepare ahead)
                 if n == 1:
