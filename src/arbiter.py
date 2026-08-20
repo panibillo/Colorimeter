@@ -881,16 +881,18 @@ class Arbiter:
         final_str = slot.record.get(f"{prefix}final_wt", "")
 
         try:
-            initial = float(initial_str) if initial_str.strip() else None
+            s = str(initial_str).strip() if initial_str else ""
+            initial = float(s) if s else None
         except (ValueError, TypeError):
             initial = None
 
         initial_valid = initial is not None and initial > empty_wt
         packet_net = (initial - empty_wt) if initial_valid else None
 
-        sample_wt_str = slot.record.get("samp_grams", "")
+        sample_wt_raw = slot.record.get("samp_grams", "")
         try:
-            sample_wt = float(sample_wt_str) if sample_wt_str.strip() else None
+            s = str(sample_wt_raw).strip() if sample_wt_raw else ""
+            sample_wt = float(s) if s else None
         except (ValueError, TypeError):
             sample_wt = None
 
@@ -899,7 +901,8 @@ class Arbiter:
             target_wt = sample_wt / 100.0 * ratio
 
         try:
-            final = float(final_str) if final_str.strip() else None
+            s = str(final_str).strip() if final_str else ""
+            final = float(s) if s else None
         except (ValueError, TypeError):
             final = None
 
