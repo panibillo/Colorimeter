@@ -516,13 +516,14 @@ class PreImagePhase(Phase):
             pool.put("run_btn", "RUNNING", enabled=False)
             pool["run_btn"].size = 18
             pool.put("instr1", "Imaging - DO NOT TOUCH")
-            pool.put("instr2", "Blank image of the dry strip")
+            # Keep weight instruction visible even while imaging
+            _line(pool, "instr2", "Weigh reagent 1 packet:")
         else:
             pool.put("run_btn", f"Pre-image\n{slot.name}",
                      on=lambda: self.capture(arb, slot),
                      enabled=is_live and arb.capture_available())
             pool["run_btn"].size = 18
-            pool.put("instr1", "Insert the dry strip")
+            pool.put("instr1", "Insert new strip in meter")
             _line(pool, "instr2", "Weigh reagent 1 packet:")
 
             # instr3: "Do not add reagent 1 yet" while invalid; otherwise show net/target
@@ -534,12 +535,9 @@ class PreImagePhase(Phase):
                 pool.put("instr3", "Do not add reagent 1 yet")
 
         # Show reagent 1 weight row; hide reagent 2 row
-        lbl1, fld1 = "reagent1_initial_wt", slot.record.get("reagent1_initial_wt", "")
-        initial_valid, _, _, _ = arb.reagent_weigh_plan(slot, 1)
-        if initial_valid:
-            lbl1, fld1 = "reagent1_final_wt", slot.record.get("reagent1_final_wt", "")
-        pool.put("reagent1_wt_lbl", "Initial" if lbl1 == "reagent1_initial_wt" else "Final")
-        pool.put("reagent1_wt_fld", fld1)
+        # In PreImagePhase, always show initial weight field (never flip to final)
+        pool.put("reagent1_wt_lbl", "Initial", enabled=is_live)
+        pool.put("reagent1_wt_fld", slot.record.get("reagent1_initial_wt", ""), enabled=is_live)
         pool.show("reagent1_wt_lbl", "reagent1_wt_fld")
         pool.hide("reagent2_wt_lbl", "reagent2_wt_fld")
 
@@ -650,19 +648,19 @@ class ReagentPhase(Phase):
             # Show appropriate weight row (next reagent's initial while running)
             if n == 1:
                 # Reagent 1 running: show reagent 2's initial row
-                pool.put("reagent1_wt_lbl", "Final")
-                pool.put("reagent1_wt_fld", slot.record.get("reagent1_final_wt", ""))
+                pool.put("reagent1_wt_lbl", "Final", enabled=is_live)
+                pool.put("reagent1_wt_fld", slot.record.get("reagent1_final_wt", ""), enabled=is_live)
                 pool.show("reagent1_wt_lbl", "reagent1_wt_fld")
-                pool.put("reagent2_wt_lbl", "Initial")
-                pool.put("reagent2_wt_fld", slot.record.get("reagent2_initial_wt", ""))
+                pool.put("reagent2_wt_lbl", "Initial", enabled=is_live)
+                pool.put("reagent2_wt_fld", slot.record.get("reagent2_initial_wt", ""), enabled=is_live)
                 pool.show("reagent2_wt_lbl", "reagent2_wt_fld")
             else:
                 # Reagent 2 running: show reagent 2's final row
-                pool.put("reagent1_wt_lbl", "Final")
-                pool.put("reagent1_wt_fld", slot.record.get("reagent1_final_wt", ""))
+                pool.put("reagent1_wt_lbl", "Final", enabled=is_live)
+                pool.put("reagent1_wt_fld", slot.record.get("reagent1_final_wt", ""), enabled=is_live)
                 pool.show("reagent1_wt_lbl", "reagent1_wt_fld")
-                pool.put("reagent2_wt_lbl", "Final")
-                pool.put("reagent2_wt_fld", slot.record.get("reagent2_final_wt", ""))
+                pool.put("reagent2_wt_lbl", "Final", enabled=is_live)
+                pool.put("reagent2_wt_fld", slot.record.get("reagent2_final_wt", ""), enabled=is_live)
                 pool.show("reagent2_wt_lbl", "reagent2_wt_fld")
 
         else:
@@ -690,18 +688,18 @@ class ReagentPhase(Phase):
 
                 # Show weight row for the next reagent's initial (prepare ahead)
                 if n == 1:
-                    pool.put("reagent1_wt_lbl", "Final")
-                    pool.put("reagent1_wt_fld", slot.record.get("reagent1_final_wt", ""))
+                    pool.put("reagent1_wt_lbl", "Final", enabled=is_live)
+                    pool.put("reagent1_wt_fld", slot.record.get("reagent1_final_wt", ""), enabled=is_live)
                     pool.show("reagent1_wt_lbl", "reagent1_wt_fld")
-                    pool.put("reagent2_wt_lbl", "Initial")
-                    pool.put("reagent2_wt_fld", slot.record.get("reagent2_initial_wt", ""))
+                    pool.put("reagent2_wt_lbl", "Initial", enabled=is_live)
+                    pool.put("reagent2_wt_fld", slot.record.get("reagent2_initial_wt", ""), enabled=is_live)
                     pool.show("reagent2_wt_lbl", "reagent2_wt_fld")
                 else:
-                    pool.put("reagent1_wt_lbl", "Final")
-                    pool.put("reagent1_wt_fld", slot.record.get("reagent1_final_wt", ""))
+                    pool.put("reagent1_wt_lbl", "Final", enabled=is_live)
+                    pool.put("reagent1_wt_fld", slot.record.get("reagent1_final_wt", ""), enabled=is_live)
                     pool.show("reagent1_wt_lbl", "reagent1_wt_fld")
-                    pool.put("reagent2_wt_lbl", "Final")
-                    pool.put("reagent2_wt_fld", slot.record.get("reagent2_final_wt", ""))
+                    pool.put("reagent2_wt_lbl", "Final", enabled=is_live)
+                    pool.put("reagent2_wt_fld", slot.record.get("reagent2_final_wt", ""), enabled=is_live)
                     pool.show("reagent2_wt_lbl", "reagent2_wt_fld")
             else:
                 # State 1: initial invalid, hide START button, show initial row only
@@ -716,16 +714,16 @@ class ReagentPhase(Phase):
 
                 # Show weight row for this reagent's initial
                 if n == 1:
-                    pool.put("reagent1_wt_lbl", "Initial")
-                    pool.put("reagent1_wt_fld", slot.record.get("reagent1_initial_wt", ""))
+                    pool.put("reagent1_wt_lbl", "Initial", enabled=is_live)
+                    pool.put("reagent1_wt_fld", slot.record.get("reagent1_initial_wt", ""), enabled=is_live)
                     pool.show("reagent1_wt_lbl", "reagent1_wt_fld")
                     pool.hide("reagent2_wt_lbl", "reagent2_wt_fld")
                 else:
-                    pool.put("reagent1_wt_lbl", "Final")
-                    pool.put("reagent1_wt_fld", slot.record.get("reagent1_final_wt", ""))
+                    pool.put("reagent1_wt_lbl", "Final", enabled=is_live)
+                    pool.put("reagent1_wt_fld", slot.record.get("reagent1_final_wt", ""), enabled=is_live)
                     pool.show("reagent1_wt_lbl", "reagent1_wt_fld")
-                    pool.put("reagent2_wt_lbl", "Initial")
-                    pool.put("reagent2_wt_fld", slot.record.get("reagent2_initial_wt", ""))
+                    pool.put("reagent2_wt_lbl", "Initial", enabled=is_live)
+                    pool.put("reagent2_wt_fld", slot.record.get("reagent2_initial_wt", ""), enabled=is_live)
                     pool.show("reagent2_wt_lbl", "reagent2_wt_fld")
 
         self._show_steps(pool, slot)
@@ -838,11 +836,11 @@ class Reagent2Phase(ReagentPhase):
                 _line(pool, "instr3", "VENTILATE!")
 
             # Show both weight rows (reagent 1 final and reagent 2 final)
-            pool.put("reagent1_wt_lbl", "Final")
-            pool.put("reagent1_wt_fld", slot.record.get("reagent1_final_wt", ""))
+            pool.put("reagent1_wt_lbl", "Final", enabled=is_live)
+            pool.put("reagent1_wt_fld", slot.record.get("reagent1_final_wt", ""), enabled=is_live)
             pool.show("reagent1_wt_lbl", "reagent1_wt_fld")
-            pool.put("reagent2_wt_lbl", "Final")
-            pool.put("reagent2_wt_fld", slot.record.get("reagent2_final_wt", ""))
+            pool.put("reagent2_wt_lbl", "Final", enabled=is_live)
+            pool.put("reagent2_wt_fld", slot.record.get("reagent2_final_wt", ""), enabled=is_live)
             pool.show("reagent2_wt_lbl", "reagent2_wt_fld")
 
         else:
@@ -868,11 +866,11 @@ class Reagent2Phase(ReagentPhase):
                      f"R2: Net {packet_net2:4.3f}g. Add {target_wt2:4.3f} g")
 
                 # Show both final weight rows
-                pool.put("reagent1_wt_lbl", "Final")
-                pool.put("reagent1_wt_fld", slot.record.get("reagent1_final_wt", ""))
+                pool.put("reagent1_wt_lbl", "Final", enabled=is_live)
+                pool.put("reagent1_wt_fld", slot.record.get("reagent1_final_wt", ""), enabled=is_live)
                 pool.show("reagent1_wt_lbl", "reagent1_wt_fld")
-                pool.put("reagent2_wt_lbl", "Final")
-                pool.put("reagent2_wt_fld", slot.record.get("reagent2_final_wt", ""))
+                pool.put("reagent2_wt_lbl", "Final", enabled=is_live)
+                pool.put("reagent2_wt_fld", slot.record.get("reagent2_final_wt", ""), enabled=is_live)
                 pool.show("reagent2_wt_lbl", "reagent2_wt_fld")
             else:
                 # State 1: initial invalid, hide START button
@@ -886,11 +884,11 @@ class Reagent2Phase(ReagentPhase):
                 pool.put("instr3", "")
 
                 # Show reagent 1 final (carried over) and reagent 2 initial
-                pool.put("reagent1_wt_lbl", "Final")
-                pool.put("reagent1_wt_fld", slot.record.get("reagent1_final_wt", ""))
+                pool.put("reagent1_wt_lbl", "Final", enabled=is_live)
+                pool.put("reagent1_wt_fld", slot.record.get("reagent1_final_wt", ""), enabled=is_live)
                 pool.show("reagent1_wt_lbl", "reagent1_wt_fld")
-                pool.put("reagent2_wt_lbl", "Initial")
-                pool.put("reagent2_wt_fld", slot.record.get("reagent2_initial_wt", ""))
+                pool.put("reagent2_wt_lbl", "Initial", enabled=is_live)
+                pool.put("reagent2_wt_fld", slot.record.get("reagent2_initial_wt", ""), enabled=is_live)
                 pool.show("reagent2_wt_lbl", "reagent2_wt_fld")
 
         self._show_steps(pool, slot)
@@ -1520,7 +1518,7 @@ if __name__ == "__main__":
     check("grams persisted (float)", A.record["samp_grams"], 3.2)
     check("remark persisted",        A.record["remark"], "cloudy sample")
     check("run_btn label",    pool["run_btn"].label, "Pre-image\nA")
-    check("instr1",           pool["instr1"].text, "Insert the dry strip")
+    check("instr1",           pool["instr1"].text, "Insert new strip in meter")
     check("main is CANCEL",   pool["main_btn"].label, "CANCEL")
 
     print("== preimage runs, stamps h5file, and advances to reagent1 ==")
