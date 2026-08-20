@@ -133,7 +133,19 @@ INSERT OR IGNORE INTO config (active, isdefault, editable, add_dt, role, name,
   (0, 1, 1, '2026-08-18 00:00:00', 'protocol', 'q10', 'float', '2.0', 'seed',
    'factor the reagent 2 rate changes by per 10 C; 1 = no compensation'),
   (0, 1, 1, '2026-08-01 00:00:00', 'protocol', 'analysis_secs', 'float', '1.5', 'seed',
-   'placeholder analysis duration until the analysis engine lands');
+   'placeholder analysis duration until the analysis engine lands'),
+  (0, 1, 1, '2026-08-19 00:00:00', 'protocol', 'reagent1_empty_packet_wt', 'float', '0.530', 'seed',
+   'empty packet weight in grams, used to compute net reagent 1 added'),
+  (0, 1, 1, '2026-08-19 00:00:00', 'protocol', 'reagent2_empty_packet_wt', 'float', '0.540', 'seed',
+   'empty packet weight in grams, used to compute net reagent 2 added'),
+  (0, 1, 1, '2026-08-19 00:00:00', 'protocol', 'reagent1_100ml_wt', 'float', '2.900', 'seed',
+   'reagent 1 grams per 100 mL of sample; used to compute target weight'),
+  (0, 1, 1, '2026-08-19 00:00:00', 'protocol', 'reagent2_100ml_wt', 'float', '1.300', 'seed',
+   'reagent 2 grams per 100 mL of sample; used to compute target weight'),
+  (0, 1, 1, '2026-08-19 00:00:00', 'protocol', 'reagent1_stir_seconds', 'int', '25', 'seed',
+   'stir duration in seconds before sub-alarm beep in reagent 1 countdown'),
+  (0, 1, 1, '2026-08-19 00:00:00', 'protocol', 'reagent2_stir_seconds', 'int', '0', 'seed',
+   'stir duration in seconds at 25 C reference; 0 = stir continuously, no sub-alarm');
 
 -- ── runtime ─────────────────────────────────────────────────────────────────
 INSERT OR IGNORE INTO config (active, isdefault, editable, add_dt, role, name,

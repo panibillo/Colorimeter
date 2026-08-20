@@ -232,6 +232,25 @@ def orphan_params(con: Optional[sqlite3.Connection] = None
     return _params_having("SUM(isdefault) = 0", con)
 
 
+def _add_samples_columns(con: sqlite3.Connection) -> None:
+    """
+    Add any missing columns to the samples table (idempotent migration for
+    existing databases). SQLite 3.45.1 does not support ALTER TABLE ... ADD
+    COLUMN IF NOT EXISTS, so check which columns exist first.
+    """
+    existing = {row[1] for row in con.execute("PRAGMA table_info(samples)")}
+    columns_to_add = [
+        ("reagent1_g", "REAL"),
+        ("reagent2_g", "REAL"),
+        ("reagent1_stir_end", "INTEGER"),
+        ("reagent2_stir_end", "INTEGER"),
+    ]
+    for name, type_ in columns_to_add:
+        if name not in existing:
+            con.execute(f"ALTER TABLE samples ADD COLUMN {name} {type_}")
+    con.commit()
+
+
 def _verify(con: sqlite3.Connection) -> int:
     """
     Check that every parameter in the table is usable, and count them.
@@ -384,6 +403,7 @@ def ensure(path=None) -> Result:
                       else _active_counts(con))
 
         _run_script(con, DDL_PATH)
+        _add_samples_columns(con)
         _run_script(con, DEFAULTS_PATH)
 
         after  = con.execute("SELECT COUNT(*) FROM config").fetchone()[0]

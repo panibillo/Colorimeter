@@ -53,6 +53,15 @@ TIMER_LBL   = Rect(  8,  55,  68, 67)   # Remaining / Elapsed / Final
 TIMER       = Rect( 90,  55, 140, 42)   # compound: ‖ | MM:SS | ›
 RUN_BTN     = Rect(240,  55,  72, 67)   # START / RESET / CAPTURE / POST
 
+# ── body: reagent weight entry (narrow column below RUN_BTN) ────────────────────
+# Labels (13px) and entry fields (28px) stacked in the column to the right of
+# the main area, showing reagent packet initial/final weights during reagent
+# phases. Hidden on all other screens.
+WT1_LBL     = Rect(240, 124,  72, 13)   # "Initial" or "Final" for reagent 1
+WT1_FLD     = Rect(240, 138,  72, 28)   # reagent1_wt_fld
+WT2_LBL     = Rect(240, 170,  72, 13)   # "Initial" or "Final" for reagent 2
+WT2_FLD     = Rect(240, 184,  72, 28)   # reagent2_wt_fld
+
 # ── body: step-status chips  y 95..229 ─────────────────────────────────────────
 # A "chip" is a small pill/badge widget (the UI sense of the word) — here three
 # compact step-progress indicators (reagent 1, reagent 2, Capture) stacked down
@@ -62,15 +71,16 @@ CHIP_B      = Rect( 136, 100,  44, 22)   # reagent 2
 CHIP_C      = Rect( 182, 100,  48, 22)   # Capture
 
 # ── body: instruction lines  y 135..203 (aligned to label/field rows 3 & 4) ─────
-INSTR1      = Rect(  8, 125, 304, 28)
-INSTR2      = Rect(  8, 155, 304, 28)
-INSTR3      = Rect(  8, 185, 304, 28)
+# Narrowed to w=224 to make room for the weight-entry column on the right
+INSTR1      = Rect(  8, 125, 224, 28)
+INSTR2      = Rect(  8, 155, 224, 28)
+INSTR3      = Rect(  8, 185, 224, 28)
 
 # ── body: persistent collect stamp  y 188..210 ─────────────────────────────────
 # Shown on the reagent/read/analysis phases (below the instructions, above the
 # footer) so the collect time stays in view once stamped.  The entry phase uses
-# the COLLECT form row above instead.
-COLLECT_LINE = Rect(  8, 188, 304, 22)
+# the COLLECT form row above instead. Narrowed to match the instruction lines.
+COLLECT_LINE = Rect(  8, 188, 224, 22)
 
 # ── body: wide label/field pairs (share y with USER and TEST rows) ─────────────
 COLOR_LBL   = Rect(  8,  95, 110, 35);  COLOR_FLD  = Rect(120,  93, 130, 39)

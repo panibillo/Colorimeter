@@ -160,7 +160,11 @@ CREATE TABLE IF NOT EXISTS samples (
     txt_result     TEXT,
     num_result     REAL,
     h5file         TEXT,
-    remark         TEXT COLLATE NOCASE
+    remark         TEXT COLLATE NOCASE,
+    reagent1_g     REAL,          -- Net grams of reagent 1 added (final - initial)
+    reagent2_g     REAL,          -- Net grams of reagent 2 added (final - initial)
+    reagent1_stir_end INTEGER,    -- Epoch seconds when reagent 1 stir sub-alarm fired
+    reagent2_stir_end INTEGER     -- Epoch seconds when reagent 2 stir sub-alarm fired
 );
 
 

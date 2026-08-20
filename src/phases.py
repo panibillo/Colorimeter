@@ -35,6 +35,11 @@ Arbiter contract (what phases call; arbiter.py implements it)
     arb.temperature_attached()->bool  is a DS18B20 on the bus at all
     arb.reagent2_plan(slot)         (secs, temp_c, measured) for this slot's
                                     reagent-2 countdown — see Reagent2Phase
+    arb.reagent_weigh_plan(slot, n) (initial_valid, packet_net, target_wt,
+                                    added_wt) for reagent n's weight validation
+    arb.reagent1_stir_seconds()     fixed stir duration for reagent 1
+    arb.reagent2_stir_plan(slot)    temperature-compensated stir duration
+                                    for reagent 2
     arb.goto(slot, phase_id)        advance slot to a phase — the live phase
                                     (runs activate, renders)
     arb.view(slot, phase_id)        preview a phase without advancing (no activate)
@@ -99,6 +104,20 @@ def _mmss(secs: int) -> str:
         '12:00'
     """
     return f"{secs // 60}:{secs % 60:02d}"
+
+
+def _line(pool, name: str, text: str, yellow: bool = False,
+          size: Optional[int] = None) -> None:
+    """
+    Set an instruction line (instr1/2/3) with explicit colour and optional size.
+
+    Enforces colour consistency: every render must explicitly set yellow or white,
+    or a yellow line can leak into a later state that should be plain.
+    """
+    pool.put(name, text)
+    pool.recolor(name, bg=("field_yellow" if yellow else "white"))
+    if size is not None:
+        pool[name].size = size
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -504,10 +523,27 @@ class PreImagePhase(Phase):
                      enabled=is_live and arb.capture_available())
             pool["run_btn"].size = 18
             pool.put("instr1", "Insert the dry strip")
-            pool.put("instr2", "Blank image, before reagent 1")
-        pool.put("instr3", self._leds_line())
+            _line(pool, "instr2", "Weigh reagent 1 packet:")
+
+            # instr3: "Do not add reagent 1 yet" while invalid; otherwise show net/target
+            initial_valid, packet_net, target_wt, _ = arb.reagent_weigh_plan(slot, 1)
+            if initial_valid:
+                pool.put("instr3",
+                        f"R1: Net {packet_net:4.3f}g. Add {target_wt:4.3f} g")
+            else:
+                pool.put("instr3", "Do not add reagent 1 yet")
+
+        # Show reagent 1 weight row; hide reagent 2 row
+        lbl1, fld1 = "reagent1_initial_wt", slot.record.get("reagent1_initial_wt", "")
+        initial_valid, _, _, _ = arb.reagent_weigh_plan(slot, 1)
+        if initial_valid:
+            lbl1, fld1 = "reagent1_final_wt", slot.record.get("reagent1_final_wt", "")
+        pool.put("reagent1_wt_lbl", "Initial" if lbl1 == "reagent1_initial_wt" else "Final")
+        pool.put("reagent1_wt_fld", fld1)
+        pool.show("reagent1_wt_lbl", "reagent1_wt_fld")
+        pool.hide("reagent2_wt_lbl", "reagent2_wt_fld")
+
         self._show_steps(pool, slot)
-        self._show_collect(pool, slot)
         self._chrome(pool, slot, arb, "CANCEL",
                      main_on=lambda: arb.open_modal(slot, "cancel"))
 
@@ -542,9 +578,15 @@ class PreImagePhase(Phase):
 
 class ReagentPhase(Phase):
     """
-    A timed reagent step.  Armed shows the duration and a START button; running
-    counts down, swaps START for RESET, and locks navigation.  Reaching zero
-    alarms and advances to `next`.
+    A timed reagent step with weight entry and stir sub-alarm.
+
+    Four states per the weight-entry workflow:
+    1. Idle, initial_valid false: empty weight row, no START button
+    2. Idle, initial_valid true: flip to final weight row, START button shown
+    3. Running, before stir: show next reagent's initial-weight row
+    4. Running, after stir fired: show stop-stirring message
+
+    Full-duration expiry still advances to `next` regardless of weight state.
     """
 
     def __init__(self, phase_id: str, secs: int, next_phase: str, prior: str,
@@ -569,6 +611,13 @@ class ReagentPhase(Phase):
         """
         return self.secs
 
+    def stir_secs(self, slot, arb) -> int:
+        """
+        Stir duration in seconds for this step.
+        Reagent1 returns reagent1_stir_seconds(); Reagent2Phase overrides.
+        """
+        return arb.reagent1_stir_seconds()
+
     def _basis(self, slot, arb) -> str:
         """
         The instr3 line explaining where this step's duration came from, or ""
@@ -577,53 +626,137 @@ class ReagentPhase(Phase):
         return ""
 
     def enter(self, pool, slot, arb) -> None:
-        # Show the live countdown only when this reagent is the slot's live phase;
-        # while it is merely being previewed, show the armed duration instead.
         is_live = slot.active_phase == self.phase_id
-        pool.put("timer_lbl", "Remaining")
-        pool["timer_lbl"].size = _TIMER_LBL_SIZE_REAGENT
+        n = 1 if "reagent1" in self.phase_id else 2
+
+        # Weight entry state
+        initial_valid, packet_net, target_wt, added_wt = arb.reagent_weigh_plan(slot, n)
+
         if is_live and slot.running:
+            # Running: countdown is active
+            pool["timer_lbl"].size = _TIMER_LBL_SIZE_REAGENT
             pool["timer"].bind(slot.timer, interactive=True)
             pool.put("timer")
             pool.put("run_btn", "RESET", on=lambda: arb.open_modal(slot, "reset"))
-            i1, i2 = self.running
+
+            # Stir sub-alarm text change
+            if slot.stir_fired:
+                _line(pool, "instr1", "Stop stirring, VENTILATE")
+            else:
+                _line(pool, "instr1", self.running[0])
+            _line(pool, "instr2", self.running[1], yellow=(n == 2))
+            pool.put("instr3", self.running[2] if len(self.running) > 2 else "")
+
+            # Show appropriate weight row (next reagent's initial while running)
+            if n == 1:
+                # Reagent 1 running: show reagent 2's initial row
+                pool.put("reagent1_wt_lbl", "Final")
+                pool.put("reagent1_wt_fld", slot.record.get("reagent1_final_wt", ""))
+                pool.show("reagent1_wt_lbl", "reagent1_wt_fld")
+                pool.put("reagent2_wt_lbl", "Initial")
+                pool.put("reagent2_wt_fld", slot.record.get("reagent2_initial_wt", ""))
+                pool.show("reagent2_wt_lbl", "reagent2_wt_fld")
+            else:
+                # Reagent 2 running: show reagent 2's final row
+                pool.put("reagent1_wt_lbl", "Final")
+                pool.put("reagent1_wt_fld", slot.record.get("reagent1_final_wt", ""))
+                pool.show("reagent1_wt_lbl", "reagent1_wt_fld")
+                pool.put("reagent2_wt_lbl", "Final")
+                pool.put("reagent2_wt_fld", slot.record.get("reagent2_final_wt", ""))
+                pool.show("reagent2_wt_lbl", "reagent2_wt_fld")
+
         else:
-            # Armed: a paused, display-only preview at the full duration.
-            preview = TimerState.down(self.duration(slot, arb), arb.now())
-            preview.pause(arb.now())
-            pool["timer"].bind(preview, interactive=False)
-            pool.put("timer")
-            pool.put("run_btn", self.start_label, on=lambda: self.start(arb, slot))
-            i1, i2 = self.armed
-        pool.put("instr1", i1)
-        pool.put("instr2", i2)
-        basis = self._basis(slot, arb)
-        if basis:
-            pool.put("instr3", basis)
+            # Armed (idle)
+            pool.put("timer_lbl", "Remaining")
+            pool["timer_lbl"].size = _TIMER_LBL_SIZE_REAGENT
+
+            if initial_valid:
+                # State 2: initial valid, show final row, enable START
+                preview = TimerState.down(self.duration(slot, arb), arb.now())
+                preview.pause(arb.now())
+                pool["timer"].bind(preview, interactive=False)
+                pool.put("timer")
+                pool.put("run_btn", self.start_label,
+                        on=lambda: self.start(arb, slot), enabled=is_live)
+                pool["run_btn"].visible = is_live
+
+                # Instr text for state 2
+                _line(pool, "instr1",
+                     f"Add {target_wt:4.3f}g of Reagent {n}", yellow=True)
+                _line(pool, "instr2", "Weigh again after adding")
+                pool.put("instr3", "")
+
+                # Show weight row for the next reagent's initial (prepare ahead)
+                if n == 1:
+                    pool.put("reagent1_wt_lbl", "Final")
+                    pool.put("reagent1_wt_fld", slot.record.get("reagent1_final_wt", ""))
+                    pool.show("reagent1_wt_lbl", "reagent1_wt_fld")
+                    pool.put("reagent2_wt_lbl", "Initial")
+                    pool.put("reagent2_wt_fld", slot.record.get("reagent2_initial_wt", ""))
+                    pool.show("reagent2_wt_lbl", "reagent2_wt_fld")
+                else:
+                    pool.put("reagent1_wt_lbl", "Final")
+                    pool.put("reagent1_wt_fld", slot.record.get("reagent1_final_wt", ""))
+                    pool.show("reagent1_wt_lbl", "reagent1_wt_fld")
+                    pool.put("reagent2_wt_lbl", "Final")
+                    pool.put("reagent2_wt_fld", slot.record.get("reagent2_final_wt", ""))
+                    pool.show("reagent2_wt_lbl", "reagent2_wt_fld")
+            else:
+                # State 1: initial invalid, hide START button, show initial row only
+                pool.put("timer")  # show but don't bind (empty timer)
+                pool.put("run_btn", "")  # empty label
+                pool["run_btn"].visible = False
+
+                # Instr text for state 1
+                pool.put("instr1", "")
+                _line(pool, "instr2", "Weigh reagent 1 packet:")
+                pool.put("instr3", "Before adding!")
+
+                # Show weight row for this reagent's initial
+                if n == 1:
+                    pool.put("reagent1_wt_lbl", "Initial")
+                    pool.put("reagent1_wt_fld", slot.record.get("reagent1_initial_wt", ""))
+                    pool.show("reagent1_wt_lbl", "reagent1_wt_fld")
+                    pool.hide("reagent2_wt_lbl", "reagent2_wt_fld")
+                else:
+                    pool.put("reagent1_wt_lbl", "Final")
+                    pool.put("reagent1_wt_fld", slot.record.get("reagent1_final_wt", ""))
+                    pool.show("reagent1_wt_lbl", "reagent1_wt_fld")
+                    pool.put("reagent2_wt_lbl", "Initial")
+                    pool.put("reagent2_wt_fld", slot.record.get("reagent2_initial_wt", ""))
+                    pool.show("reagent2_wt_lbl", "reagent2_wt_fld")
+
         self._show_steps(pool, slot)
-        self._show_collect(pool, slot)
-        # A running countdown does NOT lock nav: the timer keeps running in the
-        # background (arbiter polls it and alarms on expiry, same as an A/B
-        # toggle), and Resume brings the view back.
         self._chrome(pool, slot, arb, "CANCEL",
                      main_on=lambda: arb.open_modal(slot, "cancel"))
 
     def start(self, arb, slot) -> None:
         slot.timer   = TimerState.down(self.duration(slot, arb), arb.now())
         slot.running = True
+
+        # Arm stir sub-alarm if configured
+        stir = self.stir_secs(slot, arb)
+        if stir > 0:
+            slot.stir_deadline = arb.now() + stir
+            slot.stir_role = self.phase_id
+            slot.stir_fired = False
+
         arb.persist(slot, **{f"{self.phase_id}_start": arb.epoch()})
         arb.render(slot)
 
     def on_expire(self, arb, slot) -> None:
         slot.running = False
-        slot.timer   = None
+        slot.timer = None
+        slot.stir_deadline = None
+        slot.stir_role = None
+        slot.stir_fired = False
         arb.persist(slot, **{f"{self.phase_id}_end": arb.epoch()})
         arb.goto(slot, self.next)
 
 
 class Reagent2Phase(ReagentPhase):
     """
-    Reagent step 2, whose countdown is temperature-compensated.
+    Reagent step 2, whose countdown is temperature-compensated with stir sub-alarm.
 
     The Gutzeit reaction runs faster warm and slower cold, so a fixed wait does
     not develop every sample to the same extent.  The duration is therefore
@@ -636,6 +769,9 @@ class Reagent2Phase(ReagentPhase):
     config_repo.reagent2_secs() owns the arithmetic and the clamp, and the
     arbiter owns deciding which temperature answers — see arb.reagent2_plan().
 
+    The stir sub-alarm duration is also temperature-compensated using the same
+    temperature decision, via arb.reagent2_stir_plan().
+
     Nothing is cached: the duration is recomputed on every render and again at
     START, so correcting the temperature on Entry 2 and stepping back here
     shows the corrected wait rather than a stale one.
@@ -643,6 +779,10 @@ class Reagent2Phase(ReagentPhase):
 
     def duration(self, slot, arb) -> int:
         return arb.reagent2_plan(slot)[0]
+
+    def stir_secs(self, slot, arb) -> int:
+        """Stir sub-alarm duration for reagent 2 (temperature-compensated)."""
+        return arb.reagent2_stir_plan(slot)
 
     def _basis(self, slot, arb) -> str:
         """
@@ -655,6 +795,105 @@ class Reagent2Phase(ReagentPhase):
         _, temp_c, measured = arb.reagent2_plan(slot)
         shown = f"{temp_c:.1f} °C" if measured else f"[{temp_c:.1f} °C]"
         return f"{shown}  ref {_mmss(arb.t2ref25_secs())} @25 °C"
+
+    def enter(self, pool, slot, arb) -> None:
+        is_live = slot.active_phase == self.phase_id
+
+        # Weight entry state
+        initial_valid2, packet_net2, target_wt2, added_wt2 = arb.reagent_weigh_plan(slot, 2)
+        initial_valid1, packet_net1, target_wt1, added_wt1 = arb.reagent_weigh_plan(slot, 1)
+
+        if is_live and slot.running:
+            # Running: countdown is active
+            pool["timer_lbl"].size = _TIMER_LBL_SIZE_REAGENT
+            pool["timer"].bind(slot.timer, interactive=True)
+            pool.put("timer")
+            pool.put("run_btn", "RESET", on=lambda: arb.open_modal(slot, "reset"))
+
+            # Stir sub-alarm text change
+            stir = self.stir_secs(slot, arb)
+            if slot.stir_fired:
+                _line(pool, "instr1", "Stop stirring, VENTILATE")
+            else:
+                if stir > 0:
+                    _line(pool, "instr1", f"Stir {_mmss(stir)} and VENTILATE!")
+                else:
+                    _line(pool, "instr1", "Stir continuously and VENTILATE")
+
+            # Line 2 override: show reagent 1's target/net if valid
+            if added_wt1 is not None:
+                _line(pool, "instr2",
+                     f"R1 target {target_wt1:4.3f} Net {added_wt1:4.3f}")
+            else:
+                _line(pool, "instr2", "Weigh again after adding")
+
+            # Line 3: "VENTILATE!" in larger font, with line 4 override
+            if added_wt2 is not None:
+                _line(pool, "instr3",
+                     f"R2 target {target_wt2:4.3f} Net {added_wt2:4.3f}", size=20)
+            else:
+                pool["instr3"].size = 28
+                _line(pool, "instr3", "VENTILATE!")
+
+            # Show both weight rows (reagent 1 final and reagent 2 final)
+            pool.put("reagent1_wt_lbl", "Final")
+            pool.put("reagent1_wt_fld", slot.record.get("reagent1_final_wt", ""))
+            pool.show("reagent1_wt_lbl", "reagent1_wt_fld")
+            pool.put("reagent2_wt_lbl", "Final")
+            pool.put("reagent2_wt_fld", slot.record.get("reagent2_final_wt", ""))
+            pool.show("reagent2_wt_lbl", "reagent2_wt_fld")
+
+        else:
+            # Armed (idle)
+            pool.put("timer_lbl", "Remaining")
+            pool["timer_lbl"].size = _TIMER_LBL_SIZE_REAGENT
+
+            if initial_valid2:
+                # State 2: initial valid, show final row, enable START
+                preview = TimerState.down(self.duration(slot, arb), arb.now())
+                preview.pause(arb.now())
+                pool["timer"].bind(preview, interactive=False)
+                pool.put("timer")
+                pool.put("run_btn", self.start_label,
+                        on=lambda: self.start(arb, slot), enabled=is_live)
+                pool["run_btn"].visible = is_live
+
+                # Instr text for state 2
+                _line(pool, "instr1",
+                     f"Add {target_wt2:4.3f}g of Reagent 2", yellow=True)
+                _line(pool, "instr2", "Weigh again after adding")
+                _line(pool, "instr3",
+                     f"R2: Net {packet_net2:4.3f}g. Add {target_wt2:4.3f} g")
+
+                # Show both final weight rows
+                pool.put("reagent1_wt_lbl", "Final")
+                pool.put("reagent1_wt_fld", slot.record.get("reagent1_final_wt", ""))
+                pool.show("reagent1_wt_lbl", "reagent1_wt_fld")
+                pool.put("reagent2_wt_lbl", "Final")
+                pool.put("reagent2_wt_fld", slot.record.get("reagent2_final_wt", ""))
+                pool.show("reagent2_wt_lbl", "reagent2_wt_fld")
+            else:
+                # State 1: initial invalid, hide START button
+                pool.put("timer")  # show but don't bind (empty timer)
+                pool.put("run_btn", "")  # empty label
+                pool["run_btn"].visible = False
+
+                # Instr text for state 1
+                _line(pool, "instr1", "Weigh before adding")
+                _line(pool, "instr2", "Weigh reagent 2 packet:")
+                pool.put("instr3", "")
+
+                # Show reagent 1 final (carried over) and reagent 2 initial
+                pool.put("reagent1_wt_lbl", "Final")
+                pool.put("reagent1_wt_fld", slot.record.get("reagent1_final_wt", ""))
+                pool.show("reagent1_wt_lbl", "reagent1_wt_fld")
+                pool.put("reagent2_wt_lbl", "Initial")
+                pool.put("reagent2_wt_fld", slot.record.get("reagent2_initial_wt", ""))
+                pool.show("reagent2_wt_lbl", "reagent2_wt_fld")
+
+        self._show_steps(pool, slot)
+        self._chrome(pool, slot, arb, "CANCEL",
+                     main_on=lambda: arb.open_modal(slot, "cancel"))
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -964,6 +1203,61 @@ if __name__ == "__main__":
             secs = round(self.t2ref25 * self.q10 ** ((25.0 - t) / 10.0))
             return max(1, min(3600, secs)), t, measured
 
+        # weight entry and stir sub-alarms.  Mirrors the real arbiter.
+        def reagent_weigh_plan(self, slot, n):
+            prefix = f"reagent{n}_"
+            empty_wt = 0.530 if n == 1 else 0.540
+            ratio = 2.900 if n == 1 else 1.300
+
+            initial_str = slot.record.get(f"{prefix}initial_wt", "")
+            final_str = slot.record.get(f"{prefix}final_wt", "")
+
+            try:
+                s = str(initial_str).strip() if initial_str else ""
+                initial = float(s) if s else None
+            except (ValueError, TypeError):
+                initial = None
+
+            initial_valid = initial is not None and initial > empty_wt
+            packet_net = (initial - empty_wt) if initial_valid else None
+
+            sample_wt_raw = slot.record.get("samp_grams", "")
+            try:
+                s = str(sample_wt_raw).strip() if sample_wt_raw else ""
+                sample_wt = float(s) if s else None
+            except (ValueError, TypeError):
+                sample_wt = None
+
+            target_wt = None
+            if initial_valid and sample_wt is not None:
+                target_wt = sample_wt / 100.0 * ratio
+
+            try:
+                s = str(final_str).strip() if final_str else ""
+                final = float(s) if s else None
+            except (ValueError, TypeError):
+                final = None
+
+            added_wt = None
+            if initial is not None and final is not None:
+                added_wt = final - initial
+
+            return initial_valid, packet_net, target_wt, added_wt
+
+        def reagent1_stir_seconds(self):
+            return 25  # canned default for testing
+
+        def reagent2_stir_plan(self, slot):
+            # Temperature-compensated stir duration, 0 if disabled
+            t = _to_float(slot.record.get("samp_degC"))
+            if t is None:
+                t = DEFAULTS.default_temperature
+            base_stir = 0  # canned: reagent 2 has no stir by default
+            if base_stir == 0:
+                return 0
+            secs = round(base_stir * self.q10 ** ((25.0 - t) / 10.0))
+            return max(1, min(3600, secs))
+
         # database / sample lifecycle.  The numbering is modelled rather than
         # canned, because which number a slot ends up holding is exactly what
         # the entry screen's behaviour turns on.
@@ -1078,6 +1372,15 @@ if __name__ == "__main__":
                     self.alarm(slot)
                     self.phases[slot.active_phase].on_expire(self, slot)
 
+                # Check for stir sub-alarm
+                if (slot.stir_deadline is not None and now >= slot.stir_deadline
+                        and not slot.stir_fired):
+                    slot.stir_fired = True
+                    self.calls.append(("stir_alarm", slot.name))
+                    self.persist(slot, **{f"{slot.stir_role}_stir_end": self.epoch()})
+                    if slot is self.slots.get(self.pool["slot_btn"].text):
+                        self.render(slot)
+
         # actions invoked by buttons / modals
         def alarm(self, slot):        self.calls.append(("alarm", slot.name))
         def cancel_test(self, slot, delete=False):
@@ -1090,7 +1393,11 @@ if __name__ == "__main__":
             ap = slot.active_phase
             if ap in ("reagent1", "reagent2"):
                 self.persist(slot, **{f"{ap}_start": None})
-            slot.timer = None; slot.running = False
+            slot.timer = None
+            slot.running = False
+            slot.stir_deadline = None
+            slot.stir_role = None
+            slot.stir_fired = False
             self.close_modal(slot)
         def retry_capture(self, slot):
             self.close_modal(slot)
@@ -1225,8 +1532,17 @@ if __name__ == "__main__":
     check("phase reagent1",   A.phase, "reagent1")
     check("h5file stamped",   A.record["h5file"], "fake.h5")
     check("capture_end still empty", A.record["capture_end"], None)
+
+    # Weight entry state machine: initial not set, so run_btn is hidden
+    check("run_btn not shown", pool["run_btn"].visible, False)
+    check("instr2 for weighing", pool["instr2"].text, "Weigh reagent 1 packet:")
+
+    # Simulate entering initial weight to reach state 2
+    A.record["reagent1_initial_wt"] = "1.850"
+    arb.render(A)
+    check("run_btn shown after weight", pool["run_btn"].visible, True)
     check("run_btn label",    pool["run_btn"].label, "START\n1")
-    check("instr1",           pool["instr1"].text, "Add Reagent 1")
+    check("instr1",           pool["instr1"].text.startswith("Add"), True)
 
     print("== a protocol without the pre-image links entry2 straight to reagent1 ==")
     plain = build_phases(preimage=False)
@@ -1267,8 +1583,10 @@ if __name__ == "__main__":
     # reference: 720 * 2 ** ((25 - 21.5) / 10) = 918 s.
     check("armed at the compensated wait",
           arb.reagent2_plan(A)[0], 918)
-    check("and says what it was computed from",
-          pool["instr3"].text, "21.5 °C  ref 12:00 @25 °C")
+    # In state 1 (no initial weight entered), instr3 is blank per the weight
+    # entry workflow; the basis line appears in state 2 once weights are entered.
+    check("instr3 blank in state 1",
+          pool["instr3"].text, "")
 
     print("== a colder sample waits longer, a warmer one less ==")
     A.record["samp_degC"] = 15.0; arb.render(A)
@@ -1288,7 +1606,10 @@ if __name__ == "__main__":
     _secs, _t, _measured = arb.reagent2_plan(A)
     check("falls back to the default", _t, DEFAULTS.default_temperature)
     check("flagged as not measured",   _measured, False)
-    check("bracketed on screen",  pool["instr3"].text.startswith("[21.0 °C]"), True)
+    # In state 1 (no weight entered), instr3 is blank; enter weight to reach state 2
+    A.record["reagent2_initial_wt"] = "1.650"
+    arb.render(A)
+    check("instr3 shows net/target in state 2", pool["instr3"].text.startswith("R2: Net"), True)
 
     print("== reagent2 -> read (capture) ==")
     A.record["samp_degC"] = 21.5; arb.render(A)

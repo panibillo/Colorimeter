@@ -19,6 +19,15 @@ def click() -> None:
         pass  # canberra-gtk-play not available
 
 
+def beep(duration: float = 0.6) -> None:
+    """Play a beep sound (2-second variant for stir sub-alarms)."""
+    log.info("Beeper (mock): beep (duration %.1f s)", duration)
+    try:
+        subprocess.run(["canberra-gtk-play", "--id=bell"], timeout=1)
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        pass  # canberra-gtk-play not available
+
+
 def alarm_on() -> None:
     """Start alarm sound."""
     log.info("Beeper (mock): alarm ON")

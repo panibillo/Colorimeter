@@ -1006,6 +1006,56 @@ def analysis_secs() -> float:
     return float(get("protocol", "analysis_secs"))
 
 
+def reagent1_empty_packet_wt() -> float:
+    """Empty packet weight in grams for reagent 1."""
+    return float(get("protocol", "reagent1_empty_packet_wt"))
+
+
+def reagent2_empty_packet_wt() -> float:
+    """Empty packet weight in grams for reagent 2."""
+    return float(get("protocol", "reagent2_empty_packet_wt"))
+
+
+def reagent1_100ml_wt() -> float:
+    """Grams of reagent 1 per 100 mL of sample."""
+    return float(get("protocol", "reagent1_100ml_wt"))
+
+
+def reagent2_100ml_wt() -> float:
+    """Grams of reagent 2 per 100 mL of sample."""
+    return float(get("protocol", "reagent2_100ml_wt"))
+
+
+def reagent1_stir_seconds() -> int:
+    """Stir duration in seconds before sub-alarm in reagent 1 countdown."""
+    return int(get("protocol", "reagent1_stir_seconds"))
+
+
+def reagent2_stir_seconds() -> int:
+    """Base stir duration in seconds for reagent 2 at 25 C reference. 0 = stir continuously."""
+    return int(get("protocol", "reagent2_stir_seconds"))
+
+
+def reagent2_stir_secs(temp_c: float) -> int:
+    """
+    Stir duration for reagent 2 at a sample temperature, temperature-compensated.
+
+    Same Q10 formula as reagent2_secs(), anchored on reagent2_stir_seconds()
+    instead of t2ref25_secs(). Returns 0 outright if the configured base is 0.
+
+    Args:
+        temp_c: The sample's temperature in °C.
+
+    Returns:
+        Whole seconds, held inside [MIN_REAGENT_SECS, MAX_REAGENT_SECS].
+    """
+    base = reagent2_stir_seconds()
+    if base == 0:
+        return 0
+    secs = base * q10() ** ((REF_TEMP_C - float(temp_c)) / 10.0)
+    return max(MIN_REAGENT_SECS, min(MAX_REAGENT_SECS, round(secs)))
+
+
 # ── Runtime timing ──────────────────────────────────────────────────────────
 
 def main_loop_poll_s() -> float:

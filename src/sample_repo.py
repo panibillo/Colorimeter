@@ -182,6 +182,7 @@ _UPDATABLE = frozenset({
     "reagent1_start", "reagent1_end", "reagent2_start", "reagent2_end",
     "capture_start", "capture_end",
     "manual_read", "txt_result", "num_result", "h5file", "remark",
+    "reagent1_g", "reagent2_g", "reagent1_stir_end", "reagent2_stir_end",
 })
 
 

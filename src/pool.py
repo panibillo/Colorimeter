@@ -124,6 +124,13 @@ class Pool:
         p._add("timer", TimerWidget(L.TIMER, text_color=color("timer_text"),
                                     bg=color("body_dark"), size=30))
         button("run_btn", L.RUN_BTN, "btn_text", "start_green", 24)
+
+        # ── body: reagent weight entry (narrow column under RUN_BTN) ────────────
+        label("reagent1_wt_lbl", L.WT1_LBL, "black", "white", 10, align="center")
+        field("reagent1_wt_fld", L.WT1_FLD, 14, "field_blue", align="center")
+        label("reagent2_wt_lbl", L.WT2_LBL, "black", "white", 10, align="center")
+        field("reagent2_wt_fld", L.WT2_FLD, 14, "field_blue", align="center")
+
         label("instr1", L.INSTR1, "black", "white", 20, align="left")
         label("instr2", L.INSTR2, "black", "white", 20, align="left")
         label("instr3", L.INSTR3, "black", "white", 20, align="left")

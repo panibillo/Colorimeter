@@ -852,6 +852,81 @@ class Arbiter:
                             "uncompensated", slot.name)
         return config.reagent2_secs(temp_c), float(temp_c), measured
 
+    def reagent1_stir_seconds(self) -> int:
+        """protocol.reagent1_stir_seconds — stir duration for reagent 1."""
+        return config.reagent1_stir_seconds()
+
+    def reagent_weigh_plan(self, slot: Slot, n: int) -> tuple:
+        """
+        Validate reagent packet weights and compute net/target additions.
+
+        Args:
+            slot: The slot whose record to read weights from.
+            n: 1 for reagent 1, 2 for reagent 2.
+
+        Returns:
+            (initial_valid, packet_net, target_wt, added_wt) where:
+            - initial_valid: bool, True if initial weight > empty_packet_wt
+            - packet_net: float | None, initial - empty packet weight
+            - target_wt: float | None, sample_wt / 100 * reagentN_100ml_wt
+            - added_wt: float | None, final - initial weight
+        """
+        prefix = f"reagent{n}_"
+        empty_wt = (config.reagent1_empty_packet_wt() if n == 1
+                    else config.reagent2_empty_packet_wt())
+        ratio = (config.reagent1_100ml_wt() if n == 1
+                 else config.reagent2_100ml_wt())
+
+        initial_str = slot.record.get(f"{prefix}initial_wt", "")
+        final_str = slot.record.get(f"{prefix}final_wt", "")
+
+        try:
+            initial = float(initial_str) if initial_str.strip() else None
+        except (ValueError, TypeError):
+            initial = None
+
+        initial_valid = initial is not None and initial > empty_wt
+        packet_net = (initial - empty_wt) if initial_valid else None
+
+        sample_wt_str = slot.record.get("samp_grams", "")
+        try:
+            sample_wt = float(sample_wt_str) if sample_wt_str.strip() else None
+        except (ValueError, TypeError):
+            sample_wt = None
+
+        target_wt = None
+        if initial_valid and sample_wt is not None:
+            target_wt = sample_wt / 100.0 * ratio
+
+        try:
+            final = float(final_str) if final_str.strip() else None
+        except (ValueError, TypeError):
+            final = None
+
+        added_wt = None
+        if initial is not None and final is not None:
+            added_wt = final - initial
+
+        return initial_valid, packet_net, target_wt, added_wt
+
+    def reagent2_stir_plan(self, slot: Slot) -> int:
+        """
+        Stir duration in seconds for reagent 2, temperature-compensated.
+        Returns 0 if no stir sub-alarm is configured.
+        """
+        return config.reagent2_stir_secs(
+            float(slot.record.get("samp_degC", "21.0") or "21.0")
+        )
+
+    def _stir_alarm(self, slot: Slot) -> None:
+        """Sound a 2-second beep for the stir sub-alarm."""
+        log.info("Arbiter: STIR ALARM for slot %s", slot.name)
+        if self._beeper is None:
+            return
+        fn = getattr(self._beeper, "beep", None)
+        if callable(fn):
+            fn(duration=2.0)
+
     # ── Phase contract: database / sample lifecycle ────────────────────────────
 
     def defaults(self):
@@ -2413,6 +2488,9 @@ class Arbiter:
             self.persist(slot, **{f"{ap}_start": None})
         slot.timer = None
         slot.running = False
+        slot.stir_deadline = None
+        slot.stir_role = None
+        slot.stir_fired = False
         self.close_modal(slot)
 
     def retry_capture(self, slot: Slot) -> None:
@@ -2482,6 +2560,15 @@ class Arbiter:
                 # would only have the beep to go on — raise a visible alarm too.
                 if slot is not self._focused:
                     self._arm_alarm(slot)
+
+            # Check for stir sub-alarm (mid-countdown beep during reagent phase)
+            if (slot.stir_deadline is not None and now >= slot.stir_deadline
+                    and not slot.stir_fired):
+                slot.stir_fired = True
+                self._stir_alarm(slot)
+                self.persist(slot, **{f"{slot.stir_role}_stir_end": self.epoch()})
+                if slot is self._focused:
+                    self.render(slot)
 
     def pump_capture(self) -> None:
         """
@@ -3939,6 +4026,9 @@ class Arbiter:
         if key in ("tab", "shift-tab"):
             cw = self._focused_widget()
             was_editing = isinstance(cw, TextBox) and cw.editing
+            # Commit weight field if tab away while editing
+            if was_editing and str(cw.name) in ("reagent1_wt_fld", "reagent2_wt_fld"):
+                self._weight_field_commit(cw)
             self._move_focus(self._focus_idx + (1 if key == "tab" else -1))
             nw = self._focused_widget()
             if was_editing and isinstance(nw, TextBox) and nw.editable:
@@ -3952,7 +4042,11 @@ class Arbiter:
             if w is None or not w.enabled:
                 return
             if isinstance(w, TextBox) and w.editable:
+                was_editing = w.editing
                 w.toggle_editing(self._disp)
+                # Commit weight field if editing just turned off
+                if was_editing and str(w.name) in ("reagent1_wt_fld", "reagent2_wt_fld"):
+                    self._weight_field_commit(w)
             elif isinstance(w, Button) and callable(w.on_press):
                 w.on_press()
             return
@@ -3989,6 +4083,15 @@ class Arbiter:
         slot = self._focused
         if slot is None:
             return
+
+        # Weight entry fields: write to the current target key (initial or final)
+        if textbox.name == "reagent1_wt_fld":
+            slot.record[slot.reagent1_wt_target] = textbox.value
+            return
+        if textbox.name == "reagent2_wt_fld":
+            slot.record[slot.reagent2_wt_target] = textbox.value
+            return
+
         fields = {"entry":  EntryPhase.FIELDS,
                   "entry2": Entry2Phase.FIELDS}.get(slot.phase)
         if not fields:
@@ -4006,6 +4109,43 @@ class Arbiter:
             if begin.enabled != want:
                 begin.enabled = want
                 begin.draw(self._disp)
+
+    def _weight_field_commit(self, textbox) -> None:
+        """
+        Handle committed weight-field edits: recompute derived values and persist
+        net weight if both initial and final are now valid.
+        """
+        slot = self._focused
+        if slot is None or textbox.name not in ("reagent1_wt_fld", "reagent2_wt_fld"):
+            return
+
+        n = 1 if "reagent1" in textbox.name else 2
+        initial_valid, packet_net, target_wt, added_wt = self.reagent_weigh_plan(slot, n)
+
+        # Flip the target key if initial just became valid
+        if n == 1:
+            if initial_valid and slot.reagent1_wt_target == "reagent1_initial_wt":
+                slot.reagent1_wt_target = "reagent1_final_wt"
+                self.render(slot)
+            elif not initial_valid and slot.reagent1_wt_target == "reagent1_final_wt":
+                slot.reagent1_wt_target = "reagent1_initial_wt"
+                self.render(slot)
+            elif initial_valid:
+                # Re-render to update instr3 with new net/target, then persist if done
+                self.render(slot)
+                if added_wt is not None:
+                    self.persist(slot, reagent1_g=added_wt)
+        else:  # n == 2
+            if initial_valid and slot.reagent2_wt_target == "reagent2_initial_wt":
+                slot.reagent2_wt_target = "reagent2_final_wt"
+                self.render(slot)
+            elif not initial_valid and slot.reagent2_wt_target == "reagent2_final_wt":
+                slot.reagent2_wt_target = "reagent2_initial_wt"
+                self.render(slot)
+            elif initial_valid:
+                self.render(slot)
+                if added_wt is not None:
+                    self.persist(slot, reagent2_g=added_wt)
 
     # ── Main loop ──────────────────────────────────────────────────────────────
 
