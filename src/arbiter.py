@@ -4087,12 +4087,15 @@ class Arbiter:
         if slot is None:
             return
 
-        # Weight entry fields: write to the current target key (initial or final)
+        # Weight entry fields: determine key based on phase state (idle vs running)
+        # not based on stored target, so re-edits go to the correct place
         if textbox.name == "reagent1_wt_fld":
-            slot.record[slot.reagent1_wt_target] = textbox.value
+            key = "reagent1_final_wt" if slot.running else "reagent1_initial_wt"
+            slot.record[key] = textbox.value
             return
         if textbox.name == "reagent2_wt_fld":
-            slot.record[slot.reagent2_wt_target] = textbox.value
+            key = "reagent2_final_wt" if slot.running else "reagent2_initial_wt"
+            slot.record[key] = textbox.value
             return
 
         fields = {"entry":  EntryPhase.FIELDS,
