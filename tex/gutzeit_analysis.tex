@@ -1,0 +1,1303 @@
+\documentclass[11pt,a4paper]{article}
+
+\usepackage[margin=2.5cm]{geometry}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{booktabs}
+\usepackage{longtable}
+\usepackage{enumitem}
+\usepackage[hidelinks]{hyperref}
+\usepackage{caption}
+
+\newcommand{\ptl}{\ensuremath{\mu\mathrm{g\,L^{-1}}}}
+\newcommand{\um}{\ensuremath{\mu\mathrm{m}}}
+
+\title{Reproducibility of the Modified Gutzeit Method for\\
+Inorganic Arsenic in Drinking Water\\
+\large A quantitative review of reagent stoichiometry, reaction kinetics,\\
+gas-handling geometry, and reflectance photometry}
+\author{Prepared as a technical working document}
+\date{}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+\noindent
+This document reviews the chemistry of a two-reagent modified Gutzeit field
+test for inorganic arsenic (L-tartaric acid with trace potassium permanganate;
+zinc dust with a trace transition-metal rate enhancer; mercuric bromide
+indicator pad), and analyses the sources of the large run-to-run variation
+observed with duplicate samples. The principal conclusions are:
+(i)~neither reagent is stoichiometrically limiting with respect to arsenic,
+by roughly five orders of magnitude;
+(ii)~the \emph{buffer capacity} of the tartaric acid, not its total molarity,
+sets the duration of the productive pH window, and permits only
+$\sim\!0.15\,$g of zinc to dissolve before the pH leaves the range in which
+arsine generation is rapid;
+(iii)~the measurement is read while the reaction is still climbing, so every
+rate-determining variable maps directly onto the reported concentration;
+(iv)~the delivery of arsine to the indicator pad, not the chemistry, is the
+dominant variance source in the as-supplied geometry, because capture
+efficiency is flow-dependent;
+(v)~a fixed, shim-defined gap over a back-sealed pad is analytically superior
+to a force-balanced flapper valve, giving near-quantitative capture with an
+order of magnitude more linear range and no force calibration; and
+(vi)~multispectral reflectance analysis, correctly transformed through
+Kubelka--Munk, can separate arsenic loading from pad wetting and from local
+indicator saturation, but only if measured per-pixel rather than
+area-averaged.
+Derivations, assumptions, and a revised protocol are given.
+\end{abstract}
+
+\tableofcontents
+
+\newpage
+
+%======================================================================
+\section{Scope and system description}
+%======================================================================
+
+\subsection{The kit as supplied}
+
+\begin{description}[leftmargin=2.2cm,style=nextline]
+  \item[Reagent 1] L-tartaric acid (CAS 87-69-4), 98.9\%, with
+        potassium permanganate $<1$\%.
+  \item[Reagent 2] Zinc powder (CAS 7440-66-6), $>99$\%, with other
+        metals (proprietary) $<1$\%.
+  \item[Indicator] Paper pad, $5 \times 6.5$~mm, bearing $\approx 1$~mg
+        mercuric bromide (HgBr$_2$), bonded to a plastic carrier strip.
+\end{description}
+
+\noindent
+Manufacturer's procedure: add Reagent~1 to 100~mL of sample in a plastic
+bottle; mix 15~s; stand 2~min; add Reagent~2; shake 5~s; place the pad in
+the headspace and cap; stand 7~min; read. Headspace 97~mL.
+
+\subsection{Reagent provenance}
+
+The formulation corresponds closely to the reagent system claimed in
+US~11{,}346{,}825~B2 (Industrial Test Systems, \emph{Arsenic analysis}),
+which claims a first particulate reagent comprising a di- or tri-carboxylic
+acid with a C--C moiety between the carboxyl groups (tartaric, malic,
+succinic, citric) combined with $0.3$--$5$~wt.\% alkali metal permanganate,
+and a second particulate reagent comprising zinc with a transition-metal
+additive (Fe, Co, Ni, Cu, Sn, W, Mo) that increases the rate of arsine
+production. Worked Examples 10, 11 and 14 of that patent use
+$2.7$--$2.8$~g of a KMnO$_4$/tartaric acid blend per 100~mL, matching the
+sachet mass measured here.
+
+The rate-enhancer concept derives from US~6{,}696{,}300, which claims
+acceleration of the detection chemistry by iron and nickel salts.
+US~6{,}576{,}143 gives the balanced arsine-generation equations and the
+description of the mercuric bromide stain as ``mixed arsenic mercury
+halogenides'' producing a yellow-to-tan-to-brown colour change.
+
+The undisclosed $<1$\% metal component of Reagent~2 is therefore almost
+certainly a transition-metal salt (sodium tungstate, potassium molybdate,
+or an Fe/Ni salt). This matters: \textbf{the catalyst dose is a fixed
+percentage of the sachet mass, so it varies exactly as the zinc mass does.}
+
+\subsection{Modifications already adopted by the operator}
+
+Sample mass recorded to 0.01~g; temperature recorded to 1~$^\circ$C;
+125~mL Erlenmeyer flask on a magnetic stirrer (73~mL headspace); stir 25~s,
+stand 1:35; add Reagent~2, close immediately, stir 1~min, wait 6~min, read.
+Analysis is by a purpose-built reflectance colorimeter using a digital
+camera with per-Bayer-layer readout under 4--8 narrow-band LEDs.
+
+%======================================================================
+\section{Chemistry}
+%======================================================================
+
+\subsection{Step 1: acidification and removal of oxidisable interferents}
+
+L-tartaric acid, $\mathrm{C_4H_6O_6}$, $M = 150.087$~g\,mol$^{-1}$, is a
+diprotic weak acid with $\mathrm{p}K_{a1} = 2.98$ and
+$\mathrm{p}K_{a2} = 4.34$ at $25\,^\circ$C. Dissolving it establishes the
+acidic environment for hydride generation. The patent specifies an optimum
+reaction pH of approximately $1.8$--$2.5$, and notes that a pH significantly
+above $2.5$ reduces the rate of arsine production.
+
+The trace permanganate oxidises dissolved sulfide to sulfate:
+\begin{equation}
+  5\,\mathrm{H_2S} + 8\,\mathrm{MnO_4^-} + 14\,\mathrm{H^+}
+  \longrightarrow 5\,\mathrm{SO_4^{2-}} + 8\,\mathrm{Mn^{2+}}
+  + 12\,\mathrm{H_2O}
+\end{equation}
+This step is essential because hydrogen sulfide reacts with mercury to give
+mercury sulfide, which both destroys the pad's sensitivity to arsenic and
+produces a grey cast that obscures the arsenic colour. The patent states
+that $0.01$--$0.08$~g of an alkali metal permanganate suffices to remove up
+to about $4$--$6$~ppm of hydrogen sulfide, consistent with the
+$\leq 0.029$~g present here (Section~\ref{sec:inventory}).
+
+Permanganate is also consumed by tartaric acid over the standing period.
+Any permanganate surviving into Step~2 will oxidise As(III) to As(V), and
+As(V) is reduced to arsine more slowly than As(III) under field-kit
+conditions. Variability in the surviving permanganate is therefore a
+speciation-mediated rate variable, and is one reason the 2-minute standing
+period should not be shortened.
+
+\subsection{Step 2: arsine generation}
+
+Zinc dissolves in the acid, generating hydrogen:
+\begin{equation}
+  \mathrm{Zn} + 2\,\mathrm{H^+} \longrightarrow
+  \mathrm{Zn^{2+}} + \mathrm{H_2}
+  \label{eq:zn}
+\end{equation}
+and the nascent hydrogen reduces dissolved arsenic to arsine:
+\begin{align}
+  \mathrm{H_3AsO_4} + 4\,\mathrm{Zn} + 8\,\mathrm{H^+}
+    &\longrightarrow \mathrm{AsH_3} + 4\,\mathrm{Zn^{2+}}
+    + 4\,\mathrm{H_2O} \\
+  \mathrm{H_3AsO_3} + 3\,\mathrm{Zn} + 6\,\mathrm{H^+}
+    &\longrightarrow \mathrm{AsH_3} + 3\,\mathrm{Zn^{2+}}
+    + 3\,\mathrm{H_2O}
+\end{align}
+The excess hydrogen from~\eqref{eq:zn} is not waste: it is the carrier gas
+that strips arsine from solution and transports it to the indicator.
+Tartrate additionally complexes Zn$^{2+}$, which helps keep the metal
+surface free of passivating hydroxide as the pH rises.
+
+Two well-documented kinetic facts govern this step. First, zinc particle
+size controls the kinetics of hydrogen production, and generation must
+continue long enough to expel all the arsenic from the sample. Second,
+As(III) forms the hydride more rapidly than As(V), so incomplete or variable
+pre-oxidation shifts the effective rate.
+
+\subsection{Step 3: stain formation}
+
+Arsine displaces bromide from mercuric bromide in a stepwise sequence.
+Mercuric bromide is colourless; the mono-substituted product is yellow, and
+the colour becomes progressively browner as further bromide is replaced:
+\begin{align}
+  \mathrm{AsH_3} + \mathrm{HgBr_2} &\rightarrow
+    \mathrm{AsH_2(HgBr)} + \mathrm{HBr}
+    &&\text{(yellow)}\\
+  \mathrm{AsH_3} + 2\,\mathrm{HgBr_2} &\rightarrow
+    \mathrm{AsH(HgBr)_2} + 2\,\mathrm{HBr}
+    &&\text{(yellow)}\\
+  \mathrm{AsH_3} + 3\,\mathrm{HgBr_2} &\rightarrow
+    \mathrm{As(HgBr)_3} + 3\,\mathrm{HBr}
+    &&\text{(brownish-yellow to brown)}
+  \label{eq:tri}
+\end{align}
+Rahman \emph{et al.} assign the disubstituted species as yellow and the
+trisubstituted as brownish-yellow. At extreme loading, mercury arsenide
+(Hg$_3$As$_2$) and metallic deposits can form; these are spectrally neutral
+(grey-black) rather than yellow, which has consequences for multispectral
+interpretation (Section~\ref{sec:optics}).
+
+The limiting stoichiometry for capacity calculations
+is~\eqref{eq:tri}: three HgBr$_2$ per arsenic.
+
+\subsection{Interferences}
+
+\begin{itemize}[nosep]
+  \item \textbf{Sulfide} --- the principal interferent; removed by
+        permanganate. Note that the standard mercuric bromide paper
+        documentation warns that hydrogen sulfide can itself produce a
+        yellow colour, so sulfide interference is not reliably
+        distinguishable by hue alone.
+  \item \textbf{Antimony and selenium} --- also form hydrides, but are
+        rarely present in groundwater at interfering levels.
+  \item \textbf{Organic arsenic} --- generally not detected without a
+        preliminary oxidation step; kit results will read low relative to
+        ICP-MS if organoarsenicals are present.
+  \item \textbf{Photobleaching} --- the yellow product fades, especially in
+        sunlight, so the pad must be read promptly and consistently.
+\end{itemize}
+
+%======================================================================
+\section{Quantitative reagent inventory}
+\label{sec:inventory}
+%======================================================================
+
+\subsection{Sachet mass statistics}
+
+Thirty-two sachets of each reagent were weighed net of packaging.
+
+\begin{table}[h]
+\centering
+\caption{Sachet mass statistics ($n=32$ each).}
+\begin{tabular}{lrr}
+\toprule
+Statistic & Reagent 1 (acid) & Reagent 2 (zinc) \\
+\midrule
+Mean (g)                    & 2.896 & 1.266 \\
+Median (g)                  & 2.887 & 1.298 \\
+Standard deviation (g)      & 0.111 & 0.252 \\
+Coefficient of variation    & 3.8\% & \textbf{19.9\%} \\
+SD excluding high outlier   & 0.057 & --- \\
+CV excluding high outlier   & 2.0\% & --- \\
+Minimum (g)                 & 2.748 & 0.553 \\
+Maximum (g)                 & 3.448 & 1.678 \\
+Max/min ratio               & 1.25  & \textbf{3.03} \\
+Interquartile range (g)     & ---   & 1.116--1.449 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Reagent~1 is well controlled apart from a single sachet 19\% above the mean.
+Reagent~2 exhibits a 20\% coefficient of variation and a threefold range,
+which is a filling-process defect rather than ordinary dispensing variation.
+
+\emph{Note on the data:} the two columns were recorded in sorted order, so
+the pairing between the acid and zinc sachet used in any given test is lost.
+Future weighings should record matched pairs so that colour can be regressed
+against both masses independently.
+
+\subsection{Molar inventory per test}
+
+Taking the outlier-excluded acid mean of 2.878~g:
+\begin{align}
+  n(\mathrm{H_2T}) &= \frac{2.878 \times 0.989}{150.087}
+     = 1.896\times10^{-2}\ \mathrm{mol}
+     \quad\Rightarrow\quad C_T = 0.190\ \mathrm{M} \\
+  n(\mathrm{H^+})_{\text{total}} &= 2\,n(\mathrm{H_2T})
+     = 3.79\times10^{-2}\ \mathrm{mol}\\
+  n(\mathrm{KMnO_4}) &\leq \frac{0.01 \times 2.878}{158.034}
+     = 1.82\times10^{-4}\ \mathrm{mol}\\
+  n(\mathrm{Zn})_{\text{mean}} &= \frac{1.266}{65.38}
+     = 1.936\times10^{-2}\ \mathrm{mol}
+     \quad (\text{range } 0.85\text{--}2.57\times10^{-2})\\
+  n(\mathrm{HgBr_2}) &= \frac{1\times10^{-3}}{360.41}
+     = 2.774\times10^{-6}\ \mathrm{mol}
+\end{align}
+
+Complete dissolution of the mean zinc charge would require
+$2 \times 1.936\times10^{-2} = 3.87\times10^{-2}$~mol of H$^+$, against
+$3.79\times10^{-2}$~mol available: the two are matched to within 2\%.
+Across the observed zinc range, the acid provides between a 2.2-fold excess
+(smallest sachet) and only 74\% of requirement (largest sachet).
+
+Note also that the patent recommends $0.2$--$1$~g of zinc for a 100~mL
+sample, and its worked examples use $0.29$--$0.70$~g of zinc against the
+same $2.7$--$2.8$~g of acid. The sachets measured here average nearly twice
+the top of that range. It is worth confirming that the kit is dosed for a
+100~mL sample.
+
+\subsection{Stoichiometric excess over arsenic}
+
+At the WHO guideline value of 10~\ptl{} in a 100~mL sample:
+\begin{equation}
+  n(\mathrm{As}) = \frac{1.0\times10^{-6}}{74.92}
+  = 1.34\times10^{-8}\ \mathrm{mol}
+\end{equation}
+Reduction of As(V) to arsine consumes 4~mol Zn per mol As, i.e.\
+$5.3\times10^{-8}$~mol $= 3.5$~\ensuremath{\mu}g of zinc. The smallest
+sachet contains 0.553~g. \textbf{Zinc is in approximately
+$10^{4}$--$10^{5}$-fold excess and cannot be stoichiometrically limiting.}
+The same conclusion holds for the acid.
+
+\subsection{Indicator pad capacity}
+\label{sec:padcap}
+
+By~\eqref{eq:tri}, whole-pad capacity is
+\begin{equation}
+  n(\mathrm{As})_{\max} = \frac{n(\mathrm{HgBr_2})}{3}
+  = 9.25\times10^{-7}\ \mathrm{mol} = 69.3\ \ensuremath{\mu}\mathrm{g}
+\end{equation}
+equivalent to 693~\ptl{} in a 100~mL sample \emph{if the arsenic were
+distributed uniformly and captured completely}. The areal capacity of the
+$32.5$~mm$^2$ pad is
+\begin{equation}
+  \sigma_{\text{cap}} = \frac{9.25\times10^{-7}}{32.5}
+  = 28.5\ \mathrm{nmol\,mm^{-2}}
+  \label{eq:sigmacap}
+\end{equation}
+This figure governs the onset of \emph{local} saturation in
+Section~\ref{sec:deposition}, which occurs at far lower concentrations than
+693~\ptl{}.
+
+%======================================================================
+\section{The real limiting factor: buffer capacity}
+%======================================================================
+
+\subsection{Derivation}
+
+Since neither reagent is stoichiometrically limiting for arsenic, the
+question becomes: how long does the system remain in the pH window where
+arsine generation is fast?
+
+\paragraph{Assumptions.}
+(i)~Activity coefficients are taken as unity (ionic strength rises during
+the run, so this is approximate).
+(ii)~The only proton sink is zinc dissolution via~\eqref{eq:zn}; arsenic and
+permanganate consumption are negligible.
+(iii)~Sample alkalinity is neglected; a real groundwater with
+$2$~meq\,L$^{-1}$ alkalinity consumes an additional $0.2$~mmol, roughly
+5\% of the acid, and shifts the results accordingly.
+(iv)~Zinc tartrate complexation is neglected; it will slightly increase the
+apparent capacity.
+
+Let $C_T$ be total tartrate, $V$ the sample volume, and define the
+protonation fractions
+\begin{equation}
+  \alpha_1 = \frac{K_{a1}[\mathrm{H^+}]}{D}, \qquad
+  \alpha_2 = \frac{K_{a1}K_{a2}}{D}, \qquad
+  D = [\mathrm{H^+}]^2 + K_{a1}[\mathrm{H^+}] + K_{a1}K_{a2}
+\end{equation}
+Charge balance on the initial solution (pure H$_2$T, neglecting OH$^-$)
+gives $[\mathrm{H^+}]_0 = C_T(\alpha_{1,0} + 2\alpha_{2,0})$, so the
+proton condition referenced to the initial state reduces to
+\begin{equation}
+  \boxed{\;
+  n_{\mathrm{H^+}}(\mathrm{pH}) = V\Big[
+    C_T\big(\alpha_1 + 2\alpha_2\big) - [\mathrm{H^+}]
+  \Big]\;}
+  \label{eq:proton}
+\end{equation}
+which is the number of moles of protons that zinc has removed by the time
+the solution reaches that pH. The corresponding dissolved zinc is
+$n_{\mathrm{Zn}} = n_{\mathrm{H^+}}/2$.
+
+\subsection{Result}
+
+With $C_T = 0.190$~M, $V = 0.100$~L, $K_{a1} = 1.047\times10^{-3}$,
+$K_{a2} = 4.571\times10^{-5}$:
+
+\begin{table}[h]
+\centering
+\caption{Zinc dissolved before the solution reaches a given pH.}
+\begin{tabular}{lrrr}
+\toprule
+pH & $n_{\mathrm{H^+}}$ (mmol) & $n_{\mathrm{Zn}}$ (mmol)
+   & Zinc dissolved (g) \\
+\midrule
+1.87 (initial) & 0.00 & 0.00 & 0.000 \\
+2.20 & 2.11 & 1.06 & 0.069 \\
+2.50 & 4.53 & 2.26 & \textbf{0.148} \\
+3.00 & 10.27 & 5.13 & 0.336 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\paragraph{Interpretation.} Only about \textbf{0.15~g of zinc can dissolve
+before the pH leaves the productive window} of pH~$\leq 2.5$. Even the
+smallest sachet contains 3.7 times this amount. Zinc is therefore never
+consumed as a reagent; it functions as a delivery vehicle for
+\emph{surface area} and for the co-formulated rate catalyst. The acid's
+buffer capacity is the true ceiling on how long the reaction runs hot, and
+increasing the acid charge extends that window roughly proportionally.
+
+\subsection{Hydrogen volume and the impossibility of a sealed vessel}
+
+Complete consumption of the acid would liberate
+$1.90\times10^{-2}$~mol of H$_2$, i.e.\ 465~mL at $25\,^\circ$C and 1~atm.
+Reaching pH~2.5 alone liberates $2.26$~mmol $=55$~mL. Against a 73~mL
+headspace, a gas-tight closure would reach
+\begin{equation}
+  P = \frac{nRT}{V} = \frac{1.90\times10^{-2}\times 8.314 \times 298}
+  {7.3\times10^{-5}} \approx 6.4\ \mathrm{atm\ gauge}
+\end{equation}
+\textbf{The vessel must vent, and the venting path must be a designed,
+reproducible feature rather than a leak.} An ill-fitting closure converts an
+uncontrolled leak rate into an uncontrolled capture efficiency.
+
+\subsection{Summary of limiting factors}
+
+\begin{table}[h]
+\centering
+\caption{What limits what.}
+\begin{tabular}{lll}
+\toprule
+Candidate & Limiting? & Basis \\
+\midrule
+Zinc vs.\ arsenic       & No, by $\sim\!10^5$ & Section 3.3 \\
+Acid vs.\ arsenic       & No, by $\sim\!10^5$ & Section 3.3 \\
+Acid \emph{buffer capacity} & \textbf{Yes} & Table 2 \\
+HgBr$_2$, whole pad     & Only above $\sim\!690$~\ptl{} & Section 3.4 \\
+HgBr$_2$, \emph{locally}& \textbf{Yes, from tens of \ptl{}}
+                                              & Section 6.4 \\
+Reaction time           & \textbf{Yes} & Section 5 \\
+Arsine capture efficiency & \textbf{Yes, and flow-dependent}
+                                              & Section 6 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+%======================================================================
+\section{Kinetics, timing, and temperature}
+%======================================================================
+
+\subsection{Reading before the plateau}
+
+The patent states that substantially complete arsenic reduction may occur
+within about 10 minutes, and all of its worked examples read at 10 minutes.
+The kit protocol reads at 7 minutes. Reading on the rising part of the
+conversion curve is the single most consequential procedural choice, because
+it converts every rate variable --- zinc mass, catalyst dose, particle size,
+temperature, pH trajectory --- directly into a concentration error.
+
+The sensitivity of the response to zinc and catalyst loading is documented
+in the patent's own examples. Against a fixed 100~ppb standard:
+
+\begin{table}[h]
+\centering
+\caption{Patent examples: apparent concentration for a 100~ppb standard.}
+\begin{tabular}{llll}
+\toprule
+Example & Zinc reagent & Zinc (g) & Reported result \\
+\midrule
+11 & T2 & 0.29 & $>100$, $<150$~ppb \\
+10 & T1 & 0.70 & $>200$, $<250$~ppb \\
+14 & T1 & 0.70 (higher KMnO$_4$) & $\approx 400$~ppb \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\noindent
+A 2.4-fold change in zinc and catalyst moved a fixed sample across a
+fourfold range of apparent concentration. The sachets measured here vary
+threefold.
+
+\subsection{Time--temperature compensation}
+
+\paragraph{Assumptions.}
+(i)~A single activated process is rate-controlling.
+(ii)~The reaction proceeds to the \emph{same endpoint} at all temperatures,
+so that only the pace differs. This must be verified
+(Section~\ref{sec:isoconv-check}); it can fail if a hotter run exhausts the
+buffer window before conversion is complete.
+(iii)~The Arrhenius form applies over the narrow range of interest.
+
+Isoconversion requires $k(T)\,t = \text{constant}$. With
+$k = A\exp(-E_a/RT)$,
+\begin{equation}
+  \boxed{\;
+  t(T) = t_{25}\,\exp\!\left[
+    \frac{E_a}{R}\left(\frac{1}{T} - \frac{1}{298.15}\right)
+  \right]\;}
+  \label{eq:arrhenius}
+\end{equation}
+with $T$ in kelvin, $R = 8.314$~J\,mol$^{-1}$\,K$^{-1}$, and $t_{25}$ the
+chosen reference reaction time. This holds regardless of reaction order.
+
+It is convenient to recast $E_a$ as a $Q_{10}$, the rate factor per
+$10\,^\circ$C:
+\begin{equation}
+  Q_{10} = \exp\!\left[\frac{E_a}{R}\cdot
+  \frac{10}{T(T+10)}\right], \qquad
+  t(\theta) = t_{25}\,Q_{10}^{\,(25-\theta)/10}
+  \label{eq:q10}
+\end{equation}
+At $T = 298$~K, $Q_{10} = 2$ corresponds to
+$E_a \approx 53$~kJ\,mol$^{-1}$, which lies in the middle of the published
+range for surface-controlled acid dissolution of zinc
+($\approx 40$--$60$~kJ\,mol$^{-1}$; diffusion control would give
+$\approx 20$).
+
+\begin{table}[h]
+\centering
+\caption{Compensated read times for $t_{25} = 12$~min, $Q_{10} = 2$.
+Use only after measuring your own $Q_{10}$.}
+\begin{tabular}{lrrrrrrrrrrr}
+\toprule
+Water $^\circ$C & 15 & 18 & 20 & 22 & 24 & 25 & 26 & 28 & 30 & 32 & 35\\
+\midrule
+Read at (min) & 24.0 & 19.5 & 17.0 & 14.8 & 12.9 & 12.0 & 11.2
+              & 9.7 & 8.5 & 7.4 & 6.0 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+If temperature drifts during a run, accumulate equivalent time and stop when
+it reaches $t_{25}$:
+\begin{equation}
+  t_{\mathrm{eq}} = \int_0^{t}\exp\!\left[
+    \frac{E_a}{R}\left(\frac{1}{298.15} - \frac{1}{T(\tau)}\right)
+  \right]\mathrm{d}\tau
+  \label{eq:integral}
+\end{equation}
+
+\subsection{Measuring $E_a$ empirically}
+
+Run a fixed standard ($\approx 50$~\ptl{}) at two temperatures as far apart
+as ambient allows, with a full time course at each (5, 8, 12, 18, 25, 35~min,
+in triplicate). Find the times $t_1, t_2$ giving \emph{equal} colour:
+\begin{equation}
+  E_a = \frac{R\,\ln(t_1/t_2)}{\dfrac{1}{T_1} - \dfrac{1}{T_2}}
+  \qquad\text{or}\qquad
+  Q_{10} = \left(\frac{t_1}{t_2}\right)^{\frac{10}{\theta_2-\theta_1}}
+\end{equation}
+
+The rigorous form of the same experiment is time--temperature superposition:
+plot response against $\ln t$ for each temperature and shift the curves
+horizontally until they superimpose. The required shift is $\ln a_T$. If the
+curves collapse onto a single master curve, the single-process assumption is
+validated; if they do not, no time correction will work.
+
+\subsection{Verifying the isoconversion assumption}
+\label{sec:isoconv-check}
+
+Compare the \emph{plateau heights} at the two temperatures.
+\begin{itemize}[nosep]
+  \item Plateaus match $\Rightarrow$ adjust time
+        via~\eqref{eq:arrhenius}.
+  \item Plateaus differ $\Rightarrow$ the endpoint itself is
+        temperature-dependent, which is what one expects if the buffer
+        window is exhausted before conversion completes. A multiplicative
+        correction on the reading, $R_{\mathrm{corr}}
+        = R_{\mathrm{meas}}\,f(\theta)$, must then be fitted empirically.
+        Raising Reagent~1 to $5$--$6$~g per 100~mL widens the buffer window
+        and should be tried first.
+\end{itemize}
+
+\subsection{Choosing a time where compensation barely matters}
+
+The better strategy is to operate where the response is flat. A temperature
+uncertainty of $\pm\Delta\theta$ at a given $Q_{10}$ produces an effective
+time uncertainty
+\begin{equation}
+  \Delta\ln t = \frac{\Delta\theta}{10}\ln Q_{10}
+\end{equation}
+The resulting relative error in the reading is
+\begin{equation}
+  \frac{\Delta R}{R} = \left(\frac{\mathrm{d}\ln R}{\mathrm{d}\ln t}\right)
+  \Delta \ln t
+\end{equation}
+For $\Delta\theta = 5\,^\circ$C and $Q_{10} = 2$,
+$\Delta\ln t = 0.347$. Requiring $\Delta R/R \leq 0.02$ gives the
+\emph{flatness criterion}
+\begin{equation}
+  \boxed{\;\frac{\mathrm{d}\ln R}{\mathrm{d}\ln t} \leq 0.058\;}
+\end{equation}
+which converts to a one-line bench test. Read the same standard at 10~min
+and at 20~min ($\Delta\ln t = \ln 2 = 0.693$):
+\begin{equation}
+  \frac{R_{20} - R_{10}}{R_{10}} \leq 0.058 \times 0.693 = 0.040
+\end{equation}
+\textbf{If the 10-minute and 20-minute readings differ by 4\% or less, a
+$\pm 5\,^\circ$C temperature excursion costs under 2\% and the correction
+can be omitted.} If they differ by 15\%, the correction is doing real work
+and $t_{25}$ should be pushed toward 15~min.
+
+\subsection{Thermal budget}
+
+The sample is not isothermal. For~\eqref{eq:zn},
+$\Delta H \approx -154$~kJ\,mol$^{-1}$. Dissolution of 0.3~g of zinc
+(4.59~mmol) into 100~g of water ($c_p = 4.18$~J\,g$^{-1}$K$^{-1}$) releases
+\begin{equation}
+  \Delta T = \frac{4.59\times10^{-3}\times 1.54\times10^{5}}
+  {100 \times 4.18} = +1.7\ \mathrm{K}
+\end{equation}
+Dissolution of tartaric acid is endothermic
+($\Delta H_{\mathrm{sol}} \approx +20$ to $+25$~kJ\,mol$^{-1}$), giving
+roughly $-1$~K during Step~1. \textbf{Record the temperature at the moment
+Reagent~2 is added and again at the read, and use the mean
+in~\eqref{eq:arrhenius}.} Ignoring a $1.5$~K rise costs about 10\% of the
+effective time.
+
+This also has a bearing on any strategy of pre-warming the pad holder to
+suppress condensation: the water warms during the run while a small plastic
+head loses heat to the room, so the temperature margin closes exactly when
+it is most needed. Start the head $5$--$8\,^\circ$C above the sample and
+insulate the tube above the closure.
+
+%======================================================================
+\section{Gas handling and pad exposure geometry}
+%======================================================================
+
+\subsection{What the geometry must achieve}
+
+Colour development is more efficient if the gas is forced into intimate
+contact with the reagent paper and if the exposed area is small enough to
+concentrate the available arsine. For a pad bonded to an impermeable
+carrier, literal through-flow is impossible, but the two functional
+requirements can still be met:
+\begin{enumerate}[nosep]
+  \item \textbf{No bypass} --- every molecule of carrier gas must traverse
+        the pad face. The back face must be sealed.
+  \item \textbf{Short diffusion distance} --- the gap over the pad face must
+        be small enough that arsine reaches the surface within the residence
+        time.
+\end{enumerate}
+Failure of requirement~1 was observed directly: with the pad merely
+suspended in the vial airspace, colour developed markedly more strongly
+around the edges, which is the signature of the pad mapping an
+uncontrolled flow field rather than integrating a captured dose.
+
+\subsection{Radial flow between the pad and a flat face}
+
+Consider gas admitted through a central hole of radius $r_1$ into a gap of
+height $h$ between the pad face and a flat plate, escaping at radius $r_2$.
+
+\paragraph{Assumptions.} Creeping (Stokes) flow; $h \ll r$; isothermal,
+incompressible, Newtonian; the pad face is smooth on the scale of $h$;
+entrance effects neglected.
+
+Local volumetric flow through the annulus at radius $r$:
+\begin{equation}
+  Q = -(2\pi r)\frac{h^3}{12\mu}\frac{\mathrm{d}P}{\mathrm{d}r}
+\end{equation}
+Separating and integrating from $r_1$ to $r_2$:
+\begin{equation}
+  \boxed{\;
+  Q = \frac{\pi h^3 \Delta P}{6\mu \ln(r_2/r_1)}
+  \quad\Longleftrightarrow\quad
+  h = \left[\frac{6\mu Q \ln(r_2/r_1)}{\pi \Delta P}\right]^{1/3}\;}
+  \label{eq:radialflow}
+\end{equation}
+
+\subsection{The force-balanced (flapper valve) case}
+
+If the pad is held against the flat face by a fixed light force $F$, the gap
+self-adjusts until the integrated pressure lifts the pad. The pressure
+profile from~\eqref{eq:radialflow} is
+\begin{equation}
+  P(r) - P_{\mathrm{atm}} = \Delta P\,
+  \frac{\ln(r_2/r)}{\ln(r_2/r_1)}
+\end{equation}
+Integrating over the annulus and adding the hole area, with
+$L \equiv \ln(r_2/r_1)$:
+\begin{equation}
+  F = \Delta P\left[\frac{2\pi}{L}
+  \left(\frac{r_2^2 - r_1^2}{4} - \frac{r_1^2 L}{2}\right)
+  + \pi r_1^2\right]
+  = \Delta P\,\underbrace{\frac{\pi(r_2^2-r_1^2)}{2L}}_{A_{\mathrm{eff}}}
+  \label{eq:aeff}
+\end{equation}
+The $r_1^2$ terms cancel exactly, leaving a compact effective area.
+
+For a 3/32~in hole ($r_1 = 1.19$~mm) and a 5~mm-wide pad
+($r_2 = 2.5$~mm to the nearest edge), $L = 0.742$ and
+$A_{\mathrm{eff}} = 10.2$~mm$^2$. A closing force of $0.5$~gf gives
+$\Delta P = 479$~Pa. With $\mu(\mathrm{H_2}, 25\,^\circ\mathrm{C})
+= 8.9\times10^{-6}$~Pa\,s and a representative peak gas rate
+$Q = 0.9$~mL\,s$^{-1}$, equation~\eqref{eq:radialflow} gives
+\begin{equation}
+  h \approx 29\ \um
+\end{equation}
+
+\paragraph{Key scaling.} Because $\Delta P$ is fixed by the spring force and
+is \emph{independent of flow},
+\begin{equation}
+  h \propto Q^{1/3}
+\end{equation}
+A doubling of gas rate opens the gap by only 26\%. \textbf{The intuition
+that a hotter, faster reaction would exponentially widen the gap is
+incorrect}; the dependence is a cube root. Temperature still matters
+enormously, but through the generation chemistry of Section~5, not through
+the valve.
+
+\subsection{Capture efficiency}
+
+\paragraph{Assumptions.} Plug flow in the radial direction; wall mass
+transfer coefficient $k_m \approx D/h$; arsine concentration uniform across
+the gap; the pad is a perfect sink (reaction fast relative to diffusion);
+one absorbing wall.
+
+Differential mass balance, with $\mathrm{d}A$ the incremental pad area:
+\begin{equation}
+  Q\,\mathrm{d}C = -k_m C\,\mathrm{d}A
+  \quad\Longrightarrow\quad
+  \frac{C(A)}{C_0} = \exp\!\left(-\frac{A}{A^{*}}\right),
+  \qquad
+  \boxed{\;A^{*} = \frac{hQ}{D}\;}
+  \label{eq:astar}
+\end{equation}
+$A^{*}$ is the \emph{e-folding area}: the pad area over which 63\% of the
+arsine is removed. The number of transfer units for the whole accessible
+pad area $A_p$ is
+\begin{equation}
+  \mathrm{NTU} = \frac{A_p}{A^{*}} = \frac{A_p D}{hQ},
+  \qquad
+  \eta_{\text{capture}} = 1 - e^{-\mathrm{NTU}}
+  \label{eq:ntu}
+\end{equation}
+
+The assumption $k_m = D/h$ is deliberately conservative: for fully developed
+flow in a slot with one absorbing wall, $\mathrm{Sh} \approx 4.86$ gives
+$k_m \approx 2.4\,D/h$, which would raise all NTU values by that factor.
+
+Taking $D(\mathrm{AsH_3}$ in $\mathrm{H_2}) \approx
+4\times10^{-5}$~m$^2$\,s$^{-1}$ (estimated; the value is uncertain within
+roughly $3$--$7\times10^{-5}$) and $A_p \approx 25$~mm$^2$:
+
+\begin{table}[h]
+\centering
+\caption{Force-balanced valve: $\mathrm{NTU} \propto Q^{-4/3}$
+because $h \propto Q^{1/3}$.}
+\begin{tabular}{lrrrr}
+\toprule
+$Q$ (mL\,s$^{-1}$) & $h$ (\um) & $A^{*}$ (mm$^2$) & NTU
+& $\eta_{\text{capture}}$ \\
+\midrule
+0.3 & 19.9 & 0.149 & 168 & $>0.9999$ \\
+0.9 & 28.7 & 0.646 & 38.7 & $>0.9999$ \\
+2.7 & 41.4 & 2.79 & 8.9 & 0.9999 \\
+8.1 & 59.7 & 12.1 & 2.1 & 0.876 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\noindent
+Capture is effectively quantitative across the full range of gas rates the
+threefold zinc variation can produce. \textbf{This is the decisive advantage
+of a sealed, back-supported geometry: it converts collection from a
+flow-dependent efficiency into a near-quantitative trap, and thereby
+decouples the reading from the zinc mass.}
+
+\subsection{Deposition profile and local saturation}
+\label{sec:deposition}
+
+The same analysis fixes \emph{where} the arsenic lands. Areal deposition
+density for a total captured amount $n$:
+\begin{equation}
+  \sigma(A) = \frac{n}{A^{*}}\exp\!\left(-\frac{A}{A^{*}}\right)
+  \label{eq:sigma}
+\end{equation}
+peaking at the hole edge. Local saturation begins when
+$\sigma(0) = \sigma_{\text{cap}}$ from~\eqref{eq:sigmacap}:
+\begin{equation}
+  \boxed{\;n_0 = A^{*}\sigma_{\text{cap}}\;}
+  \label{eq:onset}
+\end{equation}
+and above that, the saturated area grows only logarithmically:
+\begin{equation}
+  A_{\text{sat}}(n) = A^{*}\ln\!\left(\frac{n}{n_0}\right)
+  \label{eq:asat}
+\end{equation}
+
+\paragraph{Consequence for the flapper valve.} With
+$A^{*} = 0.646$~mm$^2$, equation~\eqref{eq:onset} gives
+$n_0 = 18.4$~nmol $= 1.38$~\ensuremath{\mu}g, i.e.\ saturation onset at
+about \textbf{14~\ptl{}}. Above that the stain does not darken further at
+its centre; it widens --- and by~\eqref{eq:asat} the widening is
+logarithmic, so between 14 and 256~\ptl{} the saturated radius grows only
+from 1.19 to about 1.46~mm. The integrated response is strongly sublinear
+over almost the entire useful range.
+
+\paragraph{The fundamental trade-off.} Combining~\eqref{eq:ntu}
+and~\eqref{eq:onset}:
+\begin{equation}
+  \mathrm{NTU} = \frac{A_p}{A^{*}}
+  \qquad\text{and}\qquad
+  n_0 \propto A^{*}
+\end{equation}
+\textbf{Quantitative capture and uniform deposition are in direct
+opposition.} Large NTU (good capture) requires $A^{*} \ll A_p$, which
+concentrates the deposit near the inlet. Setting $A^{*} \approx A_p$ for
+uniform deposition drops capture to 63\%. There is no geometry that gives
+both, and the design task is to choose the compromise deliberately.
+
+\subsection{Recommended geometry: a fixed shim-defined gap}
+\label{sec:fixedgap}
+
+Since $A^{*} = hQ/D$, the gap height is the single lever controlling both
+capture and linear range. Requiring $\mathrm{NTU} \geq 3$ (i.e.\
+$\eta \geq 95$\%) at the maximum expected gas rate gives the design rule
+\begin{equation}
+  \boxed{\;h \leq \frac{A_p D}{3\,Q_{\max}}\;}
+  \label{eq:designrule}
+\end{equation}
+With $A_p = 25$~mm$^2$, $D = 4\times10^{-5}$~m$^2$\,s$^{-1}$ and
+$Q_{\max} = 1.5$~mL\,s$^{-1}$, this gives $h \leq 222$~\um{}. A gap of
+$150$~\um{} leaves margin:
+
+\begin{table}[h]
+\centering
+\caption{Fixed gap $h = 150$~\um{}: $\mathrm{NTU} \propto Q^{-1}$.}
+\begin{tabular}{lrrrr}
+\toprule
+$Q$ (mL\,s$^{-1}$) & $A^{*}$ (mm$^2$) & NTU
+& $\eta_{\text{capture}}$ & Saturation onset $n_0$ \\
+\midrule
+0.3 & 1.13 & 22.2 & $>0.9999$ & 32~nmol (24~\ptl{})\\
+0.9 & 3.38 & 7.4  & 0.9994 & 96~nmol (72~\ptl{})\\
+1.5 & 5.63 & 4.4  & 0.988  & 160~nmol (120~\ptl{})\\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\noindent
+Compared with the $29$~\um{} force-balanced gap, a fixed $150$~\um{} gap
+gives:
+\begin{itemize}[nosep]
+  \item capture still $\geq 98.8$\% across the whole plausible flow range;
+  \item a fivefold extension of the linear range
+        (14~\ptl{} $\rightarrow$ 72~\ptl{} onset at nominal flow);
+  \item \textbf{no force to calibrate} --- the gap is set by a shim, not by
+        a spring balance at the milligram-force scale;
+  \item \textbf{no valve chatter} at the tail of the run, when gas
+        generation falls below the cracking pressure of a force-balanced
+        design;
+  \item \textbf{no capillary stiction} --- the capillary pressure of a
+        condensed water bridge is $2\gamma/h$, which falls from
+        $\approx 5000$~Pa at 29~\um{} to $\approx 960$~Pa at 150~\um{}, and
+        in any case there is no closing force for a bridge to act against;
+  \item \textbf{no temperature sensitivity of the gap at all}, since $h$ is
+        a machined dimension.
+\end{itemize}
+
+\paragraph{Construction.} A rectangular channel a little wider than the
+strip ($\approx 5.3$~mm), with the strip's plastic back seated flat against
+the channel floor and a shim or milled step establishing $150$~\um{} over
+the pad face. Gas enters through a transverse slot ($\approx 5 \times
+0.3$~mm) rather than discrete round holes, so that it arrives as a sheet
+spanning the pad width. Extend the channel $10$--$15$~mm beyond the pad
+before the exit, and place any flow restriction \emph{downstream} of the
+pad. Do not use a second floating pressure regulator (such as an inverted
+vial) in series; two floating elements can hunt against one another. Vent
+through a fixed open orifice and make the closure itself genuinely
+gas-tight (silicone or butyl rather than natural cork).
+
+\paragraph{Note on rough, porous pad surfaces.} Paper pore structure is
+typically $1$--$20$~\um{}. At a $150$~\um{} working gap the paper's
+roughness is a small perturbation on the channel height, and the paper wicks
+condensate into its bulk rather than allowing a coherent liquid bridge to
+span the gap. This is a genuine advantage of paper over a smooth absorber,
+though wicking capacity is finite: pale, diffuse, soft-edged stains rather
+than a crisp pattern are the signature of a flooded pad.
+
+\subsection{The bypass failure mode}
+
+Whatever the gap, the claimed advantage --- that all gas passes close to the
+pad --- is destroyed by any preferential leak path: a burr at the inlet, a
+scratch across the flat face, a wave in the plate, or a domed fillet at a
+resin edge. Such a defect is invisible on inspection but not in the data.
+
+\textbf{The stain shape is a free diagnostic.} A clean concentric or
+transversely symmetric pattern indicates a good seal. A crescent, comet
+tail, or off-centre blob indicates tilt or a leak. Photograph every pad and
+treat asymmetry as grounds for rejecting the run.
+
+\subsection{Instrumenting the pressure}
+
+Rather than attempting to calibrate a milligram-scale closing force, tee a
+length of clear tubing partly filled with water off the reaction vessel as a
+water manometer, with a millimetre scale behind it. This gives, live and for
+the cost of a metre of tubing: the operating $\Delta P$, run-to-run
+repeatability of the gas path, visible evidence of any chatter, and a
+qualitative trace of the gas generation curve.
+
+\subsection{Two decisive experiments}
+
+\paragraph{Tandem pad breakthrough.} Place a second pad downstream of the
+first and run a 100~\ptl{} standard. If the capture analysis is correct,
+the downstream pad should remain white. The ratio of downstream to upstream
+colour is a direct measurement of $1 - \eta$, and hence a check on the
+assumed $D$ and $k_m$. Repeat at 0.7~g and 1.6~g of zinc: if the downstream
+pad stays clean at both, the geometry has decoupled the reading from the gas
+rate, and remaining error must lie in the chemistry.
+
+\paragraph{Gas volumetry.} Route the outlet through tubing to an inverted
+graduated cylinder over water and record volume against time. This measures
+the hydrogen evolution curve directly, giving $Q(t)$, $Q_{\max}$ for use
+in~\eqref{eq:designrule}, and a direct test of whether duplicate runs at
+identical zinc mass produce superimposable curves.
+
+%======================================================================
+\section{Reflectance photometry}
+\label{sec:optics}
+%======================================================================
+
+\subsection{Kubelka--Munk}
+
+Diffuse reflectance from a scattering paper substrate is not linear in
+absorber concentration. For an optically thick, diffusely scattering layer,
+Kubelka--Munk theory gives
+\begin{equation}
+  \boxed{\;
+  f(R_\infty) = \frac{(1 - R_\infty)^2}{2R_\infty}
+  = \frac{K}{S}\;}
+  \label{eq:km}
+\end{equation}
+where $K$ is the absorption coefficient and $S$ the scattering coefficient.
+
+\paragraph{Assumptions.}
+(i)~The layer is optically thick (no light reaches the backing) --- verify
+by measuring a pad over white and over black backings and confirming the
+readings agree.
+(ii)~Isotropic diffuse illumination and collection; a directional LED and
+camera approximate this only roughly, so treat $f(R)$ as an empirical
+linearising transform rather than an absolute quantity.
+(iii)~$S$ is independent of wavelength and of the absorber --- reasonable
+for a lightly loaded pad, but violated by wetting.
+(iv)~$R_\infty$ is measured relative to a stable diffuse white standard.
+
+Because $K$ is proportional to chromophore concentration while $S$ is a
+property of the paper, subtract the unexposed pad measured in the same band:
+\begin{equation}
+  \Delta(K/S)_\lambda = f(R_\lambda)_{\text{exposed}}
+  - f(R_\lambda)_{\text{blank}}
+  \label{eq:dks}
+\end{equation}
+Only $\Delta(K/S)$ is approximately proportional to arsenic loading.
+Performing linear algebra on raw reflectance, or on gamma-encoded camera
+values, manufactures curvature that is not chemistry.
+
+\subsection{What the spectra should look like}
+
+The three substitution states are not a freely variable mixture: they are
+sequential rungs whose relative abundance is set by the \emph{local}
+As:Hg ratio. Resolving them therefore yields the local saturation state, not
+an independent measure of total arsenic. The correct framing is two
+observables from one spectrum:
+\begin{itemize}[nosep]
+  \item \textbf{magnitude} of $\Delta(K/S)$ --- how much arsenic arrived;
+  \item \textbf{shape} of $\Delta(K/S)$ --- how concentrated it was where it
+        landed.
+\end{itemize}
+
+Do not expect three resolvable peaks. These are charge-transfer absorptions
+in a progressively more arsenide-like solid, so advancing substitution
+produces a \emph{red-shifting absorption edge} rather than new bands.
+``Yellow'' is an edge near $450$--$470$~nm; ``brown'' is that edge dragged
+toward $550$--$600$~nm with an extended tail.
+
+\subsection{LED band selection}
+
+Bands should straddle the absorption edge, not be spread evenly across the
+visible.
+
+\begin{table}[h]
+\centering
+\caption{Suggested narrow-band LED set (4-band minimum; 8-band preferred).}
+\begin{tabular}{llll}
+\toprule
+$\lambda$ (nm) & Priority & Dominant Bayer channel & Purpose \\
+\midrule
+415--430 & Essential & B & Core of the yellow absorption \\
+450--470 & Essential & B & Edge position, mono/di-substituted \\
+495--505 & Preferred & B/G & Edge shoulder \\
+525--535 & Essential & G & Brown/trisubstituted region \\
+565--590 & Preferred & G/R & Far edge tail; neutral absorbers \\
+620--630 & Essential & R & Reference: no arsenic species absorbs \\
+655--670 & Preferred & R & Second reference; scattering baseline \\
+730--780 & Optional  & R & Pure scattering; wetting and gloss \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\paragraph{Practical notes.}
+Use direct-emission narrow-band LEDs, never phosphor-converted white types.
+Avoid wavelengths below about $410$~nm: papers frequently contain optical
+brighteners that fluoresce blue under violet and UV excitation, which would
+appear as a spurious, dose-independent signal --- test a blank pad at
+$405$~nm before committing to any short-wavelength band. Characterise each
+LED's peak and FWHM rather than trusting the datasheet, since a $20$~nm
+centroid error near the absorption edge is a large photometric error.
+Correct for Bayer-channel crosstalk by measuring each LED's response in all
+three channels on a neutral target.
+
+\subsection{Establishing whether the shape carries information}
+
+Run a dose series (0, 8, 16, 32, 64, 128, 256~\ptl{}, triplicate) with
+everything else fixed and collect all bands.
+
+\paragraph{Cheap test.} Normalise each $\Delta(K/S)$ spectrum to unit sum
+and overlay. If they superimpose, only the amount is varying and
+multispectral analysis adds nothing beyond a better single number. If they
+fan out systematically with dose, composition is changing. Look also for an
+\textbf{isosbestic point}, a wavelength at which all normalised curves
+cross: its presence is direct evidence of two species interconverting in
+fixed stoichiometry.
+
+\paragraph{Rigorous test.} Assemble the $\Delta(K/S)$ values into a matrix
+$\mathbf{X}$ (samples $\times$ bands) and compute the singular value
+decomposition $\mathbf{X} = \mathbf{U}\boldsymbol{\Sigma}\mathbf{V}^{\!\top}$.
+The number of singular values rising above the noise floor is the number of
+independently varying chromophores. If $\sigma_2/\sigma_1$ sits at
+instrument noise, the system is rank~1. If rank $\geq 2$, apply
+multivariate curve resolution with alternating least squares (MCR-ALS) under
+non-negativity constraints on both spectra and concentrations, which
+recovers the pure component spectra without isolated standards.
+
+\paragraph{Interpreting rank 1.} Rank~1 does not prove a single species; it
+proves the species \emph{ratio} is constant across samples. That is
+excellent news for calibration --- a single well-behaved parameter --- while
+indicating that multispectral shape analysis adds nothing.
+
+\subsection{The spatial requirement}
+
+An area-averaged spectrum of a saturating stain cannot distinguish
+``uniformly half-substituted'' from ``core saturated, periphery untouched''
+--- these give the same integrated spectrum at very different loadings.
+Since the whole purpose of the shape metric is to detect saturation, and
+saturation is spatially localised by~\eqref{eq:sigma}, \textbf{the spectrum
+must be evaluated per-pixel and then integrated}, not averaged first.
+
+This is exactly what a camera-based instrument can do and a single-aperture
+colorimeter cannot. The recommended readout is:
+\begin{align}
+  \text{low range:}\quad & \Sigma = \sum_{\text{pixels}}
+    \Delta(K/S)_{\lambda_{\text{blue}}} \cdot \delta A
+    \quad\text{(linear below } n_0) \\
+  \text{high range:}\quad & A_{\text{sat}} =
+    \text{area of pixels classified as saturated}
+    \quad\text{(logarithmic, per~\eqref{eq:asat})}
+\end{align}
+spliced at the onset $n_0$ determined empirically.
+
+\subsection{Correction for pad wetting}
+
+This is arguably the most valuable single application of the multi-band
+instrument. Water darkens paper \emph{neutrally}, by changing the scattering
+coefficient $S$ across all wavelengths. Arsenic darkens \emph{selectively}
+in the blue, by changing $K$. A reference band at $620$--$670$~nm therefore
+measures wetting almost independently of arsenic loading and permits its
+removal:
+\begin{equation}
+  \Delta(K/S)^{\text{corr}}_\lambda
+  = \Delta(K/S)_\lambda
+  - \beta_\lambda\,\Delta(K/S)_{\text{ref}}
+\end{equation}
+where $\beta_\lambda$ is calibrated from deliberately wetted blank pads.
+A single-band instrument cannot separate these effects at all; it reads a
+damp blank as arsenic. Given the condensation risk inherent in a
+near-saturated gas stream, this correction should be regarded as mandatory.
+
+\subsection{Cautions}
+
+\begin{itemize}[nosep]
+  \item \textbf{Neutral absorbers masquerade as brown.} Hg$_3$As$_2$ and
+        metallic deposits are spectrally flat, and a flat added absorbance
+        moves any blue/red ratio metric in the same direction as genuine
+        trisubstitution. The flat-versus-edge distinction is precisely what
+        the red reference band resolves.
+  \item \textbf{Sulfide is not a clean grey flag.} Although HgS is black,
+        the standard mercuric bromide paper documentation warns that
+        hydrogen sulfide can itself produce a yellow colour. Test directly
+        with a 0~\ptl{} sample spiked with 2~mg\,L$^{-1}$ sulfide and
+        determine whether its spectral shape separates from a genuine
+        arsenic stain.
+  \item \textbf{Fading.} The yellow product fades, especially in sunlight,
+        and there is no reason the three species should fade at equal rates.
+        Measure one pad repeatedly over 20~min and check whether any ratio
+        metric drifts independently of magnitude. Fix the interval between
+        removal and measurement.
+  \item \textbf{Optical thickness.} Confirm the pad is optically thick
+        before relying on~\eqref{eq:km}.
+\end{itemize}
+
+%======================================================================
+\section{Error model and quality assurance}
+%======================================================================
+
+Precision should be characterised over a range of concentrations rather than
+at a single point. The standard approach is the Thompson--Howarth model, in
+which the standard deviation of replicates varies with concentration as
+\begin{equation}
+  s_c = s_0 + k\,c
+  \label{eq:th}
+\end{equation}
+where $s_0$ is the standard deviation at zero concentration (so that the
+detection limit is $3s_0$) and $k$ is the constant relative error. Both
+parameters can be estimated from duplicate analyses collected routinely
+during normal work.
+
+Published benchmarks for context: various laboratory procedures achieve
+$s_0 = 0.30$~\ptl{}, $k = 0.088$; a hand-held instrumental Gutzeit device
+gave $s_0 = 1.4$~\ptl{}, $k = 0.14$; visual field kits fall in the range
+$s_0 = 5$--$7$~\ptl{}, $k = 0.2$--$0.3$. Instrumental colour detection can
+in principle reach detection limits of $0.5$~\ptl{} for transmission and
+$1$--$2$~\ptl{} for reflectance geometries.
+
+Bias is a separate matter from precision and must be checked against
+standards rather than against the supplied colour chart: an independent
+evaluation of eight commercial kits found that one widely used kit was
+repeatable between replicates but overestimated arsenic by roughly a factor
+of two.
+
+\paragraph{Routine QA.} Each session: one reagent blank; standards at 0, 10,
+25, 50 and 100~\ptl{}; duplicates on 10\% of samples. Track $s_0$ and $k$
+over time as the primary process-control metric. Verify As(III) and As(V)
+standards separately, since their hydride-formation kinetics differ.
+
+%======================================================================
+\section{Revised protocol suggestions}
+%======================================================================
+
+\subsection{Changes requiring no recalibration}
+
+\begin{enumerate}[nosep]
+  \item \textbf{Restore the 2-minute oxidation rest} (patent range: 2 to
+        5~min). Better, wait until the permanganate colour has visibly
+        discharged, which makes the step self-indicating and removes the
+        speciation variable.
+  \item \textbf{Confirm complete dissolution} of Reagent~1 before adding
+        Reagent~2; undissolved acid is unavailable acid.
+  \item \textbf{Never seal the vessel}; vent through a fixed orifice
+        downstream of the pad, and use a gas-tight elastomeric closure
+        rather than porous cork.
+  \item \textbf{Fix the stirring regime}: same follower, same rpm,
+        continuous through the run rather than stirring then settling.
+  \item \textbf{Fix the read interval}: pad out, measured within a set
+        window, shielded from ambient light.
+  \item \textbf{Record temperature twice} (at Reagent~2 addition and at
+        read) and use the mean.
+  \item \textbf{Photograph every pad} and reject asymmetric stains.
+\end{enumerate}
+
+\subsection{Reagent dispensing}
+
+Pool approximately 20 sachets of each reagent, tumble-mix thoroughly, store
+over desiccant, and dispense by mass: Reagent~1 at $2.90 \pm 0.02$~g,
+Reagent~2 at $1.30 \pm 0.02$~g. This converts a 20\% CV input into
+$\approx 1.5$\%.
+
+\emph{Cautions.} Zinc dust is a flammable solid and degrades on humid
+storage. If the catalyst salt differs in particle size from the zinc it may
+segregate on pooling; verify with standards before and after pooling. Store
+the permanganate-bearing Reagent~1 away from the zinc: an oxidiser and a
+fine metal powder should never share a container.
+
+\subsection{Finding a plateau operating point}
+
+Run these in triplicate against a 50~\ptl{} As(V) standard:
+\begin{enumerate}[nosep]
+  \item \textbf{Time course}: 5, 7, 10, 15, 20, 30~min. Read where the
+        curve flattens; apply the 4\% criterion of Section~5.6.
+  \item \textbf{Zinc series}: 0.4, 0.7, 1.0, 1.3, 1.7~g at fixed acid and
+        the new read time. Choose a point on the plateau.
+  \item \textbf{Acid series}: 2.9, 4.0, 5.0, 6.0~g at fixed zinc. More acid
+        widens the buffer window (Table~2) and should move the time-course
+        plateau earlier and flatten the zinc dependence.
+\end{enumerate}
+The expected landing point is roughly $5$--$6$~g of Reagent~1,
+$0.7$--$1.0$~g of Reagent~2, and a $15$--$20$~min read, trading throughput
+for reproducibility. Any of these changes voids the manufacturer's colour
+calibration, which must be rebuilt against standards regardless.
+
+\subsection{Geometry}
+
+Adopt the fixed shim-defined gap of Section~\ref{sec:fixedgap}:
+back-sealed pad, $\approx 150$~\um{} channel over the pad face, transverse
+slot inlet, restriction downstream, single venting element, water manometer
+on the vessel. Validate with the tandem-pad breakthrough test and gas
+volumetry.
+
+\subsection{Optical}
+
+Build the $\Delta(K/S)$ pipeline of Section~\ref{sec:optics} with per-pixel
+evaluation, a red reference band for wetting correction, and the spliced
+low-range/high-range readout. Establish the spectral rank before investing
+in curve resolution.
+
+%======================================================================
+\section{Safety}
+%======================================================================
+
+\subsection{Arsine}
+
+Occupational exposure limits: ACGIH TLV-TWA $0.005$~ppm ($\approx
+16$~\ensuremath{\mu}g\,m$^{-3}$) as an 8-hour time-weighted average; OSHA
+PEL $0.05$~ppm; NIOSH REL $0.002$~mg\,m$^{-3}$ as a 15-minute ceiling;
+NIOSH IDLH $3$~ppm.
+
+A 256~\ptl{} test releases at most $\approx 27$~\ensuremath{\mu}g of
+arsine. At 30~CFM ($0.85$~m$^3$\,min$^{-1}$) over a 7-minute run, complete
+release into $\approx 6$~m$^3$ of air gives $\approx 4.4$~\ensuremath{\mu}g
+\,m$^{-3}$, below the TLV but without a large margin. The margin shrinks
+proportionally with higher standards and with tests run back to back.
+
+A computer fan in a 6~in duct realistically moves $20$--$40$~CFM. Through a
+$12 \times 8$~in opening that is roughly $0.2$~m\,s$^{-1}$ ($\approx
+45$~fpm) face velocity, against the $0.4$--$0.5$~m\,s$^{-1}$ expected of a
+laboratory fume hood. A smoke test confirms direction, not velocity.
+Recommended: measure face velocity with a hot-wire anemometer and target
+$\geq 0.4$~m\,s$^{-1}$; keep the working aperture small; cap standards at
+500~\ptl{} and dilute above that, which also addresses pad saturation.
+
+\subsection{Hydrogen}
+
+Maximum $465$~mL per run. Diluted into $\approx 6$~m$^3$ of ventilation air
+this is $0.008$\%, two and a half orders of magnitude below the 4\% lower
+explosive limit; ignition risk at the fan is negligible at that dilution.
+Do not operate in a closed cabinet, and keep the reaction vessel away from
+the fan.
+
+\subsection{Other}
+
+Reagent~1 contains an oxidiser; Reagent~2 is a flammable metal powder;
+store separately. Used pads are mercury-bearing waste and must be disposed
+of accordingly. Tartaric acid dust is a respiratory irritant.
+
+%======================================================================
+\begin{thebibliography}{99}
+
+\bibitem{kinniburgh}
+D.~G. Kinniburgh and W. Kosmus,
+``Arsenic contamination in groundwater: some analytical considerations,''
+\emph{Talanta}, vol.~58, pp.~165--180, 2002.
+\url{https://nora.nerc.ac.uk/id/eprint/12300/1/ArsenicGround.pdf}
+
+\bibitem{pat825}
+Industrial Test Systems, Inc.,
+``Arsenic analysis,'' US Patent 11{,}346{,}825~B2.
+\url{https://image-ppubs.uspto.gov/dirsearch-public/print/downloadPdf/11346825}
+
+\bibitem{pat300}
+Industrial Test Systems, Inc.,
+``Arsenic analysis'' (metal rate enhancers), US Patent 6{,}696{,}300.
+\url{https://image-ppubs.uspto.gov/dirsearch-public/print/downloadPdf/6696300}
+
+\bibitem{pat143}
+``Method for the removal of sulfide interference in common tests for
+arsenic,'' US Patent 6{,}576{,}143.
+\url{https://image-ppubs.uspto.gov/dirsearch-public/print/downloadPdf/6576143}
+
+\bibitem{rahman}
+M.~M. Rahman, K. Fujinaga, Y. Seike and M. Okumura,
+``A simple in situ visual and tristimulus colorimetric method for the
+determination of trace arsenic in environmental water after its collection
+on a mercury(II)-impregnated paper,''
+\emph{Analytical Sciences}, vol.~20, no.~1, pp.~165--170, 2004.
+\url{https://pubmed.ncbi.nlm.nih.gov/14753277/}
+
+\bibitem{reddy}
+R.~R. Reddy \emph{et al.},
+``Evaluation of arsenic field test kits for drinking water: recommendations
+for improvement and implications for arsenic affected regions such as
+Bangladesh,''
+\emph{Water Research}, vol.~170, art.~115325, 2020.
+\url{https://www.sciencedirect.com/science/article/pii/S0043135419310991}
+
+\bibitem{george}
+C.~M. George \emph{et al.},
+``Evaluation of an arsenic test kit for rapid well screening in
+Bangladesh,''
+\emph{Environmental Science \& Technology}, vol.~46, pp.~11213--11219, 2012.
+\url{https://pubmed.ncbi.nlm.nih.gov/22866936/}
+
+\bibitem{bird}
+F.~C.~J. Bird, ``The Gutzeit test for arsenic,''
+\emph{The Analyst}, vol.~24, p.~181, 1899.
+
+\bibitem{km}
+P. Kubelka and F. Munk,
+``Ein Beitrag zur Optik der Farbanstriche,''
+\emph{Zeitschrift f\"ur Technische Physik}, vol.~12, pp.~593--601, 1931.
+
+\bibitem{crc}
+\emph{CRC Handbook of Chemistry and Physics}, 84th ed., 2004 ---
+dissociation constants for tartaric acid
+($\mathrm{p}K_{a1} = 2.98$, $\mathrm{p}K_{a2} = 4.34$ at $25\,^\circ$C).
+
+\bibitem{rsc}
+``Review of analytical techniques for arsenic detection and determination in
+drinking water,''
+\emph{Environmental Science: Advances}, 2023, DOI 10.1039/D2VA00218C.
+
+\bibitem{its}
+Industrial Test Systems, Inc.,
+Quick\texttrademark{} Arsenic Test Kit instruction booklet, part 481300-5.
+\url{http://site.jjstech.com/pdf/ITS/481300-5\%20Instruction\%20Booklet.pdf}
+
+\bibitem{nrt}
+National Response Team,
+``Quick Reference Guide: Arsine (SA),'' April 2017.
+\url{https://nrt.org/sites/2/files/Arsine\%20SA\%20QRG\%20FINAL\%202017\%2004\%2025.pdf}
+
+\bibitem{merckpaper}
+Arsenic test paper (mercuric bromide paper), product insert ---
+note that hydrogen sulfide also produces a yellow colour.
+\url{https://www.ctlscientificsupply.com/prodinsert/90762insert.pdf}
+
+\end{thebibliography}
+
+\end{document}
