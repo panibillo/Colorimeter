@@ -182,6 +182,38 @@ MODE_PRE         = "pre"
 # CaptureConfig.archive_path.
 PRE_SECTION = "/pre"
 
+# Per-LED rung shifts for pre-image captures
+# ------------------------------------------
+# The unreacted pad's brightness varies by wavelength. Shorter wavelengths
+# (violet, blue) see a bright pad that needs more aggressive exposure reduction.
+# Longer wavelengths (cyan, green, red) see a dimmer pad that needs less
+# reduction to preserve pre-image SNR. See docs/preimage_exposure_explanation.md.
+def preimage_rung_shift_for_led(led: str) -> int:
+    """Return the rung shift for pre-image of one LED.
+
+    Based on analysis in docs/exposure_optimization_2026-08-20.md, Section 4.2.
+    Wavelength-dependent shifts preserve signal-to-noise in blank measurements:
+    - Short wavelengths (violet, blue, royal_blue): -2 rungs (pad is bright)
+    - Mid wavelengths (cyan, green): -1 rung (pad is dimmer)
+    - Long wavelengths (red, photo_red, amber): -2 rungs (pad is bright again)
+    - Broadband (white): -2 rungs (conservative default)
+
+    Returns the default -2 for unknown LEDs.
+    """
+    shifts = {
+        'violet': -2,
+        'royal_blue': -2,
+        'blue': -2,
+        'cyan': -1,
+        'green': -1,
+        'amber': -2,
+        'red_orange': -2,
+        'red': -2,
+        'photo_red': -2,
+        'white': -2,
+    }
+    return shifts.get(led, -2)
+
 # TODO(undecided): consider moving exposure calibration WHOLLY to the
 # Menu → Capture screen as a standalone operation, run outside the context of a
 # sample reading — rather than exposing "calibration" as a capture path that a
@@ -1593,15 +1625,21 @@ class CaptureRunner:
                     exposures_us = [cfg.initial_us]
                     log.warning("LED %s has no exposures for group %s — "
                                 "falling back to %d µs", color, group, cfg.initial_us)
-                elif cfg.rung_shift:
+                else:
                     # Only a calibrated ladder is shifted. The fallback is a
                     # bare guess with no rung to be two rungs below, so moving
                     # it would be arithmetic on a number that means nothing.
-                    shifted = exposure_repo.shift_exposures(
-                        exposures_us, cfg.rung_shift)
-                    log.info("LED %s: %+d rung(s) — %s µs -> %s µs",
-                             color, cfg.rung_shift, exposures_us, shifted)
-                    exposures_us = shifted
+                    # In pre-image mode, use per-LED shifts to optimize SNR
+                    # (cyan/green need -1 rung; others -2). Otherwise use the
+                    # uniform rung_shift (normal mode or explicit override).
+                    rung_shift = (preimage_rung_shift_for_led(color)
+                                  if self._is_pre() else cfg.rung_shift)
+                    if rung_shift:
+                        shifted = exposure_repo.shift_exposures(
+                            exposures_us, rung_shift)
+                        log.info("LED %s: %+d rung(s) — %s µs -> %s µs",
+                                 color, rung_shift, exposures_us, shifted)
+                        exposures_us = shifted
                 self._color_exposures[color] = exposures_us
                 self._color_labels[color]    = [f"e{i}" for i in range(len(exposures_us))]
                 self._color_fallback[color]  = used_fallback

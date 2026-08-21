@@ -525,6 +525,25 @@ class TestSections(CaptureSuiteWriterTestCase):
             self.assertEqual(json.loads(f["/meta"][()])["who"], "measurement")
             self.assertEqual(json.loads(f["/pre/meta"][()])["who"], "pre")
 
+    def test_a_reader_can_ask_whether_a_section_is_there(self):
+        """
+        How a reader tells a pre-imaged archive from one without.
+
+        Probing beats catching a KeyError from inside a read, because an
+        archive with no pre-image is a normal archive -- a strip that was not
+        pre-imaged -- and not an error to recover from.
+        """
+        from hdf5read import Hdf5Reader
+        with self.writer(section="/pre") as w:
+            w.add_metadata({"meta_version": 2})
+            self._sweep(w)
+        with Hdf5Reader(self.path) as r:
+            self.assertTrue(r.exists("/pre/leds"))
+            self.assertTrue(r.exists("/pre/meta"))
+            self.assertFalse(r.exists("/leds"))
+            self.assertFalse(r.exists("/nothing/here"))
+            self.assertEqual(sorted(r.list_children("/pre/leds")), ["amber"])
+
     def test_no_section_is_the_layout_it_always_was(self):
         with self.writer() as w:
             w.add_metadata({"meta_version": 2})

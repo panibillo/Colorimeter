@@ -6,13 +6,25 @@ see colorimeter_upload_analysis.md
 """
 
 from flask import Flask, request, jsonify
-import h5py, sqlite3, pathlib, datetime, shutil, hashlib
+import h5py, sqlite3, pathlib, datetime, shutil, hashlib, json
+import numpy as np
 
 version = '0.1' 
 
 ARCHIVE = pathlib.Path.home() / "ColorimeterData"
 DB_PATH = ARCHIVE / "colorimeter.db"
 app = Flask(__name__)
+
+def _plain(v):
+    """HDF5 attribute -> something json can serialise."""
+    if isinstance(v, bytes):
+        return v.decode("utf-8", "replace")
+    if isinstance(v, np.generic):
+        return v.item()
+    if isinstance(v, np.ndarray):
+        return v.tolist()
+    return v
+
 
 def init_db():
     ARCHIVE.mkdir(parents=True, exist_ok=True)
@@ -42,16 +54,21 @@ def upload():
     
     con = sqlite3.connect(DB_PATH)
     with h5py.File(dest, "r") as h5:
-        samples = list(h5.keys())
+        # One archive holds one sample.  It used to be read as though the root
+        # keys were a list of samples; they are the layout -- "leds", "dark",
+        # "meta", "photo", and (from schema 4) "pre", the pre-image of the
+        # unreacted strip -- so that counted the shape of the file, not what
+        # was in it.  The sample's identity is a root attribute.
+        attrs = {k: _plain(v) for k, v in h5.attrs.items()}
+        attrs["has_preimage"] = "pre" in h5
+        samples = [attrs.get("samp_no") or dest.stem]
         cur = con.execute(
             "INSERT INTO hdf5_files(filename,sha256,received_at,sample_count) VALUES(?,?,?,?)",
             (str(dest), sha, datetime.datetime.now().isoformat(), len(samples)))
         fid = cur.lastrowid
-        for s in samples:
-            meta = dict(h5[s].attrs)
-            con.execute(
-                "INSERT INTO measurements(hdf5_id,sample_id,timestamp,metadata) VALUES(?,?,?,?)",
-                (fid, s, meta.get("timestamp",""), str(meta)))
+        con.execute(
+            "INSERT INTO measurements(hdf5_id,sample_id,timestamp,metadata) VALUES(?,?,?,?)",
+            (fid, samples[0], attrs.get("suite_id", ""), json.dumps(attrs)))
     con.commit(); con.close()
     return jsonify(ok=True, samples=len(samples))
 

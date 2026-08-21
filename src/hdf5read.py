@@ -90,6 +90,23 @@ class Hdf5Reader:
         """Return a plain dict of the .attrs on the group or dataset at path."""
         return dict(self._file[path].attrs)
 
+    def exists(self, path: str) -> bool:
+        """
+        Return whether anything is stored at `path`.
+
+        Needed because an archive's shape is no longer fixed: a capture may
+        or may not carry a "/pre" section (the pre-image of the unreacted
+        strip), and a reader that wants it has to be able to ask rather than
+        catch a KeyError deep inside a read.
+
+        Args:
+            path: HDF5 path to a group or dataset.
+
+        Returns:
+            True if a group or dataset is there.
+        """
+        return path in self._file
+
     def list_children(self, group_path: str = "/") -> list:
         """Return the names of immediate children (groups + datasets) of group_path."""
         return list(self._file[group_path].keys())
