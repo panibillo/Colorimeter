@@ -131,9 +131,9 @@ class Pool:
         label("reagent2_wt_lbl", L.WT2_LBL, "black", "white", 10, align="center")
         field("reagent2_wt_fld", L.WT2_FLD, 14, "field_blue", align="center")
 
-        label("instr1", L.INSTR1, "black", "white", 20, align="left")
-        label("instr2", L.INSTR2, "black", "white", 20, align="left")
-        label("instr3", L.INSTR3, "black", "white", 20, align="left")
+        label("instr1", L.INSTR1, "black", "white", 16, align="left")
+        label("instr2", L.INSTR2, "black", "white", 16, align="left")
+        label("instr3", L.INSTR3, "black", "white", 16, align="left")
         # label("instr1", L.INSTR1, "body_text", "body_dark", 20, align="left")
         # label("instr2", L.INSTR2, "body_text", "body_dark", 20, align="left")
         label("collect_line", L.COLLECT_LINE, "black", "white", 13, align="left")

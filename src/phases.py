@@ -816,9 +816,9 @@ class Reagent2Phase(ReagentPhase):
             # Line 3: "VENTILATE!" in larger font, with line 4 override
             if added_wt2 is not None:
                 _line(pool, "instr3",
-                     f"R2 target {target_wt2:4.3f} Net {added_wt2:4.3f}", size=20)
+                     f"R2 target {target_wt2:4.3f} Net {added_wt2:4.3f}", size=16)
             else:
-                pool["instr3"].size = 28
+                pool["instr3"].size = 22
                 _line(pool, "instr3", "VENTILATE!")
 
             # Show both weight rows (reagent 1 final and reagent 2 final)
