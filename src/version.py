@@ -76,7 +76,7 @@ Usage:
 
 from typing import Dict, Optional, Tuple
 
-__version__ = "0.8.0"
+__version__ = "0.9.0"
 
 # (oldest, newest) format version this checkout can read, inclusive.
 READS_SCHEMA: Tuple[int, int] = (1, 4)   # .h5 layout,  capture_h5

@@ -94,6 +94,8 @@ Public surface
     inspection_exposure_us() / default_focus_diopter()
     reagent1_secs() / analysis_secs()
     t2ref25_secs() / q10() / reagent2_secs(temp_c)
+    reagent1_empty_packet_wt() / reagent2_empty_packet_wt()
+    reagent1_100ml_wt() / reagent2_100ml_wt() / reagent_wt_tolerance()
     main_loop_poll_s() / shutdown_timeout_s()
     backlight_pin()
 
@@ -1024,6 +1026,15 @@ def reagent1_100ml_wt() -> float:
 def reagent2_100ml_wt() -> float:
     """Grams of reagent 2 per 100 mL of sample."""
     return float(get("protocol", "reagent2_100ml_wt"))
+
+
+def reagent_wt_tolerance() -> float:
+    """
+    Grams the weighed reagent may differ from its target before the reagent
+    screens flag the cell.  One value for both reagents: it is a property of
+    the balance and of how closely a packet can be poured, not of the chemistry.
+    """
+    return float(get("protocol", "reagent_wt_tolerance"))
 
 
 def reagent1_stir_seconds() -> int:

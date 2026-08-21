@@ -63,6 +63,16 @@ PALETTE: dict[str, int] = {
     # Visible alarm button: a backgrounded slot's timer expired unattended.
     "alarm_bg":    0xF800,   # red
     "alarm_text":  0xFFE0,   # yellow
+    # Reagent weight grid: how the weighed amount sits against target.  Named
+    # for the state, not the hue, so the same five rules can be read off any
+    # frontend: "missing" is a weight the run still owes, "alarm" is short of
+    # target beyond the tolerance, "warn" is outside it the recoverable way,
+    # and under/over tint the text of a reading still inside the tolerance.
+    "wt_missing":  0xFFE0,   # yellow — a weight that is owed has not been entered
+    "wt_alarm":    0xF800,   # red    — short of target by more than the tolerance
+    "wt_warn":     0xFD20,   # amber  — outside the tolerance the recoverable way
+    "wt_under":    0xF800,   # red    — under target, still within tolerance (text)
+    "wt_over":     0x001F,   # blue   — over target (text)
     # Splash screen
     "warning_text":0x581F,   # purple   0xFC20,   # dark amber
     "fail_text":   0xFC20,   # red

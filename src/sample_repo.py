@@ -64,6 +64,7 @@ class Defaults:
     testlot_expire_dt: str
     remark:            str
     default_temperature: float  # entry2 fills this in when no probe answers
+    default_sample_wt: str      # entry2's Weight button fills this in
     hardware_sn:       str      # role 'device' — stored on the sample as
     software_ver:      str      # instrument_sn / provenance
 
@@ -81,6 +82,7 @@ _DEFAULT_FIELDS: tuple[tuple[str, str, str], ...] = (
     ("testlot_expire_dt", "defaults", "testlot_expire_dt"),
     ("remark",            "defaults", "remark"),
     ("default_temperature", "defaults", "default_temperature"),
+    ("default_sample_wt",  "defaults", "default_sample_wt"),
     ("hardware_sn",       "device",   "hardware_sn"),
     ("software_ver",      "device",   "software_ver"),
 )
@@ -369,6 +371,7 @@ if __name__ == "__main__":
     check("device role folded in", d.hardware_sn, SN)
     check("default temperature is a number", isinstance(d.default_temperature, float),
           True)
+    check("default sample weight is text", d.default_sample_wt, "100.")
 
     print("== an edited value shows up on the next load ==")
     config.save("defaults", "user", "Barbara Olsen")

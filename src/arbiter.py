@@ -63,7 +63,8 @@ import layout
 from widgets import Button, TextBox
 from pool import Pool
 from slot import Slot
-from phases import build_phases, EntryPhase, Entry2Phase, _mmss, _to_float
+from phases import (build_phases, EntryPhase, Entry2Phase, ReagentWeights,
+                    _mmss, _to_float)
 
 log = logging.getLogger(__name__)
 
@@ -77,6 +78,19 @@ log = logging.getLogger(__name__)
 # _maybe_open_camera(). Outside all of this (entry/entry2, and after results)
 # no capture is imminent, so the camera is released.
 _CAMERA_PHASES = ("read", "analysis")
+
+# Reagent weight grid.  One entry box, one record key — the map is flat so a
+# keystroke's destination is decided by which box was typed in and by nothing
+# else.  The old single-field-per-reagent design picked the key from
+# slot.running, which meant the same pixel wrote to a different column of the
+# database depending on whether a timer happened to be counting.
+WT_FIELD_KEYS = {
+    "wt1_init_fld":  "reagent1_initial_wt",
+    "wt1_final_fld": "reagent1_final_wt",
+    "wt2_init_fld":  "reagent2_initial_wt",
+    "wt2_final_fld": "reagent2_final_wt",
+}
+
 
 # Image viewer.  The preview is for looking at, not measuring, so the LED
 # settle is a fraction of a capture run's LED_ON_WARMUP_S (2.0 s) — colour
@@ -856,61 +870,72 @@ class Arbiter:
         """protocol.reagent1_stir_seconds — stir duration for reagent 1."""
         return config.reagent1_stir_seconds()
 
-    def reagent_weigh_plan(self, slot: Slot, n: int) -> tuple:
+    def reagent_weigh_plan(self, slot: Slot, n: int) -> ReagentWeights:
         """
-        Validate reagent packet weights and compute net/target additions.
+        Everything the weight grid needs about reagent `n`, in grams.
+
+        `net` deliberately answers two different questions, because the same
+        cell answers them in turn:
+
+        - initial entered, final blank -> what the packet holds
+          (initial - the empty packet's own weight), which is what the operator
+          needs before pouring;
+        - both entered -> what was actually poured in (initial - final), which
+          is the number the analysis wants.
+
+        `overage` is net - target either way, so a single reading of the Over
+        cell means "this much more than the protocol asks for" both before and
+        after the pour.
+
+        `target` comes from the sample volume alone and no longer waits for a
+        valid initial weight: it fills the Target cell, and it is what makes an
+        overage computable at all, so gating it on the initial weight would
+        leave the grid blank exactly when the operator is deciding what to do.
+
+        Any of `initial`, `final`, `net`, `target` and `overage` may be None —
+        an unentered or unparseable weight is absent, not zero.
 
         Args:
             slot: The slot whose record to read weights from.
             n: 1 for reagent 1, 2 for reagent 2.
 
         Returns:
-            (initial_valid, packet_net, target_wt, added_wt) where:
-            - initial_valid: bool, True if initial weight > empty_packet_wt
-            - packet_net: float | None, initial - empty packet weight
-            - target_wt: float | None, sample_wt / 100 * reagentN_100ml_wt
-            - added_wt: float | None, final - initial weight
+            A ReagentWeights(initial, final, net, target, overage, tol).
         """
         prefix = f"reagent{n}_"
         empty_wt = (config.reagent1_empty_packet_wt() if n == 1
                     else config.reagent2_empty_packet_wt())
         ratio = (config.reagent1_100ml_wt() if n == 1
                  else config.reagent2_100ml_wt())
+        tol = config.reagent_wt_tolerance()
 
-        initial_str = slot.record.get(f"{prefix}initial_wt", "")
-        final_str = slot.record.get(f"{prefix}final_wt", "")
+        initial = _to_float(slot.record.get(f"{prefix}initial_wt", ""))
+        final = _to_float(slot.record.get(f"{prefix}final_wt", ""))
+        sample_wt = _to_float(slot.record.get("samp_grams", ""))
 
-        try:
-            s = str(initial_str).strip() if initial_str else ""
-            initial = float(s) if s else None
-        except (ValueError, TypeError):
-            initial = None
+        if initial is None:
+            net = None
+        elif final is None:
+            net = initial - empty_wt
+        else:
+            net = initial - final
 
-        initial_valid = initial is not None and initial > empty_wt
-        packet_net = (initial - empty_wt) if initial_valid else None
+        target = None if sample_wt is None else sample_wt / 100.0 * ratio
+        overage = None if (net is None or target is None) else net - target
 
-        sample_wt_raw = slot.record.get("samp_grams", "")
-        try:
-            s = str(sample_wt_raw).strip() if sample_wt_raw else ""
-            sample_wt = float(s) if s else None
-        except (ValueError, TypeError):
-            sample_wt = None
+        return ReagentWeights(initial=initial, final=final, net=net,
+                              target=target, overage=overage, tol=tol)
 
-        target_wt = None
-        if initial_valid and sample_wt is not None:
-            target_wt = sample_wt / 100.0 * ratio
+    def reagent_finals_complete(self, slot: Slot) -> bool:
+        """
+        Both reagents' final packet weights have been entered.
 
-        try:
-            s = str(final_str).strip() if final_str else ""
-            final = float(s) if s else None
-        except (ValueError, TypeError):
-            final = None
-
-        added_wt = None
-        if initial is not None and final is not None:
-            added_wt = initial - final
-
-        return initial_valid, packet_net, target_wt, added_wt
+        The gate between a finished capture and analysis: reagentN_g is the
+        difference of the two weighings, so a run missing a final weighing has
+        no record of how much reagent it actually received.
+        """
+        return all(str(slot.record.get(f"reagent{n}_final_wt", "")).strip()
+                   for n in (1, 2))
 
     def reagent2_stir_plan(self, slot: Slot) -> int:
         """
@@ -2668,7 +2693,16 @@ class Arbiter:
                                      # modules, to keep it off the startup path
         capture_meta.update_archive_sample(session.out_path,
                                            owner.record.get("db_rowid"))
-        self.goto(owner, "analysis")
+        # Analysis divides by how much reagent the sample actually received, so
+        # a run whose packets were never re-weighed has nothing to divide by.
+        # Rather than analyse a sample we cannot describe, hold on the read
+        # phase, which brings the weight grid back and offers ANALYZE once both
+        # final weighings are in.
+        if self.reagent_finals_complete(owner):
+            self.goto(owner, "analysis")
+        else:
+            owner.progress = "Enter final reagent weights"
+            self.render(owner)
         # A capture just freed the camera; re-enable a waiting CAPTURE button
         # on the other slot if it is the one being viewed (not, say, the Menu).
         if (self._focused is not None and self._focused is not owner
@@ -4030,7 +4064,7 @@ class Arbiter:
             cw = self._focused_widget()
             was_editing = isinstance(cw, TextBox) and cw.editing
             # Commit weight field if tab away while editing
-            if was_editing and str(cw.name) in ("reagent1_wt_fld", "reagent2_wt_fld"):
+            if was_editing and str(cw.name) in WT_FIELD_KEYS:
                 self._weight_field_commit(cw)
             self._move_focus(self._focus_idx + (1 if key == "tab" else -1))
             nw = self._focused_widget()
@@ -4048,7 +4082,7 @@ class Arbiter:
                 was_editing = w.editing
                 w.toggle_editing(self._disp)
                 # Commit weight field if editing just turned off
-                if was_editing and str(w.name) in ("reagent1_wt_fld", "reagent2_wt_fld"):
+                if was_editing and str(w.name) in WT_FIELD_KEYS:
                     self._weight_field_commit(w)
             elif isinstance(w, Button) and callable(w.on_press):
                 w.on_press()
@@ -4087,15 +4121,12 @@ class Arbiter:
         if slot is None:
             return
 
-        # Weight entry fields: determine key based on phase state (idle vs running)
-        # not based on stored target, so re-edits go to the correct place
-        if textbox.name == "reagent1_wt_fld":
-            key = "reagent1_final_wt" if slot.running else "reagent1_initial_wt"
-            slot.record[key] = textbox.value
-            return
-        if textbox.name == "reagent2_wt_fld":
-            key = "reagent2_final_wt" if slot.running else "reagent2_initial_wt"
-            slot.record[key] = textbox.value
+        # Weight grid: one box, one key, always.  Nothing about the run state
+        # enters into it, so a correction typed late in a run lands in the same
+        # column the original reading did.
+        wt_key = WT_FIELD_KEYS.get(str(textbox.name))
+        if wt_key is not None:
+            slot.record[wt_key] = textbox.value
             return
 
         fields = {"entry":  EntryPhase.FIELDS,
@@ -4118,40 +4149,27 @@ class Arbiter:
 
     def _weight_field_commit(self, textbox) -> None:
         """
-        Handle committed weight-field edits: recompute derived values and persist
-        net weight if both initial and final are now valid.
+        A weight box was committed: repaint the grid, and store the amount
+        added once both of that reagent's weighings exist.
+
+        reagentN_g is the poured amount and nothing else, so it is written only
+        in the both-entered case; while a final weight is still missing, `net`
+        is the packet's contents and does not belong in that column.
         """
         slot = self._focused
-        if slot is None or textbox.name not in ("reagent1_wt_fld", "reagent2_wt_fld"):
+        if slot is None:
+            return
+        key = WT_FIELD_KEYS.get(str(textbox.name))
+        if key is None:
             return
 
-        n = 1 if "reagent1" in textbox.name else 2
-        initial_valid, packet_net, target_wt, added_wt = self.reagent_weigh_plan(slot, n)
-
-        # Flip the target key if initial just became valid
-        if n == 1:
-            if initial_valid and slot.reagent1_wt_target == "reagent1_initial_wt":
-                slot.reagent1_wt_target = "reagent1_final_wt"
-                self.render(slot)
-            elif not initial_valid and slot.reagent1_wt_target == "reagent1_final_wt":
-                slot.reagent1_wt_target = "reagent1_initial_wt"
-                self.render(slot)
-            elif initial_valid:
-                # Re-render to update instr3 with new net/target, then persist if done
-                self.render(slot)
-                if added_wt is not None:
-                    self.persist(slot, reagent1_g=added_wt)
-        else:  # n == 2
-            if initial_valid and slot.reagent2_wt_target == "reagent2_initial_wt":
-                slot.reagent2_wt_target = "reagent2_final_wt"
-                self.render(slot)
-            elif not initial_valid and slot.reagent2_wt_target == "reagent2_final_wt":
-                slot.reagent2_wt_target = "reagent2_initial_wt"
-                self.render(slot)
-            elif initial_valid:
-                self.render(slot)
-                if added_wt is not None:
-                    self.persist(slot, reagent2_g=added_wt)
+        n = 1 if key.startswith("reagent1") else 2
+        w = self.reagent_weigh_plan(slot, n)
+        if w.initial is not None and w.final is not None:
+            self.persist(slot, **{f"reagent{n}_g": w.net})
+        # A weight moves the START gate, the Over/Target cells and their
+        # colours all at once, so repaint the phase rather than one widget.
+        self.render(slot)
 
     # ── Main loop ──────────────────────────────────────────────────────────────
 
@@ -4458,6 +4476,10 @@ def _selftest() -> None:
     check("alarm button hidden", arb._pool["alarm_btn"].visible, False)
 
     print("== single-camera guard across slots ==")
+    # A carries a finished capture out of the prefetch section above, and the
+    # read screen turns into the weights gate once capture_end is stamped.
+    # Clear it so this section starts from a run with the camera still to use.
+    A.record["capture_end"] = None
     A.record["samp_no"] = "AX1"; A.record["user"] = "u"
     arb.goto(A, "read")
     check("A read: CAPTURE enabled", arb._pool["run_btn"].enabled, True)
@@ -4472,13 +4494,25 @@ def _selftest() -> None:
     denied = arb.request_capture(B)
     check("B capture denied",    denied, False)
 
-    print("== capture completes -> analysis -> result ==")
+    print("== capture completes: analysis waits on the final weighings ==")
     arb.focus(A)
     A.capturing = True
     for _ in range(5):
         arb.pump_capture()
+    # Nothing weighed the packets a second time, so there is no record of how
+    # much reagent the sample got and the run stops short of analysis.
+    check("A held on read",       A.phase, "read")
+    check("camera freed anyway",  arb.capture_available(), True)
+    check("run_btn is ANALYZE",   arb._pool["run_btn"].label, "ANALYZE")
+    check("ANALYZE disabled",     arb._pool["run_btn"].enabled, False)
+
+    print("== the final weighings release it -> analysis -> result ==")
+    A.record["reagent1_final_wt"] = "1.200"
+    A.record["reagent2_final_wt"] = "1.100"
+    arb.render(A)
+    check("ANALYZE enabled",      arb._pool["run_btn"].enabled, True)
+    arb._pool["run_btn"].on_press()
     check("A moved to analysis",  A.phase, "analysis")
-    check("camera freed",         arb.capture_available(), True)
     arb._analysis = (A, arb.now() - config.analysis_secs() - 1)   # force it done
     arb.pump_analysis()
     check("result set",           bool(A.result), True)
@@ -4727,6 +4761,24 @@ def _selftest() -> None:
                 return i
         return None
 
+    def cfge_open_at(role, name):
+        """
+        Open `role` on whichever page carries `name`, and return its row.
+
+        A role's parameters are paged four at a time in alphabetical order, so
+        which page a given one lands on moves whenever a parameter is added to
+        that role.  Finding the page rather than assuming the first one keeps
+        this test about the config editor instead of about the seed list.
+        """
+        for page in range(len(arb._cfge_list) + 1):
+            arb._cfge_open_role(role, page=page)
+            if arb._cfge_page != page:      # clamped: past the last page
+                break
+            row = cfge_row_of(name)
+            if row is not None:
+                return row
+        raise AssertionError(f"{name!r} is not among role {role!r}")
+
     print("== config editor: opens on the roles, Restore last, one page of eight ==")
     arb.open_menu(A)
     arb._pool["menu_stub2"].on_press()
@@ -4820,8 +4872,7 @@ def _selftest() -> None:
     check("still on the role", arb._cfge_view, "role")
 
     print("== config editor: a value its vtype cannot read is refused ==")
-    arb._cfge_open_role("protocol")
-    _r1row = cfge_row_of("reagent1_secs")
+    _r1row = cfge_open_at("protocol", "reagent1_secs")
     _fld = arb._pool[f"cfge_fld{_r1row}"]
     _fld.set_value("two minutes")
     arb._writethrough(_fld)

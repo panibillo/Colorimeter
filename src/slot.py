@@ -34,11 +34,13 @@ def _new_record() -> dict:
         "samp_degC":     "",   # entry2 temp   -> samples.samp_degC
         "samp_grams":    "",   # entry2 weight -> samples.samp_grams
         "manual_read":   "",   # read screen   -> samples.manual_read
-        # ── reagent weight entry (display-only: initial/final in-memory only) ────
-        "reagent1_initial_wt": "",  # reagent1_wt_fld while accumulating initial weight
-        "reagent1_final_wt":   "",  # reagent1_wt_fld after initial is valid
-        "reagent2_initial_wt": "",  # reagent2_wt_fld while accumulating initial weight
-        "reagent2_final_wt":   "",  # reagent2_wt_fld after initial is valid
+        # ── reagent packet weights (in-memory; only the difference is stored) ───
+        # One key per cell of the weight grid, so a keystroke's destination is
+        # fixed by which box was typed in and never by the run state.
+        "reagent1_initial_wt": "",  # wt1_init_fld  — packet before pouring
+        "reagent1_final_wt":   "",  # wt1_final_fld — packet after pouring
+        "reagent2_initial_wt": "",  # wt2_init_fld
+        "reagent2_final_wt":   "",  # wt2_final_fld
         # ── identity carried from the loaded defaults ───────────────────────
         # Provenance travels by value: the strings above and the serial below
         # are stored on the sample as they read at the time, not as FKs.
@@ -48,7 +50,7 @@ def _new_record() -> dict:
         "reagent1_start": None, "reagent1_end": None,
         "reagent2_start": None, "reagent2_end": None,
         "capture_start":  None, "capture_end":  None,
-        # ── reagent net weights (final - initial) -> samples.* ──────────────
+        # ── reagent net weights (initial - final) -> samples.* ──────────────
         "reagent1_g":     None, # samples.reagent1_g (net grams added)
         "reagent2_g":     None, # samples.reagent2_g (net grams added)
         # ── stir sub-alarm epoch timestamps -> samples.* ──────────────────
@@ -83,10 +85,6 @@ class Slot:
     stir_deadline    : monotonic deadline for the next stir sub-alarm, or None
     stir_role        : "reagent1" | "reagent2" | None — which countdown armed the sub-alarm
     stir_fired       : True once the sub-alarm has fired, used to update instr text
-    reagent1_wt_target : record key ("reagent1_initial_wt" or "reagent1_final_wt")
-                        which the reagent1_wt_fld currently writes to
-    reagent2_wt_target : record key ("reagent2_initial_wt" or "reagent2_final_wt")
-                        which the reagent2_wt_fld currently writes to
     """
 
     name:         str
@@ -102,8 +100,6 @@ class Slot:
     stir_deadline:      Optional[float] = None
     stir_role:          Optional[str]   = None
     stir_fired:         bool            = False
-    reagent1_wt_target: str             = "reagent1_initial_wt"
-    reagent2_wt_target: str             = "reagent2_initial_wt"
 
     def ready_to_begin(self) -> bool:
         """
@@ -130,5 +126,3 @@ class Slot:
         self.stir_deadline      = None
         self.stir_role          = None
         self.stir_fired         = False
-        self.reagent1_wt_target = "reagent1_initial_wt"
-        self.reagent2_wt_target = "reagent2_initial_wt"

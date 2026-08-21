@@ -53,14 +53,32 @@ TIMER_LBL   = Rect(  8,  55,  68, 67)   # Remaining / Elapsed / Final
 TIMER       = Rect( 90,  55, 140, 42)   # compound: ‖ | MM:SS | ›
 RUN_BTN     = Rect(240,  55,  72, 67)   # START / RESET / CAPTURE / POST
 
-# ── body: reagent weight entry (narrow column below RUN_BTN) ────────────────────
-# Labels (13px) and entry fields (28px) stacked in the column to the right of
-# the main area, showing reagent packet initial/final weights during reagent
-# phases. Hidden on all other screens.
-WT1_LBL     = Rect(240, 124,  72, 13)   # "Initial" or "Final" for reagent 1
-WT1_FLD     = Rect(240, 138,  72, 28)   # reagent1_wt_fld
-WT2_LBL     = Rect(240, 170,  72, 13)   # "Initial" or "Final" for reagent 2
-WT2_FLD     = Rect(240, 184,  72, 28)   # reagent2_wt_fld
+# ── body: reagent weight grid  y 154..214 ──────────────────────────────────────
+# Two fixed rows — reagent 1 above, reagent 2 below — of four cells each, under
+# a thin column-heading strip.  Positional and unchanging: a cell means the same
+# thing on every screen that shows the grid and in every run state, which is the
+# whole point of the grid replacing the old flip-flopping Initial/Final column.
+#
+#        Initial   Final    Over   Target
+#     R1 [ 3.762 ][ 1.201 ][+0.020][1.450]
+#     R2 [       ][       ][      ][0.650]
+#
+# Shown on the pre-image and both reagent phases, and on the read phase only
+# while a finished capture waits for the final packet weights.
+WT_HDR_INIT  = Rect( 30, 154,  70, 12)
+WT_HDR_FINAL = Rect(102, 154,  70, 12)
+WT_HDR_OVER  = Rect(174, 154,  70, 12)
+WT_HDR_TARG  = Rect(246, 154,  70, 12)
+WT1_ROW_LBL  = Rect(  6, 167,  22, 23)   # "R1"
+WT1_INIT     = Rect( 30, 167,  70, 23)   # wt1_init_fld   (editable)
+WT1_FINAL    = Rect(102, 167,  70, 23)   # wt1_final_fld  (editable)
+WT1_OVER     = Rect(174, 167,  70, 23)   # wt1_over_lbl   (calculated)
+WT1_TARG     = Rect(246, 167,  70, 23)   # wt1_targ_lbl   (calculated)
+WT2_ROW_LBL  = Rect(  6, 191,  22, 23)   # row 2: same x/w as row 1, y + 24
+WT2_INIT     = Rect( 30, 191,  70, 23)
+WT2_FINAL    = Rect(102, 191,  70, 23)
+WT2_OVER     = Rect(174, 191,  70, 23)
+WT2_TARG     = Rect(246, 191,  70, 23)
 
 # ── body: step-status chips  y 95..229 ─────────────────────────────────────────
 # A "chip" is a small pill/badge widget (the UI sense of the word) — here three
@@ -70,16 +88,18 @@ CHIP_A      = Rect(  90, 100,  44, 22)   # reagent 1
 CHIP_B      = Rect( 136, 100,  44, 22)   # reagent 2
 CHIP_C      = Rect( 182, 100,  48, 22)   # Capture
 
-# ── body: instruction lines  y 135..203 (aligned to label/field rows 3 & 4) ─────
-# Narrowed to w=224 to make room for the weight-entry column on the right
-INSTR1      = Rect(  8, 125, 224, 28)
-INSTR2      = Rect(  8, 155, 224, 28)
-INSTR3      = Rect(  8, 185, 224, 28)
+# ── body: instruction line  y 125..152 ─────────────────────────────────────────
+# One line, full width.  It used to be three of 224 px, stacked down to y213:
+# the narrow column on the right held the old weight entry, and the lower two
+# lines formatted weights into prose.  The grid at y154 shows those as numbers
+# and takes the space, leaving room for this one line above it.
+INSTR1      = Rect(  8, 125, 304, 28)
 
 # ── body: persistent collect stamp  y 188..210 ─────────────────────────────────
-# Shown on the reagent/read/analysis phases (below the instructions, above the
-# footer) so the collect time stays in view once stamped.  The entry phase uses
-# the COLLECT form row above instead. Narrowed to match the instruction lines.
+# Shown on the read/analysis phases (below the instructions, above the footer)
+# so the collect time stays in view once stamped.  The entry phase uses the
+# COLLECT form row above instead, and the reagent phases show the weight grid
+# in this space.  Narrowed to match the old instruction lines.
 COLLECT_LINE = Rect(  8, 188, 224, 22)
 
 # ── body: wide label/field pairs (share y with USER and TEST rows) ─────────────

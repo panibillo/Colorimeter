@@ -142,6 +142,8 @@ INSERT OR IGNORE INTO config (active, isdefault, editable, add_dt, role, name,
    'reagent 1 grams per 100 mL of sample; used to compute target weight'),
   (0, 1, 1, '2026-08-19 00:00:00', 'protocol', 'reagent2_100ml_wt', 'float', '1.300', 'seed',
    'reagent 2 grams per 100 mL of sample; used to compute target weight'),
+  (0, 1, 1, '2026-08-21 00:00:00', 'protocol', 'reagent_wt_tolerance', 'float', '0.050', 'seed',
+   'grams the weighed reagent may differ from target before the cell is flagged'),
   (0, 1, 1, '2026-08-19 00:00:00', 'protocol', 'reagent1_stir_seconds', 'int', '25', 'seed',
    'stir duration in seconds before sub-alarm beep in reagent 1 countdown'),
   (0, 1, 1, '2026-08-19 00:00:00', 'protocol', 'reagent2_stir_seconds', 'int', '0', 'seed',
@@ -236,7 +238,9 @@ INSERT OR IGNORE INTO config (active, isdefault, editable, add_dt, role, name,
   (1, 1, 1, '2026-08-09 00:20:00', 'defaults', 'remark', 'str','', 'seed',
    'Default remark is an empty string.'),
   (0, 1, 1, '2026-08-11 00:00:00', 'defaults', 'default_temperature', 'float', '21.0', 'seed',
-   'sample temperature (degrees C) the entry2 Temp button fills in when no thermometer is attached');
+   'sample temperature (degrees C) the entry2 Temp button fills in when no thermometer is attached'),
+  (0, 1, 1, '2026-08-21 00:00:00', 'defaults', 'default_sample_wt', 'str', '100.', 'seed',
+   'sample weight (grams) the entry2 Weight button fills in; the reagent targets scale from it');
 
 -- The second kit from the old `testkit` table, carried in so it can be picked
 -- from the editor's Browse screen instead of retyped.  active=0, isdefault=0

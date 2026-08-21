@@ -31,6 +31,32 @@ sqlite3 src/colorimeter.sqlite \
 
 ---
 
+## [0.9.0] — 2026-08-21
+
+Writes: archive schema 4 · meta 2 · database 2
+Reads:  archive schema 1–4 · meta 1–2 · database 2
+
+Reworks the reagent weight grid. Each packet now has its own initial/final
+fields (`reagent1_initial_wt`/`reagent1_final_wt`, and the same for reagent 2)
+instead of one field that retargeted itself between the two weighings, so
+which box a keystroke lands in is fixed by which box was typed into and never
+by run state. `Arbiter.reagent_weigh_plan()` returns a `ReagentWeights` record
+in which the Net cell answers "what the packet holds" before the pour and
+"what was actually poured" after, Target no longer waits on a valid initial
+weight, and Over (`net - target`) is computable throughout instead of only
+once both weighings are in. The reagent1_g/reagent2_g sign convention is now
+`initial - final` (was `final - initial`) to match. `reagent_finals_complete()`
+gates analysis on both final weighings actually being entered.
+
+The entry2 screen's Weight button now fills in a configured nominal sample
+weight in one press, the same way the Temp button already offers a stand-in
+reading — the reagent targets that button feeds scale from whatever ends up
+in that field.
+
+MINOR: two config parameters were added — `protocol.reagent_wt_tolerance`
+(the tolerance band was previously a hardcoded constant) and
+`defaults.default_sample_wt`.
+
 ## [0.7.0] — 2026-08-18
 
 Writes: archive schema 4 · meta 2 · database 2
