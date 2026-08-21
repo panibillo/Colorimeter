@@ -908,7 +908,7 @@ class Arbiter:
 
         added_wt = None
         if initial is not None and final is not None:
-            added_wt = final - initial
+            added_wt = initial - final
 
         return initial_valid, packet_net, target_wt, added_wt
 
