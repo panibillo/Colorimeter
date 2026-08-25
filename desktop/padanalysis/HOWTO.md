@@ -17,9 +17,13 @@ usage: hdf5inspect.py [-h] [--captures-dir DIR] [--pre] [-s] [-j]
 
 # How to run the pad analysis yourself
 
-Everything below is read-only.  Nothing writes to `captures/` or to
-`src/colorimeter.sqlite`.  The only files produced are `records.json`,
-`records_blob.json` and the images in `fig/`.
+Sections 1-7 are read-only.  Nothing in them writes to `captures/` or to
+`src/colorimeter.sqlite`; the only files produced are `records.json`,
+`records_blob.json` and the images in `fig/`.  Section 8 is the exception and
+says so: `analysis_1.py` writes a `sample_roi` table into
+`src/colorimeter.sqlite`, extracted images into `captures/<samp_no>/`, and
+interim arrays into `analysis/samples/`.  The archives themselves are never
+written by anything here.
 
 Use the project virtual environment.  The system Python does not have `h5py`,
 `cv2`, `scipy` or `matplotlib`.
@@ -303,3 +307,307 @@ clearance or a large `rms` all put the region in the wrong place.
 anyway, as the project guidelines require:
 
     timeout -k 10 600 .venv/bin/python3 -u desktop/padanalysis/measure.py 6 rect
+
+---
+
+## 8. Driving the analysis yourself — `analysis_1.py`
+
+Everything above is a pipeline: `measure.py` reduces every capture to
+`records.json` and the reports read that file and hand back conclusions.
+`analysis_1.py` is the other way round.  It gives you documented methods and
+leaves the procedure to you — a block of hard-coded steps at the bottom of the
+module that you edit for each run.  Nothing is cached between calls except the
+open archives, so a step can be commented out, changed and re-run.
+
+It is written to be run from **Eclipse**, so every path resolves from
+`Path(__file__).resolve().parent` and no argument parsing is involved.  Run the
+file; the `if __name__ == "__main__":` block at the bottom is the script.  From
+a shell it is the same file:
+
+    timeout -k 10 600 .venv/bin/python3 -u desktop/padanalysis/analysis_1.py
+
+Linux workstation only — it imports `scipy` and `cv2` and reads
+`src/colorimeter.sqlite` directly.
+
+Two modules:
+
+| module | what it is |
+|---|---|
+| `padphot.py` | the photometry, as pure functions on numpy arrays.  No file or database I/O, so each one can be read and checked on its own.  `python3 padphot.py` runs its self-test |
+| `analysis_1.py` | opening archives, finding the pad, applying the flat field, the figures, and the interim store |
+
+### 8.1 The first five minutes on a new capture
+
+The `__main__` block already holds this sequence; it is written out here
+because the order matters.
+
+```python
+inventory("C1020")                 # 1. what the archive actually holds
+locate_pad("C1020")                # 2. fit the pad, both sweeps, write sample_roi
+roi_overlay("C1020")               # 3. LOOK at it
+contact_sheet("C1020", quantity="R_inf")
+cell_table("C1020", roi=ROISAMPLE) # 4. every cell, as a picture and as numbers
+cell_table("C1020", roi=ROIWHITE)  # 5. the arithmetic check (see 8.4)
+pre_post_overlay("C1020", "royal_blue", "B")   # 6. prove the warp
+cell_PCA("C1020")                  # 7. yellow against brown
+```
+
+Step 3 is not optional.  If the fitted rectangle is not on the pad and the
+paper region not on bare paper, every number after it is void — the same rule
+`look3.py` states for the two-dye model.
+
+Every figure function takes `figs=` (show it) and `savefigs=` (write
+`fig/analysis1_<samp_no>_<what>.png`).  Under Eclipse, `figs=True` blocks on
+`plt.show()`; set `figs=False, savefigs=True` for an unattended run.
+
+`inventory` prints the sections, LEDs, rungs, exposure µs, chip levels and
+saturated fractions.  It is the answer to "why is that cell missing", and
+`rung_verdict(samp_no, cell)` gives the same answer for one cell as
+`(rung, reason)` — e.g. `(None, 'clipped: 30% of the pad and chips at the
+1023 ceiling')`.
+
+### 8.2 What `get_cell_data` gives you
+
+    a = get_cell_data(samp_no, LED, Bayerlayer, roi=ROISAMPLE, pre=False,
+                      erode=ERODE, rung=None, register=True, crop=False)
+
+A `numpy.ma.MaskedArray` on the **full layer grid** — 130 × 183 for bound
+roi 39 — masked outside the ROI.  Full grid rather than a crop because the
+pad, the bare paper and both gray chips have to be read from one frame that
+lines up, and because `duotone.PadCube.paint` and the registration map are
+defined there.  `crop=True` gives the ROI's bounding box instead, for looking
+at rather than computing with.
+
+| idiom | what it does |
+|---|---|
+| `a.mean()`, `a.std()`, `a.sum()` | ignore masked pixels — what you want |
+| `a.count()` | number of ROI pixels |
+| `a.compressed()` | 1-D vector of just the ROI pixels |
+| `~a.mask` | the boolean region itself |
+| `a.filled(np.nan)` | plain array, NaN outside, for plotting |
+| `a.data` | **the whole frame, mask ignored.**  `np.mean(a.data)` silently averages the crop |
+
+Arithmetic between two masked arrays takes the union of their masks, so a post
+frame divided by a pre frame is masked wherever either was.
+
+Two of the five ROIs are not rectangles, which is why this returns a mask:
+
+| ROI | what it is |
+|---|---|
+| `ROIBOUND` | the whole bound crop.  A rect |
+| `ROIGRAY1`, `ROIGRAY2` | the two gray chips.  Rects, from the `roi` table.  Stage furniture — they do not move with the strip |
+| `ROISAMPLE` | the fitted pad: a *rotated* rectangle (tilt ≈ −0.7°), eroded by `erode` px.  Its bounding-box corners are paper |
+| `ROIWHITE` | the strip's own bare paper below the pad, `PadRect.paper_mask()`, with blemishes removed.  Irregular by construction |
+
+**There is no `white` rect in force.**  The `roi` table's `white` rows sit at
+`active=2` and `active=9`, invisible to `roi.load_active()`; the only
+`white_balance` rects are the two gray chips.  So the white reference in this
+pipeline is two different things — the **gray chips**, weighted per cell
+through the flat field, and the **strip's own paper**, geometric.  `ROIWHITE`
+means the second, and that is what `WHITECELLS` is read on.
+
+### 8.3 The chain, one function per step
+
+`get_balanced_cell_data` walks it and hands back a `BalancedCell` carrying
+every intermediate, so you do not have to recompute anything to change your
+mind about which quantity to look at.  Each step is a `padphot` function you
+can also call on its own.
+
+| step | function | against what |
+|---|---|---|
+| dark-subtracted counts | `probe.Capture.layer` | the dark frame at the same exposure, per pixel |
+| `div` | `padphot.divisor` | the two gray chips, interpolated through this cell's fitted illumination surface at the region actually measured |
+| `R` | `padphot.reflectance` | the gray chips.  `R = 1` means as bright as the chips |
+| `R_inf` | `padphot.reflectance_infinity` | the strip's own bare paper.  `R_inf = 1` on the paper |
+| `A` | `padphot.absorbance` | `-log10(R_inf)`.  0 on the paper |
+| `KS` | `padphot.km_remission` | `(1 − R_inf)² / 2R_inf` = K/S.  0 on the paper |
+| `KS_signed` | `padphot.km_remission_signed` | the same, carrying the sign of (1 − R_inf) |
+| `Δ(K/S)` | `padphot.delta_ks` | exposed pad less blank pad.  Only this is approximately proportional to loading |
+| `Δ(K/S)_corr` | `padphot.ks_wetting_corrected` | with the neutral darkening of a wet pad removed via a red reference band |
+
+Four things worth knowing before the numbers mean anything, since they are
+where the confusion lives:
+
+- **K and S do not come apart.**  Kubelka–Munk gives only the ratio.
+  Separating them needs the pad measured over two different backings, which is
+  also the test of optical thickness.  So there is `km_remission()` and
+  deliberately no `absorption_K()`.
+- **`f(R)` is scale-sensitive.**  It is non-linear, so the choice of white
+  reference does *not* divide out: referring to the gray chips and referring to
+  the strip's paper give different K/S and the difference does not cancel.
+  `reflectance_infinity` therefore demands the reference explicitly.
+- **`f` is not monotone in `R`.**  It has a minimum of 0 at `R = 1` and rises
+  on *both* sides, so a pad reading slightly brighter than its white reference
+  gets a positive K/S indistinguishable from one reading slightly darker.  Use
+  `KS_signed` wherever K/S is averaged over pixels that straddle `R_inf = 1` —
+  which is every blank pad.
+- `A = -log10(R)` and `f(R) = K/S` are **different linearising transforms** of
+  the same measurement.  `chemistry.Reduction.A/dA` uses the first;
+  `tex/gutzeit_analysis.tex` argues for the second.  Both are computed so they
+  can be compared on real data.
+
+A cell whose *paper* clipped keeps its `R` and loses only `R_inf`, `A` and
+`KS`; `BalancedCell.paper_clipped` says so, and `cell_table` reports it rather
+than dropping the row.
+
+### 8.4 The arithmetic check
+
+On the strip's own bare paper the chain is over-determined, and that is the
+proof it is wired right:
+
+    cell_table("C1020", roi=ROIWHITE)
+
+`R_inf` must be 1.0000 (it is, exactly, by construction), `A` ≈ 0 and `KS` ≈ 0,
+for every cell.  On the gray chips `R` must be 1.0000.  If any of those four
+drifts, stop.
+
+The pad spectrum is the other sanity check, and it is chemistry rather than
+arithmetic: `R_inf` on the pad should climb monotonically with wavelength
+across the absorption edge — on C1020, violet.B 0.66 → royal_blue.B 0.77 →
+blue 0.88 → cyan 0.93 → green 0.99 → amber/red slightly above 1.0.
+
+### 8.5 Constants at the top of the module
+
+| constant | what it holds |
+|---|---|
+| `GRAYCELLS` | the 27 `(led, layer)` cells that have a flat-field model in `layermodels`.  A ladder capture holds all 27; a single-rung group-1 capture holds 20 |
+| `PRECELLS` | the 8 cells a `/pre` sweep contributes (royal blue and red only) |
+| `DARKCELLS`, `WHITECELLS` | the same 27, read on the dark frames and on the bare paper respectively |
+| `ERODE = 6.0` | layer px backed off every pad edge, matching `measure.py 6 rect` |
+| `PAD_RUNG = "e1"` | the rung `padrect` builds its composite at; `fields.rung_for` falls back to whatever the capture holds |
+| `SATURATED_DN = 1000` | counts at or above this are clipped (ceiling 1023, 23 DN margin) |
+| `MIN_SIGNAL_DN`, `MAX_SAT_FRACTION` | the floor and ceiling a rung has to pass to be usable |
+
+Anything outside `GRAYCELLS` has **no white correction at all**.  Two cells are
+`anchor_form='1anchor'` — `photo_red.Gr` and `violet.B` — and
+`whitecorr.anchor_weights` already branches on it.
+
+### 8.6 `sample_roi`, and where geometry comes from
+
+`locate_pad` fits `PadRect` on each sweep and writes one row per
+`(samp_no, section)` into a `sample_roi` table in `src/colorimeter.sqlite`,
+created with `CREATE TABLE IF NOT EXISTS`.  It is deliberately **not** in
+`src/db_DDL.sql`: that is instrument schema, and adding to it would drag in a
+`SCHEMA_VERSION` bump and a release.  This is a desktop analysis artefact.
+
+    sqlite3 src/colorimeter.sqlite "SELECT * FROM sample_roi WHERE samp_no='C1020'"
+
+The row carries the `bound_*` rect the fit is relative to, read from the
+archive's own `/meta`, **not** from the `roi` table.  That is not redundancy: a
+past capture was cropped against whatever bound was in force when it was taken,
+and no amount of syncing the `roi` table can recover that.  `probe.Capture`
+already reads `/meta`; so does everything here.
+
+`pushdb.sh` copies the whole local file to the Pi, so `sample_roi` will travel
+there.  Harmless — the instrument never reads it — but not a surprise.
+
+### 8.7 Pre against post
+
+Both sweeps get their own `PadRect`, which gives an exact strip frame, so
+registration is arithmetic and needs no image matching.  For a post pixel at
+strip coordinate `(u, v)`:
+
+```
+v_pre = top_pre + (v - top_post)
+x_pre = aL_pre + u + m_pre * (v_pre - yc_pre)
+```
+
+`get_cell_data(pre=True)` applies one bilinear resample of the pre cell onto
+the post grid, so `post / pre` divides pixel by pixel.  `register=False`
+returns the unregistered frame.
+
+Registration applies **only** to the strip-attached ROIs (`sample`, `white`).
+The gray chips are stage furniture and do not move.
+
+Two flags:
+
+- Interpolation correlates neighbouring pixels, so a per-pixel noise estimate
+  taken *after* a resample understates the noise.  Take σ from the
+  unregistered frame.
+- `pre_post_overlay` prints the corner disagreement after the map.  It should
+  be a small fraction of a pixel — 0.27 layer px on C1020 — and a large value
+  means one of the two *fits* is wrong, not that the strip moved.  Structure in
+  the ratio panel that follows the pad outline is a registration error;
+  structure inside the pad is chemistry.
+
+### 8.8 The interim store
+
+    writeh5_sampcell(samp_no, cellname, array, **attrs)
+    readh5_sampcell(samp_no, cellname)
+    sampcell_attrs(samp_no, cellname="/")
+    clear_sampcells(samp_no)
+
+`desktop/padanalysis/analysis/samples/<samp_no>.h5`, dataset at
+`/<cellname>/array`, `attrs` on the enclosing group.  A masked array is stored
+as `filled(nan)` plus a sibling `/mask` and put back together on read.
+
+The file root carries the source archive's identity — `samp_no`,
+`software_ver`, `schema_version` and both sweeps' bound rects — so a sidecar
+can never be silently paired with a re-cropped capture.
+
+`clear_sampcells` before a re-run: HDF5 does not hand back the space a deleted
+dataset occupied, so rewriting into the same file grows it every time.
+`.gitignore` already excludes `**.h5`, so these stay out of the repo.
+
+### 8.9 Syncing a table from the Pi
+
+`desktop/fetch_samplerows_from_pi.py` now updates **any** table, not just
+`samples`:
+
+    .venv/bin/python3 desktop/fetch_samplerows_from_pi.py --list-tables
+    .venv/bin/python3 desktop/fetch_samplerows_from_pi.py --table roi --dry-run
+    .venv/bin/python3 desktop/fetch_samplerows_from_pi.py --table roi
+
+| mode | when |
+|---|---|
+| `upsert` | match on a natural key (`samp_no COLLATE NOCASE` for `samples`); other local rows untouched.  The old behaviour, now explicit |
+| `mirror` | replace the whole local table from the remote, preserving `rowid`, in one transaction.  What `roi`, `exposure`, `layermodels` and `colorcard` need, since they are append-only history keyed by `rowid` and a per-row upsert would leave stale `active=1` rows behind |
+
+Each table has a default mode; `--mode` overrides it.  The local database is
+backed up to `<db>.bak-<date>` before any write unless `--no-backup`.
+
+Two cautions.  Mirroring `config` overwrites desktop-local settings, and
+`config` carries a partial unique index (`ux_config_one_active`) that a
+row-by-row replace can transiently violate — hence delete-then-insert inside
+one transaction.  And `sample_roi` is local-only: it has no remote counterpart
+and the tool refuses it.
+
+### 8.10 Things that will bite
+
+**Exposure group 1 over-exposes three cells.**  On C1019–C1021, `blue.B`,
+`cyan.Gr` and `cyan.Gb` clip on 100 % of the bare paper and 58–89 % of the pad
+— three of the 27 lost outright.  C1016–C1018, at exposure group 3, read all
+27.  The group changed between C1018 and C1019 and raised every exposure 1.5×
+(blue 5283 → 7915 µs, cyan 7402 → 11130 µs).  This is not a code fault, and
+`rung_verdict` names it rather than dropping the cell silently.
+
+**Never average Gr and Gb.**  They differ about 1.5 % under red LEDs, and they
+sit on different Bayer sub-grids half a layer pixel apart, which matters for
+any per-pixel cross-layer work and for the pre/post warp.
+
+**Violet fluoresces the card.**  White card stock carries optical brighteners
+(≈22× under violet).  `violet.B` on a white or paper region is not
+reflectance.
+
+**One strip alone is rank-1.**  `cell_PCA("C1020")` gives PC1 0.949, PC2 0.032
+and a single straight ridge through the origin in the yellow-against-brown
+density: on one pad the two products are *proportional*, so the two-dye model
+separates nothing within a strip.  Per `tex/gutzeit_analysis.tex` that means
+the species ratio is constant, not that there is one species.  Endmembers
+fitted on one pad describe that pad's own cloud and are not comparable between
+samples — `duotone.fit(cubes)` fits one shared basis over a set, and
+`cell_PCA(..., endmembers=...)` takes it.
+
+**`roi.active` is overloaded.**  It holds 0, 1, 2, 3 and 9 in
+`src/colorimeter.sqlite` while only 0/1/2 are defined.  Rows at 3 and 9 are
+invisible to every loader *and* immune to `roi.save()`, which only supersedes
+`active=1`.  Worth cleaning up separately; it is the same "one column, one
+meaning" problem noted elsewhere.
+
+**Do not `import pca`.**  `pca.py` runs a multi-minute analysis at import time
+and is hardwired to five captures.  Use `duotone`, which does its PCA with
+`np.linalg.svd`.
+
+**`scipy` is installed but missing from `requirements-frozen.txt`**, even
+though `padrect.py` and `segment.py` already import it.  A fresh environment
+built from that file will not run this module.

@@ -132,6 +132,29 @@ def _peak(v, i):
     return i + (0.0 if d == 0 else 0.5 * (a - c) / d)
 
 
+def _nearest_local_max(g, w0, w1, target):
+    """
+    Row of the local maximum of `g` in [w0, w1) closest to `target`.
+
+    A pad with a broad or graded stain can rise back to paper over several
+    rows rather than one clean step, so the window holds more than one
+    plausible edge -- typically a strong partial rise where the stain first
+    thins, and a second, similarly strong one where it actually clears. The
+    tallest of these is not reliably the true edge, but the one nearest a
+    target trusted from a fixed dimension (pad height off a measured top, or
+    white-background height off `strip_top`) is. Falls back to the tallest
+    sample in the window when `g` has no interior local maximum there.
+    """
+    seg = g[w0:w1]
+    if len(seg) < 3:
+        return w0 + int(np.argmax(seg))
+    is_max = (seg[1:-1] >= seg[:-2]) & (seg[1:-1] >= seg[2:])
+    idx = np.flatnonzero(is_max) + 1 + w0
+    if len(idx) == 0:
+        return w0 + int(np.argmax(seg))
+    return int(idx[np.argmin(np.abs(idx - target))])
+
+
 class PadRect:
     """The pad as a rotated rectangle, plus the edge fits behind it."""
 
@@ -251,7 +274,13 @@ class PadRect:
         w1 = min(int(target) + RESEAT_SEARCH + 1, len(g) - 2)
         if w1 - w0 < 2:
             return
-        ib = w0 + int(np.argmax(g[w0:w1]))
+        # With a top edge to trust, `target` is itself a fixed-geometry
+        # prediction, so the nearest rise to it beats the tallest one in the
+        # window -- see `_nearest_local_max`.  Without one, target was just
+        # picked as the window's tallest rise, and there is nothing to be
+        # nearer to.
+        ib = (_nearest_local_max(g, w0, w1, target) if disagrees
+              else w0 + int(np.argmax(g[w0:w1])))
         slope = float(g[ib])
         if slope <= self.bot_slope and not disagrees:
             return                      # nothing better is out there
@@ -495,7 +524,7 @@ def _first_crossing(v, thr):
 if __name__ == "__main__":
     from samples import NAMES
 
-    for name in NAMES:
+    for name in ["C1025"]: #NAMES:
         c = open_capture(name)
         try:
             p = PadRect(c)
