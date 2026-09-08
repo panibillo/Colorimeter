@@ -242,7 +242,7 @@ def apply_registration_with_shifts(pre_layer, shifts, shape_post):
     return result
 
 
-def register_pre_to_post_empirical(samp_no, pre_layer, post_layer, max_shift=5):
+def register_pre_to_post_empirical(samp_no, pre_layer, post_layer, max_shift=5, use_areas=False):
     """
     Register pre-image to post-measurement using arithmetic + empirical shifts.
 
@@ -253,18 +253,111 @@ def register_pre_to_post_empirical(samp_no, pre_layer, post_layer, max_shift=5):
         pre_layer: 2D array (pre-image signal).
         post_layer: 2D array (measurement signal).
         max_shift: Maximum shift to search for (±pixels).
+        use_areas: If True, divide image into 3×3 areas and compute per-area shifts
+                   to handle rotation. If False, use global mean shift (faster but
+                   fails with rotation).
 
     Returns:
         (registered_pre, shifts_info) where:
         - registered_pre: Pre-image resampled to post grid with shifts applied.
         - shifts_info: Dict with measured shifts for logging/inspection.
     """
+    if use_areas:
+        return _register_with_areas(samp_no, pre_layer, post_layer, max_shift)
+
     shifts = measure_registration_shifts(
         samp_no, pre_layer, post_layer, max_shift=max_shift
     )
     registered = apply_registration_with_shifts(pre_layer, shifts, post_layer.shape)
 
     return registered, shifts
+
+
+def _register_with_areas(samp_no, pre_layer, post_layer, max_shift=5, n_areas=3):
+    """
+    Register with per-area shifts to handle rotation (experimental).
+
+    Divides image into n_areas × n_areas grid, measures shifts per area,
+    and resamples with per-area corrections. Approximates rotation without
+    explicit image rotation.
+
+    Args:
+        samp_no: Capture name.
+        pre_layer: 2D array (pre-image).
+        post_layer: 2D array (measurement).
+        max_shift: Max shift to search per area.
+        n_areas: Grid dimension (3 = 3×3 areas, 9 total).
+
+    Returns:
+        (registered_pre, shifts_info) — same as register_pre_to_post_empirical.
+    """
+    rows, cols = post_layer.shape
+    result = np.zeros_like(post_layer, dtype=np.float64)
+    shifts_by_area = {}
+
+    row_size = rows // n_areas
+    col_size = cols // n_areas
+
+    for i in range(n_areas):
+        for j in range(n_areas):
+            r_start = i * row_size
+            r_end = r_start + row_size if i < n_areas - 1 else rows
+            c_start = j * col_size
+            c_end = c_start + col_size if j < n_areas - 1 else cols
+
+            # Measure shift in this area
+            roi_pre = pre_layer[r_start:r_end, c_start:c_end]
+            roi_post = post_layer[r_start:r_end, c_start:c_end]
+
+            if roi_pre.size == 0 or roi_post.size == 0:
+                continue
+
+            # Correlation-based shift
+            best_corr = -np.inf
+            best_shift = (0, 0)
+            for dy in range(-max_shift, max_shift + 1):
+                for dx in range(-max_shift, max_shift + 1):
+                    roi_pre_pad = np.pad(
+                        roi_pre,
+                        ((max_shift + 1, max_shift + 1), (max_shift + 1, max_shift + 1)),
+                        mode="edge",
+                    )
+                    y_start = max_shift + dy
+                    x_start = max_shift + dx
+                    sliced = roi_pre_pad[
+                        y_start : y_start + roi_post.shape[0],
+                        x_start : x_start + roi_post.shape[1],
+                    ]
+                    corr = np.sum(sliced * roi_post)
+                    if corr > best_corr:
+                        best_corr = corr
+                        best_shift = (dx, dy)
+
+            shifts_by_area[(i, j)] = best_shift
+
+            # Resample this area with its local shift
+            yy, xx = np.mgrid[r_start:r_end, c_start:c_end].astype(np.float64)
+            dx, dy = best_shift
+            yy_shifted = yy + dy
+            xx_shifted = xx + dx
+            area_resampled = _bilinear_interp(pre_layer, yy_shifted, xx_shifted)
+            result[r_start:r_end, c_start:c_end] = area_resampled
+
+    # Compute overall mean shift for logging
+    if shifts_by_area:
+        mean_dx = np.mean([s[0] for s in shifts_by_area.values()])
+        mean_dy = np.mean([s[1] for s in shifts_by_area.values()])
+    else:
+        mean_dx, mean_dy = 0.0, 0.0
+
+    shifts_info = {
+        "mean_dx": mean_dx,
+        "mean_dy": mean_dy,
+        "per_area": shifts_by_area,
+        "method": f"{n_areas}x{n_areas} areas",
+    }
+
+    return result, shifts_info
 
 
 # ── alternative: normalized cross-correlation (numpy only) ──────────────────
