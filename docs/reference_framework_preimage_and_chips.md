@@ -241,13 +241,16 @@ print(f"Per-edge: {shifts['edges']}")
 
 | Scenario | Method | Reason |
 |---|---|---|
-| **Routine analysis** | Arithmetic only | Fast, sufficient for most applications |
-| **High-precision dosimetry** | Empirical refinement | Measurable noise reduction (~10%) |
-| **Rotation or skew observed** | Empirical refinement | Captures non-rigid deformations |
-| **Batch QC** | Arithmetic only | Speed matters; precision less critical |
+| **All production use** | Arithmetic only | Empirical refinement tested on 11 samples; degrades by 8.6% on average |
 
-**Future enhancement:** Divide image into 4–9 areas and compute per-area shifts 
-to handle rotation without explicit image rotation.
+**Important finding:** Tested empirical registration (edge-correlation) on all 11 available
+pre-image samples (C1014–C1025):
+- **Result:** Degraded R_inf by 8.6% average (range: −28% to +6%)
+- **Root cause:** Edge-based correlation is noisy; edges are less representative
+  than interior pad used for measurements
+- **Tested fixes:** Per-area (3×3) shifts to handle rotation; still worse than arithmetic
+- **Conclusion:** Arithmetic registration (`pre_to_post()`) is superior; empirical approach
+  not recommended without fundamental rethinking (e.g., interior strip selection)
 
 ---
 

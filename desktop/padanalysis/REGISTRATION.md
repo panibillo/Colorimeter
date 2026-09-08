@@ -31,32 +31,29 @@ R_inf = sig_meas / sig_pre_aligned
 
 This uses the arithmetic pre_to_post() transform (O(1) speed, ~nm-class accuracy).
 
-### High-Precision Approach
+### Empirical Refinement (Experimental — Not Recommended)
 
 ```python
 from padregistration import register_pre_to_post_empirical
-import numpy as np
 
-# Measure actual shifts via edge correlation
+# Measure shifts via edge correlation (not recommended)
 sig_pre_aligned, shifts = register_pre_to_post_empirical(
     samp_no, sig_pre, sig_meas, max_shift=5
 )
 
-print(f"Measured shifts: dx={shifts['mean_dx']:.2f}, dy={shifts['mean_dy']:.2f}")
-print(f"  left:   {shifts['edges']['left']}")
-print(f"  right:  {shifts['edges']['right']}")
-print(f"  top:    {shifts['edges']['top']}")
-print(f"  bottom: {shifts['edges']['bottom']}")
-
-# Compute reflectance with empirical correction
 R_inf = sig_meas / sig_pre_aligned
-
-# Check if edge shifts agree (indicator of rotation/skew)
-dx_vert = np.mean([shifts['edges'][e][0] for e in ['left', 'right']])
-dx_horiz = np.mean([shifts['edges'][e][0] for e in ['top', 'bottom']])
-if abs(dx_vert - dx_horiz) > 1.0:
-    print("Warning: possible rotation detected")
 ```
+
+**Status:** Testing on 11 samples showed empirical registration **degrades** R_inf
+by 8.6% on average (−28% to +6%). Arithmetic registration is superior.
+
+**Why it fails:** Edge-based correlation measures shifts from pad boundary regions,
+which are noisier and less representative than the interior pad used for actual
+measurements. Global mean of edges also fails under rotation (8/11 samples had
+misaligned edge shifts).
+
+**Recommendation:** Use arithmetic registration (standard approach). Keep empirical
+code as reference for future work (e.g., interior strip selection).
 
 ## Decision Tree
 
