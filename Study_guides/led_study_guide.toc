@@ -1,0 +1,43 @@
+\contentsline {section}{\numberline {1}What Is an LED?}{3}{section.1}%
+\contentsline {subsection}{\numberline {1.1}The LED's I--V Curve and the Load Line}{3}{subsection.1.1}%
+\contentsline {section}{\numberline {2}The Basic LED Circuit}{5}{section.2}%
+\contentsline {subsection}{\numberline {2.1}The Governing Equations}{5}{subsection.2.1}%
+\contentsline {subsection}{\numberline {2.2}Worked Example: Finding $R$}{6}{subsection.2.2}%
+\contentsline {section}{\numberline {3}Understanding LED Specifications}{6}{section.3}%
+\contentsline {subsection}{\numberline {3.1}Forward Voltage ($V_f$): Typical, Minimum, and Maximum}{6}{subsection.3.1}%
+\contentsline {subsection}{\numberline {3.2}Maximum Current ($I_{max}$)}{7}{subsection.3.2}%
+\contentsline {subsection}{\numberline {3.3}Power Dissipation ($P_{max}$)}{7}{subsection.3.3}%
+\contentsline {subsection}{\numberline {3.4}Luminous Output}{8}{subsection.3.4}%
+\contentsline {section}{\numberline {4}Choosing an Operating Current}{8}{section.4}%
+\contentsline {subsection}{\numberline {4.1}The Three Brightness Levels}{8}{subsection.4.1}%
+\contentsline {subsection}{\numberline {4.2}The Power Budget Constraint}{9}{subsection.4.2}%
+\contentsline {section}{\numberline {5}Calculating the Current-Limiting Resistor}{9}{section.5}%
+\contentsline {subsection}{\numberline {5.1}Step-by-Step Procedure}{9}{subsection.5.1}%
+\contentsline {subsection}{\numberline {5.2}The E24 Resistor Series}{9}{subsection.5.2}%
+\contentsline {subsection}{\numberline {5.3}Full Worked Example}{10}{subsection.5.3}%
+\contentsline {section}{\numberline {6}Resistor Power Rating}{11}{section.6}%
+\contentsline {subsection}{\numberline {6.1}Calculating Resistor Power}{11}{subsection.6.1}%
+\contentsline {subsection}{\numberline {6.2}Choosing the Right Package}{11}{subsection.6.2}%
+\contentsline {section}{\numberline {7}Parallel LED Groups}{12}{section.7}%
+\contentsline {subsection}{\numberline {7.1}Why Parallel, Not Series?}{12}{subsection.7.1}%
+\contentsline {subsubsection}{\numberline {7.1.1}How a Series String Works in Principle}{12}{subsubsection.7.1.1}%
+\contentsline {subsubsection}{\numberline {7.1.2}Problem 1: A Resistor Cannot Stabilize a Series String on 5\,\si {V}}{12}{subsubsection.7.1.2}%
+\contentsline {subsubsection}{\numberline {7.1.3}Problem 2: Vf Production Spread Destabilizes the Whole String}{12}{subsubsection.7.1.3}%
+\contentsline {subsubsection}{\numberline {7.1.4}Problem 3: Different Colors Cannot Share a Series String}{13}{subsubsection.7.1.4}%
+\contentsline {subsubsection}{\numberline {7.1.5}Problem 4: One Failure Kills the Whole Group}{13}{subsubsection.7.1.5}%
+\contentsline {subsubsection}{\numberline {7.1.6}Problem 5: You Cannot Adjust LEDs Independently}{14}{subsubsection.7.1.6}%
+\contentsline {subsubsection}{\numberline {7.1.7}When Series Strings Are the Right Choice}{14}{subsubsection.7.1.7}%
+\contentsline {subsubsection}{\numberline {7.1.8}Summary of Series vs.\ Parallel (with Resistor)}{14}{subsubsection.7.1.8}%
+\contentsline {subsection}{\numberline {7.2}The Optional Shared Resistor}{15}{subsection.7.2}%
+\contentsline {section}{\numberline {8}Supply Voltage Considerations}{16}{section.8}%
+\contentsline {subsection}{\numberline {8.1}Headroom: Why Supply Voltage Matters}{16}{subsection.8.1}%
+\contentsline {subsection}{\numberline {8.2}LDOs and the 5\,\si {V}{} Supply Problem}{16}{subsection.8.2}%
+\contentsline {section}{\numberline {9}The MOSFET Switch}{17}{section.9}%
+\contentsline {subsection}{\numberline {9.1}Why a MOSFET?}{17}{subsection.9.1}%
+\contentsline {subsection}{\numberline {9.2}The Gate Circuit}{17}{subsection.9.2}%
+\contentsline {section}{\numberline {10}Reading the Violet LED Datasheet: A Case Study}{18}{section.10}%
+\contentsline {subsection}{\numberline {10.1}What the Datasheet Says}{19}{subsection.10.1}%
+\contentsline {subsection}{\numberline {10.2}Design Implications}{19}{subsection.10.2}%
+\contentsline {section}{\numberline {11}Putting It All Together: Design Checklist}{20}{section.11}%
+\contentsline {section}{\numberline {12}Comprehensive Exercises}{20}{section.12}%
+\contentsline {section}{\numberline {A}Answer Key}{21}{appendix.A}%

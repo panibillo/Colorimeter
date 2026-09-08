@@ -1,0 +1,303 @@
+\section{Rotary Encoders}
+
+\subsection{Overview}
+
+Two rotary encoders are used in this design. One controls the alert buzzer volume and
+the other controls the display brightness. Either encoder may be temporarily
+reassigned by the application script to set other parameters as needed. The encoders
+do not include push-button switches.
+
+A rotary encoder is a digital position sensor. Unlike a potentiometer, it has no
+end stops and produces no analog output. Instead, it produces a series of digital
+pulses as the shaft is rotated, with the direction of rotation encoded in the phase
+relationship between two output signals. Because the encoder has no absolute position,
+the application maintains a software counter that is incremented or decremented on
+each detent step.
+
+\subsection{How a Rotary Encoder Works}
+
+Inside the encoder are two switches, conventionally labelled A and B (sometimes CLK
+and DT). The switches are arranged so that they open and close in a specific sequence
+depending on the direction of rotation. As the shaft turns clockwise, A transitions
+before B. As the shaft turns counter-clockwise, B transitions before A. The
+relationship is a two-bit Gray code sequence:
+
+\begin{table}[h]
+\centering
+\begin{tabular}{ccc}
+\hline
+\textbf{Step} & \textbf{A} & \textbf{B} \\
+\hline
+0 & 1 & 1 \\
+1 & 0 & 1 \\
+2 & 0 & 0 \\
+3 & 1 & 0 \\
+\hline
+\end{tabular}
+\caption{Gray code sequence for clockwise rotation. Counter-clockwise reverses the order.}
+\label{tab:encoder_gray}
+\end{table}
+
+The simplest detection strategy is to trigger an interrupt on the falling edge of
+signal A, then immediately read the state of signal B. If B is high at that moment,
+rotation is clockwise; if B is low, rotation is counter-clockwise. This single-edge
+approach is sufficient for a hand-turned control knob where speed is low.
+
+\subsection{Contact Bounce and Debouncing}
+
+The switches inside a mechanical rotary encoder bounce as they make and break contact,
+producing multiple spurious transitions per detent step. Without debouncing, the
+interrupt handler fires several times per click and the counter accumulates incorrect
+values.
+
+Two debouncing strategies are available:
+
+\begin{itemize}
+    \item \textbf{Hardware debouncing:} A small capacitor (typically \SI{10}{\nano\farad}
+    to \SI{100}{\nano\farad}) from each encoder pin to ground, combined with a pull-up
+    resistor (\SI{10}{\kilo\ohm}), forms an RC low-pass filter that smooths the bounce
+    transients. This is the preferred approach for a production design as it requires no
+    timing logic in software.
+
+    \item \textbf{Software debouncing:} Record the timestamp of each interrupt and
+    ignore subsequent triggers that arrive within a debounce window (typically
+    \SI{5}{\milli\second} to \SI{50}{\milli\second}). The RPi.GPIO
+    \texttt{add\_event\_detect()} call includes a built-in \texttt{bouncetime}
+    parameter for exactly this purpose.
+\end{itemize}
+
+Both approaches may be combined. Hardware debouncing is recommended with a
+\SI{100}{\nano\farad} ceramic capacitor on each encoder pin.
+
+\subsection{Wiring}
+
+Each encoder has two signal pins (A and B), a common pin, and optionally a supply
+pin. The common is connected to ground. Each signal pin is pulled up to \SI{3.3}{\volt}
+through a \SI{10}{\kilo\ohm} resistor (the Raspberry Pi internal pull-up may be used
+instead, activated in software). A \SI{100}{\nano\farad} ceramic capacitor from each
+signal pin to ground provides hardware debouncing.
+
+\begin{verbatim}
+  3.3V ---[ 10k ]---+--- Encoder A pin
+                    |
+                  100nF
+                    |
+                   GND
+                   
+  3.3V ---[ 10k ]---+--- Encoder B pin
+                    |
+                  100nF
+                    |
+                   GND
+
+  Encoder Common --- GND
+\end{verbatim}
+
+\subsection{Pin Restrictions on the Raspberry Pi Zero}
+
+All GPIO pins on the Raspberry Pi Zero support interrupts via the RPi.GPIO library.
+There is no hardware restriction limiting interrupts to specific pins, unlike some
+microcontrollers. The Linux kernel \texttt{gpio} subsystem services all GPIO interrupts
+through a unified interface.
+
+Practical limits to be aware of:
+
+\begin{itemize}
+    \item \textbf{Timing jitter:} Because the Raspberry Pi runs Linux, interrupt
+    latency is not deterministic. Typical latency is \SI{1}{\milli\second} to
+    \SI{5}{\milli\second} under light load, but may spike under heavy CPU or I/O
+    activity. For a hand-turned knob this is entirely acceptable; for high-speed
+    pulse counting it would not be.
+
+    \item \textbf{Number of interrupts:} There is no fixed limit on the number of
+    simultaneous GPIO interrupts. Each \texttt{add\_event\_detect()} call starts a
+    kernel-level watch on that pin. In practice, a handful of interrupts is well
+    within the capability of the system.
+
+    \item \textbf{Power:} GPIO pins source or sink a maximum of \SI{16}{\milli\ampere}
+    individually, with a total bank limit. Encoder signal pins draw negligible current
+    when used as inputs with pull-ups; no power budget concern arises.
+
+    \item \textbf{Voltage:} All GPIO inputs must remain within \SI{0}{\volt} to
+    \SI{3.3}{\volt}. The encoders are passive switches to ground and are inherently
+    safe provided the pull-ups are connected to \SI{3.3}{\volt} and not \SI{5}{\volt}.
+\end{itemize}
+
+\subsection{Setting Up Interrupts in Python}
+
+The RPi.GPIO library provides \texttt{add\_event\_detect()} to register a callback
+function that is invoked when a specified edge transition is detected on a GPIO pin.
+The callback runs in a separate thread managed by the library, but in a simple
+synchronous script the main loop can simply read shared variables that the callback
+updates.
+
+The general pattern for a single interrupt is:
+
+\begin{verbatim}
+import RPi.GPIO as GPIO
+
+GPIO.setmode(GPIO.BCM)
+
+PIN = 17
+GPIO.setup(PIN, GPIO.IN, pull_up_down=GPIO.PUD_UP)
+
+def on_edge(channel):
+    # called automatically when the edge is detected
+    pass
+
+GPIO.add_event_detect(
+    PIN,
+    GPIO.FALLING,
+    callback=on_edge,
+    bouncetime=10        # ignore re-triggers within 10 ms
+)
+\end{verbatim}
+
+\subsection{Two Encoders with Multiple Interrupts}
+
+For two encoders, four GPIO pins are used (A and B for each encoder). An interrupt
+is registered on the A pin of each encoder. When the interrupt fires, the handler
+reads the B pin to determine direction and updates the appropriate software counter.
+
+\begin{verbatim}
+import RPi.GPIO as GPIO
+import time
+
+# --- Pin assignments ---
+ENC1_A = 17    # Volume encoder
+ENC1_B = 27
+ENC2_A = 22    # Brightness encoder
+ENC2_B = 23
+
+# --- Shared state ---
+volume     = 50    # 0-100
+brightness = 50    # 0-100
+
+GPIO.setmode(GPIO.BCM)
+
+for pin in [ENC1_A, ENC1_B, ENC2_A, ENC2_B]:
+    GPIO.setup(pin, GPIO.IN, pull_up_down=GPIO.PUD_UP)
+
+
+def on_volume(channel):
+    global volume
+    direction = 1 if GPIO.input(ENC1_B) else -1
+    volume = max(0, min(100, volume + direction))
+
+
+def on_brightness(channel):
+    global brightness
+    direction = 1 if GPIO.input(ENC2_B) else -1
+    brightness = max(0, min(100, brightness + direction))
+
+
+GPIO.add_event_detect(ENC1_A, GPIO.FALLING,
+                      callback=on_volume,     bouncetime=10)
+GPIO.add_event_detect(ENC2_A, GPIO.FALLING,
+                      callback=on_brightness, bouncetime=10)
+
+
+def main():
+    print("Turning encoders. Ctrl-C to exit.")
+    try:
+        while True:
+            # Main loop runs normally; callbacks fire asynchronously
+            print(f"Volume: {volume:3d}   Brightness: {brightness:3d}",
+                  end="\r")
+            time.sleep(0.1)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        GPIO.cleanup()
+
+
+if __name__ == "__main__":
+    main()
+\end{verbatim}
+
+\noindent Key points in this implementation:
+
+\begin{itemize}
+    \item The B pin of each encoder is read inside the interrupt callback, not
+    registered as a separate interrupt. Only the A pin triggers the interrupt.
+    \item The \texttt{bouncetime=10} argument suppresses re-triggers within
+    \SI{10}{\milli\second}, providing software debouncing in addition to any
+    hardware RC filtering.
+    \item The \texttt{global} keyword allows the callback (running in the RPi.GPIO
+    interrupt thread) to modify the counter variables read by the main loop.
+    \item The counters are clamped to their valid ranges inside each callback.
+    \item \texttt{GPIO.cleanup()} is called on exit to release all pin reservations
+    and remove event detection.
+\end{itemize}
+
+\subsection{Temporarily Reassigning an Encoder}
+
+Because the encoder counters are simple integer variables, reassigning an encoder
+to a different parameter requires only redirecting which variable the callback
+modifies. The cleanest approach is to use a function that unregisters the existing
+callback and registers a new one:
+
+\begin{verbatim}
+def reassign_encoder1(new_variable: list, label: str) -> None:
+    """
+    Temporarily redirect encoder 1 to control a different parameter.
+    new_variable must be a mutable container, e.g. a list of one int.
+    """
+    GPIO.remove_event_detect(ENC1_A)
+
+    def on_reassigned(channel):
+        direction = 1 if GPIO.input(ENC1_B) else -1
+        new_variable[0] = max(0, min(100, new_variable[0] + direction))
+
+    GPIO.add_event_detect(ENC1_A, GPIO.FALLING,
+                          callback=on_reassigned, bouncetime=10)
+    print(f"Encoder 1 now controls: {label}")
+\end{verbatim}
+
+\noindent To restore the original volume function, call \texttt{reassign\_encoder1}
+again with the \texttt{volume} container and label.
+
+\subsection{Adafruit 1651 Touchscreen Interrupt (TSC2007)}
+
+The Adafruit 1651 display uses the \textbf{TSC2007} resistive touch controller,
+which communicates over I2C. The TSC2007 provides a \textbf{PENIRQ} pin (active
+low) that is asserted whenever the screen is touched. Connecting this pin to a
+GPIO and registering a falling-edge interrupt allows the application to respond to
+touch events immediately, without polling the I2C bus in a continuous loop.
+
+\begin{verbatim}
+TOUCH_IRQ = 24    # PENIRQ from TSC2007
+
+GPIO.setup(TOUCH_IRQ, GPIO.IN, pull_up_down=GPIO.PUD_UP)
+
+def on_touch(channel):
+    """Read touch coordinates from TSC2007 over I2C."""
+    # Issue a read command to the TSC2007 over I2C here
+    # e.g. using smbus2 or adafruit_tsc2007 library
+    pass
+
+GPIO.add_event_detect(TOUCH_IRQ, GPIO.FALLING,
+                      callback=on_touch, bouncetime=50)
+\end{verbatim}
+
+\noindent The PENIRQ pin requires a pull-up to \SI{3.3}{\volt}; the internal
+RPi pull-up activated by \texttt{GPIO.PUD\_UP} is sufficient. The PENIRQ line
+is open-drain on the TSC2007 and safe to connect directly to the GPIO pin
+provided the pull-up is to \SI{3.3}{\volt}.
+
+\subsection{Parts List}
+
+\begin{table}[h]
+\centering
+\begin{tabular}{llll}
+\hline
+\textbf{Reference} & \textbf{Description} & \textbf{Value / Part} & \textbf{Package} \\
+\hline
+ENC1, ENC2  & Rotary encoder, mechanical, no push button & e.g. Alps EC11  & Through-hole \\
+R1--R4      & Signal pull-up resistors (A and B, each encoder) & \SI{10}{\kilo\ohm} & 0603 \\
+C1--C4      & Hardware debounce capacitors (A and B, each encoder) & \SI{100}{\nano\farad} ceramic & 0603 \\
+\hline
+\end{tabular}
+\caption{Rotary encoder components}
+\label{tab:encoder_parts}
+\end{table}

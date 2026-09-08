@@ -1,0 +1,111 @@
+{
+  "camtest8_version": "4",
+  "timestamp": "20260615_2120",
+  "led_channel": 2,
+  "led_color": "royal_blue",
+  "led_label": "ch 2 (royal_blue, 455 nm)",
+  "camera_model": "Camera Module 3 (IMX708)",
+  "bayer_pattern": "BGGR",
+  "config_size": [
+    2304,
+    1296
+  ],
+  "focus_diopters": 7.5,
+  "focus_mode": "autofocus_capped",
+  "focus_max_af_diopter": 7.5,
+  "autofocus_raw_diopters": 10.0,
+  "target_bayer_channel": "B",
+  "roi_white_channel_means": {
+    "B": 344.6410034602076,
+    "Gb": 89.80579584775087,
+    "Gr": 90.0826124567474,
+    "R": 70.10726643598616
+  },
+  "phase0_calibrated_exposure_us": 2000,
+  "phase0_desat_retries": 0,
+  "per_led_desat_retries": 0,
+  "ref_exposure_us": 2000,
+  "e3_refinement": [
+    {
+      "iteration": 1,
+      "exposure_us": 3864,
+      "measured_p50": 451.0,
+      "error_fraction": 0.1191,
+      "converged": false
+    },
+    {
+      "iteration": 2,
+      "exposure_us": 4386,
+      "measured_p50": 508.0,
+      "error_fraction": 0.0078,
+      "converged": true
+    }
+  ],
+  "e3_final_us": 4386,
+  "e3_ratio": 1.5,
+  "roi_sample_percentiles_at_e3": {
+    "89": 532.0,
+    "66": 517.0,
+    "50": 508.0,
+    "33": 498.0,
+    "11": 479.0
+  },
+  "computed_exposures": {
+    "e0": {
+      "type": "fixed_ratio",
+      "ratio": "e3/1.5",
+      "exposure_us": 2924,
+      "exposure_ms": 2
+    },
+    "e1": {
+      "type": "percentile",
+      "target_percentile": 89,
+      "percentile_value": 532.0,
+      "exposure_us": 4221,
+      "exposure_ms": 4
+    },
+    "e2": {
+      "type": "percentile",
+      "target_percentile": 66,
+      "percentile_value": 517.0,
+      "exposure_us": 4343,
+      "exposure_ms": 4
+    },
+    "e3": {
+      "type": "percentile",
+      "target_percentile": 50,
+      "percentile_value": 508.0,
+      "exposure_us": 4386,
+      "exposure_ms": 4
+    },
+    "e4": {
+      "type": "percentile",
+      "target_percentile": 33,
+      "percentile_value": 498.0,
+      "exposure_us": 4509,
+      "exposure_ms": 4
+    },
+    "e5": {
+      "type": "percentile",
+      "target_percentile": 11,
+      "percentile_value": 479.0,
+      "exposure_us": 4688,
+      "exposure_ms": 4
+    },
+    "e6": {
+      "type": "fixed_ratio",
+      "ratio": "e3*1.5",
+      "exposure_us": 6579,
+      "exposure_ms": 6
+    }
+  },
+  "applied_exposures_us": {
+    "e0": 2912,
+    "e1": 4195,
+    "e2": 4195,
+    "e3": 4328,
+    "e4": 4382,
+    "e5": 4489,
+    "e6": 6573
+  }
+}

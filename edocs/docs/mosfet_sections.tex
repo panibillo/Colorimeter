@@ -1,0 +1,302 @@
+\section{Extending MOSFETs with Shift Register}
+
+\subsection{Overview}
+
+The Raspberry Pi Zero provides a limited number of GPIO pins. Where multiple independent
+loads must be switched, a serial-to-parallel shift register allows eight MOSFET gates to
+be controlled from three GPIO pins. The device chosen is the \textbf{74HC595}, an
+8-bit serial-in, parallel-out shift register that operates from \SI{3.3}{\volt} and is
+widely available in an SMD package.
+
+Data is clocked into the shift register serially and latched to the eight parallel outputs
+simultaneously, ensuring that all outputs update at the same instant. Although the
+74HC595 can be driven by bit-banging three GPIO pins, the implementation here uses the
+hardware \textbf{SPI1} peripheral on the Raspberry Pi Zero for reliable timing and
+minimal CPU overhead. Only one MOSFET is energised at a time; the controlling byte
+therefore always has exactly one bit set.
+
+\subsection{Circuit Description}
+
+The Raspberry Pi Zero SPI1 peripheral provides three signals: MOSI (data), SCLK (clock),
+and CE (chip enable, used here as the latch signal). Each signal passes through a
+\SI{470}{\ohm} series resistor before reaching the 74HC595 to protect the GPIO pins
+from transient currents.
+
+The 74HC595 output enable pin (\textoverline{OE}) is tied permanently to ground so
+that the parallel outputs are always active. The master reset pin (\textoverline{MR})
+is tied permanently to \SI{3.3}{\volt} to prevent accidental clearing of the register.
+A \SI{100}{\nano\farad} bypass capacitor is placed directly across the Vcc and GND
+pins of the IC.
+
+Each of the eight parallel outputs drives a MOSFET gate through a \SI{500}{\ohm}
+series resistor. A \SI{10}{\kilo\ohm} resistor from gate to ground ensures the gate
+is pulled firmly low when the corresponding output is de-asserted, preventing the
+MOSFET from floating into an undefined state.
+
+\subsection{Circuit Diagram}
+
+\begin{verbatim}
+  Raspberry Pi Zero                  74HC595 (SOIC-16)
+  (SPI1)                             +----------------+
+                          3.3V -----| Vcc(16) (8)GND |------ GND
+                                    |                |
+   GPIO 20 (MOSI) --[ 470R ]--------| DS   (pin 14)  |   [SER]
+   GPIO 21 (SCLK) --[ 470R ]--------| SHCP (pin 11)  |   [SRCLK]
+   GPIO 18 (CE0)  --[ 470R ]--------| STCP (pin 12)  |   [RCLK]
+                                    |                |
+                            GND ----| /OE  (pin 13)  |  (always enabled)
+                           3.3V ----| /MR  (pin 10)  |  (master reset off)[SRCLR]
+                                    |                |
+                                    |   Q0  (pin 15) |--+
+                                    |   Q1  (pin 1)  |--+  (Q1..Q7 identical)
+                                    |   Q2  (pin 2)  |--+
+                                    |   Q3  (pin 3)  |--+
+                                    |   Q4  (pin 4)  |--+
+                                    |   Q5  (pin 5)  |--+
+                                    |   Q6  (pin 6)  |--+
+                                    |   Q7  (pin 7)  |--+
+                                    |       (pin 9)  |--x  (Q7S serial data out)
+                          100nF     |                |
+                                    +----------------+
+  --||-- Vcc to GND, close to IC
+ 
+  One MOSFET channel (repeated x8):
+
+  74HC595 Qn ---[ 500R ]---+--- MOSFET Gate (AO3400A or similar)
+                            |
+                          10k
+                            |
+                           GND                MOSFET Source --- GND
+                                              MOSFET Drain  --- Load (-)
+\end{verbatim}
+
+\subsection{Parts List}
+
+\begin{table}[h]
+\centering
+\begin{tabular}{llll}
+\hline
+\textbf{Reference} & \textbf{Part Number} & \textbf{Description} & \textbf{Package} \\
+\hline
+U1      & 74HC595           & 8-bit shift register, serial-in parallel-out  & SOIC-16 \\
+Q1--Q8  & AO3400A           & N-channel MOSFET, \SI{30}{\volt}, \SI{5.7}{\ampere} & SOT-23 \\
+R1--R3  & R470-0603         & \SI{470}{\ohm} GPIO series resistors          & 0603 \\
+R4--R11 & R500-0603         & \SI{500}{\ohm} MOSFET gate resistors          & 0603 \\
+R12--R19 & R10K-0603        & \SI{10}{\kilo\ohm} gate pull-down resistors   & 0603 \\
+C1      & 100nF ceramic     & Bypass capacitor, Vcc to GND                  & 0603 \\
+\hline
+\end{tabular}
+\caption{Shift register MOSFET controller components}
+\label{tab:shiftreg_parts}
+\end{table}
+
+\subsection{Programming Notes}
+
+The SPI1 peripheral on the Raspberry Pi Zero is accessed via the \texttt{spidev} library.
+SPI mode 0 (CPOL=0, CPHA=0) is compatible with the 74HC595. A clock speed of
+\SI{500}{\kilo\hertz} is more than adequate; the 74HC595 is rated to several megahertz
+but there is no benefit to running faster for low-speed MOSFET switching.
+
+A single byte is transferred per operation. The byte has exactly one bit set to select
+one MOSFET channel, or is zero to de-energise all channels. The \texttt{xfer2()} call
+clocks out the data and automatically toggles the chip enable line, which is connected
+to the latch (STCP) pin, causing the outputs to update at the end of the transfer.
+
+Note that SPI1 on the Raspberry Pi Zero requires the overlay \texttt{spi1-1cs} to be
+enabled in \texttt{/boot/config.txt}:
+
+\begin{verbatim}
+    dtoverlay=spi1-1cs
+\end{verbatim}
+
+\subsection{Example Code}
+
+\begin{verbatim}
+import spidev
+
+SPI_BUS = 1       # SPI1
+SPI_DEVICE = 0    # CE0
+
+spi = spidev.SpiDev()
+spi.open(SPI_BUS, SPI_DEVICE)
+spi.max_speed_hz = 500000
+spi.mode = 0
+
+
+def set_mosfet(channel: int) -> None:
+    """
+    Energise a single MOSFET by channel number.
+
+    Parameters
+    ----------
+    channel : int
+        Channel to activate, 0 through 7.
+        Pass -1 or any out-of-range value to de-energise all channels.
+    """
+    if 0 <= channel <= 7:
+        byte = 1 << channel
+    else:
+        byte = 0
+    spi.xfer2([byte])
+
+
+def all_off() -> None:
+    """De-energise all MOSFET channels."""
+    spi.xfer2([0x00])
+\end{verbatim}
+
+\noindent To activate channel 4 then turn everything off:
+
+\begin{verbatim}
+    set_mosfet(4)
+    time.sleep(1.0)
+    all_off()
+\end{verbatim}
+
+
+% ---------------------------------------------------------------------------
+\section{High-Side Control of 5\,V Load with MOSFET}
+
+\subsection{Overview}
+
+In circuits requiring both high-side and low-side switching, the load is interrupted at
+both the positive supply terminal and the ground return. The low-side switch is an
+N-channel MOSFET (AO3400A), which is straightforward to drive from a \SI{3.3}{\volt}
+GPIO. The high-side switch requires a P-channel MOSFET because its source terminal
+connects to the positive supply rail.
+
+The P-channel MOSFET chosen is the \textbf{AO3401A}, the complementary P-channel
+counterpart to the AO3400A. Both devices share the SOT-23 package and are produced
+by the same manufacturer, making them a well-matched pair. The AO3401A is rated at
+\SI{-30}{\volt} Vds and \SI{-4}{\ampere} continuous drain current, well in excess of
+the anticipated load current.
+
+\subsection{The Level-Shifting Problem}
+
+A P-channel MOSFET turns on when its gate is pulled sufficiently below its source
+voltage. With the source at \SI{+5}{\volt}, the gate must be pulled close to ground
+to turn the device on, and must be pulled to \SI{+5}{\volt} to turn it off. A
+\SI{3.3}{\volt} GPIO cannot swing to \SI{+5}{\volt} and therefore cannot turn the
+device fully off. A small-signal NPN transistor is used to solve this: it pulls the
+gate to ground when the GPIO is high (turning the P-channel on), and allows the gate
+to be pulled to \SI{+5}{\volt} through a resistor when the GPIO is low (turning the
+P-channel off).
+
+\subsection{Circuit Description}
+
+The GPIO drives the base of an MMBT3904 NPN transistor through a \SI{10}{\kilo\ohm}
+base resistor. The collector of the NPN connects to the gate of the AO3401A. A
+\SI{10}{\kilo\ohm} resistor from the gate to \SI{+5}{\volt} pulls the gate high
+when the NPN is off, ensuring the P-channel is firmly off. When the NPN saturates,
+it pulls the gate to ground, turning the P-channel on.
+
+The logic is inverted by the NPN stage: GPIO high turns the high-side MOSFET on,
+and GPIO low turns it off. This matches the behaviour of the low-side N-channel
+switch, so both MOSFETs are enabled by a high logic level on their respective GPIO
+pins. The load is energised only when both GPIO pins are high simultaneously.
+
+When the supply voltage is \SI{5}{\volt} and the gate is pulled to ground by the NPN,
+Vgs of the AO3401A is \SI{0}{\volt} $-$ \SI{5}{\volt} $=$ \SI{-5}{\volt}. The
+AO3401A gate threshold is \SI{-1}{\volt}, so the device is driven well into
+conduction.
+
+\subsection{Circuit Diagram}
+
+\begin{verbatim}
+  High-side control:
+
+  RPi GPIO A --[ 10k ]--+-- MMBT3904 Base
+                         |
+                    MMBT3904 Emitter ----------- GND
+                    MMBT3904 Collector --+------ AO3401A Gate
+                                        |
+                                       10k
+                                        |
+                                      +5V
+
+  +5V ----------- AO3401A Source
+                  AO3401A Drain ----+---- Load (+)
+                                    |
+                                  Load (-)
+                                    |
+                               AO3400A Drain
+                               AO3400A Source --- GND
+                               AO3400A Gate --[ 500R ]--+-- RPi GPIO B
+                                                        |
+                                                       10k
+                                                        |
+                                                       GND
+
+  Load energised when: GPIO A = HIGH and GPIO B = HIGH
+\end{verbatim}
+
+\subsection{Parts List}
+
+\begin{table}[h]
+\centering
+\begin{tabular}{llll}
+\hline
+\textbf{Reference} & \textbf{Part Number} & \textbf{Description} & \textbf{Package} \\
+\hline
+Q1 & AO3401A   & P-channel MOSFET, \SI{-30}{\volt}, \SI{-4}{\ampere}, high-side switch & SOT-23 \\
+Q2 & AO3400A   & N-channel MOSFET, \SI{30}{\volt}, \SI{5.7}{\ampere}, low-side switch  & SOT-23 \\
+Q3 & MMBT3904  & NPN BJT, \SI{40}{\volt}, \SI{200}{\milli\ampere}, gate driver         & SOT-23 \\
+R1 & R10K-0603 & \SI{10}{\kilo\ohm} NPN base resistor                                  & 0603   \\
+R2 & R10K-0603 & \SI{10}{\kilo\ohm} P-channel gate pull-up to \SI{5}{\volt}            & 0603   \\
+R3 & R500-0603 & \SI{500}{\ohm} N-channel gate series resistor                         & 0603   \\
+R4 & R10K-0603 & \SI{10}{\kilo\ohm} N-channel gate pull-down to GND                   & 0603   \\
+\hline
+\end{tabular}
+\caption{High-side and low-side MOSFET switch components}
+\label{tab:highside_parts}
+\end{table}
+
+\subsection{Logic Table}
+
+\begin{table}[h]
+\centering
+\begin{tabular}{ccccl}
+\hline
+\textbf{GPIO A} & \textbf{NPN} & \textbf{AO3401A} & \textbf{GPIO B (AO3400A)} & \textbf{Load} \\
+(high-side)     &              & (P-channel)      & (low-side)                &               \\
+\hline
+LOW  & OFF & OFF & LOW  & Off \\
+LOW  & OFF & OFF & HIGH & Off \\
+HIGH & ON  & ON  & LOW  & Off \\
+HIGH & ON  & ON  & HIGH & \textbf{On} \\
+\hline
+\end{tabular}
+\caption{High-side and low-side switch logic}
+\label{tab:highside_logic}
+\end{table}
+
+\subsection{Example Code}
+
+\begin{verbatim}
+import RPi.GPIO as GPIO
+
+HIGH_SIDE_PIN = 23   # controls AO3401A via MMBT3904
+LOW_SIDE_PIN  = 24   # controls AO3400A directly
+
+GPIO.setmode(GPIO.BCM)
+GPIO.setup(HIGH_SIDE_PIN, GPIO.OUT, initial=GPIO.LOW)
+GPIO.setup(LOW_SIDE_PIN,  GPIO.OUT, initial=GPIO.LOW)
+
+
+def load_on() -> None:
+    """Energise the load by enabling both high-side and low-side switches."""
+    GPIO.output(HIGH_SIDE_PIN, GPIO.HIGH)
+    GPIO.output(LOW_SIDE_PIN,  GPIO.HIGH)
+
+
+def load_off() -> None:
+    """De-energise the load. Low side is opened first."""
+    GPIO.output(LOW_SIDE_PIN,  GPIO.LOW)
+    GPIO.output(HIGH_SIDE_PIN, GPIO.LOW)
+\end{verbatim}
+
+\noindent The low-side switch is opened first in \texttt{load\_off()} to interrupt
+current flow before the high side is released. This order avoids a brief condition
+where the high side is off but the low side is still on, which would momentarily
+short the load's negative terminal through the N-channel with no current path,
+producing no harm but making the sequence logically cleaner.

@@ -1,0 +1,16 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Run camtest5 -l3 -j -e 500 xtest",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/dev/camtest5.py",
+            "args": ["-l3", "-j", "-e", "500", "xtest"],
+            "python": "${workspaceFolder}/.venv/bin/python",
+            "cwd": "${workspaceFolder}/dev",
+            "console": "integratedTerminal",
+            "justMyCode": true
+        }
+    ]
+}

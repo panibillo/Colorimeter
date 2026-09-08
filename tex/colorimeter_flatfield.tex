@@ -1,0 +1,2087 @@
+% ============================================================
+%  Polynomial Illumination Correction (Flat Field)
+%  for the Arsenic Colorimeter
+%
+%  Companion to colorimeter_methods.tex (Layer 1) and
+%  colorimeter_plan.tex.  Documents the analysis carried out with
+%  devdesk/flatfield.py on the 2026-08-03 uniform-card suites.
+%
+%  Source formatting: each sentence, and each major clause within a
+%  long sentence, begins on a new source line.
+%
+%  Compile with pdflatex (twice for cross-references).
+% ============================================================
+
+\documentclass[11pt, a4paper]{article}
+
+\usepackage{amsmath, amssymb}
+\usepackage{booktabs}
+\usepackage{geometry}
+\geometry{margin=2.5cm}
+\usepackage{hyperref}
+\hypersetup{colorlinks=true, linkcolor=blue, citecolor=blue, urlcolor=blue}
+\usepackage{microtype}
+\usepackage{parskip}
+\usepackage{enumitem}
+
+\newcommand{\code}[1]{\texttt{#1}}
+\newcommand{\pct}{\,\%}
+\newcommand{\mean}[2]{\left\langle #1 \right\rangle_{#2}}
+
+\title{%
+  Polynomial Illumination Correction for the Arsenic Colorimeter:\\
+  Analysis, Criteria, Implementation and Protocol}
+\author{Development Notes}
+\date{2026-08-04}
+
+\begin{document}
+\maketitle
+\tableofcontents
+\newpage
+
+% ============================================================
+\section{Purpose and scope}
+% ============================================================
+
+The colorimeter reads a chemical test strip by comparing the mean
+brightness of a small \emph{sample} patch
+against the mean brightness of a \emph{white reference} patch
+elsewhere on the same card.
+That comparison is meaningful only if the two patches are lit equally.
+They are not.
+Measured on the captures described below,
+the illumination inside the imaged region falls by about $25\pct$
+from the top of the region to the bottom.\footnote{Denominator:
+the mean over the whole imaged region.
+The figure is the difference between the mean of the top row of pixels
+and the mean of the bottom row, divided by that overall mean.}
+
+This document covers the correction for that non-uniformity.
+The correction map is called a \emph{flat
+field}\footnote{\textbf{Flat field.}
+A map of how brightly the illumination lands on each pixel
+when the imaged object is uniform.
+Dividing a picture by its flat field removes the lighting pattern
+and leaves only the object.
+The name is from astronomy,
+where the calibration image is taken of a featureless (``flat'') screen.},
+and the decision documented here is to represent it as a low-order
+polynomial surface,
+fitted separately for each LED color and each Bayer layer.
+
+The document reports:
+
+\begin{itemize}[nosep]
+  \item the notation and the definition of every measure used
+        (\S\ref{sec:notation});
+  \item what the correction is and where it sits in the pipeline
+        (\S\ref{sec:pipeline});
+  \item whether the correction has to be a map at all,
+        or whether two numbers would do (\S\ref{sec:scalar});
+  \item the polynomial model and why it takes the form it does
+        (\S\ref{sec:model});
+  \item the criteria proposed for judging a fit adequate
+        (\S\ref{sec:criteria});
+  \item what was measured, on which captures (\S\ref{sec:results});
+  \item the choices those measurements drove (\S\ref{sec:choices});
+  \item how the evaluation harness is built (\S\ref{sec:implementation});
+  \item the image sampling protocol for the captures still needed
+        (\S\ref{sec:protocol});
+  \item how to run the programs and read their output
+        (\S\ref{sec:running}, \S\ref{sec:interpreting});
+  \item what this unblocks (\S\ref{sec:next}).
+\end{itemize}
+
+Nothing described here has been wired into the instrument's capture or
+analysis path.
+The work so far is a desktop evaluation harness,
+\code{devdesk/flatfield.py},
+plus the archive metadata needed to make its inputs self-describing.
+
+% ============================================================
+\section{Notation, vocabulary and measures}
+\label{sec:notation}
+% ============================================================
+
+\subsection{Terms}
+
+\begin{description}[style=nextline, leftmargin=1em]
+
+\item[Bayer layer]
+  The camera sensor has one color filter per photosite,
+  in a repeating $2\times2$ tile:
+  red, two greens, blue.
+  Splitting the raw image on that tile gives four half-resolution images,
+  called \emph{layers} and labeled \code{R}, \code{Gr}, \code{Gb}, \code{B}.
+  \code{Gr} is the green photosite that shares a row with red;
+  \code{Gb} is the one that shares a row with blue.
+  They are not interchangeable;
+  see \S\ref{sec:crosstalk}.
+
+\item[DN]
+  Digital Number: the raw sensor count, before conversion to physical units.
+  The sensor is 10-bit, so DN runs $0$ to $1023$.
+
+\item[Stream space]
+  Pixel coordinates in the full camera frame,
+  $2304\times1296$ for the IMX708 mode in use.
+
+\item[Layer space]
+  Pixel coordinates within one Bayer layer.
+  A rectangle $w\times h$ in stream space is $w/2 \times h/2$ in layer space.
+  All analysis in this document is in layer space.
+
+\item[\code{bound}]
+  The rectangular region of interest that the capture path crops and stores.
+  Everything outside it is discarded at capture time.
+  Currently $196\times660$ in stream space,
+  which is $98\times330$ per layer.
+
+\item[Crop]
+  The stored \code{bound} region of one Bayer layer,
+  as an array of $330$ rows by $98$ columns.
+  ``The crop'' always means this whole array.
+
+\item[Patch]
+  One of the small rectangles the analysis measures:
+  \code{sample}, \code{white}, \code{chip1}, \code{chip2}.
+  Each is $68\times68$ in stream space,
+  so $34\times34$ in layer space, which is $1156$ pixels.
+  A patch is a real region of interest at a real location on the card.
+  Patches are addressed in code by \emph{role}
+  (\code{ROLE\_SAMPLE}, \code{ROLE\_WHITE}, \ldots), never by name,
+  because names are operator-editable.
+
+\item[Window]
+  One tile of a regular $34\times34$ grid laid over the crop,
+  used only as a measuring grid for the block-residual statistic
+  (\S\ref{sec:m-block}).
+  Windows are the same size as patches
+  but are placed by the grid, not by where an ROI is.
+  The $330\times98$ crop holds $9\times2 = 18$ whole windows.
+
+\item[Extent]
+  The set of pixels a polynomial was fitted over,
+  written $\Omega$.
+  The extent may be the whole crop or some subset of it;
+  the choices tried are listed in \S\ref{sec:ladder}.
+
+\item[Dark frame]
+  A capture taken at the same exposure with the LEDs off.
+  Subtracting it removes the sensor's electronic offset and thermal signal.
+  All work here is on dark-subtracted data.
+
+\item[Suite]
+  One capture archive (\code{.h5}) holding,
+  for every LED color,
+  a ladder of exposures plus the matching dark frames.
+
+\item[In-sample]
+  A fit evaluated on the same capture it was fitted to.
+  Optimistic by construction:
+  the fit has already seen that capture's noise and texture.
+
+\item[Out-of-sample, or transfer]
+  A fit taken from one capture and applied to a different one.
+  This is what the instrument does in service,
+  because it applies a stored calibration to a new measurement.
+  It is therefore the estimate that predicts field performance.
+
+\end{description}
+
+\subsection{Symbols}
+\label{sec:symbols}
+
+Every quantity below is defined per Bayer layer,
+for one LED color at one exposure.
+There is no mixing of layers or colors anywhere in the analysis.
+
+\begin{center}
+\begin{tabular}{ll}
+\toprule
+Symbol & Meaning \\
+\midrule
+$p=(x,y)$ & a pixel location in layer space; $x$ is the column, $y$ the row \\
+$D(p)$    & lit frame, DN \\
+$D_0(p)$  & dark frame at the same exposure, DN \\
+$S(p) = D(p)-D_0(p)$ & dark-subtracted signal, DN \\
+$A(p)$    & reflectance of the imaged target, dimensionless --- the quantity wanted \\
+$L(p)$    & illumination delivered to $p$, DN per unit reflectance \\
+$\Omega$  & the fit extent: a set of pixels \\
+$|\Omega|$& the number of pixels in that set \\
+$F(p)$    & the fitted polynomial surface, DN \\
+$G(p)$    & the gain map, dimensionless \\
+$S^{c}(p)$& corrected signal, DN \\
+$R_i$     & the set of pixels in patch $i$; $n_i = |R_i|$, and $n_i = 1156$ \\
+$w_i,h_i$ & the width and height of patch $i$ in layer pixels; both $34$ \\
+$\bar{s}_i$ & the corrected mean of patch $i$, DN \\
+$\bar{g}_i$ & the mean of the gain map over patch $i$, dimensionless \\
+$W_k$     & the $k$-th window of the measuring grid \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The angle-bracket notation means an arithmetic mean over a set of pixels:
+\begin{equation}
+  \mean{X}{\Omega} \;\equiv\; \frac{1}{|\Omega|}\sum_{p \in \Omega} X(p) .
+  \label{eq:mean}
+\end{equation}
+The subscript names the set.
+$\mean{X}{\Omega}$ is a scalar.
+
+The model is a pixelwise one throughout.
+$D$, $D_0$, $S$, $A$, $L$, $F$, $G$ and $S^{c}$ are all arrays
+of the same shape as the crop,
+and every operation combining them --- subtraction in
+Eq.~\ref{eq:sig}, division in Eq.~\ref{eq:correct} ---
+is elementwise, one pixel at a time.
+No matrix product appears anywhere in the correction.
+The only scalars are the means defined by Eq.~\ref{eq:mean}
+and the polynomial coefficients.
+
+\subsection{The three measures}
+\label{sec:measures}
+
+Three numbers recur throughout the results.
+All three are relative quantities expressed as percentages,
+and the denominator of each is part of its definition.
+
+\subsubsection{Block residual --- how flat the corrected crop is}
+\label{sec:m-block}
+
+Lay the $34\times34$ measuring grid over the corrected crop
+and take the mean of each window:
+\begin{equation}
+  m_k \;=\; \mean{S^{c}}{W_k} .
+\end{equation}
+If the correction were perfect and the imaged card uniform,
+every $m_k$ would equal the mean of the whole corrected crop.
+Express each window's departure from that as a percentage:
+\begin{equation}
+  d_k \;=\; 100 \left( 
+    \frac{m_k - \mean{S^{c}}{\mathrm{crop}}}{\mean{S^{c}}{\mathrm{crop}}}  
+  \right) .
+  \label{eq:block}
+\end{equation}
+The ratio $m_k / \mean{S^{c}}{\mathrm{crop}}$ equals $1$ when the window
+matches the whole crop,
+so subtracting $1$ converts it from a ratio into a deviation,
+and multiplying by $100$ expresses that deviation as a percentage.
+The denominator is the mean of the whole corrected crop.
+
+Two summaries of $\{d_k\}$ are reported:
+the root-mean-square over the $18$ windows,
+printed as \code{blk rms},
+and the largest $|d_k|$, printed as \code{blk max}.
+
+Averaging over $1156$ pixels reduces the shot-noise contribution
+to about $0.04\pct$ of the window mean,
+so what survives in $d_k$ is spatial structure,
+not pixel noise.
+
+\subsubsection{Criterion P --- patch-ratio accuracy}
+\label{sec:m-p}
+
+$\bar{s}_i$ is the corrected mean of patch $i$,
+that is $\mean{S^{c}}{R_i}$,
+a single number in DN.
+$\bar{s}_{\mathrm{white}}$ is the same quantity for the patch
+in the white-reference role,
+and it is the denominator.
+
+Image a card that is genuinely uniform.
+Every patch should then read the same as the white reference,
+so for each patch $i$ the quantity
+\begin{equation}
+  P_i \;=\; 100 \left| 
+  %\frac{\bar{s}_i}{\bar{s}_{\mathrm{white}}} - 1 \right|
+  \frac{\bar{s}_i - \bar{s}_{\mathrm{white}}}{\bar{s}_{\mathrm{white}}} \right|
+  \label{eq:critP}
+\end{equation}
+should be zero, and whatever it is instead is the flat field's error.
+
+Two levels of aggregation follow, and they are easy to confuse:
+
+\begin{enumerate}[nosep]
+  \item Within one frame, take the worst patch:
+        $P = \max_i P_i$, over the patches present.
+  \item Across the set of frames scored --- one frame per
+        (LED color $\times$ Bayer layer) --- report the median of $P$
+        as \code{P med} and the maximum of $P$ as \code{P max}.
+\end{enumerate}
+
+So \code{P med} $= 0.24\pct$ means:
+in half the 39 frames scored,
+the worst-deviating patch deviated by less than $0.24\pct$
+of that frame's corrected white-patch mean,
+and in half of them by more.
+\code{P max} is the single worst patch in the single worst frame.
+Neither figure is a median over patches.
+
+\subsubsection{Criterion S --- residual tilt inside a patch}
+\label{sec:m-s}
+
+Fit a plane to the corrected patch by least squares,
+\begin{equation}
+  \hat{v}(x,y) \;=\; a_0 + a_x\,x + a_y\,y ,
+  \qquad (x,y) \in R_i ,
+  \label{eq:plane}
+\end{equation}
+where $x$ runs $0 \ldots w_i-1$ and $y$ runs $0 \ldots h_i-1$
+in layer pixels within the patch.
+The constant $a_0$ carries the patch level;
+$a_x$ and $a_y$ are the slopes, in DN per layer pixel.
+
+A plane over a rectangle attains its largest and smallest values
+at opposite corners,
+so the peak-to-peak range of $\hat{v}$ over the patch is
+\begin{equation}
+  R_{\mathrm{plane}} \;=\; |a_x|\,(w_i - 1) \;+\; |a_y|\,(h_i - 1) ,
+  \label{eq:range}
+\end{equation}
+in DN.
+The spans are $w_i - 1$ and $h_i - 1$, not $w_i$ and $h_i$,
+because a row of $w_i$ pixels spans $w_i - 1$ intervals
+between first and last pixel center.
+Using $w_i$ would overstate $R_{\mathrm{plane}}$
+by a factor $w_i/(w_i-1)$, here $34/33$.
+
+Criterion S is that range as a percentage of the patch's own mean:
+\begin{equation}
+  S_i \;=\; 100\,\frac{R_{\mathrm{plane}}}{\bar{s}_i} .
+  \label{eq:critS}
+\end{equation}
+The denominator is patch $i$'s own corrected mean, not the white patch's.
+
+$S_i$ needs a companion figure,
+because a plane fitted to pure noise still has non-zero slopes.
+Take $n$ pixels evenly spaced along a side of length $\ell$,
+with independent noise of standard deviation $\sigma_v$ on each.
+The least-squares slope has standard error
+$\sigma_v \sqrt{12 / (n\,\ell^{2})}$,
+so the slope multiplied by the side length has standard error
+$\sigma_v \sqrt{12/n}$.
+The two axes contribute one such term each, and Eq.~\ref{eq:range} adds them,
+so the range expected from noise alone is
+\begin{equation}
+  S^{\mathrm{nz}}_i \;=\; 2\,\sigma_i\,\sqrt{12/n_i} ,
+  \label{eq:snz}
+\end{equation}
+where $\sigma_i$ is the pixel standard deviation within patch $i$
+as a percentage of $\bar{s}_i$.
+For $n_i = 1156$ the factor $2\sqrt{12/n_i}$ is $0.204$.
+
+The reported column \code{S/nz} is the ratio $S_i / S^{\mathrm{nz}}_i$.
+A value near $1$ means the tilt is what noise alone would have produced,
+so it is a fitting artifact.
+A value well above $1$ means the corrected patch really does carry a tilt.
+
+\subsection{Other percentages}
+
+Percentages that do not fit one of the three definitions above
+are spelled out where they appear.
+The recurring ones are the masked-pixel fraction
+(denominator: pixels in the fit extent)
+and brightness ratios between two cards
+(denominator: named at the point of use).
+
+% ============================================================
+\section{Where the correction sits}
+\label{sec:pipeline}
+% ============================================================
+
+The pipeline for one measurement, per Bayer layer:
+
+\begin{enumerate}[nosep]
+  \item Capture the lit frame $D$ and its dark frame $D_0$
+        at the same exposure.
+  \item Subtract, pixel by pixel:
+        \begin{equation}
+          S(p) \;=\; D(p) - D_0(p) .
+          \label{eq:sig}
+        \end{equation}
+  \item Mask pixels that are saturated or dead (\S\ref{sec:masking}).
+  \item Divide $S$ by the gain map $G$ --- this document's subject.
+  \item Take the patch means $\bar{s}_{\mathrm{sample}}$
+        and $\bar{s}_{\mathrm{white}}$,
+        and form their ratio.
+  \item Convert that ratio to concentration by the strip calibration.
+\end{enumerate}
+
+Step 4 is the only step that knows anything about illumination geometry.
+Its sole purpose is to make step 5's ratio independent of
+\emph{where on the card} the two patches sit.
+
+\subsection{The correction divides; it does not subtract}
+\label{sec:divide}
+
+\code{colorimeter\_methods.tex} specified subtracting a saved trend array.
+That is correct only to first order.
+Illumination acts multiplicatively on the dark-subtracted signal:
+a pixel that receives $10\pct$ less light returns $10\pct$ less signal,
+not a fixed number of DN less.
+Writing the signal as the product of what the target reflects
+and what the lamp delivers,
+\begin{equation}
+  S(p) \;=\; A(p)\,L(p) ,
+  \label{eq:model}
+\end{equation}
+makes the point plain:
+$L$ multiplies, so removing it requires division.
+
+The size of the error from getting this wrong was measured.
+On the two 2026-08-03 captures,
+the gray card returned $0.27\times$ the signal of the white card
+at the same exposure.\footnote{Ratio of dark-subtracted patch means,
+gray divided by white.
+Denominator: the white card's patch mean.}
+An additive trend calibrated on the white card,
+applied to the gray card,
+over-corrects by a factor of $1/0.27 \approx 3.7$.
+
+The correction used here is therefore
+\begin{equation}
+  S^{c}(p)
+  \;=\;
+  \frac{S(p)}{G(p)},
+  \qquad
+  G(p) \;=\; \frac{F(p)}{\mean{F}{\Omega}} .
+  \label{eq:correct}
+\end{equation}
+Both operations are elementwise over pixels.
+$F$ is the fitted polynomial surface in DN,
+$\mean{F}{\Omega}$ is a single number,
+and $G$ is dimensionless with mean exactly $1$ over $\Omega$.
+$G$ is called a \emph{gain map}.
+
+Note which extent normalizes $F$.
+The denominator $\mean{F}{\Omega}$ is the mean of the fitted surface
+over the extent it was fitted on,
+not over the whole crop.
+For a fit taken over the whole crop the two are the same.
+For a fit taken over a small window around one patch they are not,
+and using the wrong one rescales the result without any visible symptom.
+The code stores this number as \code{FlatField.norm\_mean}.
+
+% ============================================================
+\section{Does the correction need to be a map?}
+\label{sec:scalar}
+% ============================================================
+
+The measurement of interest is a ratio of two patch means,
+and a patch mean is a single number.
+It is worth asking directly whether the whole gain \emph{map} is needed,
+or whether two scalars would give the same answer.
+The question turns out to have a clean answer,
+and answering it also explains two results reported later.
+
+\subsection{The exact case}
+
+Suppose the fit is perfect,
+so that $G = L / \mean{L}{\Omega}$ exactly.
+Substituting Eq.~\ref{eq:model} into Eq.~\ref{eq:correct},
+\begin{equation}
+  S^{c}(p) \;=\; \frac{A(p)\,L(p)}{L(p)/\mean{L}{\Omega}}
+             \;=\; A(p)\,\mean{L}{\Omega} .
+\end{equation}
+The illumination cancels pixel by pixel,
+leaving reflectance times a constant.
+Taking patch means and forming the ratio,
+\begin{equation}
+  \frac{\bar{s}_{\mathrm{sample}}}{\bar{s}_{\mathrm{white}}}
+  \;=\;
+  \frac{\mean{A}{R_{\mathrm{sample}}}}{\mean{A}{R_{\mathrm{white}}}} ,
+\end{equation}
+which is exactly the reflectance ratio wanted,
+and the constant $\mean{L}{\Omega}$ has cancelled.
+
+\subsection{What happens with two scalars instead}
+
+Now suppose the map is never applied,
+and the patch means are taken from the uncorrected signal
+and divided by the patch-average gains
+\begin{equation}
+  \bar{g}_i \;=\; \mean{G}{R_i} ,
+\end{equation}
+which are two numbers.
+The estimate becomes
+\begin{equation}
+  r_{\mathrm{scalar}}
+  \;=\;
+  \frac{\mean{S}{R_{\mathrm{sample}}} \big/ \bar{g}_{\mathrm{sample}}}
+       {\mean{S}{R_{\mathrm{white}}}  \big/ \bar{g}_{\mathrm{white}}} .
+  \label{eq:rscalar}
+\end{equation}
+
+The only step that can go wrong is
+$\mean{A L}{R_i} \ne \mean{A}{R_i}\mean{L}{R_i}$.
+The mean of a product is the product of the means plus their covariance,
+so the relative error of that step is
+\begin{equation}
+  \frac{\mean{AL}{R_i}}{\mean{A}{R_i}\mean{L}{R_i}} - 1
+  \;=\;
+  \rho_i \; c^{A}_i \; c^{L}_i ,
+  \label{eq:cov}
+\end{equation}
+where $c^{A}_i$ and $c^{L}_i$ are the coefficients of
+variation\footnote{\textbf{Coefficient of variation.}
+Standard deviation divided by mean, a dimensionless measure of relative
+spread.
+Written as a percentage here.}
+of reflectance and of illumination \emph{within} patch $i$,
+and $\rho_i$ is their correlation coefficient, between $-1$ and $+1$.
+
+So the two-scalar form is exact whenever the target reflectance
+is uniform within each patch,
+because then $c^{A}_i = 0$.
+Where reflectance is not uniform,
+the error is the product of three factors,
+each of which is small.
+
+\subsection{How large is that error here?}
+
+$c^{L}_i$ can be measured directly:
+evaluate the fitted gain map over each patch rectangle
+and take its coefficient of variation.
+Median over the 39 white-suite frames, \code{Gr} layer, $(3,1)$ fit:
+
+\begin{center}
+\begin{tabular}{lrrr}
+\toprule
+Patch & $c^{L}_i$ ($\pct$ of patch mean) & peak-to-peak ($\pct$)
+      & $\bar{g}_i$ range over LEDs \\
+\midrule
+\code{sample} & 0.31 & 1.33 & $1.066 \ldots 1.139$ \\
+\code{chip1}  & 0.82 & 3.43 & $1.042 \ldots 1.104$ \\
+\code{white}  & 1.48 & 5.75 & $0.957 \ldots 0.985$ \\
+\code{chip2}  & 2.47 & 9.02 & $0.706 \ldots 0.854$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Inside the sample patch the gain varies by only $0.31\pct$.
+Take a pessimistic case:
+a test strip whose color development varies by $20\pct$ across the patch
+($c^{A} = 20\pct$),
+correlated perfectly with the illumination gradient ($\rho = 1$).
+Eq.~\ref{eq:cov} then gives $1.0 \times 0.20 \times 0.0031 = 0.062\pct$,
+which is below the $0.12\pct$ repeatability floor of \S\ref{sec:floor}.
+For the white reference patch,
+where $c^{L} = 1.48\pct$ but the target is a reference surface
+and $c^{A}$ should be near $1\pct$,
+the same formula gives about $0.015\pct$.
+
+Two useful observations fall out of that table.
+The sample patch happens to sit where the illumination is flattest,
+so the approximation is safest exactly where it matters most.
+And \code{chip2}, at the bottom of \code{bound},
+has eight times the sample patch's within-patch gain variation
+and the largest spread of $\bar{g}$ across LED colors ---
+one more reason it is the worst patch in every test reported later.
+
+\subsection{What still needs the map}
+
+The two-scalar form is adequate for the concentration measurement itself,
+but it does not replace the map everywhere.
+
+\begin{itemize}[nosep]
+  \item \textbf{Criterion S and the Layer 3 uniformity flag.}
+        Both are statements about variation \emph{within} a patch,
+        which a patch-average scalar has by definition discarded.
+  \item \textbf{Masked or robust patch statistics.}
+        If some pixels in a patch are excluded ---
+        hot pixels, a bubble, a defect ---
+        the correct scalar is the gain averaged over the surviving pixels,
+        not over the whole rectangle.
+        Computing that requires the map.
+        The same applies to a median or trimmed mean,
+        for which the cancellation argument above does not hold,
+        because those estimators are not linear.
+  \item \textbf{Any diagnostic that looks at the corrected image.}
+        The residual heatmaps and profiles of \S\ref{sec:running} are examples.
+\end{itemize}
+
+Note also what the two-scalar form does \emph{not} avoid:
+the polynomial itself.
+$\bar{g}_i$ is the average of the fitted surface over patch $i$,
+and there is no way to obtain it without fitting a surface.
+What the argument removes is the per-pixel division at measurement time,
+not the calibration.
+
+\subsection{Has this been established?}
+
+Partly, and it is worth being exact about which part.
+
+\textbf{Established.}
+Criterion P, Eq.~\ref{eq:critP}, is defined on patch means.
+It therefore already measures the accuracy of precisely the scalar ratio
+that Eq.~\ref{eq:rscalar} would use.
+Every number reported in \S\ref{sec:results} is a statement about
+that ratio,
+not about pixelwise flatness.
+The criterion was designed that way before this question was asked,
+and the question confirms the design rather than changing it.
+
+\textbf{Established.}
+The within-patch gain variation $c^{L}_i$ is measured, and it is small
+for the sample patch.
+
+\textbf{Not established.}
+The within-patch reflectance variation $c^{A}$ of a developed test strip,
+and its correlation $\rho$ with the illumination gradient,
+have not been measured.
+A uniform card cannot measure them,
+because a uniform card has $c^{A} \approx 0$ by assumption.
+That measurement requires imaging developed strips,
+which is a separate exercise.
+The bound of $0.062\pct$ above is an estimate under an assumed
+$c^{A} = 20\pct$, not a measurement.
+
+\textbf{Consequence for the design.}
+Store, per (LED color, Bayer layer, patch role), the single scalar
+$\bar{g}_i$;
+that is what the instrument needs at measurement time,
+and it is a few dozen numbers rather than a few dozen arrays.
+Keep the polynomial coefficients as the source those scalars are computed
+from, so that a moved ROI is a recomputation rather than a recapture.
+Keep the map generation available for diagnostics and for criterion S.
+
+\subsection{Why the ratio form explains the multi-field failure}
+\label{sec:whyratio}
+
+Eq.~\ref{eq:rscalar} depends on the two gains only through their
+\emph{ratio} $\bar{g}_{\mathrm{sample}}/\bar{g}_{\mathrm{white}}$.
+Any factor common to both cancels.
+That is why the choice of $\mean{F}{\Omega}$ in Eq.~\ref{eq:correct}
+does not affect the answer
+when a single field corrects both patches:
+it is the same factor top and bottom.
+
+It also predicts the failure reported in \S\ref{sec:localfail}.
+When the sample patch and the white patch are corrected by
+\emph{different} fields,
+fitted over different extents,
+the two normalizing constants $\mean{F}{\Omega_{\mathrm{sample}}}$
+and $\mean{F}{\Omega_{\mathrm{white}}}$ are different numbers
+and do not cancel.
+Their ratio is exactly the relative brightness of the two extents,
+which is the quantity being measured.
+A multi-field scheme therefore cannot produce a patch ratio at all
+without a further step that ties the fields to a common scale.
+
+% ============================================================
+\section{The model}
+\label{sec:model}
+% ============================================================
+
+\subsection{Polynomial form}
+
+For one combination of (LED color, exposure, Bayer layer),
+the fitted surface is
+\begin{equation}
+  F(x,y) \;=\;
+  \sum_{i_y=0}^{d_y} \; \sum_{i_x=0}^{d_x}
+  c_{i_y i_x}\, x^{i_x}\, y^{i_y},
+  \qquad
+  \text{subject to } i_x + i_y \le \max(d_y, d_x),
+  \label{eq:poly}
+\end{equation}
+where $d_y$ and $d_x$ are the maximum exponents allowed on the two axes,
+$c_{i_y i_x}$ are the coefficients found by least squares,
+and $x$ and $y$ are pixel coordinates rescaled linearly to the interval
+$[-1,1]$.
+
+The rescaling is always taken over the whole \code{bound} crop,
+whatever extent the fit was taken over.
+That keeps coefficient vectors from different extents directly comparable.
+Fitting is ordinary least squares over the unmasked pixels of $\Omega$.
+
+The constraint $i_x + i_y \le \max(d_y,d_x)$,
+applied on top of the separate limits $d_y$ and $d_x$,
+is what makes the basis \emph{anisotropic}.\footnote{\textbf{Anisotropic
+basis.}
+A basis that allows different maximum powers on the two axes.
+A conventional bivariate polynomial of degree $n$ is isotropic:
+it treats $x$ and $y$ alike and costs $\binom{n+2}{2}$ terms.
+Here the surface varies strongly in $y$ and barely in $x$,
+so high powers of $x$ add parameters without adding descriptive power.}
+With $(d_y,d_x) = (3,1)$ it admits 7 terms,
+\[
+  1,\quad x,\quad y,\quad xy,\quad y^{2},\quad xy^{2},\quad y^{3},
+\]
+against 10 for a full bivariate cubic and 15 for a full quartic.
+
+\subsection{Why $(3,1)$}
+
+The surface is close to one-dimensional.
+Averaging each row of the crop and comparing top to bottom
+gives a fall of about $25\pct$
+(denominator: the crop mean).
+Averaging each column and comparing left to right
+gives a variation of about $2\pct$
+(same denominator).
+The $y$ axis carries more than ten times the variation of the $x$ axis.
+
+The measured consequence, on the white suite:
+\code{P med} improves from $0.24\pct$ at $(3,1)$ to $0.21\pct$ at $(3,3)$.
+That is a gain of $0.03\pct$ of the corrected white-patch mean,
+against a tolerance of $0.5\pct$,
+in exchange for three more free parameters.
+See Table~\ref{tab:ladder-white}.
+
+\subsection{One polynomial per LED color and per Bayer layer}
+
+Each LED \emph{color} is a symmetrical array of four emitters.
+Arrays of different colors cannot occupy the same physical positions,
+so each color lights the stage from a slightly different geometry,
+in addition to part-to-part differences between individual emitters.
+A separate polynomial per color is therefore expected by construction.
+
+The data agrees.
+Comparing two normalized fields as $34\times34$ block means of their ratio
+(denominator: the frame mean),
+field shapes differ between LED colors,
+on the same card,
+by $0.55$ to $2.1\pct$.
+On the same measure,
+\code{R} and \code{Gr} field shapes on the \emph{same frame}
+differ by up to $0.96\pct$,
+so layers must be separated as well.
+
+\subsection{Masking}
+\label{sec:masking}
+
+Three classes of pixel are excluded before fitting:
+
+\begin{itemize}[nosep]
+  \item \textbf{Saturated}: raw value $\ge 1000$ DN.
+        The threshold is $1023 - 23$.
+        The top of the range is already in the sensor's non-linear region,
+        so those counts understate the light that produced them.
+  \item \textbf{Non-positive after dark subtraction}: no signal to fit.
+  \item \textbf{Hot pixels}, as flagged by \code{devdesk/roi\_darkdiff.py}.
+\end{itemize}
+
+A frame with more than $1\pct$ of its pixels masked
+(denominator: pixels in the fit extent)
+is refused rather than fitted,
+because the surviving pixels are systematically the dimmer ones
+and a fit over them is biased.
+
+Masking changes conclusions here; it is not routine housekeeping.
+The stored exposure ladders were metered against a \emph{sample}
+at the center of the frame,
+so a white card filling the whole stage oversaturates.
+In the white suite,
+\code{royal\_blue/B} has a mean of 959\,DN and,
+without masking,
+fits with a residual of $0.00\pct$ ---
+a perfect fit to a clipped plateau.
+\code{green/e2} in \code{Gr} and \code{Gb} is $96\pct$ masked
+(denominator: pixels in the crop)
+and is correctly refused;
+see the \code{SKIPPED} rows in \S\ref{sec:running}.
+
+% ============================================================
+\section{Criteria for adequacy}
+\label{sec:criteria}
+% ============================================================
+
+The flat field's only job is to make patch \emph{means} comparable
+between locations.
+Two consequences shape the criteria,
+and \S\ref{sec:scalar} has already made both precise:
+
+\begin{itemize}[nosep]
+  \item An error that is constant over a patch cancels in the
+        sample-to-white ratio,
+        because it appears in both numerator and denominator.
+  \item An error that is a linear ramp across a patch does not bias the
+        patch mean,
+        because a plane's departures from its center value are
+        antisymmetric about that center and cancel in the average.
+\end{itemize}
+
+So pixelwise flatness is the wrong basis for a criterion.
+Judged pixelwise, models that are entirely adequate would fail,
+and overfitted models would score well.
+The criteria are defined on patch means instead.
+
+\subsection{P --- patch-ratio accuracy (primary)}
+
+Defined by Eq.~\ref{eq:critP} in \S\ref{sec:m-p}.
+Require $P \le \mathrm{tol}_P$,
+with two tolerances, because they answer different questions:
+
+\begin{center}
+\begin{tabular}{lll}
+\toprule
+Mode & $\mathrm{tol}_P$ & Rationale \\
+\midrule
+in-sample & $0.5\pct$ & about $4\times$ the $0.12\pct$ repeatability floor \\
+transfer  & $1.0\pct$ & what a stored calibration must achieve in service \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Both are percentages of the corrected white-reference patch mean
+$\bar{s}_{\mathrm{white}}$,
+which is the same denominator the instrument's own answer uses.
+P is the criterion that decides acceptance.
+
+\subsection{S --- residual tilt inside a patch (secondary)}
+
+Defined by Eq.~\ref{eq:critS} in \S\ref{sec:m-s},
+with the noise reference of Eq.~\ref{eq:snz}.
+Require $S_i \le 1\pct$ of patch $i$'s own corrected mean.
+
+As established in \S\ref{sec:scalar},
+a tilt does not bias the patch mean,
+so S does not affect the concentration measurement.
+It matters because Layer 3 of \code{colorimeter\_plan.tex}
+uses within-patch spread as a strip-uniformity flag,
+and a leftover illumination tilt would inflate that flag
+into false alarms.
+
+\subsection{T --- degree selection (tertiary)}
+
+Accept the smallest $(d_y,d_x)$ whose \emph{transfer} P
+stops improving by more than $0.1\pct$,
+that figure being the measured repeatability floor of \S\ref{sec:floor}.
+
+The purpose of T is to prevent one specific mistake.
+In-sample residual falls monotonically as degree rises, without limit,
+because a more flexible model can always follow one capture more closely.
+Transfer error stops falling once the added terms are describing
+that capture's own noise and texture rather than the illumination.
+Selecting on in-sample residual therefore guarantees an overfitted model.
+The harness prints in-sample and transfer side by side in every table
+so the difference between them stays visible.
+
+% ============================================================
+\section{The extent ladder}
+\label{sec:ladder}
+% ============================================================
+
+``Fit over an area larger than the target'' leaves open how much larger.
+Five rungs were defined, cheapest first,
+to be climbed only as far as necessary:
+
+\begin{enumerate}[nosep]
+  \item \code{bound} --- the whole crop, $330\times98$ layer pixels.
+  \item \code{bound\_trim05} and \code{bound\_trim10} ---
+        the crop less a $5\pct$ or $10\pct$ border on each side
+        (denominator: the crop's own height and width).
+  \item Whole frame --- from the older \code{*\_img.h5} captures.
+  \item \code{local\_<patch>} --- the patch grown by $50\pct$ on every side,
+        about $51\times51$ layer pixels, fitted at low degree.
+  \item \code{sector<k>\_<i>} --- the crop split into $k$ horizontal bands,
+        with no continuity enforced between bands.
+        The split is along $y$ because that is the axis
+        the illumination varies on.
+\end{enumerate}
+
+Rungs 4 and 5 turn out to be unusable for criterion P,
+for the structural reason given in \S\ref{sec:whyratio}
+and reported in \S\ref{sec:localfail}.
+
+Rung 3 remains untested.
+The capture suites store only the \code{bound} crop.
+Whole-frame raw data exists only in the older \code{*\_img.h5} files,
+which carry neither a dark frame nor an LED label.
+Testing rung 3 properly needs a configuration switch on the normal
+capture path
+to archive full-image Bayer layers \emph{and} full-image dark Bayer layers.
+That is a change in \code{src/} and has deliberately not been made.
+
+% ============================================================
+\section{Results}
+\label{sec:results}
+% ============================================================
+
+Two capture suites, both of plain colored card filling the stage,
+taken 2026-08-03:
+
+\begin{center}
+\begin{tabular}{lll}
+\toprule
+Suite & Stage & Frames scored \\
+\midrule
+\code{white\_20260803\_1742.h5} & white card stock  & 39 \\
+\code{mgray\_20260803\_1736.h5} & gray card stock   & 40 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+One frame is scored per (LED color $\times$ Bayer layer):
+the brightest exposure in the ladder that is not clipped.
+\S\ref{sec:ladderselect} discusses that selection rule
+and proposes a tightening of it.
+
+\subsection{Repeatability floor}
+\label{sec:floor}
+
+Before any residual can be interpreted,
+the size of a measurement that means ``zero'' has to be known.
+Two comparisons that ought to be flat were measured,
+as the $34\times34$ block RMS of a ratio between two normalized frames
+(denominator: the frame mean),
+over frames brighter than 300\,DN:
+
+\begin{center}
+\begin{tabular}{lcc}
+\toprule
+Comparison & white suite & gray suite \\
+\midrule
+\code{Gb} against \code{Gr}, same frame   & $0.118\pct$ & $0.101\pct$ \\
+Adjacent exposures, same LED              & $0.128\pct$ & $0.173\pct$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Shot noise alone on a 1156-pixel mean predicts about $0.04\pct$,
+so these figures are above the pure counting limit
+but they are the practical floor of the whole pipeline.
+Take $0.12\pct$ as that floor.
+Nothing at or below it is a measurement.
+The $0.5\pct$ in-sample tolerance sits about $4\times$ above it.
+
+\subsection{Magnitude of the uncorrected non-uniformity}
+
+Across the crop, before correction,
+the illumination spans about $+7\pct$ to $-17\pct$ of the crop mean.
+The \code{chip2} patch, at the bottom of \code{bound},
+sits in the worst of it.
+That span is the size of the error the flat field exists to remove.
+
+\subsection{In-sample ladder}
+
+\begin{table}[htbp]
+\centering
+\caption{White card suite, 39 frames.
+Columns as defined in \S\ref{sec:measures}:
+\code{P med} and \code{P max} are the median and maximum,
+over frames, of each frame's worst-patch $P$;
+\code{S med} is the median worst-patch $S$;
+\code{S/nz} is that tilt divided by its noise reference;
+\code{blk rms} is the block residual.
+Terms is the number of free coefficients.}
+\label{tab:ladder-white}
+\begin{tabular}{llrrrrrrl}
+\toprule
+Extent & $(d_y,d_x)$ & Terms & P med & P max & S med & S/nz & blk rms & P \\
+\midrule
+\code{bound} & (1,1) &  3 & 8.86 & 16.35 & 5.67 & 10.62 & 3.77 & fail \\
+\code{bound} & (2,1) &  5 & 0.88 &  1.59 & 1.68 &  4.13 & 0.47 & fail \\
+\code{bound} & (2,2) &  6 & 0.90 &  1.64 & 1.72 &  4.09 & 0.41 & fail \\
+\code{bound} & (3,1) &  7 & \textbf{0.24} & \textbf{0.46} & 1.68 & 4.32 & 0.38 & \textbf{PASS} \\
+\code{bound} & (3,2) &  9 & 0.21 &  0.41 & 1.74 &  4.49 & 0.28 & PASS \\
+\code{bound} & (3,3) & 10 & 0.21 &  0.41 & 1.76 &  4.60 & 0.28 & PASS \\
+\code{bound} & (4,2) & 12 & 0.28 &  0.50 & 1.48 &  3.68 & 0.19 & PASS \\
+\code{bound} & (6,2) & 18 & 0.28 &  0.58 & 1.21 &  2.80 & 0.15 & fail \\
+\midrule
+\code{bound\_trim05} & (2,1) & 5 & 1.11 & 2.50 & 1.91 & 4.73 & 0.45 & fail \\
+\code{bound\_trim05} & (3,1) & 7 & 0.39 & 1.04 & 1.79 & 4.51 & 0.39 & fail \\
+\code{bound\_trim10} & (3,1) & 7 & 0.93 & 1.97 & 2.15 & 5.57 & 0.49 & fail \\
+\midrule
+\code{sector3} & (1,1) & 3 & --- & --- & 1.22 & 2.85 & --- & n/a \\
+\code{sector3} & (2,1) & 5 & --- & --- & 1.08 & 2.96 & --- & n/a \\
+\code{local}   & (1,1) & 3 & --- & --- & 1.11 & 2.59 & --- & n/a \\
+\code{local}   & (2,1) & 5 & --- & --- & 1.19 & 3.10 & --- & n/a \\
+\code{local}   & (2,2) & 6 & --- & --- & 1.18 & 3.09 & --- & n/a \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{table}[htbp]
+\centering
+\caption{Gray card suite, 40 frames.
+Same columns.
+No rung passes criterion P even in-sample;
+see \S\ref{sec:graypuzzle}.}
+\label{tab:ladder-gray}
+\begin{tabular}{llrrrrrrl}
+\toprule
+Extent & $(d_y,d_x)$ & Terms & P med & P max & S med & S/nz & blk rms & P \\
+\midrule
+\code{bound} & (1,1) &  3 & 9.63 & 16.63 & 6.99 & 6.11 & 4.18 & fail \\
+\code{bound} & (2,1) &  5 & 1.20 &  7.51 & 3.30 & 2.57 & 0.55 & fail \\
+\code{bound} & (2,2) &  6 & 1.12 &  7.47 & 3.30 & 2.57 & 0.49 & fail \\
+\code{bound} & (3,1) &  7 & 0.73 &  1.29 & 2.58 & 2.02 & 0.49 & fail \\
+\code{bound} & (3,2) &  9 & 0.72 &  1.26 & 2.52 & 1.98 & 0.42 & fail \\
+\code{bound} & (3,3) & 10 & 0.72 &  1.26 & 2.73 & 2.12 & 0.42 & fail \\
+\code{bound} & (4,2) & 12 & 0.55 &  1.08 & 2.40 & 2.03 & 0.37 & fail \\
+\code{bound} & (6,2) & 18 & 0.46 &  1.00 & 2.47 & 2.07 & 0.33 & fail \\
+\midrule
+\code{bound\_trim05} & (3,1) & 7 & 1.08 & 2.23 & 3.10 & 2.36 & 0.50 & fail \\
+\code{bound\_trim10} & (3,1) & 7 & 1.09 & 1.85 & 2.88 & 2.10 & 0.67 & fail \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Four results follow from these tables.
+
+\textbf{Degree 1 is inadequate; degree 3 is where the improvement stops.}
+A plane leaves $8.9$ to $9.6\pct$ median P,
+so the surface genuinely curves.
+Raising $d_y$ from 2 to 3 gains $0.64\pct$ on the white card.
+Raising it from 3 to 6 gains nothing.
+
+\textbf{Raising $d_x$ changes nothing.}
+$(3,1)$, $(3,2)$ and $(3,3)$ differ by at most $0.03\pct$ in median P.
+This is the direct evidence for the anisotropic basis.
+
+\textbf{Overfitting is visible in-sample.}
+On the white card,
+P at $(6,2)$ is $0.28\pct$ median and $0.58\pct$ maximum,
+which is worse than $(3,1)$'s $0.24$ and $0.46$,
+while the block residual continues to fall from $0.38$ to $0.15\pct$.
+The added terms are describing the card's own texture,
+and they do so near the patches, where it costs most.
+A criterion based on pixelwise flatness would have selected $(6,2)$.
+
+\textbf{Trimming the fit extent makes the result worse.}
+\code{bound\_trim05} at $(3,1)$ scores $0.39\pct$
+against \code{bound}'s $0.24\pct$,
+and \code{trim10} scores $0.93\pct$.
+The patches sit near the edges of the crop,
+so trimming forces the polynomial to extrapolate
+exactly where it is being judged.
+Rung 2 of the ladder is rejected.
+
+\subsection{Local and sector fits cannot produce a patch ratio}
+\label{sec:localfail}
+
+Rungs 4 and 5 report no P at all.
+This is the structural consequence derived in \S\ref{sec:whyratio}:
+each local or sector field is normalized over its own extent,
+so the two normalizing constants do not cancel in the ratio,
+and their quotient is exactly the relative brightness of the two extents ---
+which is the quantity being measured.
+
+The harness reports these entries as blank
+rather than computing a number that would look meaningful
+and be arbitrary.
+Their S column is still informative,
+and local fits do flatten a patch well,
+but S is the secondary criterion.
+Any scheme using more than one field
+needs a step that ties the fields to a common scale
+before it can be used at all.
+
+\subsection{Transfer}
+\label{sec:transfer}
+
+Fields fitted on the white suite, applied to the gray suite.
+Both P columns use the corrected white-patch mean as denominator.
+The \code{aligned} columns repeat the transfer
+with the field displaced bodily by the whole number of layer rows
+that suits it best;
+\S\ref{sec:registration} explains why that column exists.
+
+\begin{table}[htbp]
+\centering
+\caption{Transfer: white $\rightarrow$ gray,
+33 (LED $\times$ layer) pairs after exclusions.
+Violet excluded, per \S\ref{sec:fluor}.}
+\label{tab:transfer}
+\begin{tabular}{lrrrrrrrr}
+\toprule
+ & & \multicolumn{2}{c}{in-sample} & \multicolumn{2}{c}{transfer}
+ & \multicolumn{3}{c}{aligned} \\
+\cmidrule(lr){3-4}\cmidrule(lr){5-6}\cmidrule(lr){7-9}
+$(d_y,d_x)$ & Terms & P med & blk & P med & P max & P med & P max & @row \\
+\midrule
+(1,1) &  3 & 8.98 & 3.81 & 10.14 & 16.51 & 10.06 & 16.24 & $+14$ \\
+(2,1) &  5 & 0.92 & 0.46 & \textbf{0.98} & 1.90 & \textbf{0.79} & 1.66 & $+2$ \\
+(3,1) &  7 & 0.23 & 0.38 & 1.34 & 2.05 & 1.13 & 1.95 & $+2$ \\
+(4,1) &  9 & 0.27 & 0.32 & 1.41 & 2.15 & 1.24 & 2.01 & $+2$ \\
+(4,2) & 12 & 0.27 & 0.19 & 1.40 & 2.14 & 1.24 & 2.00 & $+2$ \\
+(5,2) & 15 & 0.26 & 0.16 & 1.32 & 2.07 & 1.13 & 1.90 & $+2$ \\
+(6,2) & 18 & 0.28 & 0.15 & 1.38 & 2.20 & 1.20 & 2.03 & $+2$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The difference between the two halves of the table is the point.
+In-sample P improves by a factor of four from $(1,1)$ to $(3,1)$
+and then stops.
+Transfer P is best at $(2,1)$ and grows worse as degree rises.
+Criterion T, applied mechanically, selects $(2,1)$.
+
+That selection should not be acted on,
+for the reason given in \S\ref{sec:staging}:
+the two suites imaged \emph{different physical stages}.
+A transfer between captures of two different cards
+measures card differences and model error at the same time
+and cannot separate them.
+Table~\ref{tab:transfer} should be read as an upper bound ---
+transfer error is no worse than about $1\pct$ median ---
+with the ranking of degrees within it not yet trustworthy.
+
+\subsection{Registration offset}
+\label{sec:registration}
+
+The shift scan displaces the fitted field by a whole number of layer rows
+and rescores.
+At $(2,1)$:
+
+\begin{center}
+\begin{tabular}{lrrrrrrrr}
+\toprule
+Offset (layer rows) & $-8$ & $-4$ & $-2$ & $0$ & $+2$ & $+4$ & $+8$ \\
+Median transfer P ($\pct$) & 2.14 & 1.58 & 1.28 & 0.98 & \textbf{0.79}
+                           & 0.84 & 1.59 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+There is a clear minimum at $+2$ layer rows,
+which is $+4$ stream pixels,
+improving median P from $0.98$ to $0.79\pct$.
+That is a registration offset between the two captures ---
+the card or the stage moved ---
+and no polynomial degree can correct it.
+Only re-registering the captures can.
+
+The scan exists because without it the degree comparison is confounded.
+A low-degree field can score well on a transfer test
+simply by being too smooth to respond to a misalignment.
+Comparing degrees at each one's own best alignment removes that advantage.
+
+\subsection{Confounders found and handled}
+
+\subsubsection{Optical brighteners in the white card}
+\label{sec:fluor}
+
+Under violet illumination the white card returned $22.4\times$
+the signal of the gray card,
+where every other LED color agreed on a ratio near $3.7\times$.
+(Denominator in both figures: the gray card's dark-subtracted patch mean.)
+A sixfold departure from the consensus ratio
+is not a reflectance difference.
+
+White card stock contains optical brighteners:
+fluorescent dyes that absorb near-ultraviolet light
+and re-emit it in the blue.
+Under violet LEDs the card is a light \emph{source},
+and the surface fitted to it is the emission pattern of the paper,
+which will not transfer to any other target.
+
+The harness detects this automatically,
+in \code{find\_anomalous\_leds()},
+using a threshold of $2\times$ the consensus ratio.
+It reports the finding and excludes the offending LED
+from the pooled figures.
+That is why Table~\ref{tab:transfer} states ``violet excluded''
+rather than silently carrying a $20\pct$ outlier.
+
+\subsubsection{Green crosstalk under red LEDs}
+\label{sec:crosstalk}
+
+\code{Gb} and \code{Gr} agree to $0.10$--$0.12\pct$ under most LEDs,
+which is the repeatability floor.
+Under \code{photo\_red}, \code{red} and \code{red\_orange}
+they disagree by more than $1\pct$ on the same block-RMS measure
+(denominator: the frame mean),
+reproducibly at every exposure,
+so the disagreement is not noise.
+
+The green photosites that neighbor red pick up different optical and
+electrical crosstalk from those that neighbor blue.
+The consequence is firm:
+fit each Bayer layer separately,
+and never average the two greens.
+Agreement between \code{Gb} and \code{Gr} remains a useful internal
+control, but only for the non-red LEDs.
+
+\subsubsection{Card texture, and how much of the residual it explains}
+\label{sec:texture}
+
+The residuals reported above are limited partly by the card,
+not only by the model,
+and the two can be separated.
+
+Take two exposures of the same LED and layer,
+scale each to its own mean,
+and form their ratio.
+Structure that is fixed on the card appears identically in both frames
+and cancels in that ratio;
+random noise does not cancel, and adds in quadrature,
+so the ratio's spread divided by $\sqrt{2}$ estimates the noise alone.
+Subtracting that from a single frame's spread, in quadrature,
+leaves the fixed structure.
+
+At the pixel scale, on the sample patch,
+with both cards at comparable brightness:
+
+\begin{center}
+\begin{tabular}{lrrrr}
+\toprule
+Suite / LED / layer & mean DN & pixel CV & noise part & fixed part \\
+\midrule
+white / \code{white} / \code{B}      & 526 & $1.44\pct$ & $1.12\pct$ & $0.89\pct$ \\
+white / \code{cyan} / \code{B}       & 632 & $1.34\pct$ & $1.09\pct$ & $0.78\pct$ \\
+gray / \code{royal\_blue} / \code{B} & 532 & $4.01\pct$ & $1.29\pct$ & $3.80\pct$ \\
+gray / \code{violet} / \code{B}      & 580 & $3.51\pct$ & $1.15\pct$ & $3.32\pct$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+(All percentages are of the patch mean.)
+At the same signal level the random noise is the same on both cards,
+near $1.1\pct$,
+as it must be if it is shot noise.
+The fixed part is four times larger on the gray card.
+The gray card stock is substantially more textured than the white.
+
+At the $34\times34$ patch scale,
+after removing the fitted field,
+the same separation gives:
+
+\begin{center}
+\begin{tabular}{lrrr}
+\toprule
+Suite / LED / layer & block CV & noise part & fixed part \\
+\midrule
+white / \code{white} / \code{B}      & $0.394\pct$ & $0.091\pct$ & $0.383\pct$ \\
+white / \code{green} / \code{Gr}     & $0.375\pct$ & $0.084\pct$ & $0.365\pct$ \\
+white / \code{blue} / \code{Gr}      & $0.353\pct$ & $0.045\pct$ & $0.350\pct$ \\
+gray / \code{royal\_blue} / \code{B} & $0.328\pct$ & $0.145\pct$ & $0.294\pct$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+(All percentages are of the frame mean, per Eq.~\ref{eq:block}.)
+This is the more important of the two tables.
+The block residual after a $(3,1)$ fit ---
+$0.38\pct$ for the white suite in Table~\ref{tab:ladder-white} ---
+is almost entirely fixed structure on the card,
+with only $0.05$ to $0.09\pct$ attributable to noise.
+
+Two conclusions follow.
+The polynomial is performing better than the block-residual figure
+suggests,
+because most of that figure is the target rather than the model.
+And criterion P, which assumes the imaged card is uniform,
+is measuring card structure and fit error together
+whenever the card has structure of its own.
+Separating them is exactly what the \code{grayR180} capture of
+\S\ref{sec:protocol} is for.
+
+\subsubsection{Staging differences between the two suites}
+\label{sec:staging}
+
+The white and gray suites are not two captures of one scene.
+They used different sheets of card stock, separately placed.
+Paper texture, thickness, flatness and placement all differ at once,
+and the $+2$-row registration offset confirms that placement did.
+
+There is a second staging issue.
+The production chamber has a flat-black stage and curtains
+except at the sample,
+whereas a card filling the whole stage
+scatters substantially more light back into the optical path
+than the instrument will normally see.
+The surfaces fitted here therefore include stray light
+that the instrument does not have.
+
+Neither issue invalidates the analysis.
+The in-sample results, the model form, the criteria
+and the confounders are all sound.
+Both are reasons the transfer figure is an upper bound.
+Measuring the true transfer error requires the controlled protocol
+of \S\ref{sec:protocol}.
+
+\subsubsection{The gray suite fails P in-sample}
+\label{sec:graypuzzle}
+
+Table~\ref{tab:ladder-gray} shows no rung passing criterion P
+on the gray card:
+best case $0.46\pct$ median but $1.00\pct$ maximum at $(6,2)$,
+and $0.73/1.29\pct$ at $(3,1)$.
+The white card passes comfortably at the same degree.
+
+Signal level is the likeliest explanation.
+The gray card returns $0.27\times$ the white card's signal,
+so its dim layers sit where noise is a much larger fraction
+of the patch mean.
+\S\ref{sec:ladderselect} tabulates this,
+and the worst transfer pairs in \S\ref{sec:transfer}
+are readings at 7 to 14\,DN on the gray card.
+
+Card structure is the other candidate,
+but \S\ref{sec:texture} weighs against it:
+at patch scale the gray card's fixed structure
+($0.29\pct$) is no worse than the white card's ($0.35$ to $0.38\pct$),
+even though at pixel scale it is four times larger.
+The texture appears to be fine-grained enough
+to average out over a $34\times34$ patch.
+
+The \code{grayA}/\code{grayA2} pair of \S\ref{sec:protocol}
+resolves this,
+and the case for re-metering the exposures against the calibration card
+is strong either way.
+
+\subsubsection{Enlarging \code{bound} makes the result worse}
+
+This was tested directly,
+because enlarging \code{bound} had been proposed
+as a way to give the polynomial more support.
+
+At fixed degree, patch error grows as the fit area grows.
+On the gray card the worst-patch P went from $0.46\pct$
+over a 330-row crop to $2.61\pct$ over an enlarged one;
+on a light-gray capture, from $0.17\pct$ to $3.06\pct$.
+Raising the degree did not recover it.
+The result was confirmed independently on a later 530-row capture:
+fitting over 530 rows costs $1.3$ to $2.1\times$ more residual
+within the same central region
+than fitting over 330 rows does.
+
+A polynomial distributes its degrees of freedom
+over the whole fit extent.
+Enlarging the extent asks the same 7 terms to describe more of a curve,
+and the added territory is territory nothing is measured in.
+The recommendation is the opposite one:
+move the reference patches inward, toward the sample,
+rather than moving \code{bound} outward.
+\code{chip2} sits at the bottom of \code{bound},
+where illumination has fallen $17\pct$,
+and it is the worst patch in every transfer test.
+
+\subsection{Exposure ladder selection}
+\label{sec:ladderselect}
+
+\code{capture\_runner} records several exposures per LED in a suite,
+and some are expected to saturate somewhere in the frame.
+Discarding those and requiring only that one usable exposure survive
+is the right policy,
+with one refinement.
+
+\textbf{The selection must be per (LED, layer), not per LED.}
+The harness already does this,
+in \code{select\_frames()}:
+for each (LED color, Bayer layer) independently
+it takes the unclipped exposure with the highest mean.
+Selecting per LED would be wrong,
+because the four layers of one frame differ enormously in level.
+Under the green LED at exposure \code{e2},
+\code{Gr} and \code{Gb} are $96\pct$ masked
+while \code{R} sits at 66\,DN and \code{B} at 220\,DN,
+both perfectly usable.
+Discarding the whole frame would throw away good data
+in two layers out of four.
+
+\textbf{``Unclipped'' is necessary but not sufficient.}
+An unclipped frame can still be too dim to be worth fitting.
+Averaging $n$ pixels reduces relative noise by $\sqrt{n}$,
+so the relative noise on a patch mean is
+\begin{equation}
+  \varepsilon_i \;=\; \frac{\sigma_i}{\sqrt{n_i}} ,
+  \label{eq:patchnoise}
+\end{equation}
+where $\sigma_i$ is the pixel coefficient of variation within the patch,
+in percent, and $n_i = 1156$.
+Measured on the sample patch of the selected frames:
+
+\begin{center}
+\begin{tabular}{lrrr}
+\toprule
+Suite & patch mean, DN & pixel CV $\sigma$ & patch-mean noise $\varepsilon$ \\
+\midrule
+white & 27.5  & $5.87\pct$ & $0.173\pct$ \\
+white & 70.9  & $3.20\pct$ & $0.094\pct$ \\
+white & 241.3 & $2.00\pct$ & $0.059\pct$ \\
+white & 903.5 & $1.12\pct$ & $0.033\pct$ \\
+\midrule
+gray  & 7.8   & $15.59\pct$ & $0.459\pct$ \\
+gray  & 45.2  & $5.66\pct$  & $0.167\pct$ \\
+gray  & 310.8 & $4.46\pct$  & $0.131\pct$ \\
+gray  & 579.8 & $3.51\pct$  & $0.103\pct$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+(All percentages are of the sample patch's own mean.)
+The gray card never reaches $\varepsilon = 0.1\pct$ at any exposure
+in the suite,
+while the white card reaches it above about 70\,DN.
+That is a concrete, quantitative statement of why the gray suite
+underperforms,
+and it is a direct argument for re-metering the exposure ladder
+against the calibration card.
+
+\textbf{Proposed success criterion.}
+A suite is adequate for flat-field work when,
+for every (LED color, Bayer layer) combination the analysis consumes,
+at least one exposure in the ladder satisfies both of:
+
+\begin{enumerate}[nosep]
+  \item masked fraction $\le 1\pct$ of the fit extent
+        (already enforced, \S\ref{sec:masking});
+  \item $\varepsilon \le 0.1\pct$ by Eq.~\ref{eq:patchnoise},
+        which at $n = 1156$ means a pixel CV of $\sigma \le 3.4\pct$
+        (not yet enforced).
+\end{enumerate}
+
+Exposures that fail either test are discarded, not repaired,
+and there is no requirement that one exposure serve all four layers.
+The second test is a small addition to \code{select\_frames()}
+and would turn the present silent underperformance
+into an explicit report.
+
+\textbf{Which combinations must be consumed.}
+The five worst transfer pairs of \S\ref{sec:transfer} ---
+\code{amber/B}, \code{blue/R}, \code{photo\_red/B},
+\code{royal\_blue/R}, \code{red\_orange/B} ---
+are all combinations in which the LED color and the Bayer layer
+do not match,
+and all of them read between 7 and 14\,DN on the destination card.
+They are crosstalk readings carrying almost no signal.
+If the measurement consumes only the matching combinations,
+the success criterion need only apply to those,
+and the pooled transfer figures should improve substantially
+once the mismatched ones are excluded.
+Testing that requires a layer filter on the harness,
+which it does not yet have.
+
+% ============================================================
+\section{Choices made}
+\label{sec:choices}
+% ============================================================
+
+\begin{center}
+\small
+\begin{tabular}{lll}
+\toprule
+Question & Choice & Basis \\
+\midrule
+Correction form   & divide by unit-mean gain & \S\ref{sec:divide} \\
+Basis             & anisotropic $(d_y,d_x)$  & row vs column variation, $25$ vs $2\pct$ \\
+Default degree    & $(3,1)$, 7 terms         & Table~\ref{tab:ladder-white} \\
+Fit extent        & the whole crop           & trims and enlargements both worse \\
+Granularity       & per LED color, per layer & $2.1\pct$ and $0.96\pct$ shape differences \\
+Normalization     & mean over the fit extent & \S\ref{sec:whyratio} \\
+Coordinates       & $[-1,1]$ over \code{bound} always & comparable coefficients \\
+Degree selection  & aligned transfer P       & criterion T \\
+Runtime form      & per-patch scalar gains   & \S\ref{sec:scalar} \\
+Frame selection   & best unclipped, per (LED, layer) & \S\ref{sec:ladderselect} \\
+Calibration card  & brightener-free and smooth & \S\ref{sec:fluor}, \S\ref{sec:texture} \\
+Storage           & coefficients authoritative & maps and scalars derived \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+$(3,1)$ is the default, not a settled answer.
+Criterion T on the present data prefers $(2,1)$,
+but on data that cannot separate model error from card differences.
+The choice between $(2,1)$ and $(3,1)$
+is to be re-run on the controlled suites.
+
+% ============================================================
+\section{Implementation}
+\label{sec:implementation}
+% ============================================================
+
+\subsection{\code{devdesk/flatfield.py}}
+
+A desktop-only evaluation harness,
+sibling of \code{hdf5inspect.py} and \code{roi\_darkdiff.py}
+in the same directory,
+sharing their conventions:
+argparse mode flags,
+\code{Hdf5Reader} from \code{src/hdf5read.py},
+bare filenames resolved against \code{captures/},
+results into \code{devdesk/devdesk.sqlite}.
+It makes no changes to \code{src/} behavior.
+
+Principal types:
+
+\begin{description}[style=nextline, leftmargin=1em]
+\item[\code{Frame}]
+  One dark-subtracted, masked layer,
+  with its LED, exposure label, exposure in microseconds and dark link.
+  \code{.usable} is false when more than $1\pct$ of pixels are masked.
+\item[\code{Patches}]
+  The active patch rectangles in layer coordinates,
+  plus which one holds the white-reference role.
+  Loaded through \code{roi.load\_active()} and
+  \code{roi.to\_layer\_rect\_within()};
+  never hardcoded.
+\item[\code{FlatField}]
+  Coefficients, degrees, normalization domain, fit extent,
+  the window it covers, and \code{norm\_mean} $= \mean{F}{\Omega}$.
+  Provides \code{gain()}, \code{correct()}, \code{gain\_for\_patch()}
+  and \code{coef\_json()}.
+\item[\code{Model}]
+  A named collection of one or more \code{FlatField}s
+  with \code{field\_for(rect)},
+  so that single-field and multi-field extents
+  are scored through one interface.
+\item[\code{Score}]
+  P, S, $S/S^{\mathrm{nz}}$, block residual,
+  and the count of patches no field could cover without extrapolating.
+\end{description}
+
+The \code{covers} field on \code{FlatField} deserves a note,
+because getting it wrong produced a wrong answer once.
+\code{bound} extents cover the whole crop;
+\code{local\_*} and \code{sector*} extents cover only their own window.
+Without that distinction,
+trimmed fits were scored on whichever patches happened to fall
+inside the trim window,
+which is a smaller and easier subset,
+and trimming looked better than it is.
+
+\subsection{Storage}
+
+Coefficients are the source of truth;
+maps and scalars are regenerable caches.
+
+Table \code{flatfield} in \code{devdesk/devdesk.sqlite},
+keyed on (\code{h5file}, \code{led}, \code{eno}, \code{bayerlayer},
+\code{extent}, \code{deg\_y}, \code{deg\_x}),
+holds \code{coef\_json},
+the normalization domain
+(\code{domain\_rows}, \code{domain\_cols}, \code{bound\_*}, \code{frame\_*}),
+\code{norm\_mean},
+and the fit statistics
+(\code{n\_fit}, \code{n\_masked}, \code{fit\_rms\_pct},
+\code{block\_rms\_pct}, \code{patch\_dev\_max\_pct}).
+
+Derived gain maps go to
+
+\begin{footnotesize}
+\begin{verbatim}
+    devdesk/flatfield/<suite_id>/<led>_<ch>_<roi>_gain.npy
+\end{verbatim}
+\end{footnotesize}
+
+\noindent
+holding the field evaluated over one patch rectangle,
+divided by its own mean.
+This is the artifact \code{colorimeter\_methods.tex} called
+\code{color\_bayer\_rect\_trend.npy},
+changed from additive to multiplicative,
+and regenerable from the coefficients whenever a patch moves.
+That regenerability is the reason for keeping the coefficients
+authoritative.
+
+\S\ref{sec:scalar} adds a third, smaller artifact for the runtime path:
+the per-patch scalar $\bar{g}_i$,
+which is the mean of that same gain map.
+
+\subsection{Archive metadata (capture schema 2)}
+
+The analysis needs to know the \code{bound} rectangle
+a capture was taken with.
+The stored layer shape gives its width and height;
+it cannot give its $x$ and $y$,
+and a uniform card carries no features to register against.
+
+Consulting the local \code{roi} table is not a substitute.
+The analysis machine's \code{colorimeter.sqlite} is a copy,
+and an ROI edit made on the instrument never reaches it.
+This produced a real false alarm:
+an apparent fault in the HDF5 writer
+that was in fact a stale desktop database.
+
+Archives now describe themselves.
+\code{capture\_h5.SCHEMA\_VERSION} is 2,
+and each archive carries:
+
+\begin{itemize}[nosep]
+  \item root attributes \code{bound\_x}, \code{bound\_y},
+        \code{bound\_w}, \code{bound\_h},
+        which are cheap to read and sufficient to interpret the layers;
+  \item a \code{/meta} JSON record with the full patch set,
+        camera settings,
+        and rows from the \code{device} and \code{samples} tables.
+\end{itemize}
+
+\code{src/capture\_meta.py} collects that record declaratively.
+Column lists and field extractors are tuples at the top of the module,
+so adding a field is a one-line edit in one place.
+\code{collect()} never raises;
+a block that fails becomes \code{\{"error": \ldots\}},
+because a metadata problem must never cost a capture.
+
+\code{flatfield.py} reads \code{archive\_bound()} first
+and falls back to the \code{roi} table only for schema-1 archives,
+printing a warning when it does.
+A \code{--bound X,Y,W,H} override handles archives
+taken against geometry this database does not have.
+
+\medskip
+\noindent
+\textbf{Deployment note.}
+The schema-2 writer must be deployed to the Pi
+before the protocol captures of \S\ref{sec:protocol} are taken.
+Archives written by the current Pi code are still schema 1
+and will not carry their own geometry.
+
+% ============================================================
+\section{Image sampling protocol}
+\label{sec:protocol}
+% ============================================================
+
+The binding uncertainty is the transfer error,
+and it cannot be resolved from the existing captures,
+because those used two different stages.
+Four short suites on one card resolve it.
+
+\subsection{Card selection}
+
+The card must satisfy two independent requirements,
+and the earlier recommendation to use gray stock addressed only the first.
+
+\begin{enumerate}[nosep]
+  \item \textbf{Free of optical brighteners.}
+        White stock fluoresces under violet (\S\ref{sec:fluor}),
+        and its surface under that LED is the paper's emission
+        rather than the instrument's illumination.
+        Check by confirming that the violet LED's brightness ratio
+        against a reference card
+        sits with the other LEDs rather than several times above them.
+  \item \textbf{Smooth at the pixel scale.}
+        The gray stock measured in \S\ref{sec:texture}
+        carries $3.3$ to $3.8\pct$ fixed texture at pixel scale,
+        four times the white stock's.
+        Check by the two-exposure ratio method of \S\ref{sec:texture},
+        which separates fixed texture from random noise;
+        aim for a fixed part below $1.5\pct$ of the patch mean.
+\end{enumerate}
+
+The gray stock's texture largely averages out over a $34\times34$ patch,
+so it is usable,
+but a card meeting both requirements gives a cleaner measurement
+of the instrument.
+
+\subsection{Preparation}
+
+\begin{enumerate}[nosep]
+  \item Select and verify the card as above.
+  \item \textbf{Mark one corner} of the card,
+        indelibly and visibly in frame if possible.
+        The \code{grayR180} suite depends on knowing the orientation.
+  \item \textbf{Re-meter the exposure ladder against this card},
+        so that the maximum DN anywhere inside \code{bound}
+        is $\le 850$\,DN in every layer.
+        Metering on a center patch is what oversaturated
+        the earlier white suite.
+        A ceiling of 850 leaves margin below the 1000\,DN mask threshold
+        for the brighter corners.
+  \item Confirm that the ladder meets the success criterion of
+        \S\ref{sec:ladderselect}:
+        for every (LED, layer) combination consumed,
+        at least one exposure with $\sigma \le 3.4\pct$
+        on the sample patch.
+  \item \textbf{Deploy schema-2 capture code to the Pi} first,
+        so that each archive records its own \code{bound}.
+  \item Let the LEDs and the enclosure reach thermal steady state
+        before the first suite,
+        and take all four suites in one sitting.
+\end{enumerate}
+
+\subsection{The four suites}
+
+\begin{center}
+\begin{tabular}{lll}
+\toprule
+Suite & Action before capture & What it isolates \\
+\midrule
+\code{grayA}    & place the card, capture & baseline \\
+\code{grayA2}   & \textbf{touch nothing}, capture again & noise floor alone \\
+\code{grayB}    & lift the card, replace it carefully & placement repeatability \\
+\code{grayR180} & rotate the same card $180^{\circ}$ in plane
+                & paper against instrument \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Each suite is the full LED set with the re-metered ladder.
+It is the same capture the instrument already performs,
+with a card on the stage.
+
+\subsection{What each suite answers}
+
+\code{grayA} $\rightarrow$ \code{grayA2} should transfer
+at the repeatability floor, about $0.12\pct$ of the white patch mean.
+If it does not,
+something in the pipeline is contributing error of its own
+and every other figure here is suspect.
+This is the control.
+
+\code{grayA} $\rightarrow$ \code{grayB} adds placement.
+The difference between this result and \code{grayA2}'s
+is the cost of re-seating a card,
+and it sets a floor on how well any calibration
+can be verified by re-imaging a target.
+
+\code{grayA} $\rightarrow$ \code{grayR180} is the decisive one.
+Rotating the card $180^{\circ}$ leaves the instrument's illumination
+pattern untouched
+but rotates the paper's own structure with the card.
+Therefore:
+
+\begin{itemize}[nosep]
+  \item Structure that stays in place under rotation
+        belongs to the instrument.
+        It is what the polynomial is for,
+        and it is correctable.
+  \item Structure that rotates with the card belongs to the paper.
+        No flat field can remove it,
+        and it is a hard floor on how well criterion P
+        can ever be verified,
+        because P assumes the card is uniform
+        and this measures the extent to which it is not.
+\end{itemize}
+
+That decomposition converts Table~\ref{tab:transfer}'s upper bound
+into an actual measurement of model error,
+and it settles the choice between $(2,1)$ and $(3,1)$.
+\S\ref{sec:texture} has already shown the effect is large enough
+at the pixel scale to be worth separating,
+and this is the measurement that separates it at the patch scale.
+
+\subsection{Optional additions}
+
+If a configuration switch for full-image Bayer layers
+plus full-image dark layers is added to the normal capture path,
+take one extra \code{grayA} suite with it enabled.
+That makes ladder rung 3 testable
+and answers directly whether \code{bound}
+is a large enough support region.
+
+% ============================================================
+\section{Running the programs}
+\label{sec:running}
+% ============================================================
+
+Use the project virtual environment.
+The system Python lacks \code{h5py}, \code{cv2} and \code{matplotlib}.
+
+\begin{verbatim}
+cd /home/bill/Projects/Colorimeter
+.venv/bin/python3 devdesk/flatfield.py --selftest
+\end{verbatim}
+
+\noindent
+Modes:
+
+\begin{center}
+\begin{tabular}{ll}
+\toprule
+Flag & Purpose \\
+\midrule
+\code{-f}, \code{--fit}      & fit the default $(3,1)$ over \code{bound};
+                               print coefficients \\
+\code{-c}, \code{--compare}  & the extent $\times$ degree ladder, in-sample \\
+\code{-t}, \code{--transfer} & fit on FILE, apply to FILE2 \\
+\code{-p}, \code{--plot}     & profiles, residual heatmap,
+                               error-against-degree curves \\
+\code{-w}, \code{--write}    & store coefficients and derived gain maps \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent
+Filters and overrides:
+\code{--led COLOR} (repeatable),
+\code{--exp LABEL} (repeatable),
+\code{--deg-y}, \code{--deg-x},
+\code{--bound X,Y,W,H},
+\code{--captures-dir}, \code{--db}, \code{--gain-dir},
+and \code{-o FILE.png} to save a \code{-p} figure instead of showing it.
+
+\subsection{Fitting one LED}
+
+\begin{verbatim}
+.venv/bin/python3 devdesk/flatfield.py white_20260803_1742.h5 -f --led green
+\end{verbatim}
+
+\begin{footnotesize}
+\begin{verbatim}
+white_20260803_1742.h5: flat-field fits, (deg_y, deg_x) = (3, 1), 7 terms
+  basis: y^0x^0 y^0x^1 y^1x^0 y^1x^1 y^2x^0 y^2x^1 y^3x^0
+  led      e#  ch   exp_us    mean  masked%   span%  resid%  coef[0..2]
+  green    e0  R      5291    29.1    0.00%   29.1%   5.86%    30.47  -0.43   -3.64
+  green    e0  Gr     5291   514.1    0.00%   31.2%   1.59%   538.65  -6.52  -69.48
+  green    e0  Gb     5291   514.0    0.00%   31.3%   1.59%   538.66  -6.62  -69.87
+  green    e0  B      5291    97.3    0.00%   35.8%   3.02%   102.40  -1.51  -16.22
+  green    e1  Gr     7937   770.9    0.00%   31.1%   1.45%   808.37  -9.46 -102.98
+  green    e2  Gr    11906   918.1   96.24%  SKIPPED - over 1% masked
+\end{verbatim}
+\end{footnotesize}
+
+\noindent
+Column meanings:
+
+\begin{description}[style=nextline, leftmargin=1em, nosep]
+\item[\code{mean}]
+  $\mean{S}{\mathrm{crop}}$, the dark-subtracted mean over the crop, in DN.
+  Use it to judge whether a row is worth reading at all.
+  At 29\,DN the \code{R} layer under a green LED is nearly all noise,
+  which is why its \code{resid\%} is $5.86$
+  while the well-exposed \code{Gr} row's is $1.59$.
+\item[\code{masked\%}]
+  Percent of crop pixels excluded.
+  Denominator: all pixels in the crop.
+  Above $1\pct$ the row is \code{SKIPPED}.
+\item[\code{span\%}]
+  $(\max F - \min F)$ divided by $\mean{F}{\Omega}$,
+  over the fitted surface.
+  It is the size of the illumination variation the fit describes,
+  about $30\pct$ here.
+\item[\code{resid\%}]
+  Root-mean-square of the pixelwise fit residual,
+  as a percentage of the frame mean.
+  This is a \emph{pixelwise} figure and is dominated by shot noise.
+  Do not compare it with criterion P,
+  which is a patch-mean figure and roughly $\sqrt{1156}$ times smaller
+  for the same underlying error.
+\item[\code{coef[0..2]}]
+  The first three coefficients:
+  the constant, the $x$ term and the $y$ term.
+  The $y$ coefficient is about $10\times$ the $x$ coefficient
+  with the same sign pattern in every row,
+  which is the anisotropy in raw form.
+\end{description}
+
+\subsection{The ladder}
+
+\begin{verbatim}
+.venv/bin/python3 devdesk/flatfield.py mgray_20260803_1736.h5 -c
+\end{verbatim}
+
+Prints the repeatability floor,
+the patch positions in use,
+then the content of Table~\ref{tab:ladder-gray}.
+Read the floor block first;
+it states what the smallest meaningful number in the table is.
+
+\subsection{Transfer}
+
+\begin{verbatim}
+.venv/bin/python3 devdesk/flatfield.py grayA_<stamp>.h5 grayR180_<stamp>.h5 -t
+\end{verbatim}
+
+Prints the fluorescence exclusion list,
+the degree table (Table~\ref{tab:transfer}),
+the criterion-T recommendation,
+the shift scan,
+and the five worst (LED $\times$ layer) pairs
+with their source and destination brightness in DN.
+
+\subsection{Writing results}
+
+\begin{verbatim}
+.venv/bin/python3 devdesk/flatfield.py grayA_<stamp>.h5 -w
+\end{verbatim}
+
+Writes \code{flatfield} rows and \code{*\_gain.npy} maps,
+then verifies the round trip
+by rebuilding a gain map from the stored \code{coef\_json}
+and comparing it with the file.
+
+% ============================================================
+\section{Interpreting results}
+\label{sec:interpreting}
+% ============================================================
+
+\subsection{Reading order}
+
+\begin{enumerate}[nosep]
+  \item \textbf{The floor block.}
+        If \code{Gb} against \code{Gr} is not near $0.12\pct$,
+        stop.
+        The pipeline is contributing error
+        and nothing below it is trustworthy.
+  \item \textbf{The exclusion warnings.}
+        A fluorescence flag or a \code{SKIPPED} row
+        changes which frames the pooled figures cover.
+  \item \textbf{The patch list.}
+        Confirm the patch positions are the intended ones;
+        a stale \code{roi} table moves them without any other symptom.
+  \item \textbf{Transfer P, not in-sample P},
+        for any decision about degree.
+  \item \textbf{\code{P max}, not \code{P med}},
+        for any decision about acceptance.
+        The median conceals the one patch that fails.
+\end{enumerate}
+
+\subsection{Decision rules}
+
+\begin{description}[style=nextline, leftmargin=1em]
+
+\item[Transfer P falls with degree, then flattens.]
+  The expected pattern.
+  Take the degree at which it flattens, per criterion T.
+
+\item[Transfer P rises with degree while in-sample P falls.]
+  Overfitting.
+  Take the lower degree.
+  This is what Table~\ref{tab:transfer} shows above $(2,1)$.
+
+\item[The shift scan has a minimum away from zero.]
+  The two captures are not registered to each other.
+  Correct the staging or the registration;
+  changing the polynomial cannot help.
+  Compare degrees on the \code{aligned} columns only.
+
+\item[S is large but \code{S/nz} is near 1.]
+  The tilt is a plane fitted through noise, not a real tilt.
+  Ignore it.
+  This is common in dim layers,
+  where the pixel coefficient of variation reaches $6\pct$.
+
+\item[S is large and \code{S/nz} is well above 1.]
+  A real residual tilt that no whole-crop polynomial removed.
+  It does not bias the patch mean,
+  so P can still pass,
+  but it will inflate Layer 3's uniformity flag.
+
+\item[Block residual keeps improving while P stalls or worsens.]
+  The added terms are describing texture, not illumination.
+  Trust P.
+  Compare the block residual against \S\ref{sec:texture}'s figures
+  before concluding the model is at fault:
+  most of that residual is the card.
+
+\item[P is blank.]
+  A multi-field model.
+  Not a missing number; see \S\ref{sec:localfail}.
+
+\item[A single LED is a large outlier.]
+  Check fluorescence first, then signal level.
+  The worst-pairs listing prints source and destination DN
+  precisely so that a $1.6\pct$ error at 11\,DN
+  can be recognized as noise rather than field error.
+
+\end{description}
+
+\subsection{What adequate will look like}
+
+On the controlled suites, the flat field is adequate when all of:
+
+\begin{itemize}[nosep]
+  \item \code{grayA} $\rightarrow$ \code{grayA2} transfer \code{P max}
+        $\le 0.3\pct$ of the corrected white patch mean,
+        which is near the floor;
+  \item \code{grayA} $\rightarrow$ \code{grayB} transfer \code{P max}
+        $\le 1.0\pct$;
+  \item in \code{grayA} $\rightarrow$ \code{grayR180},
+        the part of the residual that stays fixed under rotation
+        is $\le 1.0\pct$,
+        the rotating part being card structure rather than model error;
+  \item the shift scan on \code{grayA} $\rightarrow$ \code{grayA2}
+        has its minimum at zero rows;
+  \item the chosen degree is the point at which aligned transfer P
+        flattens,
+        not the point at which in-sample residual flattens.
+\end{itemize}
+
+% ============================================================
+\section{How this fits into next steps}
+\label{sec:next}
+% ============================================================
+
+\subsection{Settled}
+
+\begin{itemize}[nosep]
+  \item Model form:
+        multiplicative correction,
+        anisotropic polynomial,
+        one per LED color and per Bayer layer,
+        fitted over the whole crop,
+        normalized over its fit extent.
+  \item Criteria defined and implemented:
+        P, S with its noise reference, and T on aligned transfer.
+  \item The correction reduces at measurement time
+        to two scalars per patch pair (\S\ref{sec:scalar}),
+        with the error of that reduction bounded
+        by a product of within-patch variations.
+  \item Extent ladder mostly resolved:
+        the whole crop wins;
+        trims are worse;
+        multi-field schemes cannot produce a patch ratio
+        without a cross-normalization step;
+        whole-frame is untestable with current archives.
+  \item Confounders identified and handled in code:
+        saturation, optical brighteners, red-LED green crosstalk,
+        registration offset,
+        and card texture.
+  \item Archives made self-describing (capture schema 2),
+        so analysis no longer depends on a database copy
+        staying in step.
+  \item Patch selection converted from hardcoded names to roles,
+        so that renaming a patch cannot silently misdirect the analysis.
+\end{itemize}
+
+\subsection{Immediately next}
+
+\begin{enumerate}[nosep]
+  \item Deploy schema-2 capture code to the Pi.
+  \item Run \code{src/arbiter.py}'s self-test on the Pi.
+        It cannot run on the desktop, which lacks \code{gpiozero},
+        so the role-based edits to it are compile-checked
+        but not executed.
+  \item Add the $\varepsilon \le 0.1\pct$ test to
+        \code{select\_frames()} (\S\ref{sec:ladderselect}),
+        and a layer filter so that mismatched
+        (LED, layer) combinations can be excluded from pooled figures.
+  \item Select and verify a calibration card
+        against both requirements of \S\ref{sec:protocol}.
+  \item Re-meter the exposure ladder against it to the 850\,DN ceiling.
+  \item Capture \code{grayA}, \code{grayA2}, \code{grayB},
+        \code{grayR180}.
+  \item Re-run \code{-c} and \code{-t} across them,
+        and settle $(2,1)$ against $(3,1)$
+        on data that separates model error from card structure.
+\end{enumerate}
+
+\subsection{Then}
+
+\begin{itemize}[nosep]
+  \item \textbf{Promote the evaluated model into \code{src/}.}
+        The harness stays in \code{devdesk/} as the evaluation tool.
+        The instrument needs only to look up two stored scalars
+        per patch pair,
+        with the map generation available for diagnostics.
+  \item \textbf{Measure within-patch reflectance variation on developed
+        strips},
+        which is the one unmeasured factor
+        in the bound of \S\ref{sec:scalar}.
+  \item \textbf{Decide the calibration cadence:}
+        how often the field is refitted, and against what ---
+        a stored card, or the white reference patch on each strip.
+  \item \textbf{Move the reference patches inward.}
+        \code{chip2} sits where illumination has fallen $17\pct$,
+        it has eight times the sample patch's within-patch gain variation,
+        and it is the worst patch in every test.
+        Bringing the references nearer the sample
+        reduces the flat field's workload substantially.
+        This is a layout change with consequences beyond this task.
+  \item \textbf{Bayesian update within the patch:}
+        a stored field as prior,
+        updated by the few measurements each run actually makes,
+        rather than re-estimated from scratch.
+        Deferred deliberately,
+        because it is worth building only once the prior's quality
+        is known,
+        and that is what the protocol captures establish.
+  \item \textbf{Full-frame capture switch}, to close ladder rung 3.
+\end{itemize}
+
+\subsection{Relation to the other documents}
+
+This is Layer 1 of \code{colorimeter\_plan.tex},
+with two amendments to \code{colorimeter\_methods.tex}:
+the correction divides rather than subtracts (\S\ref{sec:divide}),
+and the stored artifact is a multiplicative gain
+derived from authoritative coefficients
+rather than an additive trend array (\S\ref{sec:implementation}).
+Layer 3's strip-uniformity flag is the consumer of criterion S.
+
+\end{document}

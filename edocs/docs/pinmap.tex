@@ -1,0 +1,843 @@
+% ============================================================
+%  Pin Mapping: Raspberry Pi Zero 2 W  <-->  Adafruit 1651
+%  2.8" TFT Touch Shield (ILI9341 + TSC2007)
+%  Custom PCB Design Reference  --  DIY Kit
+% ============================================================
+\documentclass[11pt,a4paper]{article}
+
+\usepackage[a4paper, margin=2cm]{geometry}
+\usepackage{booktabs}
+\usepackage{tabularx}
+\usepackage{longtable}
+\usepackage{array}
+\usepackage{xcolor}
+\usepackage{colortbl}
+\usepackage{hyperref}
+\usepackage{parskip}
+\usepackage{microtype}
+\usepackage{fancyhdr}
+\usepackage{titlesec}
+\usepackage{mdframed}
+\usepackage{enumitem}
+\usepackage{multirow}
+\usepackage{amsmath}
+
+% ── Colours ──────────────────────────────────────────────────
+\definecolor{hdr}{RGB}{30,70,120}
+\definecolor{rowA}{RGB}{235,242,252}
+\definecolor{rowB}{RGB}{248,251,255}
+\definecolor{warn}{RGB}{255,243,205}
+\definecolor{warnborder}{RGB}{200,150,0}
+\definecolor{notebg}{RGB}{237,247,237}
+\definecolor{noteborder}{RGB}{60,140,60}
+\definecolor{oddcol}{RGB}{220,235,255}
+\definecolor{evencol}{RGB}{220,250,225}
+\definecolor{pwrcol}{RGB}{255,230,220}
+
+% ── Column types ─────────────────────────────────────────────
+\newcolumntype{L}[1]{>{\raggedright\arraybackslash}p{#1}}
+\newcolumntype{C}[1]{>{\centering\arraybackslash}p{#1}}
+
+% ── Section styling ───────────────────────────────────────────
+\titleformat{\section}{\large\bfseries\color{hdr}}{}{0em}{}[\titlerule]
+\titleformat{\subsection}{\normalsize\bfseries\color{hdr}}{}{0em}{}
+
+% ── Header / footer ───────────────────────────────────────────
+\pagestyle{fancy}
+\fancyhf{}
+\lhead{\small RPi Zero 2W $\leftrightarrow$ Adafruit 1651 Pin Mapping}
+\rhead{\small DIY Kit PCB Reference}
+\cfoot{\small Page \thepage}
+\renewcommand{\headrulewidth}{0.4pt}
+
+% ── Note / warning boxes ──────────────────────────────────────
+\newmdenv[
+  backgroundcolor=notebg,
+  linecolor=noteborder,
+  linewidth=1.2pt,
+  leftmargin=0pt, rightmargin=0pt,
+  innerleftmargin=8pt, innerrightmargin=8pt,
+  innertopmargin=6pt, innerbottommargin=6pt,
+  skipabove=6pt, skipbelow=6pt
+]{notebox}
+
+\newmdenv[
+  backgroundcolor=warn,
+  linecolor=warnborder,
+  linewidth=1.2pt,
+  leftmargin=0pt, rightmargin=0pt,
+  innerleftmargin=8pt, innerrightmargin=8pt,
+  innertopmargin=6pt, innerbottommargin=6pt,
+  skipabove=6pt, skipbelow=6pt
+]{warnbox}
+
+% ── Helpers ───────────────────────────────────────────────────
+\newcommand{\fixed}{\textbf{FIXED}}
+\newcommand{\soft}{\textit{soft}}
+\newcommand{\na}{---}
+
+% =============================================================
+\begin{document}
+
+\begin{center}
+  {\LARGE\bfseries\color{hdr}
+    Pin Mapping Reference\\[4pt]
+    Raspberry Pi Zero 2~W $\leftrightarrow$ Adafruit 1651}\\[6pt]
+  {\large 2.8\,'' TFT Touch Shield with Resistive Touch (TSC2007)}\\[4pt]
+  {\normalsize Custom PCB Design --- DIY Kit\\
+   \textit{Point-to-point wiring between RPi header and 1651 shield header}}\\[2pt]
+  {\small\color{gray}
+    Sources: Adafruit Learning System (learn.adafruit.com/adafruit-2-8-tft-touch-shield-v2),\\
+    Raspberry Pi GPIO documentation
+    (\href{https://www.raspberrypi.com/documentation/computers/raspberry-pi.html\#gpio}%
+    {raspberrypi.com/documentation/computers/raspberry-pi.html\#gpio})}
+\end{center}
+
+\vspace{4pt}\hrule\vspace{10pt}
+
+% ── RPi GPIO Quick Reference ──────────────────────────────────
+\section{RPi Zero 2~W GPIO Peripheral Reference}
+
+The following functions are fixed by the BCM2710A1 SoC and cannot be
+remapped in software.  All GPIO pins operate at \textbf{3.3\,V logic}.
+Applying 5\,V to any GPIO pin will permanently damage the board.
+
+\begin{notebox}
+\textbf{Source:}
+\href{https://www.raspberrypi.com/documentation/computers/raspberry-pi.html\#gpio}%
+{raspberrypi.com --- GPIO documentation}
+
+\smallskip
+\textbf{PWM (pulse-width modulation)}
+\begin{itemize}[noitemsep,topsep=2pt]
+  \item Software PWM available on all pins
+  \item Hardware PWM available on \textbf{GPIO12, GPIO13, GPIO18, GPIO19}
+\end{itemize}
+
+\textbf{SPI}
+\begin{itemize}[noitemsep,topsep=2pt]
+  \item SPI0: MOSI (GPIO10); MISO (GPIO9); SCLK (GPIO11);
+        CE0 (GPIO8); CE1 (GPIO7)
+  \item SPI1: MOSI (GPIO20); MISO (GPIO19); SCLK (GPIO21);
+        CE0 (GPIO18); CE1 (GPIO17); CE2 (GPIO16)
+\end{itemize}
+
+\textbf{I2C}
+\begin{itemize}[noitemsep,topsep=2pt]
+  \item Data: GPIO2 \quad Clock: GPIO3
+  \item EEPROM Data: GPIO0 \quad EEPROM Clock: GPIO1
+        \quad \textit{(do not use for general I/O)}
+\end{itemize}
+
+\textbf{Serial (UART)}
+\begin{itemize}[noitemsep,topsep=2pt]
+  \item TX: GPIO14 (physical pin~8) \quad RX: GPIO15 (physical pin~10)
+  \item \textit{These are reserved for the Linux serial console by default.
+        Avoid using them for general I/O in a DIY kit.}
+\end{itemize}
+\end{notebox}
+
+% ── Power Pin Note ────────────────────────────────────────────
+\subsection{Power and Ground Pin Notes}
+
+\begin{warnbox}
+\textbf{5V pins --- Pin~2 and Pin~4 (both even side):}
+Both pins are electrically identical --- connected directly to the
+incoming micro-USB supply rail with no intervening regulation or
+current limiting beyond the board's polyfuse.
+The duplication is for PCB routing convenience only.
+Either may be used; for a DIY kit, Pin~2 is conventional.
+Current capacity is limited only by your power supply and the board's
+polyfuse (typically rated around 2\,A for the Zero 2\,W).
+
+\smallskip
+\textbf{3.3V pins --- Pin~1 (odd) and Pin~17 (odd):}
+Both are outputs of the same onboard 3.3\,V regulator.
+They are electrically identical.
+The \textbf{total} current available from the 3.3\,V rail
+(shared with all GPIO output drivers and any attached peripherals)
+is approximately \textbf{50\,mA}.
+The 1651 shield has its own onboard 3.3\,V regulator fed from the 5\,V
+rail, so it does \emph{not} draw from the RPi's 3.3\,V supply.
+Do not power the 1651 from the RPi 3.3\,V pin.
+
+\smallskip
+\textbf{Ground pins:}
+Physical pins 6, 9, 14, 20, 25, 30, 34, and 39 are all ground.
+They are all identical. Use the ground pin physically closest to
+the signal pins being routed for best noise performance.
+For a two-connector PCB layout (odd-side and even-side headers),
+use Pin~9 or Pin~25 for the odd-side (1651) ground return,
+and Pin~6, 14, or 20 for the even-side ground return.
+\end{warnbox}
+
+% =============================================================
+\section{RPi Zero 2~W --- Complete Pin Allocation Table}
+
+\textbf{Legend:} \colorbox{oddcol}{\strut Odd-side pin} \quad
+\colorbox{evencol}{\strut Even-side pin} \quad
+\colorbox{pwrcol}{\strut Power / Ground}
+
+\smallskip
+Column headers: \textbf{Phys} = physical header pin number;
+\textbf{BCM} = Broadcom GPIO number used in Python code;
+\textbf{Dir} = I=input, O=output, PWM, PWR;
+\textbf{Assignment} = function in this design.
+
+\vspace{6pt}
+
+\setlength{\tabcolsep}{4pt}
+\renewcommand{\arraystretch}{1.30}
+
+\begin{longtable}{C{0.9cm} C{1.3cm} C{0.8cm} L{3.5cm} L{7.5cm}}
+  \toprule
+  \rowcolor{hdr}
+  \color{white}\textbf{Phys} &
+  \color{white}\textbf{BCM} &
+  \color{white}\textbf{Dir} &
+  \color{white}\textbf{Assignment} &
+  \color{white}\textbf{Notes} \\
+  \midrule
+  \endfirsthead
+  \toprule
+  \rowcolor{hdr}
+  \color{white}\textbf{Phys} &
+  \color{white}\textbf{BCM} &
+  \color{white}\textbf{Dir} &
+  \color{white}\textbf{Assignment} &
+  \color{white}\textbf{Notes} \\
+  \midrule
+  \endhead
+  \bottomrule
+  \endfoot
+
+  %% ── ODD SIDE ─────────────────────────────────────────────
+  \multicolumn{5}{l}{\cellcolor{oddcol}\textbf{Odd-side pins --- 1651 Display and Touch (point-to-point wiring to shield)}} \\
+  \midrule
+
+  \rowcolor{pwrcol}
+  1 & \na & PWR & 3.3\,V & \textit{Not used for 1651. Available for other 3.3\,V loads
+    if total rail current stays under 50\,mA.} \\
+
+  \rowcolor{oddcol}
+  3 & GPIO2 & I/O & I2C SDA $\to$ TSC2007 &
+    \fixed\ by SoC. I2C bus 1 data.
+    Enable with \texttt{dtparam=i2c\_arm=on} in \texttt{/boot/config.txt}.
+    The 1651 shield has onboard 4.7\,k$\Omega$ pull-ups on SDA/SCL --- do not add
+    additional pull-ups on the PCB. See protective resistor note (Section~\ref{sec:passive}). 
+    [To J1-Pin2]\\
+
+  \rowcolor{rowB}
+  5 & GPIO3 & I/O & I2C SCL $\to$ TSC2007 &
+    \fixed\ by SoC. I2C bus 1 clock.
+    Same pull-up note as SDA above. 
+    [To J1-Pin4]\\
+
+  \rowcolor{oddcol}
+  7 & GPIO4 & I & TSIRQ (touch interrupt) &
+    \soft\ assignment.
+    Active-low interrupt from TSC2007.
+    Enable internal pull-up in software: \texttt{GPIO.setup(4, GPIO.IN, pull\_up\_down=GPIO.PUD\_UP)}.
+    Add 33\,$\Omega$ series resistor on PCB for ESD protection. 
+    [To J1-Pin10]\\
+
+  \rowcolor{pwrcol}
+  9 & \na & GND & Ground (1651 return) &
+    Connect to ground plane. \\
+
+  \rowcolor{oddcol}
+  11 & GPIO17 & \na & \textit{Spare} &
+  Unallocated. Reserve for future use. 
+  Add 33\,$\Omega$ series resistor on PCB. 
+  [To J1-Pin14]\\
+
+  \rowcolor{pwrcol}
+  17 & \na & PWR & 3.3\,V &
+    \textit{Not used for 1651. See power notes above.} \\
+
+  \rowcolor{oddcol}
+  19 & GPIO10 & O & SPI0 MOSI $\to$ ILI9341 &
+    \fixed\ by SoC (SPI0 MOSI). High-speed data to display.
+    Add 33\,$\Omega$ series resistor on PCB.
+    [To J1-Pin 13] \\
+
+  \rowcolor{rowB}
+  21 & GPIO9 & I & SPI0 MISO $\leftarrow$ ILI9341 &
+    \fixed\ by SoC (SPI0 MISO). Read-back from display/SD.
+    Add 33\,$\Omega$ series resistor on PCB. 
+    [To J1-Pin 14]\\
+
+  \rowcolor{oddcol}
+  23 & GPIO11 & O & SPI0 SCLK $\to$ ILI9341 &
+    \fixed\ by SoC (SPI0 clock).
+    Add 33\,$\Omega$ series resistor on PCB. 
+    [To J1-Pin 11]\\
+
+  \rowcolor{pwrcol}
+  25 & \na & GND & Ground &
+    Connect to ground plane. \\
+
+  \rowcolor{rowB}
+  27 & GPIO0 & \na & \textit{PIN REMOVED, DO NOT USE} &
+    Reserved for HAT ID EEPROM. Leave unconnected. \\
+
+  \rowcolor{pwrcol}
+  29 & GPIO5 & \na & Unassigned &
+  May be used as active-low SD Card CS on 1651.
+  Add 33\,$\Omega$ series resistor on PCB. 
+  [To J1-Pin 8]\\
+
+  \rowcolor{rowB}
+  31 & GPIO6 & O & TFT DC (Data/Command) &
+  \soft\ assignment. Data/Command select for ILI9341.
+  Add 33\,$\Omega$ series resistor on PCB. 
+  [To J1-Pin 7]\\
+
+  \rowcolor{oddcol}
+  33 & GPIO13 & PWM & Backlight PWM $\to$ 1651 LITE &
+    \soft\ assignment. \textbf{Hardware PWM channel 1} (BCM2710 PWM1).
+    Connect to 1651 LITE pin (solder the LITE/\#3 jumper on shield).
+    Add 33\,$\Omega$ series resistor on PCB.
+    Software: use \texttt{RPi.GPIO} PWM or \texttt{pigpio} for precise frequency.  
+    [To J1-Pin 9] \\
+
+  \rowcolor{rowB}
+  35 & GPIO19 & ? & SPI1 MISO &
+    \soft\ assignment. (SPI1 MOSI pin is used for the Shift Register).
+    Pin 35 is exposed on J4-Pin 4. It can be used as general IO, or as SPI1 MISO.
+    Add 33\,$\Omega$ series resistor on PCB. [To J4-Pin4] \\
+
+  \rowcolor{pwrcol}
+  37 & GPIO26 & \na & \textit{Spare} &
+  Unallocated. Reserve for future use. [To J1-Pin 16]\\
+
+  \rowcolor{pwrcol}
+  39 & \na & GND & Ground &
+  Connect to ground plane. \\
+
+  \midrule
+  %% ── EVEN SIDE ─────────────────────────────────────────────
+  \multicolumn{5}{l}{\cellcolor{evencol}\textbf{Even-side pins --- General I/O (LEDs, Inputs, 1-Wire, MOSFET control)}} \\
+  \midrule
+
+  \rowcolor{pwrcol}
+  2 & \na & PWR & 5\,V $\to$ 1651 VIN &
+    \textbf{Primary 5\,V supply for the 1651 shield.}
+    The shield's onboard regulator converts this to 3.3\,V for the ILI9341 and TSC2007.
+    Do not use the RPi 3.3\,V rail to power the 1651. 
+    [To J1-Pin 1]\\
+
+  \rowcolor{pwrcol}
+  4 & \na & PWR & 5\,V $\to$ LED's &
+    Electrically identical to Pin~2. Available for other 5\,V loads on the PCB
+    (e.g., MOSFET gate driver supply if needed).  
+    [To LED \\
+
+  \rowcolor{pwrcol}
+  6 & \na & GND & Ground (even-side return) &
+   Connect to ground plane. \\
+
+  \rowcolor{evencol}
+  8 & GPIO14 & \na & \textit{UART TX --- DO NOT USE} &
+    Linux serial console TX by default. Do not use for general I/O in a kit.
+    Leave unconnected at header. \\
+
+  \rowcolor{rowB}
+  10 & GPIO15 & \na & \textit{UART RX --- DO NOT USE} &
+    Linux serial console RX by default. Leave unconnected at header. \\
+
+  \rowcolor{evencol}
+  12 & GPIO18 & O & Indicator LED 3 &
+    \soft\ assignment. Hardware PWM capable (PWM0) if dimming desired.
+    Option Interface header J3: via jumper JP2 (closed) $\to$ J3-Pin4.
+    Option SPI1 CE0/Interface header J4: via jumper JP1 (open) $\to$ J4-Pin6  
+    Add 470\,$\Omega$ current-limit resistor.\\
+
+  \rowcolor{pwrcol}
+  14 & \na & GND & Ground &
+    Connect to ground plane.\\
+
+  \rowcolor{evencol}
+  16 & GPIO23 & O & Indicator LED 2 &
+    \soft\ assignment. General GPIO output.
+    Interface header J3 $\to$ J3-Pin4.
+    Add 33\,$\Omega$ current-limit resistor in series with LED on PCB. \\
+
+  \rowcolor{rowB}
+  18 & GPIO24 & O?I? & 74HC595 RCLK &
+    Connect to pin 12 on 74HC595 
+    Add 33\,$\Omega$ series ESD resistor on PCB.\\
+
+  \rowcolor{pwrcol}
+  20 & \na & GND & Ground &
+    Connect to ground plane.\\
+
+  \rowcolor{evencol}
+  22 & GPIO25 & O & Control LED 10 (MOSFET gate) &
+    500\,$\Omega$ gate resistor and 10K\,$\Omega$ bleed resistor.\\
+  
+  \rowcolor{evencol}
+  24 & GPIO8 & O & TFT CS $\to$ ILI9341 (SPI0 CE0) &
+    \fixed\ by SoC (SPI0 CE0). \textbf{Only even-pin forced exception for 1651.}
+    Hardware-managed chip select.
+    Add 33\,$\Omega$ series resistor on PCB. \\
+
+  \rowcolor{rowB}
+  26 & GPIO7 & O & Control LED 9 (MOSFET gate) &
+  500\,$\Omega$ gate resistor and 10K\,$\Omega$ bleed resistor.\\
+  
+
+  \rowcolor{pwrcol}
+  28 & GPIO1 & \na & \textit{PIN REMOVED, DO NOT USE} &
+    Reserved for HAT ID EEPROM. Leave unconnected. \\
+
+  \rowcolor{pwrcol}
+  30 & \na & GND & Ground &
+    Connect to ground plane. \\
+
+  \rowcolor{evencol}
+  32 & GPIO12 & PWM & Buzzer &
+    Hardware PWM  (PWM0 channel A) 
+    Add 1K\,$\Omega$ current-limit resistor.\\
+
+  \rowcolor{pwrcol}
+  34 & \na & GND & Ground &
+    Additional even-side ground. \\
+
+  \rowcolor{evencol}
+  36 & GPIO16 & I/O & 1-Wire bus &
+    This is not the default 1-Wire pin.
+	\textbf{Requires:} \texttt{dtoverlay=w1-gpio,gpiopin=7} in \texttt{/boot/config.txt}.
+	\textbf{Requires 4.7\,k$\Omega$ pull-up to 3.3\,V on PCB}.
+	(This is a PCB passive component, not a GPIO internal pull-up --- 
+	the 1-Wire protocol requires a strong external pull-up.)\\
+		  
+  \rowcolor{rowB}
+  38 & GPIO20 & O & SPI1-MOSI &
+    Connect to Pin 14 of 74HC595.  Also connects to J4-Pin3, where it can be used as SPI1-MOSI or potentially some other output signal
+    Add 470\,$\Omega$ gate resistor on PCB. \\
+
+  \rowcolor{pwrcol}
+  39 & \na & GND & Ground &
+    See odd-side row above. \\
+
+  \rowcolor{evencol}
+  40 & GPIO21 & ? & Connect to 74HC595 SRCLCK Pin 11. \\
+
+\end{longtable}
+
+\begin{warnbox}
+	These are as-built.
+\end{warnbox}
+
+% =============================================================
+\section{Adafruit 1651 Shield Pin Mapping Table}
+\label{sec:1651}
+
+Point-to-point wiring from each shield pin to the RPi header.
+Column 1 is the Arduino/Metro silkscreen label on the 1651 shield.
+Passive components (series resistors) sit on the PCB between the RPi
+header and the wire going to the 1651 shield pin.
+
+\vspace{6pt}
+\renewcommand{\arraystretch}{1.30}
+
+\begin{longtable}{C{1.5cm} C{1.4cm} C{1.4cm} L{2.8cm} L{6.5cm}}
+  \toprule
+  \rowcolor{hdr}
+  \color{white}\textbf{1651 Pin} \newline \color{white}\footnotesize(Arduino label) &
+  \color{white}\textbf{RPi Odd} \newline \color{white}\footnotesize(physical/BCM) &
+  \color{white}\textbf{RPi Even} \newline \color{white}\footnotesize(physical/BCM) &
+  \color{white}\textbf{Description} &
+  \color{white}\textbf{Notes} \\
+  \midrule
+  \endfirsthead
+  \toprule
+  \rowcolor{hdr}
+  \color{white}\textbf{1651 Pin} \newline \color{white}\footnotesize(Arduino label) &
+  \color{white}\textbf{RPi Odd} \newline \color{white}\footnotesize(physical/BCM) &
+  \color{white}\textbf{RPi Even} \newline \color{white}\footnotesize(physical/BCM) &
+  \color{white}\textbf{Description} &
+  \color{white}\textbf{Notes} \\
+  \midrule
+  \endhead
+  \bottomrule
+  \endfoot
+
+  %% Power
+  \rowcolor{pwrcol}
+  \textbf{5V / VIN} &
+  \na &
+  Pin~2 &
+  Board power in &
+  5\,V from RPi micro-USB rail. Feeds onboard 3.3\,V regulator.
+  Do \emph{not} use RPi 3.3\,V.
+  No series resistor --- power line. Use adequate trace width on PCB. \\
+
+  \rowcolor{pwrcol}
+  \textbf{GND} &
+  Pin~9 or 25 &
+  Pin~6, 14, or 20 &
+  Ground &
+  Common ground. Use the ground pin nearest the signal traces being routed. \\
+
+  %% SPI bus
+  \rowcolor{oddcol}
+  \textbf{ICSP MOSI} &
+  Pin~19 / GPIO10 &
+  \na &
+  SPI0 MOSI $\to$ ILI9341 &
+  \fixed. 33\,$\Omega$ series resistor on PCB (RPi side of resistor connects to pin~19;
+  shield side connects to ICSP MOSI pin). \\
+
+  \rowcolor{rowB}
+  \textbf{ICSP MISO} &
+  Pin~21 / GPIO9 &
+  \na &
+  SPI0 MISO $\leftarrow$ ILI9341 &
+  \fixed. 33\,$\Omega$ series resistor on PCB. \\
+
+  \rowcolor{oddcol}
+  \textbf{ICSP SCK} &
+  Pin~23 / GPIO11 &
+  \na &
+  SPI0 clock &
+  \fixed. 33\,$\Omega$ series resistor on PCB. \\
+
+  \rowcolor{evencol}
+  \textbf{D10} --- TFT CS &
+  \na &
+  Pin~24 / GPIO8 &
+  Display chip select (CE0) &
+  \fixed\ (SPI0 CE0). Only even-side pin forced for 1651.
+  33\,$\Omega$ series resistor on PCB. Active-low. \\
+
+  \rowcolor{oddcol}
+  \textbf{D9} --- TFT DC &
+  Pin~35 / GPIO19 &
+  \na &
+  Data/Command select &
+  \soft. 33\,$\Omega$ series resistor on PCB. \\
+
+  %% SD card
+  \rowcolor{oddcol}
+  \textbf{D4} --- SD CS &
+  Pin~11 / GPIO17 &
+  \na &
+  microSD chip select &
+  \soft. Active-low. 33\,$\Omega$ series resistor on PCB.
+  Only wire if microSD is used; otherwise leave open. \\
+
+  %% Touch / I2C
+  \rowcolor{oddcol}
+  \textbf{SDA} &
+  Pin~3 / GPIO2 &
+  \na &
+  I2C SDA $\to$ TSC2007 &
+  \fixed. The 1651 shield has onboard 4.7\,k$\Omega$ pull-up.
+  Do \emph{not} add a second pull-up on PCB.
+  33\,$\Omega$ series resistor on PCB for ESD. \\
+
+  \rowcolor{rowB}
+  \textbf{SCL} &
+  Pin~5 / GPIO3 &
+  \na &
+  I2C clock $\to$ TSC2007 &
+  \fixed. Same pull-up and ESD notes as SDA. \\
+
+  \rowcolor{oddcol}
+  \textbf{D2} --- TSIRQ &
+  Pin~7 / GPIO4 &
+  \na &
+  Touch interrupt (active-low) &
+  \soft. Solder the TSIRQ/\#2 jumper on 1651 to enable.
+  Enable RPi internal pull-up in software.
+  33\,$\Omega$ series resistor on PCB. \\
+
+  %% Backlight
+  \rowcolor{oddcol}
+  \textbf{D3} --- LITE &
+  Pin~33 / GPIO13 &
+  \na &
+  Backlight PWM &
+  \soft. Solder the LITE/\#3 jumper on 1651 to enable.
+  Hardware PWM channel 1.
+  33\,$\Omega$ series resistor on PCB. \\
+
+  %% VddIO note
+  \rowcolor{warn}
+  \textbf{VddIO jumper} &
+  \multicolumn{4}{L{12cm}}{%
+    \textbf{IMPORTANT:} The 1651 VddIO jumper must be set to \textbf{3V}
+    (solder left pad to centre pad) because the RPi Zero 2\,W is a 3.3\,V logic device.
+    This selects the logic reference voltage for the 74LVX245 level shifters on the shield.
+    Incorrect setting risks damaged GPIO pins.} \\
+
+\end{longtable}
+
+new version of table
+
+\begin{longtable}{C{1.5cm} C{1.0cm} C{1.0cm} C{1.4cm} L{2.6cm} L{6.9cm}}
+	\toprule
+	\rowcolor{hdr}
+	\color{white}\textbf{1651 GPIO} \newline \color{white}\footnotesize(Arduino label) &
+	\color{white}\textbf{1651 Pin} \newline \color{white}\footnotesize(Arduino label) &
+	\color{white}\textbf{J1 Pin} \newline \color{white}\footnotesize(header KiCad) &
+	\color{white}\textbf{RPi Pin} \newline \color{white}\footnotesize(rpi header) &
+	\color{white}\textbf{RPi}\newline\textbf{GPIO} \newline \color{white}\footnotesize(rpi header) &
+	\color{white}\textbf{Description}  \\
+	\midrule
+	\endfirsthead
+	\bottomrule
+	\endfoot
+	
+	%% Power
+	\rowcolor{pwrcol}
+	\textbf{5V / VIN} & (10) & J~1 & pin~2 & V5+ &
+	5\,V from RPi micro-USB rail. Feeds onboard 3.3\,V regulator.
+	Do \emph{not} use RPi 3.3\,V.
+	No series resistor --- power line. Use adequate trace width on PCB. \\
+	
+	\rowcolor{pwrcol}
+	\textbf{GND} & (8,9) & J~3 J~5 & GND & Ground &
+	Connects to ground plane on boards. \\
+	
+	%% SPI reset
+	\rowcolor{evencol}
+	\textbf{RESET} & RESET & J~14 & pin~11 & GPIO17 &
+	\soft. 33\,$\Omega$ series resistor on PCB. 
+	Used for hardware reset of ILI9341.
+	More reliable than the ILI9341's software reset (0x01).\\
+	
+	%% SPI bus
+	\rowcolor{oddcol}
+	\textbf{ICSP MOSI} & D11 & J~13 & pin~19 & GPIO10/SPI0 MOSI &
+	\fixed. 33\,$\Omega$ series resistor on PCB at RPi pin 19.
+	$\to$ TFT ILI9341 MOSI \\
+	  
+	%% SPI bus
+	\rowcolor{evencol}
+	\textbf{ICSP MISO} & D12 & J~12 & pin-21 & GPIO9/SPI0 MISO &
+	\fixed. 33\,$\Omega$ series resistor on PCB. 
+	Shared SPI0 MISO return path from TFT ILI9341 MISO and microSD subsystem.\\
+	
+	%% SPI bus
+	\rowcolor{oddcol}
+	\textbf{ICSP SCK} & D13 & J~11 & pin~23 & GPIO11/SPI0 SCLK &
+	\fixed. 33\,$\Omega$ series resistor on PCB. 
+	$\to$ TFT ILI9341 SCK.\\
+	
+	%% SPI bus
+	\rowcolor{evencol}
+	\textbf{TFT CS} & D10 & J~6 & pin~24 & GPIO8/SPI0 CE0 &
+	\fixed\ 33\,$\Omega$ series resistor on PCB. Active-low. 
+	$\to$ TFT ILI9341 CS --- Chip Select\\
+
+	%% SPI bus
+	\rowcolor{oddcol}
+	\textbf{TFT DC} & D9 & J~7 & pin~31 & GPIO6 &
+	\soft. 33\,$\Omega$ series resistor on PCB. 
+	$\to$ TFT ILI9341 DC --- Data/Command select\\
+
+	%% SD card
+	\rowcolor{evencol}
+	\textbf{SD CS} & D4 & J~8 & Pin~29 & GPIO5 &
+	\soft. Active-low. 33\,$\Omega$ series resistor on PCB.
+	SDcard Chip Select. (May change if microSD is not used.)\\
+
+	%% Touch / I2C
+	\rowcolor{oddcol}
+	\textbf{SDA} & SDA(17) & J~2 & Pin~3 & GPIO2/I2C SDA1 &
+	\fixed. 33\,$\Omega$ series resistor on PCB for ESD.  
+	The 1651 shield has onboard 4.7\,k$\Omega$ pull-up.
+	Do \emph{not} add a second pull-up on PCB.
+	$\to$ TSC2007-SDA \\
+	
+	\rowcolor{evencol}
+	\textbf{SCL} & SCL(18) & J~4 & Pin~5 & GPIO3/I2C SCL1 &
+	\fixed. Same pull-up and ESD notes as SDA. 
+	$\to$ TSC2007-SCL\\
+	
+	\rowcolor{oddcol}
+	\textbf{TSIRQ} & D~2 & J~10 & Pin~7 & GPIO4 &
+	\soft. Touch interrupt (active-low). Solder the TSIRQ/\#2 jumper on 1651 to enable.
+	Enable RPi internal pull-up in software.
+	33\,$\Omega$ series resistor on PCB. \\
+
+	%% Backlight
+	\rowcolor{evencol}
+	\textbf{LITE} & D3 & J~9 &Pin~33 & GPIO13 &
+	\soft. Backlight PWM. 
+	Hardware PWM channel 1. 
+	Solder the LITE/\#3 jumper on 1651 to enable.
+	33\,$\Omega$ series resistor on PCB. \\
+	
+	%% VddIO note
+	\rowcolor{warn}
+	\textbf{VddIO jumper} &
+	\multicolumn{5}{L{14cm}}{%
+		\textbf{IMPORTANT:} The 1651 VddIO jumper must be set to \textbf{3V}
+		(solder left pad to centre pad) because the RPi Zero 2\,W is a 3.3\,V logic device.
+		This selects the logic reference voltage for the 74LVX245 level shifters on the shield.
+		Incorrect setting risks damaged GPIO pins.} \\
+	
+\end{longtable}
+% =============================================================
+\section{Passive Component Recommendations for DIY Kit}
+\label{sec:passive}
+
+\subsection{Protective Series Resistors on 1651 Signal Lines}
+
+All signal lines between the RPi GPIO header and the 1651 shield header
+should have a \textbf{33\,$\Omega$ series resistor} placed on the PCB,
+on the RPi side of the wire run (i.e., close to the RPi header).
+
+\begin{notebox}
+\textbf{Rationale:}
+The RPi's GPIO pins have no internal current limiting or ESD protection diodes
+rated for external misconnection.
+A 33\,$\Omega$ resistor limits the peak fault current if a signal line is
+accidentally shorted to 5\,V or GND during kit assembly or use,
+and damps transmission-line ringing on the SPI clock and data lines
+at high speed (40\,MHz).
+At 40\,MHz SPI, the RC time constant with typical PCB trace capacitance
+($\sim$5\,pF) gives a corner frequency well above 100\,MHz,
+so the resistor has negligible effect on signal integrity at this speed.
+
+\smallskip
+\textbf{Value:} 33\,$\Omega$ is the standard recommended value for RPi GPIO protection.
+Acceptable range: 22--47\,$\Omega$.
+\textbf{Package:} 0402 or 0603 SMD preferred for a compact PCB.
+Place as close as possible to the RPi GPIO header pin.
+\end{notebox}
+
+\textbf{Specific lines and resistor placement:}
+
+\begin{itemize}[noitemsep]
+  \item \textbf{SPI lines (MOSI, MISO, SCLK, TFT CS, TFT DC, SD CS):}
+        33\,$\Omega$ each. Place within 5\,mm of RPi header.
+  \item \textbf{I2C lines (SDA, SCL):}
+        33\,$\Omega$ each. Note: the 1651 shield already has 4.7\,k$\Omega$ pull-ups
+        on these lines. Do \emph{not} add PCB pull-ups --- the shield pull-ups are sufficient.
+  \item \textbf{TSIRQ:} 33\,$\Omega$ series. RPi internal pull-up enabled in software.
+  \item \textbf{LITE (backlight PWM):} 33\,$\Omega$ series.
+  \item \textbf{5\,V power line:} No series resistor. Use adequate trace width
+        ($\geq$0.5\,mm for up to 500\,mA).
+  \item \textbf{GND:} No series resistor.
+\end{itemize}
+
+\subsection{1-Wire Bus Pull-up}
+
+\begin{warnbox}
+The 1-Wire bus on GPIO7 (physical pin~26) \textbf{requires a 4.7\,k$\Omega$ pull-up
+resistor to 3.3\,V} on the PCB.
+This is a hard requirement of the 1-Wire protocol --- the internal RPi pull-up
+(50\,k$\Omega$) is far too weak and will cause communication failures.
+Use a 4.7\,k$\Omega$ resistor to the 3.3\,V rail (RPi pin~1 or pin~17).
+Package: 0402 or 0603 SMD.
+\end{warnbox}
+
+\subsection{LED Current-Limit Resistors}
+
+All LED outputs (indicator LEDs on GPIO12, GPIO18, GPIO23;
+control LEDs on GPIO16, GPIO20, GPIO21) must have current-limiting
+resistors in series with the LED on the PCB.
+
+\begin{itemize}[noitemsep]
+  \item RPi GPIO output voltage: 3.3\,V
+  \item Maximum current per GPIO pin: 16\,mA (recommended: 8--12\,mA for longevity)
+  \item Typical LED forward voltage: 2.0\,V (red/yellow), 3.0\,V (blue/green/white)
+  \item \textbf{Recommended resistor for red/yellow LED:}
+        $(3.3 - 2.0)\,\text{V} / 10\,\text{mA} = 130\,\Omega$, use \textbf{150\,$\Omega$}
+  \item \textbf{Recommended resistor for blue/green/white LED:}
+        $(3.3 - 3.0)\,\text{V} / 10\,\text{mA} = 30\,\Omega$, use \textbf{33\,$\Omega$}
+        (or higher if the LED is very bright)
+  \item Package: 0402 or 0603 SMD.
+\end{itemize}
+
+\subsection{MOSFET Gate Resistors}
+
+For MOSFET gate drive lines (GPIO16, GPIO20, GPIO21, and any remaining
+MOSFET control pins), place a \textbf{33--100\,$\Omega$ gate resistor}
+in series between the GPIO output and the MOSFET gate.
+This limits the gate charge current spike at switch-on,
+which would otherwise present a momentary short-circuit load to the GPIO pin.
+If MOSFETs switch inductive loads, add a flyback diode across the load.
+
+\subsection{Decoupling Capacitors}
+
+\begin{notebox}
+\textbf{On the RPi header power pins:}
+Place a \textbf{100\,nF ceramic capacitor} (0402 or 0603, X5R or X7R)
+between the 5\,V supply pin (pin~2) and the nearest GND pin (pin~6)
+on the PCB, as close as possible to the connector.
+This decouples switching transients on the supply caused by the display's
+SPI bursts.
+
+\smallskip
+\textbf{On the 1651 shield header power pin:}
+Place a \textbf{100\,nF ceramic} plus optionally a \textbf{10\,$\mu$F electrolytic}
+(or tantalum) in parallel, between VIN and GND at the shield power header pins.
+The larger capacitor absorbs the inrush current when the display backlight
+and SPI bus first activate.
+
+\smallskip
+\textbf{On the 3.3\,V rail (for 1-Wire and I2C pull-ups):}
+Place a \textbf{100\,nF ceramic} between 3.3\,V (pin~1 or 17) and GND
+close to the pull-up resistors.
+
+\smallskip
+\textbf{No capacitors are needed} in the GPIO signal paths.
+The 33\,$\Omega$ series resistors already damp any ringing.
+Adding capacitance to SPI lines would slow the edges at high speed.
+\end{notebox}
+
+% =============================================================
+\section{Software Configuration Notes}
+
+\begin{itemize}[noitemsep]
+  \item \textbf{SPI:} Enable with \texttt{dtparam=spi=on} in \texttt{/boot/config.txt}
+  \item \textbf{I2C:} Enable with \texttt{dtparam=i2c\_arm=on} in \texttt{/boot/config.txt}
+  \item \textbf{1-Wire:} Enable with
+        \texttt{dtoverlay=w1-gpio,gpiopin=7} in \texttt{/boot/config.txt}
+        (non-default pin; standard default is GPIO4)
+  \item \textbf{Backlight PWM:} GPIO13 is hardware PWM channel~1 (PWM1).
+        Use \texttt{pigpio} library for precise frequency and duty-cycle control,
+        or \texttt{RPi.GPIO} for simple on/off and software PWM.
+  \item \textbf{TSIRQ:} Configure GPIO4 as input with pull-up.
+        TSC2007 default I2C address: \texttt{0x48}.
+  \item \textbf{1651 VddIO jumper:} Must be set to 3V before powering on.
+\end{itemize}
+
+% =============================================================
+\section{Summary: Unallocated and Reserved Pins}
+
+\begin{tabular}{L{2cm} L{2cm} L{9cm}}
+  \toprule
+  \textbf{Physical} & \textbf{BCM} & \textbf{Status} \\
+  \midrule
+  Pin 1  & \na     & 3.3\,V --- available for low-current peripherals \\
+  Pin 17 & \na     & 3.3\,V --- available for low-current peripherals \\
+  Pin 13 & GPIO27  & \textit{Spare odd-side GPIO --- reserve} \\
+  Pin 15 & GPIO22  & \textit{Spare odd-side GPIO --- reserve} \\
+  Pin 27 & GPIO0   & EEPROM --- do not use \\
+  Pin 28 & GPIO1   & EEPROM --- do not use \\
+  Pin 8  & GPIO14  & UART TX --- avoid in kit \\
+  Pin 10 & GPIO15  & UART RX --- avoid in kit \\
+  \bottomrule
+\end{tabular}
+
+\vspace{10pt}
+\begin{warnbox}
+\textbf{Outstanding allocation items --- finalise before PCB layout:}
+\begin{itemize}[noitemsep]
+  \item 2 remaining MOSFET control outputs (of 5 total; 3 assigned: GPIO16, 20, 21)
+  \item 2 remaining digital inputs (of 4 total; 2 assigned: GPIO24, 25)
+  \item Candidates: even-side GPIO22 (pin~15 odd --- reconsidered if moved),
+        or confirm further even-side spares with designer
+  \item Confirm whether all 5 control LEDs vs MOSFET gate signals share the same pins,
+        or whether LED indicators and MOSFET gates are on separate GPIO lines
+\end{itemize}
+\end{warnbox}
+
+\end{document}

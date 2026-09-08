@@ -1,0 +1,616 @@
+\documentclass[11pt,letter]{article}
+
+\usepackage[margin=2.5cm]{geometry}
+\usepackage{hyperref}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{titlesec}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{parskip}
+\usepackage{fancyhdr}
+\usepackage{enumitem}
+\usepackage{mdframed}
+
+% --- Colours ---
+\definecolor{codebg}{RGB}{245,245,245}
+\definecolor{codeframe}{RGB}{180,180,180}
+\definecolor{keyword}{RGB}{0,0,180}
+\definecolor{comment}{RGB}{80,120,80}
+\definecolor{string}{RGB}{160,0,0}
+\definecolor{noteblue}{RGB}{230,240,255}
+\definecolor{noteframe}{RGB}{100,140,200}
+\definecolor{warnbg}{RGB}{255,245,225}
+\definecolor{warnframe}{RGB}{200,150,0}
+
+% --- Code listing style ---
+\lstset{
+  backgroundcolor=\color{codebg},
+  frame=single,
+  rulecolor=\color{codeframe},
+  basicstyle=\ttfamily\small,
+  keywordstyle=\color{keyword}\bfseries,
+  commentstyle=\color{comment}\itshape,
+  stringstyle=\color{string},
+  breaklines=true,
+  breakatwhitespace=true,
+  showstringspaces=false,
+  tabsize=4,
+  captionpos=b,
+  numbers=left,
+  numberstyle=\tiny\color{gray},
+  numbersep=6pt,
+}
+
+% --- Note/Warning boxes ---
+\newmdenv[
+  backgroundcolor=noteblue,
+  linecolor=noteframe,
+  linewidth=1.2pt,
+  leftmargin=0pt,
+  rightmargin=0pt,
+  innerleftmargin=10pt,
+  innerrightmargin=10pt,
+  innertopmargin=6pt,
+  innerbottommargin=6pt,
+]{notebox}
+
+\newmdenv[
+  backgroundcolor=warnbg,
+  linecolor=warnframe,
+  linewidth=1.2pt,
+  leftmargin=0pt,
+  rightmargin=0pt,
+  innerleftmargin=10pt,
+  innerrightmargin=10pt,
+  innertopmargin=6pt,
+  innerbottommargin=6pt,
+]{warnbox}
+
+% --- Headers/footers ---
+\pagestyle{fancy}
+\fancyhf{}
+\rhead{RPi Zero 2W Power Management}
+\lhead{\leftmark}
+\rfoot{Page \thepage}
+\lfoot{\today}
+
+% --- Section formatting ---
+\titleformat{\section}{\large\bfseries}{}{0em}{}[\titlerule]
+\titleformat{\subsection}{\normalsize\bfseries}{}{0em}{}
+
+% ================================================================
+\begin{document}
+
+\title{\textbf{Raspberry Pi Zero 2W Power Management}\\[0.4em]
+\large Headless SSH Operation, Field Deployment, and Hardware Wakeup}
+\author{System Configuration Reference}
+\date{\today}
+\maketitle
+\thispagestyle{fancy}
+
+\tableofcontents
+\newpage
+
+% ================================================================
+\section{Introduction}
+
+The Raspberry Pi Zero 2W is a capable single-board computer built around the BCM2710A1 quad-core ARM Cortex-A53 SoC. Running a full Linux operating system makes it very versatile, but it also means that power and connectivity management behave quite differently from microcontrollers such as Arduino or ESP32. In particular, features such as deep sleep with GPIO wakeup that are trivial on a microcontroller require more deliberate configuration on the Pi.
+
+This document covers two primary use cases:
+
+\begin{enumerate}
+  \item \textbf{Desktop companion device} --- mains-powered, connected via SSH over WiFi, expected to remain responsive at all times including while a Python program is running awaiting user interaction.
+  \item \textbf{Battery-powered field instrument controller} --- running a camera module and a 2.8-inch touchscreen display, where power conservation is critical and hardware wakeup from a low-power state is desirable.
+\end{enumerate}
+
+Both use cases share a common root problem: the default Linux WiFi power-saving behaviour causes the wireless interface to sleep during idle periods, making the device appear unresponsive or unreachable over the network.
+
+% ================================================================
+\section{Understanding the Problem}
+
+\subsection{WiFi Power Management}
+
+By default, the Linux kernel enables power management on wireless interfaces. The driver instructs the WiFi chip to enter a low-power sleep between beacon intervals. In practice this causes the interface to miss incoming packets during the sleep window, making SSH connections appear to hang or drop entirely after a period of inactivity.
+
+This is the most common cause of a headless Pi becoming unresponsive when ignored for a while.
+
+\subsection{SSH Session Timeouts}
+
+Independently of the WiFi hardware, SSH itself will terminate an idle connection after a timeout period if no keepalive packets are exchanged. This compounds the WiFi problem: even if the network interface is awake, a long-idle SSH session may have already been dropped by one or both endpoints.
+
+\subsection{Router ARP and DHCP Expiry}
+
+Some routers will remove a device's ARP table entry if no traffic is seen for an extended period, or reassign the DHCP lease when it expires. The Pi then either has a different IP address or is temporarily unreachable, even though it is otherwise healthy.
+
+\subsection{CPU Throttling}
+
+The Zero 2W will throttle its CPU clock if it detects under-voltage or over-temperature conditions. While this does not cause WiFi dropout directly, it can make the device appear sluggish after waking from an idle state. The throttle state persists even after the condition clears unless explicitly reset.
+
+% ================================================================
+\section{Use Case 1: Desktop Companion Device (Mains Powered)}
+
+In this configuration the Pi Zero 2W is:
+\begin{itemize}
+  \item Powered from mains via a USB power supply at the desktop.
+  \item Accessed exclusively via SSH over the local WiFi network.
+  \item Running Python scripts that may sit idle for extended periods waiting for user input.
+  \item Expected to remain fully responsive at all times.
+\end{itemize}
+
+Power saving is \emph{not} a goal here. The objectives are maximum responsiveness and connection stability.
+
+\subsection{Step 1: Disable WiFi Power Management}
+
+\textbf{Check current state:}
+\begin{lstlisting}[language=bash, caption={Check WiFi power management state}]
+iwconfig wlan0
+\end{lstlisting}
+
+Look for the line \texttt{Power Management:on}. If present, power management is active and should be disabled.
+
+\textbf{Disable immediately (does not survive reboot):}
+\begin{lstlisting}[language=bash, caption={Disable WiFi power management immediately}]
+sudo iwconfig wlan0 power off
+\end{lstlisting}
+
+\textbf{Persist across reboots using a udev rule:}
+\begin{lstlisting}[language=bash, caption={Create a persistent udev rule}]
+sudo nano /etc/udev/rules.d/70-wifi-powersave.rules
+\end{lstlisting}
+
+Add the following single line:
+\begin{lstlisting}[caption={Contents of 70-wifi-powersave.rules}]
+ACTION=="add", SUBSYSTEM=="net", KERNEL=="wlan*", \
+    RUN+="/sbin/iwconfig %k power off"
+\end{lstlisting}
+
+\textbf{Alternative method via \texttt{/etc/network/interfaces.d}:}
+\begin{lstlisting}[language=bash, caption={Create interface configuration file}]
+sudo nano /etc/network/interfaces.d/wlan0
+\end{lstlisting}
+\begin{lstlisting}[caption={Contents of wlan0 interface config}]
+wireless-power off
+\end{lstlisting}
+
+\begin{notebox}
+\textbf{Note:} The udev rule method is the most reliable on Raspberry Pi OS (Bookworm). If using NetworkManager rather than dhcpcd, see Section~\ref{sec:networkmanager}.
+\end{notebox}
+
+\subsection{Step 2: Configure SSH Keepalives}
+
+Configure keepalives on \emph{both} the server (Pi) and the client (desktop) to prevent idle session expiry.
+
+\textbf{On the Pi --- edit the SSH server configuration:}
+\begin{lstlisting}[language=bash, caption={Edit SSH server config on the Pi}]
+sudo nano /etc/ssh/sshd_config
+\end{lstlisting}
+
+Add or modify:
+\begin{lstlisting}[caption={SSH server keepalive settings}]
+ClientAliveInterval 60
+ClientAliveCountMax 3
+\end{lstlisting}
+
+This sends a keepalive every 60 seconds and drops the connection only after 3 missed responses (i.e., after 3 minutes of complete silence).
+
+Restart the SSH daemon to apply:
+\begin{lstlisting}[language=bash]
+sudo systemctl restart sshd
+\end{lstlisting}
+
+\textbf{On your desktop --- edit the SSH client configuration:}
+\begin{lstlisting}[language=bash, caption={Edit SSH client config on desktop}]
+nano ~/.ssh/config
+\end{lstlisting}
+\begin{lstlisting}[caption={SSH client keepalive settings}]
+Host pi-zero
+    HostName 192.168.1.xxx
+    User pi
+    ServerAliveInterval 60
+    ServerAliveCountMax 3
+\end{lstlisting}
+
+Replace \texttt{192.168.1.xxx} with your Pi's IP address. You can then connect simply with \texttt{ssh pi-zero}.
+
+\subsection{Step 3: Assign a Static IP or DHCP Reservation}
+
+To prevent the Pi's IP address from changing:
+
+\textbf{Option A: DHCP reservation on your router (recommended).}
+Find the Pi's MAC address:
+\begin{lstlisting}[language=bash]
+ip link show wlan0
+\end{lstlisting}
+Then log into your router's admin interface and assign a permanent IP to that MAC address. This requires no configuration on the Pi itself.
+
+\textbf{Option B: Static IP on the Pi.}
+Edit \texttt{/etc/dhcpcd.conf}:
+\begin{lstlisting}[language=bash]
+sudo nano /etc/dhcpcd.conf
+\end{lstlisting}
+\begin{lstlisting}[caption={Static IP configuration in dhcpcd.conf}]
+interface wlan0
+static ip_address=192.168.1.50/24
+static routers=192.168.1.1
+static domain_name_servers=192.168.1.1 8.8.8.8
+\end{lstlisting}
+
+\subsection{Step 4: Keep Python Scripts Alive Over SSH}
+
+If you disconnect your SSH session, any foreground process (including Python scripts) will receive a \texttt{SIGHUP} and terminate. Use one of the following approaches to keep scripts running independently of your SSH session.
+
+\textbf{Using \texttt{tmux} (recommended):}
+\begin{lstlisting}[language=bash, caption={Run Python script in a persistent tmux session}]
+# Start a named session
+tmux new -s myapp
+
+# Inside tmux, run your script
+python3 myapp.py
+
+# Detach without killing it: Ctrl+B then D
+# Reattach later:
+tmux attach -t myapp
+\end{lstlisting}
+
+\textbf{Using \texttt{screen}:}
+\begin{lstlisting}[language=bash]
+screen -S myapp
+python3 myapp.py
+# Detach: Ctrl+A then D
+# Reattach:
+screen -r myapp
+\end{lstlisting}
+
+\textbf{Using \texttt{nohup} (simplest, no reattach):}
+\begin{lstlisting}[language=bash]
+nohup python3 myapp.py &> myapp.log &
+\end{lstlisting}
+
+% ================================================================
+\section{Use Case 2: Battery-Powered Field Instrument Controller}
+
+In this configuration the Pi Zero 2W is:
+\begin{itemize}
+  \item Powered by a LiPo or Li-ion battery pack (typically via a UPS HAT or dedicated battery management board).
+  \item Driving a camera module (e.g. Camera Module 3 or HQ Camera).
+  \item Displaying a UI on a 2.8-inch SPI or DSI touchscreen.
+  \item Expected to conserve power aggressively.
+  \item Required to wake from a low-power state via a hardware signal.
+\end{itemize}
+
+\subsection{Power Budget Considerations}
+
+A typical Zero 2W draws approximately:
+
+\begin{center}
+\begin{tabular}{lcc}
+\toprule
+\textbf{State} & \textbf{Approx. Current (5V)} & \textbf{Notes} \\
+\midrule
+Idle, WiFi active & 120--180\,mA & Baseline \\
+Active, full load & 350--500\,mA & Camera + display \\
+Halted (\texttt{sudo halt}) & 30--80\,mA & OS stopped, power rail live \\
+Suspend to RAM & 20--50\,mA & Experimental on Pi \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\begin{warnbox}
+\textbf{Warning:} Unlike microcontrollers, the Pi Zero 2W cannot achieve true microamp-level sleep while the SoC power rail is live. For very long battery life between uses, consider cutting power to the board entirely using an external timer or supervisor circuit (see Section~\ref{sec:hardware_wakeup}).
+\end{warnbox}
+
+\subsection{Enabling WiFi Power Management for Field Use}
+
+For the field instrument use case, WiFi power saving should be \emph{enabled} when WiFi is not needed, or WiFi can be disabled entirely:
+
+\begin{lstlisting}[language=bash, caption={Disable WiFi entirely to save power}]
+sudo rfkill block wifi
+# Re-enable:
+sudo rfkill unblock wifi
+\end{lstlisting}
+
+Or softer: enable power management on the interface:
+\begin{lstlisting}[language=bash]
+sudo iwconfig wlan0 power on
+\end{lstlisting}
+
+\subsection{Configuring the 2.8-Inch Touchscreen}
+
+Most 2.8-inch displays for the Pi use either the SPI bus (with an ILI9341 or ST7789 controller) or the DSI connector. Setup varies by display:
+
+\textbf{SPI display (most common for 2.8" units):}
+\begin{lstlisting}[language=bash, caption={Enable SPI in config}]
+sudo raspi-config
+# -> Interface Options -> SPI -> Enable
+\end{lstlisting}
+
+Add the appropriate overlay to \texttt{/boot/firmware/config.txt} (Bookworm) or \texttt{/boot/config.txt} (Bullseye):
+\begin{lstlisting}[caption={Example config.txt entry for ILI9341 display}]
+dtoverlay=ili9341,speed=32000000,rotate=90
+\end{lstlisting}
+
+\begin{notebox}
+\textbf{Note:} Exact overlay name and parameters depend on your specific display and GPIO wiring. Consult the display manufacturer's documentation. Common alternatives include \texttt{st7789v}, \texttt{waveshare28}, and \texttt{piscreen}.
+\end{notebox}
+
+\textbf{Reduce display backlight to save power:}
+\begin{lstlisting}[language=bash, caption={Dim or blank the backlight via GPIO or PWM}]
+# If backlight is on GPIO 18 (PWM capable):
+gpio -g pwm 18 512   # 50% brightness (0-1024 range)
+gpio -g pwm 18 0     # Off
+\end{lstlisting}
+
+\subsection{Camera Module Setup}
+
+\begin{lstlisting}[language=bash, caption={Enable camera interface}]
+sudo raspi-config
+# -> Interface Options -> Camera (legacy) or I2C/Legacy Camera
+\end{lstlisting}
+
+For libcamera (Bookworm default):
+\begin{lstlisting}[language=bash, caption={Test camera capture with libcamera}]
+libcamera-still -o test.jpg
+libcamera-vid -o test.h264 -t 5000
+\end{lstlisting}
+
+To save power, ensure the camera is properly released when not in use in your Python code:
+\begin{lstlisting}[language=python, caption={Proper camera resource management in Python}]
+from picamera2 import Picamera2
+
+cam = Picamera2()
+cam.start()
+# ... capture frames ...
+cam.stop()
+cam.close()   # Releases the hardware properly
+\end{lstlisting}
+
+\subsection{Hardware Wakeup Options}
+\label{sec:hardware_wakeup}
+
+This is the most nuanced aspect of Pi power management. Because the Pi runs a full OS, hardware wakeup is fundamentally different from microcontroller sleep/wake cycles.
+
+\subsubsection{Option A: GPIO Edge Detection with a Watchdog Process}
+
+The simplest approach is to keep a very lightweight Python process running that watches a GPIO pin using edge-triggered interrupts (not polling). Power consumption of the waiting process is negligible.
+
+\begin{lstlisting}[language=python, caption={GPIO edge-triggered wakeup listener}]
+import RPi.GPIO as GPIO
+import subprocess
+import time
+
+WAKEUP_PIN = 17   # BCM numbering
+
+GPIO.setmode(GPIO.BCM)
+GPIO.setup(WAKEUP_PIN, GPIO.IN, pull_up_down=GPIO.PUD_DOWN)
+
+print("Waiting for wakeup signal on GPIO17...")
+
+try:
+    while True:
+        # Edge detection: blocks until a rising edge occurs
+        GPIO.wait_for_edge(WAKEUP_PIN, GPIO.RISING, timeout=60000)
+        print("Wakeup signal received!")
+
+        # Re-enable WiFi, restart services, etc.
+        subprocess.run(["sudo", "rfkill", "unblock", "wifi"])
+        subprocess.run(["sudo", "iwconfig", "wlan0", "power", "off"])
+        # ... further wakeup actions ...
+
+        time.sleep(1)   # Debounce
+
+except KeyboardInterrupt:
+    GPIO.cleanup()
+\end{lstlisting}
+
+Run this as a systemd service to ensure it starts on boot:
+\begin{lstlisting}[language=bash, caption={Create a systemd service for the wakeup listener}]
+sudo nano /etc/systemd/system/gpio-wakeup.service
+\end{lstlisting}
+\begin{lstlisting}[caption={gpio-wakeup.service unit file}]
+[Unit]
+Description=GPIO Wakeup Listener
+After=network.target
+
+[Service]
+ExecStart=/usr/bin/python3 /home/pi/gpio_wakeup.py
+Restart=always
+User=pi
+
+[Install]
+WantedBy=multi-user.target
+\end{lstlisting}
+\begin{lstlisting}[language=bash]
+sudo systemctl enable gpio-wakeup
+sudo systemctl start gpio-wakeup
+\end{lstlisting}
+
+\subsubsection{Option B: The RUN Pin (Hard Reset / Halt and Wake)}
+
+The Pi Zero 2W exposes a \textbf{RUN} pad (solder point near the top of the board). Briefly pulling this pin \textbf{low then releasing it} will reset the SoC. The workflow is:
+
+\begin{enumerate}
+  \item The Pi runs \texttt{sudo halt} to stop the OS. Current draw drops to $\sim$30--80\,mA.
+  \item An external circuit (button, timer, or small microcontroller) pulses the RUN pin low for $\sim$100\,ms.
+  \item The Pi boots from scratch.
+\end{enumerate}
+
+\begin{warnbox}
+\textbf{Important:} This is a \emph{reboot}, not a resume. Any SSH sessions, running programs, and in-memory state are lost. Design your application to restore its state from disk on startup if using this method.
+\end{warnbox}
+
+A simple external wakeup circuit:
+\begin{lstlisting}[caption={Simple RUN pin wakeup --- momentary switch circuit}]
+RUN pad  <---[10k pull-up to 3.3V]
+              |
+              +---[Normally-open pushbutton]--- GND
+\end{lstlisting}
+
+For automated wakeup (e.g. on a schedule), a DS3231 RTC alarm output or an ATtiny85 can drive the RUN pin:
+\begin{lstlisting}[caption={ATtiny85 pseudocode for timed wakeup}]
+// ATtiny85 keeps Pi halted, pulses RUN pin on schedule
+sleep_for(interval);          // ATtiny deep-sleeps between pulses
+pull_low(RUN_PIN);
+delay_ms(200);
+release(RUN_PIN);             // Pi begins booting
+sleep_for(boot_time + work_time);
+// Repeat
+\end{lstlisting}
+
+\subsubsection{Option C: RTC-Controlled Power Cut (Maximum Battery Life)}
+
+For the longest battery life, use a power management board such as:
+\begin{itemize}
+  \item \textbf{Witty Pi 4} --- RTC-based power sequencer; cuts all power to the Pi on a schedule and restores it at a programmed time.
+  \item \textbf{PiJuice HAT} --- Battery management + RTC with programmable wakeup events.
+  \item \textbf{TPL5110} --- Simple timer IC that cuts and restores power at a fixed interval.
+\end{itemize}
+
+These solutions allow the Pi to draw near-zero current between activations because the power rail is physically removed. The tradeoff is boot time ($\sim$20--40 seconds) on each wakeup cycle.
+
+% ================================================================
+\section{Troubleshooting}
+
+\subsection{Diagnosing WiFi Dropout}
+
+\textbf{Check current power management state:}
+\begin{lstlisting}[language=bash]
+iwconfig wlan0
+\end{lstlisting}
+
+\textbf{Check for recent network errors in the system log:}
+\begin{lstlisting}[language=bash]
+journalctl -u dhcpcd --since "1 hour ago"
+dmesg | grep -i wlan
+dmesg | grep -i brcmfmac    # BCM WiFi driver messages
+\end{lstlisting}
+
+\textbf{Check the current IP address:}
+\begin{lstlisting}[language=bash]
+ip addr show wlan0
+\end{lstlisting}
+
+\textbf{Ping the Pi continuously from your desktop to detect dropout timing:}
+\begin{lstlisting}[language=bash]
+ping -i 5 192.168.1.50   # Ping every 5 seconds
+\end{lstlisting}
+
+\subsection{Diagnosing SSH Drops}
+
+\textbf{Check SSH server logs on the Pi:}
+\begin{lstlisting}[language=bash]
+sudo journalctl -u ssh --since "1 hour ago"
+\end{lstlisting}
+
+Common messages to look for:
+\begin{itemize}
+  \item \texttt{Timeout, client not responding} --- client failed to send keepalives.
+  \item \texttt{Connection reset by peer} --- network-level dropout (usually WiFi).
+  \item \texttt{Write failed: Broken pipe} --- session dropped after idle.
+\end{itemize}
+
+\subsection{Diagnosing Throttling and Under-Voltage}
+
+\textbf{Check throttle state:}
+\begin{lstlisting}[language=bash]
+vcgencmd get_throttled
+\end{lstlisting}
+
+The returned hex value is a bitmask. Key bits:
+
+\begin{center}
+\begin{tabular}{ll}
+\toprule
+\textbf{Bit} & \textbf{Meaning} \\
+\midrule
+0 & Under-voltage currently detected \\
+1 & ARM frequency currently capped \\
+2 & Currently throttled \\
+16 & Under-voltage has occurred since last reboot \\
+18 & Throttling has occurred since last reboot \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+A value of \texttt{0x0} means no throttling. A value of \texttt{0x50000} means under-voltage and throttling have occurred in the past but are not currently active.
+
+\textbf{Monitor CPU frequency in real time:}
+\begin{lstlisting}[language=bash]
+watch -n 1 vcgencmd measure_clock arm
+\end{lstlisting}
+
+\subsection{Diagnosing NetworkManager vs dhcpcd Conflicts}
+\label{sec:networkmanager}
+
+Raspberry Pi OS Bookworm uses NetworkManager by default. Older scripts and config files targeting \texttt{dhcpcd} may not have the expected effect.
+
+\textbf{Check which is managing your interface:}
+\begin{lstlisting}[language=bash]
+nmcli device status
+\end{lstlisting}
+
+\textbf{Disable WiFi power management via NetworkManager:}
+\begin{lstlisting}[language=bash]
+sudo nano /etc/NetworkManager/conf.d/wifi-powersave.conf
+\end{lstlisting}
+\begin{lstlisting}[caption={NetworkManager WiFi power save config}]
+[connection]
+wifi.powersave = 2
+\end{lstlisting}
+
+Values: \texttt{2} = disabled, \texttt{3} = enabled. Then restart NetworkManager:
+\begin{lstlisting}[language=bash]
+sudo systemctl restart NetworkManager
+\end{lstlisting}
+
+\subsection{General Recovery Steps}
+
+If the Pi becomes completely unresponsive over SSH:
+
+\begin{enumerate}
+  \item Try pinging the Pi: \texttt{ping 192.168.1.50}
+  \item If ping fails: the WiFi interface has dropped. Power cycle the Pi.
+  \item If ping succeeds but SSH hangs: the SSH daemon may have crashed. Try a fresh SSH connection. If it connects, the previous session timed out.
+  \item If SSH connects but the system is extremely slow: check for throttling with \texttt{vcgencmd get\_throttled}.
+  \item As a last resort: power cycle. Ensure you use \texttt{sync} in any scripts before halting to prevent SD card corruption.
+\end{enumerate}
+
+% ================================================================
+\section{Quick Reference Summary}
+
+\begin{center}
+\begin{tabular}{>{\bfseries}p{4.5cm} p{5cm} p{4.5cm}}
+\toprule
+\textbf{Scenario} & \textbf{Primary Fix} & \textbf{Notes} \\
+\midrule
+SSH drops after idle & WiFi power mgmt off + SSH keepalives & Fix on both Pi and desktop \\
+IP address changes & DHCP reservation or static IP & Router config preferred \\
+Python script dies on disconnect & Use tmux or screen & Session persists after SSH close \\
+Field use, battery powered & Disable WiFi when not needed & Use rfkill \\
+Wake from halt via hardware & Pulse RUN pin from external MCU & Causes full reboot \\
+Wake via GPIO without reboot & GPIO edge detection daemon & Small power cost \\
+Maximum battery life & Power management HAT (PiJuice, Witty Pi) & Physically cuts power rail \\
+Throttling / slowness & Check power supply, use quality USB cable & Aim for 5.1V, 3A supply \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+% ================================================================
+\section{Recommended Hardware for Field Deployment}
+
+\begin{itemize}
+  \item \textbf{Battery management:} PiJuice Zero HAT or Witty Pi 4 Mini
+  \item \textbf{Display:} Waveshare 2.8" SPI touchscreen (ILI9341 or ST7789) or Adafruit 2.8" PiTFT
+  \item \textbf{Camera:} Raspberry Pi Camera Module 3 (autofocus, good low-light)
+  \item \textbf{Storage:} High-endurance microSD card rated for continuous write cycles (e.g. SanDisk Max Endurance)
+  \item \textbf{Power supply (desktop use):} Official Raspberry Pi USB-C power supply (5.1V, 3A)
+  \item \textbf{Wakeup MCU (if needed):} ATtiny85 or small ESP8266 module running at 3.3V logic
+\end{itemize}
+
+% ================================================================
+\section*{Revision Notes}
+\addcontentsline{toc}{section}{Revision Notes}
+
+This document was compiled from direct troubleshooting of a Raspberry Pi Zero 2W running Raspberry Pi OS (Bookworm) in a headless SSH configuration. Commands and file paths reflect Bookworm conventions. For Bullseye and earlier, substitute \texttt{/boot/config.txt} for \texttt{/boot/firmware/config.txt} and note that NetworkManager was not the default network manager.
+
+\end{document}

@@ -1,0 +1,161 @@
+\documentclass[border=10pt]{standalone}
+% 'standalone' produces a tight bounding box around the drawing.
+% 'border=10pt' adds a small margin around the content.
+
+\usepackage{circuitikz}
+% The main package for drawing electronic circuits in LaTeX.
+
+\usepackage{xcolor}
+% Lets us name colors for annotation text.
+
+% ── Convenience color for annotation comments ──────────────
+\definecolor{annotate}{RGB}{0,100,180}
+
+\begin{document}
+
+
+\section{Magnetic Buzzer}
+
+\subsection{Overview}
+
+The alert sounder is a passive magnetic buzzer driven by a pulse-width modulated (PWM)
+signal from the Raspberry Pi Zero. A passive magnetic buzzer is preferred over an active
+buzzer or piezoelectric transducer because its tone is warm and rounded rather than harsh,
+and because both pitch and volume are controllable in software via the PWM frequency and
+duty cycle respectively.
+
+The buzzer operates from the \SI{5}{\volt} supply rail and draws approximately
+\SI{30}{\milli\ampere} to \SI{40}{\milli\ampere} at full drive. Since this exceeds the
+safe output current of a GPIO pin, and because the supply voltage exceeds the
+\SI{3.3}{\volt} GPIO logic level, a small-signal NPN bipolar junction transistor is
+used as a low-side switch between the buzzer and ground.
+
+\subsection{Circuit Description}
+
+The GPIO pin drives the base of the NPN transistor through a current-limiting resistor
+R1. When the GPIO is high, the transistor saturates and connects the buzzer's negative
+terminal to ground, completing the circuit through the \SI{5}{\volt} supply. When the
+GPIO is low, the transistor is cut off and the buzzer is de-energised.
+
+Because the buzzer is an inductive load, a flyback diode is placed across its terminals
+to suppress the reverse voltage spike that occurs when the transistor switches off.
+Without this diode the spike could damage the transistor.
+
+Volume is controlled by adjusting the PWM duty cycle. A duty cycle of approximately
+50\% produces full volume; reducing the duty cycle lowers the average power delivered
+to the buzzer and therefore reduces loudness. Pitch is controlled by adjusting the PWM
+frequency. The range of \SI{2000}{\hertz} to \SI{2500}{\hertz} produces a clear,
+pleasant tone that is audible in both laboratory and outdoor environments. The buzzer
+is rated at approximately \SI{85}{\decibel} to \SI{90}{\decibel} at \SI{10}{\centi\meter}.
+
+The complete circuit is shown below.
+
+\begin{verbatim}
+    RPi GPIO (PWM) ---[ R1 1k ]---+--- MMBT3904 Base
+                                  |
+                             MMBT3904 Emitter --- GND
+
+    +5V ---[ Buzzer CEM-1203(42) ]---+--- MMBT3904 Collector
+                                     |
+                               1N4148W (flyback)
+                               Anode  -> Collector side
+                               Cathode -> +5V side
+\end{verbatim}
+
+\subsection{Parts List}
+
+\begin{table}[h]
+\centering
+\begin{tabular}{llll}
+\hline
+\textbf{Reference} & \textbf{Part Number} & \textbf{Description} & \textbf{Package} \\
+\hline
+BZ1 & CEM-1203(42)  & Passive magnetic buzzer, \SI{5}{\volt}, \SI{2048}{\hertz} rated & 12\,mm through-hole \\
+D1  & 1N4148W       & Fast switching diode, flyback protection                        & SOD-123 \\
+Q1  & MMBT3904      & NPN small-signal BJT, \SI{40}{\volt}, \SI{200}{\milli\ampere}  & SOT-23  \\
+R1  & R1K-0805      & Resistor \SI{1}{\kilo\ohm}, base current limiter               & 0805    \\
+\hline
+\end{tabular}
+\caption{Magnetic buzzer circuit components}
+\label{tab:buzzer_parts}
+\end{table}
+
+\subsection{Programming Notes}
+
+The buzzer is controlled using the RPi.GPIO software PWM facility. Any GPIO pin may
+be used, but a hardware PWM pin (GPIO 18 or GPIO 12 on the Raspberry Pi Zero) is
+preferred because software PWM can exhibit jitter under system load, which may cause
+audible roughness in the tone.
+
+Key relationships are:
+
+\begin{itemize}
+    \item \textbf{Frequency} sets pitch. The range \SI{1500}{\hertz} to
+          \SI{3000}{\hertz} is recommended. Values below \SI{1000}{\hertz} may be too
+          quiet for some magnetic buzzers, and values above \SI{4000}{\hertz} become
+          increasingly harsh.
+    \item \textbf{Duty cycle} sets volume. A value of 50 (50\%) gives maximum loudness.
+          Values below approximately 10 may be too quiet to be useful. Values above 50
+          do not increase loudness and may introduce distortion.
+    \item \textbf{Duration} is implemented as a blocking \texttt{time.sleep()} call.
+          Interruption logic is not implemented in this version.
+\end{itemize}
+
+The GPIO pin must be initialised as an output before the PWM object is created. The
+PWM object should be started with a duty cycle of zero and frequency set before each
+call to avoid a brief click at startup.
+
+\subsection{Example Code}
+
+\begin{verbatim}
+import RPi.GPIO as GPIO
+import time
+
+BUZZER_PIN = 18  # Hardware PWM pin recommended
+
+GPIO.setmode(GPIO.BCM)
+GPIO.setup(BUZZER_PIN, GPIO.OUT)
+
+_pwm = GPIO.PWM(BUZZER_PIN, 2000)
+_pwm.start(0)
+
+
+def sound_alert(frequency: int = 2000,
+                volume: int = 50,
+                duration: float = 1.0) -> None:
+    """
+    Sound the magnetic buzzer for a fixed duration.
+
+    Parameters
+    ----------
+    frequency : int
+        Tone frequency in Hz. Recommended range 1500-3000.
+        Default 2000 Hz.
+    volume : int
+        Duty cycle as a percentage, 0-50. Values above 50
+        do not increase loudness. Default 50 (full volume).
+    duration : float
+        Duration in seconds to sound the alert. Blocking.
+        Default 1.0 second.
+    """
+    volume = max(0, min(50, volume))       # clamp to 0-50
+    frequency = max(100, min(10000, frequency))  # clamp to safe range
+
+    _pwm.ChangeFrequency(frequency)
+    _pwm.ChangeDutyCycle(volume)
+    time.sleep(duration)
+    _pwm.ChangeDutyCycle(0)                # silence buzzer, leave PWM running
+\end{verbatim}
+
+\noindent To sound a two-second alert at \SI{2500}{\hertz} at three-quarter volume:
+
+\begin{verbatim}
+    sound_alert(frequency=2500, volume=37, duration=2.0)
+\end{verbatim}
+
+\noindent To clean up GPIO resources on program exit:
+
+\begin{verbatim}
+    _pwm.stop()
+    GPIO.cleanup()
+\end{verbatim}

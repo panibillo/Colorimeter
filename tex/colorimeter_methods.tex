@@ -1,0 +1,522 @@
+% ============================================================
+%  Colorimetric Analysis of Chemical Test Strips
+%  Mathematical Methods for an Arsenic Colorimeter
+%
+%  Reconstructed from design conversation.
+%  Compile with pdflatex (twice for cross-references).
+%  Requires: amsmath, amssymb, booktabs, geometry, hyperref,
+%            algorithm2e (optional), microtype.
+% ============================================================
+
+\documentclass[11pt, a4paper]{article}
+
+\usepackage{amsmath, amssymb, amsthm}
+\usepackage{booktabs}
+\usepackage{geometry}
+\geometry{margin=2.5cm}
+\usepackage{hyperref}
+\hypersetup{colorlinks=true, linkcolor=blue, citecolor=blue, urlcolor=blue}
+\usepackage{microtype}
+\usepackage{parskip}
+\usepackage{enumitem}
+
+% Convenience macros
+\newcommand{\R}{\mathbb{R}}
+\newcommand{\E}{\mathbb{E}}
+\newcommand{\bx}{\mathbf{x}}
+\newcommand{\bS}{\mathbf{S}}
+\newcommand{\bI}{\mathbf{I}}
+\newcommand{\bV}{\mathbf{V}}
+\newcommand{\bC}{\mathbf{C}}
+\newcommand{\bA}{\mathbf{A}}
+\newcommand{\bPsi}{\boldsymbol{\Psi}}
+\newcommand{\tr}{\operatorname{tr}}
+\newcommand{\diag}{\operatorname{diag}}
+
+\title{%
+  Colorimetric Analysis of Chemical Test Strips:\\
+  Mathematical Methods for a Bayer-Camera Colorimeter}
+\author{Design Notes}
+\date{}
+
+\begin{document}
+\maketitle
+\tableofcontents
+\newpage
+
+% ============================================================
+\section{Introduction and Instrument Overview}
+% ============================================================
+
+This document describes the mathematical methods developed for a
+closed-box colorimeter designed to measure arsenic concentration in
+water using chemical test strips.  The strips discolour in the range
+white\,--\,yellow\,--\,brown, and the highest sensitivity is required
+in the pale-yellow region where human colour discrimination is poor.
+
+\subsection{Hardware}
+
+\begin{itemize}[nosep]
+  \item \textbf{Camera:} Sony IMX219, 8\,MP, controlled by a Raspberry Pi Zero.
+    Raw Bayer images are captured; the four channels are
+    $B$, $G_b$, $G_r$, $R$.
+  \item \textbf{Illumination:} Narrow-band LEDs (blue, green, red, and
+    optionally more), each used alone.  LED spectral output is
+    temperature-dependent.
+  \item \textbf{Stage:} A reference colour card with invariant patches
+    (white, black, and several shades of yellow to brown) surrounds the
+    test strip at the centre of the field.
+\end{itemize}
+
+\subsection{Key Design Principles}
+
+\begin{enumerate}[nosep]
+  \item Every image contains both the unknown test strip \emph{and} all
+    invariant reference patches.  Distances are computed
+    \emph{within} a single image, making them independent of LED
+    drive current and exposure time.
+  \item LED temperature is retained as a continuous covariate because
+    it shifts the LED spectrum in a way that is not cancelled by
+    within-image normalisation.
+  \item Calibration uses many test strips of known concentration spanning
+    the measurement range.  Each strip produces a vector of colour
+    distances; the GP maps these to concentration.
+\end{enumerate}
+
+% ============================================================
+\section{Image Channels and Normalisation}
+% ============================================================
+
+\subsection{Multi-spectral Channel Vector}
+
+Each Bayer image under one LED colour yields four channels.
+Only channels with sufficient signal-to-noise ratio (SNR) are used.
+The SNR criterion for channel $k$ under LED $i$ is
+
+\begin{equation}
+  \mathrm{SNR}_{ik}
+    = \frac{\bar{x}_{ik}^{\mathrm{white}}}{\sigma_{ik}^{\mathrm{dark}}}
+    \geq \tau,
+  \label{eq:snr}
+\end{equation}
+
+where $\bar{x}_{ik}^{\mathrm{white}}$ is the mean pixel value of the
+white reference patch and $\sigma_{ik}^{\mathrm{dark}}$ is the
+standard deviation of the dark (black patch) signal.
+The threshold $\tau$ (typically 10) is fixed for all LEDs.
+For example, the $R$ channel is near zero under blue illumination and
+is excluded.
+
+The set of channels passing the SNR test for LED $i$ is denoted
+$\mathcal{C}_i \subseteq \{B, G_b, G_r, R\}$.
+The total number of included channels across all LEDs is
+$N = \sum_i |\mathcal{C}_i|$, and $N > 4$ in general.
+
+\subsection{Normalisation}
+
+Raw pixel means are normalised to remove illumination intensity and
+exposure-time variation.  For channel $k$, patch $j$, LED $i$:
+
+\begin{equation}
+  \tilde{x}_{ijk}
+    = \frac{\bar{x}_{ijk}}{t_{\exp,i}\;\bar{x}_{ik}^{\mathrm{white}}},
+  \label{eq:normalise}
+\end{equation}
+
+where $t_{\exp,i}$ is the exposure time for LED $i$ and
+$\bar{x}_{ik}^{\mathrm{white}}$ is from the \emph{same image}.
+Both strip and reference patches are divided by the same white mean,
+so the ratio is dimensionless and illumination-intensity-independent.
+LED temperature drift is \emph{not} removed by this normalisation and
+is handled explicitly as a regression covariate.
+
+The normalised colour vector for a patch $j$ under LED $i$ is
+
+\begin{equation}
+  \tilde{\bx}_{ij}
+    = \bigl(\tilde{x}_{ijk}\bigr)_{k \in \mathcal{C}_i}
+    \in \R^{|\mathcal{C}_i|}.
+\end{equation}
+
+% ============================================================
+\section{Covariance Estimation}
+% ============================================================
+
+\subsection{Pooled Within-Patch Covariance}
+
+The Mahalanobis distance requires an estimate of the within-patch
+pixel noise covariance $\bS$.  This is estimated once during
+calibration by pooling per-pixel observations from all invariant
+reference patches (excluding SAMPLE and BLACK) across all calibration
+images taken with the same LED.
+
+Let $\mathbf{x}_{ij\ell}$ denote the normalised $|\mathcal{C}_i|$-vector
+of pixel $\ell$ in reference patch $j$ of a calibration image under
+LED $i$, and let $n_{ij}$ be the pixel count of that patch.
+The pooled sample covariance is
+
+\begin{equation}
+  \bS_i
+    = \frac{1}{\displaystyle\Bigl(\sum_{j} n_{ij}\Bigr) - J}
+      \sum_{j}\sum_{\ell=1}^{n_{ij}}
+        \bigl(\mathbf{x}_{ij\ell} - \bar{\bx}_{ij}\bigr)
+        \bigl(\mathbf{x}_{ij\ell} - \bar{\bx}_{ij}\bigr)^{\!\top},
+  \label{eq:pooled-cov}
+\end{equation}
+
+where $J$ is the number of reference patches used.
+Ledoit--Wolf shrinkage is applied to stabilise the estimate:
+
+\begin{equation}
+  \hat{\bS}_i = (1-\lambda)\,\bS_i + \lambda\,\hat{\sigma}^2\bI,
+  \qquad
+  \hat{\sigma}^2 = \frac{1}{p}\tr(\bS_i),
+  \label{eq:lw}
+\end{equation}
+
+where $\lambda \in (0,1)$ is chosen analytically to minimise the
+expected squared Frobenius error.  The result $\hat{\bS}_i$ is
+positive definite with controllable condition number.
+
+\subsection{Bayesian Update at Measurement Time}
+
+When a new image is captured, the live reference patches provide
+fresh pixel noise observations.  The calibration estimate is used as
+an inverse-Wishart prior; the live scatter matrix updates it.
+
+\paragraph{Prior.}
+\begin{equation}
+  \bS \sim \mathcal{W}^{-1}(\bPsi_0,\,\nu_0),
+  \qquad
+  \bPsi_0 = \nu_0\,\hat{\bS}_i,
+  \label{eq:iw-prior}
+\end{equation}
+
+so that $\E[\bS] = \hat{\bS}_i$.
+The prior weight $\nu_0$ is set to the total number of strided
+calibration pixels used to estimate $\hat{\bS}_i$, reflecting the
+confidence accumulated during calibration.
+
+\paragraph{Live scatter matrix.}
+From the $n_{\mathrm{live}}$ stride-subsampled pixels of the live
+reference patches:
+
+\begin{equation}
+  \bA_{\mathrm{live}}
+    = \sum_{j \in \mathcal{R}}\sum_{\ell=1}^{n_j}
+        \bigl(\mathbf{x}_{j\ell} - \bar{\bx}_j\bigr)
+        \bigl(\mathbf{x}_{j\ell} - \bar{\bx}_j\bigr)^{\!\top},
+  \label{eq:live-scatter}
+\end{equation}
+
+where $\mathcal{R}$ denotes the set of invariant reference patches
+and $n_{\mathrm{live}} = \sum_{j \in \mathcal{R}} n_j$.
+
+\paragraph{Posterior mean.}
+\begin{equation}
+  \bS_{\mathrm{updated}}
+    = \frac{\bPsi_0 + \bA_{\mathrm{live}}}
+           {\nu_0 + n_{\mathrm{live}} - p - 1},
+  \label{eq:iw-posterior}
+\end{equation}
+
+where $p = |\mathcal{C}_i|$ is the number of channels.
+When $n_{\mathrm{live}} \ll \nu_0$ the posterior is dominated by the
+calibration prior; when $n_{\mathrm{live}} \gg \nu_0$ the live data
+dominates.  The update is most significant when LED temperature has
+drifted from calibration conditions.
+
+% ============================================================
+\section{Mahalanobis Distance}
+% ============================================================
+
+\subsection{Definition}
+
+The Mahalanobis distance between the normalised colour vector of the
+test strip $\tilde{\bx}_{\mathrm{strip}}$ and that of reference patch
+$r$, both in the same image under LED $i$, is
+
+\begin{equation}
+  d_M\!\left(\tilde{\bx}_{\mathrm{strip}},\,\tilde{\bx}_r\right)
+    = \sqrt{
+        \bigl(\tilde{\bx}_{\mathrm{strip}} - \tilde{\bx}_r\bigr)^{\!\top}
+        \bS_i^{-1}
+        \bigl(\tilde{\bx}_{\mathrm{strip}} - \tilde{\bx}_r\bigr)
+      }.
+  \label{eq:mahal}
+\end{equation}
+
+The squared distance $d_M^2$ is asymptotically $\chi^2_p$ distributed
+under the hypothesis that the strip colour is drawn from the same
+distribution as reference $r$.
+
+\subsection{Why Within-Image Distances Are Stable}
+
+Because both $\tilde{\bx}_{\mathrm{strip}}$ and $\tilde{\bx}_r$ are
+normalised by the same white patch mean from the same image
+(equation~\eqref{eq:normalise}), the distance is:
+\begin{itemize}[nosep]
+  \item independent of LED drive current and total flux;
+  \item independent of camera exposure and gain;
+  \item partially self-correcting for LED temperature drift (both
+    patches shift together under a spectral change).
+\end{itemize}
+Residual temperature sensitivity arises from the interaction of the
+LED spectral shift with the differential reflectance spectra of the
+strip and the reference patches.  This is retained as a covariate
+in the GP.
+
+\subsection{Outlier Detection}
+
+A distance is flagged as a statistical outlier if
+
+\begin{equation}
+  d_M^2 > \chi^2_{p,\,1-\alpha},
+  \label{eq:chi2-flag}
+\end{equation}
+
+where $\chi^2_{p,\,1-\alpha}$ is the $(1-\alpha)$ quantile of the
+chi-squared distribution with $p$ degrees of freedom.  At $\alpha = 0.01$
+and $p = 4$ channels, the threshold is approximately $13.28$.
+A flagged distance indicates a possible contaminated strip, wrong
+reagent, or sensor artefact.
+
+% ============================================================
+\section{Feature Vector and Calibration Dataset}
+% ============================================================
+
+\subsection{Feature Vector}
+
+For a test strip image set (one image per LED), the GP input feature
+vector is assembled as follows.  Let $I$ denote the number of LEDs
+and $\mathcal{R} = \{r_1, \ldots, r_J\}$ the set of reference patches.
+The feature vector is
+
+\begin{equation}
+  \mathbf{f}
+    = \Bigl(
+        d_{11},\, d_{12},\, \ldots,\, d_{IJ},\;
+        T_1,\, T_2,\, \ldots,\, T_I
+      \Bigr)
+    \in \R^{IJ + I},
+  \label{eq:feature-vector}
+\end{equation}
+
+where $d_{ij} = d_M(\tilde{\bx}_{\mathrm{strip}},\, \tilde{\bx}_{r_j})$
+is the Mahalanobis distance to reference $r_j$ under LED $i$, and
+$T_i$ is the measured temperature of LED $i$ at capture time.
+
+\subsection{Calibration Dataset}
+
+Each calibration strip (known concentration $c$) yields one feature
+vector $\mathbf{f}$ and one target $c$.  Repeating for $M$ strips:
+
+\begin{equation}
+  \mathcal{D}
+    = \bigl\{(\mathbf{f}^{(m)},\, c^{(m)})\bigr\}_{m=1}^{M},
+  \label{eq:cal-dataset}
+\end{equation}
+
+with $\mathbf{f}^{(m)} \in \R^{IJ+I}$ and $c^{(m)} \in \R$.
+The calibration dataset spans the concentration range of interest,
+with denser sampling in the pale-yellow region.
+
+% ============================================================
+\section{Gaussian Process Regression}
+% ============================================================
+
+\subsection{Model}
+
+A Gaussian Process prior is placed over the function
+$c = f(\mathbf{f})$:
+
+\begin{equation}
+  f \sim \mathcal{GP}\!\left(\mu(\mathbf{f}),\;
+                              k(\mathbf{f}, \mathbf{f}')\right).
+  \label{eq:gp-prior}
+\end{equation}
+
+The mean function $\mu$ is absorbed into a normalisation of the
+target (zero-mean after standardisation).
+The kernel is a product of two anisotropic squared-exponential
+(RBF) kernels --- one for the distance features, one for the
+temperature features --- plus a white noise term:
+
+\begin{align}
+  k(\mathbf{f}, \mathbf{f}')
+    &= \sigma_f^2\;
+       k_{\mathrm{dist}}(\mathbf{f}_d, \mathbf{f}_d')\;
+       k_{\mathrm{temp}}(\mathbf{f}_T, \mathbf{f}_T')
+       + \sigma_n^2\,\delta(\mathbf{f}, \mathbf{f}'),
+  \label{eq:kernel} \\[4pt]
+  k_{\mathrm{dist}}(\mathbf{f}_d, \mathbf{f}_d')
+    &= \exp\!\left(
+         -\frac{1}{2}
+         \sum_{ij}
+         \frac{(d_{ij} - d_{ij}')^2}{\ell_{ij}^2}
+       \right),
+  \label{eq:kernel-dist} \\[4pt]
+  k_{\mathrm{temp}}(\mathbf{f}_T, \mathbf{f}_T')
+    &= \exp\!\left(
+         -\frac{1}{2}
+         \sum_{i}
+         \frac{(T_i - T_i')^2}{\ell_{T,i}^2}
+       \right).
+  \label{eq:kernel-temp}
+\end{align}
+
+Here $\mathbf{f}_d$ and $\mathbf{f}_T$ are the distance and temperature
+sub-vectors of $\mathbf{f}$; $\sigma_f^2$ is the signal variance;
+$\sigma_n^2$ is the observation noise variance; and $\ell_{ij}$,
+$\ell_{T,i}$ are per-feature length scales.
+All hyperparameters are optimised by maximising the log marginal
+likelihood:
+
+\begin{equation}
+  \log p(\mathbf{c} \mid \mathbf{F})
+    = -\frac{1}{2}\mathbf{c}^{\top}
+        \bigl(\mathbf{K} + \sigma_n^2\bI\bigr)^{-1}\mathbf{c}
+      -\frac{1}{2}\log\det\!\bigl(\mathbf{K} + \sigma_n^2\bI\bigr)
+      -\frac{M}{2}\log 2\pi,
+  \label{eq:log-ml}
+\end{equation}
+
+where $\mathbf{K}_{mm'} = k(\mathbf{f}^{(m)}, \mathbf{f}^{(m')})$
+is the $M \times M$ kernel matrix and
+$\mathbf{c} = (c^{(1)}, \ldots, c^{(M)})^{\top}$.
+
+\subsection{Prediction}
+
+Given a new feature vector $\mathbf{f}^*$, the GP posterior
+predictive distribution is Gaussian with mean and variance
+
+\begin{align}
+  \hat{c}
+    &= \mathbf{k}_*^{\top}
+       \bigl(\mathbf{K} + \sigma_n^2\bI\bigr)^{-1}\mathbf{c},
+  \label{eq:gp-mean} \\[4pt]
+  \hat{\sigma}^2
+    &= k(\mathbf{f}^*, \mathbf{f}^*)
+       - \mathbf{k}_*^{\top}
+         \bigl(\mathbf{K} + \sigma_n^2\bI\bigr)^{-1}
+         \mathbf{k}_*,
+  \label{eq:gp-var}
+\end{align}
+
+where $(\mathbf{k}_*)_m = k(\mathbf{f}^*, \mathbf{f}^{(m)})$.
+The estimate $\hat{c}$ is the predicted concentration and
+$\hat{\sigma}$ is the corresponding $1\sigma$ uncertainty.
+
+A measurement is flagged as potentially extrapolated if
+$\mathbf{f}^*$ lies outside the per-feature range of the calibration
+set $\mathcal{D}$.
+
+% ============================================================
+\section{PCA Projection (Supplementary)}
+% ============================================================
+
+When the colour gamut varies along essentially one physical axis
+(white\,--\,yellow\,--\,brown driven by a single chemical), the
+between-reference covariance has one dominant eigenvalue and a 1-D
+projection suffices for a scalar calibration curve.
+
+Let the $N_c$ normalised reference-patch colour vectors
+$\{\bar{\bx}_r\}_{r \in \mathcal{R}}$ have centroid
+$\bar{\bx} = \frac{1}{|\mathcal{R}|}\sum_r \bar{\bx}_r$.
+The between-reference covariance is
+
+\begin{equation}
+  \bC = \frac{1}{|\mathcal{R}|-1}
+        \sum_{r \in \mathcal{R}}
+        (\bar{\bx}_r - \bar{\bx})(\bar{\bx}_r - \bar{\bx})^{\top}.
+  \label{eq:between-cov}
+\end{equation}
+
+Its eigendecomposition $\bC\mathbf{v}_k = \lambda_k \mathbf{v}_k$
+yields eigenvectors sorted in descending order.
+The scalar projection of a colour vector onto the principal axis is
+
+\begin{equation}
+  s = \mathbf{v}_1^{\top}(\bx - \bar{\bx}).
+  \label{eq:pca-project}
+\end{equation}
+
+The explained-variance ratio $\lambda_1 / \sum_k \lambda_k$ quantifies
+how well the 1-D approximation holds.  If this ratio is close to 1,
+the GP distance-based approach and the PCA scalar approach will give
+nearly identical results; the GP approach is more general and is
+preferred.
+
+% ============================================================
+\section{Summary of Measurement Procedure}
+% ============================================================
+
+\begin{enumerate}
+  \item For each available LED $i$, capture a Bayer image of the
+    test strip on the stage.
+
+  \item For each responsive channel $k \in \mathcal{C}_i$, extract
+    the patch means for SAMPLE and all reference patches.
+
+  \item Optionally update the calibration covariance using
+    equation~\eqref{eq:iw-posterior} with the live reference pixels.
+
+  \item Compute the normalised colour vectors
+    (equation~\eqref{eq:normalise}) for the SAMPLE and each
+    reference patch.
+
+  \item Compute the Mahalanobis distances
+    $d_{ij}$ (equation~\eqref{eq:mahal}) and check for outliers
+    (equation~\eqref{eq:chi2-flag}).
+
+  \item Read the LED temperature $T_i$ for each LED.
+
+  \item Assemble the feature vector $\mathbf{f}$
+    (equation~\eqref{eq:feature-vector}).
+
+  \item Query the fitted GP to obtain
+    $(\hat{c}, \hat{\sigma})$ (equations \eqref{eq:gp-mean}
+    and~\eqref{eq:gp-var}).
+
+  \item Report $\hat{c}$ as the concentration estimate with
+    $\hat{\sigma}$ as the $1\sigma$ uncertainty.
+    Raise warnings for chi-squared outliers or extrapolation.
+\end{enumerate}
+
+% ============================================================
+\section*{References}
+% ============================================================
+
+\begin{enumerate}
+  \item Mahalanobis, P.\,C.\ (1936).
+    On the generalised distance in statistics.
+    \textit{Proceedings of the National Institute of Sciences of India},
+    \textbf{2}(1), 49--55.
+
+  \item Duda, R.\,O., Hart, P.\,E., \& Stork, D.\,G.\ (2001).
+    \textit{Pattern Classification} (2nd ed.).
+    Wiley-Interscience.
+    Chapter~2: Bayesian decision theory and Mahalanobis distance.
+
+  \item McLachlan, G.\,J.\ (1999).
+    Mahalanobis distance.
+    \textit{Resonance}, \textbf{4}(6), 20--26.
+
+  \item Rasmussen, C.\,E.\ \& Williams, C.\,K.\,I.\ (2006).
+    \textit{Gaussian Processes for Machine Learning}.
+    MIT Press.
+    \url{http://www.gaussianprocess.org/gpml/}
+
+  \item Geladi, P., Grahn, H., \& Burger, J.\ (2007).
+    Multivariate images, hyperspectral imaging.
+    In \textit{Techniques and Applications of Hyperspectral Image
+    Analysis}. Wiley.
+    Covers multi-illumination image stacks as joint multivariate
+    observations.
+
+  \item Ledoit, O.\ \& Wolf, M.\ (2004).
+    A well-conditioned estimator for large-dimensional covariance matrices.
+    \textit{Journal of Multivariate Analysis}, \textbf{88}(2), 365--411.
+\end{enumerate}
+
+\end{document}

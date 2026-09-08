@@ -1,0 +1,29 @@
+ERC report (2026-04-26T15:22:53, Encoding UTF8)
+Report includes: Errors, Warnings, Exclusions
+
+***** Sheet /
+[lib_symbol_issues]: The symbol library 'rpi_zero_GPIO' was not found at '/home/bill/kicad/libraries/rpizero'
+    ; warning
+    @(3150 mils, 3150 mils): Symbol U1 [RPi_Zero_W]
+[footprint_link_issues]: The current configuration does not include the footprint library 'CEM-1203_42_'
+    ; warning
+    @(9050 mils, 1400 mils): Symbol LS1 [CEM-1203_42_]
+[lib_symbol_issues]: The symbol library 'colorimeter_parts' was not found at '/home/bill/Projects/Colorimeter/edocs/kicad/libs/symbols'
+    ; warning
+    @(9050 mils, 1400 mils): Symbol LS1 [CEM-1203_42_]
+[power_pin_not_driven]: Input Power pin not driven by any Output Power pins
+    ; error (excluded)
+    @(3900 mils, 3850 mils): Symbol U1 Pin 6 [GND, Power input, Line]
+    Unknown cause: error in part definition?  Verify that it bridges to GND flood
+[pin_to_pin]: Pins of type Power output and Power output are connected
+    ; error (excluded)
+    @(4100 mils, 3850 mils): Symbol U1 Pin 2 [5V_PWR, Power output, Line]
+    @(4000 mils, 3850 mils): Symbol U1 Pin 4 [5V_PWR, Power output, Line]
+
+ ** ERC messages: 5  Errors 2  Warnings 3
+
+ ** Ignored checks:
+    - Global label only appears once in the schematic
+    - Four connection points are joined together
+    - SPICE model issue
+    - Assigned footprint doesn't match footprint filters

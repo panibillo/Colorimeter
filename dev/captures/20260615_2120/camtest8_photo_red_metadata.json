@@ -1,0 +1,118 @@
+{
+  "camtest8_version": "4",
+  "timestamp": "20260615_2120",
+  "led_channel": 9,
+  "led_color": "photo_red",
+  "led_label": "ch 9 (photo_red, 660 nm)",
+  "camera_model": "Camera Module 3 (IMX708)",
+  "bayer_pattern": "BGGR",
+  "config_size": [
+    2304,
+    1296
+  ],
+  "focus_diopters": 7.5,
+  "focus_mode": "autofocus_capped",
+  "focus_max_af_diopter": 7.5,
+  "autofocus_raw_diopters": 10.0,
+  "target_bayer_channel": "R",
+  "roi_white_channel_means": {
+    "B": 64.83910034602076,
+    "Gb": 66.92906574394463,
+    "Gr": 67.01384083044982,
+    "R": 79.19896193771626
+  },
+  "phase0_calibrated_exposure_us": 2000,
+  "phase0_desat_retries": 0,
+  "per_led_desat_retries": 0,
+  "ref_exposure_us": 2000,
+  "e3_refinement": [
+    {
+      "iteration": 1,
+      "exposure_us": 11906,
+      "measured_p50": 195.5,
+      "error_fraction": 0.6182,
+      "converged": false
+    },
+    {
+      "iteration": 2,
+      "exposure_us": 31180,
+      "measured_p50": 411.0,
+      "error_fraction": 0.1973,
+      "converged": false
+    },
+    {
+      "iteration": 3,
+      "exposure_us": 38842,
+      "measured_p50": 495.0,
+      "error_fraction": 0.0332,
+      "converged": true
+    }
+  ],
+  "e3_final_us": 38842,
+  "e3_ratio": 1.5,
+  "roi_sample_percentiles_at_e3": {
+    "89": 511.0,
+    "66": 501.0,
+    "50": 495.0,
+    "33": 488.0,
+    "11": 476.0
+  },
+  "computed_exposures": {
+    "e0": {
+      "type": "fixed_ratio",
+      "ratio": "e3/1.5",
+      "exposure_us": 25894,
+      "exposure_ms": 25
+    },
+    "e1": {
+      "type": "percentile",
+      "target_percentile": 89,
+      "percentile_value": 511.0,
+      "exposure_us": 38918,
+      "exposure_ms": 38
+    },
+    "e2": {
+      "type": "percentile",
+      "target_percentile": 66,
+      "percentile_value": 501.0,
+      "exposure_us": 39694,
+      "exposure_ms": 39
+    },
+    "e3": {
+      "type": "percentile",
+      "target_percentile": 50,
+      "percentile_value": 495.0,
+      "exposure_us": 38842,
+      "exposure_ms": 38
+    },
+    "e4": {
+      "type": "percentile",
+      "target_percentile": 33,
+      "percentile_value": 488.0,
+      "exposure_us": 40752,
+      "exposure_ms": 40
+    },
+    "e5": {
+      "type": "percentile",
+      "target_percentile": 11,
+      "percentile_value": 476.0,
+      "exposure_us": 41779,
+      "exposure_ms": 41
+    },
+    "e6": {
+      "type": "fixed_ratio",
+      "ratio": "e3*1.5",
+      "exposure_us": 58263,
+      "exposure_ms": 58
+    }
+  },
+  "applied_exposures_us": {
+    "e0": 25892,
+    "e1": 38906,
+    "e2": 38906,
+    "e3": 39681,
+    "e4": 38826,
+    "e5": 40750,
+    "e6": 58252
+  }
+}

@@ -1,0 +1,112 @@
+% ============================================================
+%  Buzzer Sub-Circuit  –  Revised layout
+%  RPi GPIO → R1 → MMBT3904 (NPN) → Buzzer (vertical) → +5V
+%  Flyback diode 1N4148W to the left of the buzzer
+% ============================================================
+
+\documentclass[border=12pt]{standalone}
+\usepackage{circuitikz}
+\usepackage{xcolor}
+
+% ── Layout constants (easy to tweak) ──────────────────────
+%  y=0   : R1 / NPN base line
+%  x=0   : left edge (GPIO label)
+%  x=6   : NPN centre
+%  x=9   : buzzer / diode column
+
+\begin{document}
+	\begin{circuitikz}[american, scale=1.15, transform shape,
+		/tikz/circuitikz/bipoles/length=1.4cm]
+		% bipoles/length scales component body size uniformly
+		
+		% ══════════════════════════════════════════════════════
+		%  TRANSISTOR  (centre of universe)
+		% ══════════════════════════════════════════════════════
+		% npn node centred at (6, -1) so that the Base pin
+		% sits at y=0 (base is ~1 unit above centre for npn)
+		\node[npn] (T1) at (6, -1) {};
+		
+		% ══════════════════════════════════════════════════════
+		%  INPUT PATH:  GPIO  ──  R1  ──  Base
+		% ══════════════════════════════════════════════════════
+		% Open-circle pin (o-) at left, plain wire (-) at right
+		\draw (0, 0)
+		node[left]{\textbf{GPIO (PWM)}}
+		to[R, o-, l=R1, a=1\,k$\Omega$]   % resistor on the wire
+		(T1.B);                             % ends at Base pin
+		
+		% ══════════════════════════════════════════════════════
+		%  EMITTER  ──  GND
+		% ══════════════════════════════════════════════════════
+		\draw (T1.E)
+		to[short]
+		(T1.E |- 0,-3)      % straight down to y=-3
+		node[ground]{};     % GND symbol
+		
+		% ══════════════════════════════════════════════════════
+		%  COLLECTOR  ──  bottom of buzzer
+		% ══════════════════════════════════════════════════════
+		% Named coordinate where collector wire meets buzzer column
+		\coordinate (CBOT) at (9, -1);   % buzzer bottom terminal
+		\coordinate (CTOP) at (9,  2);   % buzzer top  terminal  (+5V)
+		
+		% Horizontal wire: Collector → buzzer-bottom
+		\draw (T1.C) -- (CBOT);
+		
+		% ══════════════════════════════════════════════════════
+		%  BUZZER  (vertical, bottom→top = Collector→+5V)
+		% ══════════════════════════════════════════════════════
+		% CircuiTikZ 'buzzer' draws horizontally by default;
+		% 'rotate=-90' inside component options re-orients it
+		% so current flows bottom-to-top.
+		% '*-*' puts filled junction dots at both terminals.
+		\draw (CBOT)
+		to[buzzer, *-*, rotate=-90,           % vertical orientation
+		l_={\small CEM-1203(42)},           % label to right (l_ = right side)
+		a_={\small Piezo Buzzer}]           % annotation to right
+		(CTOP);
+		
+		% ══════════════════════════════════════════════════════
+		%  +5V  RAIL
+		% ══════════════════════════════════════════════════════
+		\draw (CTOP)
+		to[short, -*]              % short wire, dot at end
+		++(0, 0.3)                 % tiny upward stub
+		node[vcc]{\textbf{+5V}};  % VCC / supply symbol
+		
+		% ══════════════════════════════════════════════════════
+		%  FLYBACK DIODE  (left of buzzer, anode at bottom)
+		% ══════════════════════════════════════════════════════
+		% Placed at x=7.2, spanning same y range as buzzer.
+		% Anode (positive) at bottom → Collector side (CBOT y)
+		% Cathode at top             → +5V side       (CTOP y)
+		% Drawing path goes bottom→top, so normal 'D' orientation
+		% has anode at start = bottom. ✓
+		\coordinate (DBOT) at (7.2, -1);   % anode  (= CBOT y)
+		\coordinate (DTOP) at (7.2,  2);   % cathode (= CTOP y)
+		
+		% Horizontal connecting wires from buzzer terminals to diode
+		\draw (CBOT) -- (DBOT);   % bottom junction
+		\draw (CTOP) -- (DTOP);   % top    junction
+		
+		% Diode drawn bottom→top; labels forced to the left
+		\draw (DBOT)
+		to[D, *-*,                           % dots at both ends
+		l_={\small 1N4148W},              % label  left
+		a_={\small Flyback}]              % annotation left
+		(DTOP);
+		% Note: l_ and a_ with the underscore push labels to the
+		% "negative" side of the path — which is the left when
+		% the path runs upward.
+		
+		% ══════════════════════════════════════════════════════
+		%  TERMINAL LABELS  (minimal)
+		% ══════════════════════════════════════════════════════
+		\node[below right, font=\tiny] at (T1.B) {B};
+		\node[above right, font=\tiny] at (T1.C) {C};
+		\node[below right, font=\tiny] at (T1.E) {E};
+		\node[below, font=\small]      at (T1.center) {MMBT3904};
+		
+	\end{circuitikz}
+\end{document}
+

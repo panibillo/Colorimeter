@@ -1,0 +1,364 @@
+% ============================================================
+%  Arsenic Colorimeter: Synthesis and Planning Document
+%
+%  Compile with: pdflatex colorimeter_plan.tex (twice)
+% ============================================================
+
+\documentclass[11pt,letterpaper]{article}
+
+\usepackage[letterpaper,margin=1in]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage[protrusion=true,expansion=false]{microtype}
+\usepackage{parskip}
+\usepackage{enumitem}
+\usepackage{hyperref}
+\hypersetup{
+  colorlinks=true,
+  linkcolor=blue,
+  urlcolor=blue,
+  pdftitle={Arsenic Colorimeter -- Synthesis and Planning},
+  pdfauthor={Design Notes}
+}
+\usepackage{titlesec}
+\titleformat{\section}{\Large\bfseries}{\thesection}{1em}{}
+\titleformat{\subsection}{\large\bfseries}{\thesubsection}{1em}{}
+\titleformat{\subsubsection}{\normalsize\bfseries}{\thesubsubsection}{1em}{}
+
+\setlist[itemize]{topsep=2pt,itemsep=1pt}
+\setlist[enumerate]{topsep=2pt,itemsep=1pt}
+
+\title{Synthesis and Planning:\\ Arsenic Colorimeter Methods}
+\author{Design notes}
+\date{\today}
+
+\begin{document}
+\maketitle
+
+% ============================================================
+\section*{Where we are}
+% ============================================================
+
+You have a hardware-first project with a working optical prototype, a clear
+measurement goal (arsenic in drinking water, with the decision threshold
+around the WHO 10\,\textmu g/L limit), a chemistry you don't fully control
+(gas-phase Gutzeit-type strip reaction), and a statistics pipeline that was
+written somewhat ahead of the hardware and the data. The original \texttt{.tex}
+is a speculative methods document --- a plausible skeleton assembled from
+standard tools (Mahalanobis, inverse-Wishart, GP), not a reflection of
+measurements you've actually looked at.
+
+My critique flagged two kinds of issues: mathematical consistency problems
+inside the skeleton, and physical difficulties the skeleton didn't
+acknowledge. Your response splits those cleanly:
+
+\begin{itemize}
+  \item \textbf{Physical issues you've already thought about and have a plan for:}
+    illumination non-uniformity (polynomial flat-field), strip heterogeneity
+    (defer, study empirically), strip kinetics (built-in timer, fixed
+    protocol), temperature (ambient + water + LED-adjacent probes), stray
+    light (flat-black interior, small patch area, testable).
+  \item \textbf{Physical issues still open:} batch-to-batch strip variation,
+    the exact spectral behavior of the IMX219 under each LED, HDR / dynamic
+    range in the pale-yellow regime, dark current behavior vs.\ exposure
+    time and temperature.
+  \item \textbf{Statistical issues you're explicitly deferring to
+    collaboration:} what to actually use as features, what to regress with,
+    what to report for uncertainty, and how to validate.
+\end{itemize}
+
+My job at this planning stage is to (a)~design a statistical pipeline that
+fits your hardware plan, (b)~tell you what data I need to see before
+committing to specifics, and (c)~flag what you should learn so you're not
+flying blind on the statistics.
+
+% ============================================================
+\section*{The approach I'd recommend, at the level of strategy}
+% ============================================================
+
+The original paper's architecture was: \emph{within-image Mahalanobis
+distances to reference patches, stacked with LED temperatures, fed to a GP.}
+I don't think that's the right shape. Here is the shape I'd recommend
+instead, with the reasoning.
+
+\textbf{Build the pipeline in layers, each with a clear job, each testable on
+its own.} The layers are: raw capture $\to$ pixel-level corrections $\to$
+patch-level feature extraction $\to$ dimensional reduction $\to$
+regression/classification $\to$ uncertainty calibration. Each layer should
+be swappable. The temptation with a project like this is to combine layers
+--- e.g., fold flat-fielding into the covariance model --- and that makes
+debugging impossible.
+
+\subsection*{Layer 1: Raw capture and pixel-level corrections}
+
+This is the part where your hardware plan already lives. Concretely:
+
+\begin{itemize}
+  \item \textbf{Dark subtraction first, always.} Every image, raw, minus a
+    same-exposure-time dark frame. Dark-subtract before anything else. The
+    dark frame captures read noise bias, dark current, and fixed-pattern
+    noise in one shot. Your plan mentions ``subtract the mean black
+    background'' but a \emph{mean} dark throws away pattern noise. Subtract
+    the full dark \emph{frame}, pixel-by-pixel. Capture darks periodically
+    (they drift with sensor temperature).
+  \item \textbf{Flat-field correction using your polynomial plan.} Your
+    plan is sound. One refinement: fit the polynomial \emph{per Bayer
+    channel} (you already said this) and \emph{per LED} (you already said
+    this), but also consider fitting across a wider area than just the
+    rectangles and evaluating at rectangle centers. A polynomial fit over
+    more pixels is better conditioned. Degree-2 is almost certainly right;
+    only go to degree-3 if residuals show structure.
+  \item \textbf{Saturation and dead-pixel masking.} Before any mean, mask
+    pixels that are saturated ($\geq {\sim}1000$ DN on a 10-bit sensor) or
+    identified as hot/dead from calibration. The IMX219 has ${\sim}0.1\%$
+    bad pixels typically. Patch means should be trimmed means or medians
+    over unmasked pixels.
+  \item \textbf{Exposure bracketing.} I'd strongly consider capturing each
+    LED condition at two or three exposures and selecting (or HDR-combining)
+    to maximize SNR without saturating. The pale-yellow regime is where you
+    need the dynamic range.
+\end{itemize}
+
+The output of this layer is: per-patch, per-LED, per-Bayer-channel, a
+flat-fielded, dark-subtracted, outlier-masked pixel array. Not a mean yet
+--- keep the pixels around, because the spatial distribution of values
+inside the strip patch is itself information (see Layer~3).
+
+\subsection*{Layer 2: Within-image normalization}
+
+This is where your existing plan of ``divide by white patch'' lives, but I'd
+do it differently than the original \texttt{.tex}.
+
+\begin{itemize}
+  \item After flat-fielding, the white reference patch should read
+    approximately constant across the frame (that's what flat-fielding is
+    for). So \emph{any} white patch on the card, or an average of several,
+    gives you a single scalar per (LED, channel) to divide by. This is the
+    illumination-intensity normalizer.
+  \item The black patch, after dark subtraction, ideally reads zero. If it
+    doesn't, you have stray light, and the black patch value is your
+    stray-light estimate. Subtract it. (This is your stray-light test,
+    built into every measurement.)
+  \item The result is a \emph{reflectance-like} quantity per patch, per LED,
+    per channel: dimensionless, between 0 and 1, interpretable as
+    ``fraction of incident light reflected.''
+\end{itemize}
+
+This is a much cleaner foundation than the original paper's setup. It
+cleanly separates intensity normalization (white) from stray-light
+subtraction (black). Both are physical quantities, not statistical
+nuisances.
+
+\subsection*{Layer 3: Feature extraction from patch pixels}
+
+Here I'd depart from the original paper significantly. The paper jumped
+straight to ``patch mean, then Mahalanobis distance to references, with
+pixel-noise covariance in the middle.'' I'd reconsider.
+
+What you actually have from Layer~2 is, per strip, a multivariate
+reflectance value per (LED, channel) position --- roughly $I\times 4$ values
+if all Bayer channels are used for all LEDs, minus the ones knocked out by
+low SNR. For typical cases that's maybe 8--12 numbers.
+
+The useful features are:
+
+\begin{itemize}
+  \item \textbf{Mean reflectance vector.} The obvious one. Call it
+    $\mathbf{r}\in\mathbb{R}^N$ where $N$ is the number of (LED, channel)
+    combinations surviving SNR culling.
+  \item \textbf{Within-patch variability.} The standard deviation or
+    inter-quartile range of pixel reflectance inside the strip patch, per
+    (LED, channel). This is a \emph{uniformity flag} --- if the strip
+    reacted unevenly, these values will be elevated compared to
+    calibration. Not a predictor of concentration, but a quality indicator.
+  \item \textbf{Ratios / log-ratios between channels.} For a colorimetric
+    measurement, ratios are often more informative than absolute values. A
+    log-reflectance vector $-\log(\mathbf{r})$ is the right transform if
+    you believe Beer-Lambert-like behavior (which is an approximation for
+    strips, but a useful one).
+\end{itemize}
+
+I would \textbf{not} compute Mahalanobis distances to reference patches as
+the primary feature. Here's why: reference patches are useful for
+\emph{rebasing the measurement against known colors present in the same
+image}, which corrects for illumination drift. But that's already handled
+by white-patch normalization in Layer~2. The references give you a
+\emph{check} --- does a ``yellow reference'' in this image read the same as
+it did in calibration? --- but they aren't the input to the regression. The
+regression input should be the strip's reflectance vector itself.
+
+Keep the reference patches in the pipeline, but in a different role:
+\textbf{as a per-image quality gate.} If any reference patch's reflectance
+vector in the live image differs from its calibration mean by more than $k$
+standard deviations (this \emph{is} where a Mahalanobis distance earns its
+keep --- as an outlier detector on known-color patches), flag the image and
+recalibrate or reject.
+
+\subsection*{Layer 4: Dimensional reduction and covariate assembly}
+
+You anticipated this: PCA on the strip reflectance vectors across a
+calibration set will likely reveal that 1--2 components capture $>95\%$ of
+the variance, because there's essentially one chemical axis
+(white$\to$yellow$\to$brown). That's the ``principal color score'' $s_1$,
+and possibly $s_2$.
+
+The feature vector for regression is then small:
+\begin{equation*}
+  \mathbf{x} = \bigl(s_1,\; s_2,\; T_{\text{ambient}},\; T_{\text{water}},\;
+    t_{\text{develop}},\; \text{strip-lot ID}\bigr).
+\end{equation*}
+
+Low-dimensional, interpretable, and each component has a physical meaning.
+This is \emph{vastly} preferable to the original paper's $IJ+I$-dimensional
+feature vector for a GP.
+
+\subsection*{Layer 5: Regression}
+
+Here the question is not ``GP vs.\ not GP'' but ``what's the simplest
+model that works?'' In order of increasing complexity:
+
+\begin{enumerate}
+  \item \textbf{Univariate calibration curve.} $c = f(s_1)$. Fit a monotone
+    spline, or a parametric curve motivated by the chemistry. This should
+    be your baseline and it will probably cover 80\% of cases. It's
+    intelligible to engineers. Every colorimetric analysis textbook uses
+    this.
+  \item \textbf{Bivariate.} $c = f(s_1, s_2)$. Include $s_2$ if residuals
+    from (1) show structure along $s_2$.
+  \item \textbf{With covariates.} Add $T_{\text{water}}$, $t_{\text{develop}}$,
+    etc.\ if residuals correlate with them.
+  \item \textbf{GP, only if needed.} Switch to a GP if a parametric model
+    doesn't fit well and you have enough calibration data to justify it.
+    GPs are powerful but opaque. Save them for when you've demonstrated
+    that simpler models aren't sufficient.
+\end{enumerate}
+
+The original paper's ``GP with a 12+ dim feature vector'' is almost
+certainly overfit for a calibration set of a few hundred strips.
+
+\subsection*{Layer 6: Uncertainty calibration and decision threshold}
+
+This is absent from the original and matters enormously for a field
+instrument. Two things:
+
+\begin{itemize}
+  \item \textbf{Empirical prediction intervals via cross-validation or
+    conformal prediction.} Rather than trust the model's internal
+    uncertainty (GP posterior variance, or fitted spline confidence bands),
+    compute residuals from leave-one-strip-out CV, and use their
+    distribution to build honest 95\% prediction intervals. Report those.
+  \item \textbf{Decision-relevant metrics.} The WHO limit is 10\,\textmu g/L.
+    What matters is the \emph{false-negative rate at 10\,\textmu g/L}.
+    Design the validation around this specifically. ROC-like analysis
+    centered on the decision threshold is more important than overall RMSE.
+\end{itemize}
+
+% ============================================================
+\section*{What I need to know to commit to specifics}
+% ============================================================
+
+Before I'd write down equations or code, I need the following, in roughly
+this order of importance:
+
+\begin{enumerate}
+  \item \textbf{The actual strip chemistry.} Is this a Gutzeit
+    (HgBr$_2$-on-paper) strip? Arsenator? Something else? The kinetics,
+    temperature sensitivity, and spectral signature differ. This determines
+    whether we expect Beer-Lambert-like log-reflectance behavior, what the
+    dominant color axis looks like, and whether there's one reaction
+    product or several.
+  \item \textbf{A small real dataset.} Even 20--50 strips across the
+    concentration range, imaged on the prototype, would let me see the
+    actual shape of the color manifold, the noise level, and whether 1-D
+    PCA really is enough. Without this we're just speculating.
+  \item \textbf{The LED choices and their spectra.} You said ``blue, green,
+    red, and optionally more.'' Which exact LEDs? Peak wavelengths, FWHMs?
+    More LEDs aren't automatically better if their spectral bands don't
+    align with features in the strip's reflectance spectrum.
+  \item \textbf{The reference card design.} How many references, what
+    colors? Are they printed (potentially fugitive), Munsell chips, or
+    Pantone-painted? Long-term stability of the reference card is critical
+    for an instrument that will live in the field.
+  \item \textbf{Target performance.} LOD? Required precision at
+    10\,\textmu g/L? Required precision at higher concentrations? Time
+    budget per measurement? This drives how much calibration effort is
+    justified.
+  \item \textbf{Deployment constraints.} How much computation can a
+    Raspberry Pi Zero do per measurement? A full GP inverse is fine for a
+    few hundred points; a cross-validated conformal prediction interval
+    means doing that several times. This bounds what's implementable.
+\end{enumerate}
+
+% ============================================================
+\section*{What I recommend you learn or read}
+% ============================================================
+
+Not huge detours, but enough to let you judge proposals rather than accept
+them:
+
+\begin{itemize}
+  \item \textbf{Beer-Lambert and diffuse reflectance basics.} Why
+    log-reflectance is often the right transform. Kubelka-Munk is the
+    standard model for reflectance from scattering media like paper
+    strips; it's a one-page read and gives you a language for discussing
+    what's going on optically. This is the single most useful thing to
+    read.
+  \item \textbf{PCA intuition, not mechanics.} You already have the
+    mechanics from the \texttt{.tex}. What's worth building up is the
+    intuition that PCA on a calibration set tells you the
+    \emph{dimensionality of the chemistry}, and the explained-variance
+    plot is a diagnostic tool you'll use to argue (to yourself and to
+    reviewers) that a 1-D or 2-D model is justified.
+  \item \textbf{Cross-validation and why ``training error'' lies.}
+    Hastie, Tibshirani, Friedman (\emph{Elements of Statistical Learning})
+    chapter~7 is the classic. The key idea: you will always be able to fit
+    your calibration data well; the honest question is how well you predict
+    \emph{unseen} strips, and CV is the answer.
+  \item \textbf{Conformal prediction, at a high level.} This is a method
+    for building honest prediction intervals around \emph{any} regression
+    model without distributional assumptions. A short intro paper
+    suffices. For a field instrument where the end user will make a
+    health decision from the number, this matters.
+  \item \textbf{What Mahalanobis distance actually is, and where it does
+    and doesn't belong.} Not a deep dive --- the intuition ``distance
+    measured in units of standard deviations, accounting for correlation
+    between dimensions'' is enough, plus the fact that it requires you to
+    specify \emph{which} covariance. In a classifier it's the within-class
+    covariance. In outlier detection it's the expected-under-the-null
+    covariance. In the original paper it was within-patch pixel noise,
+    which was the wrong choice.
+\end{itemize}
+
+% ============================================================
+\section*{What the rewritten document should look like}
+% ============================================================
+
+When we're ready to write, I'd structure it as:
+
+\begin{enumerate}
+  \item Instrument and measurement concept (hardware, chemistry, protocol,
+    timing).
+  \item Image processing pipeline (Layers 1--3 above) --- this is the
+    engineering meat.
+  \item Feature extraction and calibration model (Layers 4--5), presenting
+    the univariate model as the baseline and more complex models as
+    extensions justified by residual analysis.
+  \item Uncertainty quantification and decision thresholds (Layer~6).
+  \item Validation protocol and results (once data exists).
+\end{enumerate}
+
+Substantially shorter and substantially less mathematical than the
+original. The original's weakness was that it paraded statistical
+machinery; the new version's strength should be that each step has a
+specific, defensible reason rooted in the physics and chemistry.
+
+% ============================================================
+\section*{Immediate next step I'd suggest}
+% ============================================================
+
+Get any real data --- even a quick prototype pass with ten strips at five
+concentrations, imaged with whatever LEDs you have --- and look at it with
+me. Everything above is informed speculation. A plot of $\log(1/r)$ vs.\
+concentration for each LED, over a real run, answers more questions in ten
+minutes than another round of theory.
+
+\end{document}

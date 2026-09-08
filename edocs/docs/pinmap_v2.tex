@@ -1,0 +1,1174 @@
+% ============================================================
+%  Pin Mapping and Configuration Reference
+%  Raspberry Pi Zero 2 W  --- Colorimeter Prototype
+%  As-Built Document  ---  Pre-Testing Reference
+%
+%  Components covered:
+%    Adafruit 1651  2.8" TFT Touch Shield (ILI9341 + TSC2007)
+%    74HC595 8-bit shift register (SPI1)
+%    AO3400A N-channel MOSFETs x10 (8 via 595, 2 direct GPIO)
+%    CEM-1203(42) passive buzzer via MMBT3904 NPN BJT
+%    1-Wire temperature probe (non-default GPIO16)
+%    Connectors J1--J8, jumpers JP1--JP2
+%
+%  Sources:
+%    RPi GPIO: raspberrypi.com/documentation/computers/raspberry-pi.html#gpio
+%    Adafruit 1651: learn.adafruit.com/adafruit-2-8-tft-touch-shield-v2
+%    74HC595: TI SN74HC595 datasheet; Adafruit learn.adafruit.com/74hc595
+%    AO3400A: Alpha & Omega AO3400A datasheet
+%    pigpio: abyz.me.uk/rpi/pigpio/
+% ============================================================
+\documentclass[11pt,a4paper]{article}
+
+\usepackage[a4paper, margin=1.8cm]{geometry}
+\usepackage{booktabs}
+\usepackage{tabularx}
+\usepackage{longtable}
+\usepackage{array}
+\usepackage{xcolor}
+\usepackage{colortbl}
+\usepackage{hyperref}
+\usepackage{parskip}
+\usepackage{microtype}
+\usepackage{fancyhdr}
+\usepackage{titlesec}
+\usepackage{mdframed}
+\usepackage{enumitem}
+\usepackage{multirow}
+\usepackage{amsmath}
+\usepackage{alltt}
+
+% ── Colours ──────────────────────────────────────────────────
+\definecolor{hdr}{RGB}{30,70,120}
+\definecolor{rowB}{RGB}{248,251,255}
+\definecolor{warn}{RGB}{255,243,205}
+\definecolor{warnborder}{RGB}{200,150,0}
+\definecolor{notebg}{RGB}{237,247,237}
+\definecolor{noteborder}{RGB}{60,140,60}
+\definecolor{oddcol}{RGB}{220,235,255}
+\definecolor{evencol}{RGB}{220,250,225}
+\definecolor{pwrcol}{RGB}{255,230,220}
+\definecolor{errcol}{RGB}{255,210,210}
+
+% ── Column types ─────────────────────────────────────────────
+\newcolumntype{L}[1]{>{\raggedright\arraybackslash}p{#1}}
+\newcolumntype{C}[1]{>{\centering\arraybackslash}p{#1}}
+
+% ── Section styling ───────────────────────────────────────────
+\titleformat{\section}{\large\bfseries\color{hdr}}{}{0em}{}[\titlerule]
+\titleformat{\subsection}{\normalsize\bfseries\color{hdr}}{}{0em}{}
+\titleformat{\subsubsection}{\normalsize\itshape\color{hdr}}{}{0em}{}
+
+% ── Header / footer ───────────────────────────────────────────
+\pagestyle{fancy}
+\fancyhf{}
+\lhead{\small Colorimeter Prototype --- RPi Zero 2W Pin Mapping and Configuration}
+\rhead{\small As-Built Pre-Testing Reference}
+\cfoot{\small Page \thepage}
+\renewcommand{\headrulewidth}{0.4pt}
+
+% ── Coloured boxes ────────────────────────────────────────────
+\newmdenv[backgroundcolor=notebg, linecolor=noteborder, linewidth=1.2pt,
+  leftmargin=0pt, rightmargin=0pt, innerleftmargin=8pt, innerrightmargin=8pt,
+  innertopmargin=6pt, innerbottommargin=6pt,
+  skipabove=6pt, skipbelow=6pt]{notebox}
+
+\newmdenv[backgroundcolor=warn, linecolor=warnborder, linewidth=1.2pt,
+  leftmargin=0pt, rightmargin=0pt, innerleftmargin=8pt, innerrightmargin=8pt,
+  innertopmargin=6pt, innerbottommargin=6pt,
+  skipabove=6pt, skipbelow=6pt]{warnbox}
+
+\newmdenv[backgroundcolor=errcol, linecolor=red, linewidth=1.5pt,
+  leftmargin=0pt, rightmargin=0pt, innerleftmargin=8pt, innerrightmargin=8pt,
+  innertopmargin=6pt, innerbottommargin=6pt,
+  skipabove=6pt, skipbelow=6pt]{errorbox}
+
+% ── Helpers ───────────────────────────────────────────────────
+\newcommand{\fixed}{\textbf{FIXED}}
+\newcommand{\soft}{\textit{soft}}
+\newcommand{\na}{---}
+\newcommand{\jref}[1]{\texttt{\small[#1]}}
+
+% =============================================================
+\begin{document}
+
+\begin{center}
+  {\LARGE\bfseries\color{hdr} Colorimeter Prototype\\[4pt]
+   Pin Mapping and Configuration Reference}\\[6pt]
+  {\large Raspberry Pi Zero 2~W --- As-Built}\\[4pt]
+  {\normalsize Pre-testing reference document.
+   Describes all hardware connections, required OS configuration,\\
+   known issues, and testing cautions as of first prototype build.}\\[4pt]
+  {\small\color{gray}
+   RPi GPIO reference:
+   \href{https://www.raspberrypi.com/documentation/computers/raspberry-pi.html\#gpio}%
+   {raspberrypi.com/documentation/.../raspberry-pi.html\#gpio}\\
+   Adafruit 1651:
+   \href{https://learn.adafruit.com/adafruit-2-8-tft-touch-shield-v2}%
+   {learn.adafruit.com/adafruit-2-8-tft-touch-shield-v2}\\
+   74HC595: TI SN74HC595 datasheet;
+   \href{https://learn.adafruit.com/74hc595}{learn.adafruit.com/74hc595}\\
+   pigpio library:
+   \href{http://abyz.me.uk/rpi/pigpio/}{abyz.me.uk/rpi/pigpio}}
+\end{center}
+\vspace{4pt}\hrule\vspace{8pt}
+
+% =============================================================
+\section{RPi Zero 2~W GPIO Peripheral Reference}
+\label{sec:gpioref}
+
+All GPIO pins operate at \textbf{3.3\,V logic}.
+Applying 5\,V to any GPIO pin will permanently damage the SoC.
+The following peripheral pin assignments are \textbf{fixed by the RP3A0 SoC}
+and cannot be remapped in software.
+
+\begin{notebox}
+\textbf{Source:}
+\href{https://www.raspberrypi.com/documentation/computers/raspberry-pi.html\#gpio}%
+{raspberrypi.com --- GPIO and 40-pin header documentation}
+
+\medskip
+\textbf{Hardware PWM} --- available on four pins only:
+GPIO12 (PWM0-A, pin~32), GPIO13 (PWM1, pin~33),
+GPIO18 (PWM0-B, pin~12), GPIO19 (PWM0, pin~35).
+\textit{GPIO12 and GPIO13 share one clock divider.
+GPIO18 and GPIO19 share another.
+Both channels within a pair can have independent duty cycles
+but their frequencies must be derived from the same base clock.}
+
+\medskip
+\textbf{SPI0} (enabled by \texttt{dtparam=spi=on}):
+MOSI=GPIO10/pin~19; MISO=GPIO9/pin~21; SCLK=GPIO11/pin~23;
+CE0=GPIO8/pin~24; CE1=GPIO7/pin~26.
+
+\medskip
+\textbf{SPI1} (enabled by \texttt{dtoverlay=spi1-1cs}):
+MOSI=GPIO20/pin~38; MISO=GPIO19/pin~35; SCLK=GPIO21/pin~40;
+CE0=GPIO18/pin~12; CE1=GPIO17/pin~11; CE2=GPIO16/pin~36.
+\textit{Warning: the spi1 overlay claims GPIO18 as CE0 by default.
+GPIO18 is used in this design for a separate purpose.
+See Section~\ref{sec:spi1config} for correct configuration.}
+
+\medskip
+\textbf{I2C bus~1} (enabled by \texttt{dtparam=i2c\_arm=on}):
+SDA=GPIO2/pin~3; SCL=GPIO3/pin~5.
+
+\medskip
+\textbf{UART}:
+TX=GPIO14/pin~8; RX=GPIO15/pin~10.
+\textit{Reserved for Linux serial console. Do not use.}
+
+\medskip
+\textbf{EEPROM}: GPIO0/pin~27 and GPIO1/pin~28.
+\textit{Physical pins removed on this prototype. Do not use.}
+\end{notebox}
+
+% ── Power notes ───────────────────────────────────────────────
+\subsection{Power and Ground Pin Notes}
+
+\begin{warnbox}
+\textbf{5\,V pins --- Pin~2 and Pin~4 (even side):}
+Electrically identical. Both connect directly to the micro-USB supply rail.
+In this design: Pin~2 supplies the Adafruit 1651 shield via J1.
+Pin~4 supplies the LED load circuit via J5--J8.
+Current limit is set by the micro-USB supply and the board polyfuse
+($\approx$2\,A for the Zero 2\,W).
+
+\smallskip
+\textbf{3.3\,V pins --- Pin~1 (odd) and Pin~17 (odd):}
+Both are outputs of the same onboard 3.3\,V regulator. Electrically identical.
+\textbf{Total current budget across the entire 3.3\,V rail is $\approx$50\,mA},
+shared among GPIO output drivers and all 3.3\,V peripherals.
+In this design the 3.3\,V rail supplies: 74HC595 VCC, 1-Wire pull-up,
+I2C pull-ups (via 1651 shield), and J2 pin~1 (1-Wire device supply).
+The 1651 shield has its own onboard 3.3\,V regulator fed from 5\,V ---
+it does \emph{not} draw from the RPi 3.3\,V rail.
+
+\smallskip
+\textbf{Ground:} Pins 6, 9, 14, 20, 25, 30, 34, 39 are all identical ground.
+Use the ground pin nearest to each signal group for lowest-impedance return paths.
+\end{warnbox}
+
+% =============================================================
+\section{Complete RPi Zero 2~W Pin Allocation --- As-Built}
+\label{sec:pinmap}
+
+\textbf{Legend:}
+\colorbox{oddcol}{\strut Odd-side pin (1651 / SPI0 / I2C)} \quad
+\colorbox{evencol}{\strut Even-side pin (general I/O)} \quad
+\colorbox{pwrcol}{\strut Power / Ground} \quad
+\colorbox{errcol}{\strut Note / caution}
+
+\smallskip
+\textbf{Columns:} Phys = physical header pin;
+BCM = Broadcom GPIO number (use in Python);
+Dir = O output / I input / IO bidirectional / PWM / PWR;
+Connector reference in \texttt{[brackets]}.
+
+\vspace{4pt}
+\setlength{\tabcolsep}{3pt}
+\renewcommand{\arraystretch}{1.35}
+
+\begin{longtable}{C{0.85cm} C{1.2cm} C{0.65cm} L{3.2cm} L{8.1cm}}
+  \toprule
+  \rowcolor{hdr}
+  \color{white}\textbf{Phys} &
+  \color{white}\textbf{BCM} &
+  \color{white}\textbf{Dir} &
+  \color{white}\textbf{Assignment} &
+  \color{white}\textbf{Notes / connector} \\
+  \midrule
+  \endfirsthead
+  \toprule
+  \rowcolor{hdr}
+  \color{white}\textbf{Phys} &
+  \color{white}\textbf{BCM} &
+  \color{white}\textbf{Dir} &
+  \color{white}\textbf{Assignment} &
+  \color{white}\textbf{Notes / connector} \\
+  \midrule
+  \endhead
+  \bottomrule
+  \endfoot
+
+  % ── ODD SIDE ────────────────────────────────────────────────
+  \multicolumn{5}{l}{\cellcolor{oddcol}%
+    \textbf{Odd-side pins --- Adafruit 1651 display/touch shield
+    (SPI0, I2C, PWM backlight)}} \\
+  \midrule
+
+  \rowcolor{pwrcol}
+  1 & \na & PWR & 3.3\,V &
+    Not connected to 1651 (shield has own regulator).
+    Available for low-current 3.3\,V loads ($\leq$50\,mA total rail). \\
+
+  \rowcolor{oddcol}
+  3 & GPIO2 & IO & I2C SDA $\to$ TSC2007 &
+    \fixed\ by SoC. I2C bus~1 data.
+    Shield has onboard 4.7\,k$\Omega$ pull-up --- do not add PCB pull-up.
+    33\,$\Omega$ series ESD resistor on PCB.
+    \jref{J1-Pin2} \\
+
+  \rowcolor{rowB}
+  5 & GPIO3 & IO & I2C SCL $\to$ TSC2007 &
+    \fixed\ by SoC. I2C bus~1 clock.
+    Same pull-up note as SDA.
+    33\,$\Omega$ series ESD resistor on PCB.
+    \jref{J1-Pin4} \\
+
+  \rowcolor{oddcol}
+  7 & GPIO4 & I & TSIRQ --- touch interrupt &
+    Active-low interrupt output from TSC2007.
+    Enable RPi internal pull-up in software:
+    \texttt{GPIO.setup(4, GPIO.IN, pull\_up\_down=GPIO.PUD\_UP)}.
+    33\,$\Omega$ series ESD resistor on PCB.
+    \jref{J1-Pin10} \\
+
+  \rowcolor{pwrcol}
+  9 & \na & GND & Ground &
+    Odd-side ground return. Connects to J1-Pin3, J1-Pin5, J1-Pin15.
+    \jref{J1-Pin3, J1-Pin5, J1-Pin15} \\
+
+  \rowcolor{oddcol}
+  11 & GPIO17 & \na & Spare &
+    Unassigned. Routed to J1 for future use.
+    33\,$\Omega$ series resistor on PCB.
+    \jref{J1-Pin14} \\
+
+  \rowcolor{pwrcol}
+  13 & GPIO27 & \na & No connect &
+    Unassigned. Physical pin present but no PCB connection. \\
+
+  \rowcolor{pwrcol}
+  15 & GPIO22 & \na & No connect &
+    Unassigned. Physical pin present but no PCB connection. \\
+
+  \rowcolor{pwrcol}
+  17 & \na & PWR & 3.3\,V &
+    Not connected to 1651. Same rail as pin~1.
+    Available for low-current 3.3\,V loads. \\
+
+  \rowcolor{oddcol}
+  19 & GPIO10 & O & SPI0 MOSI $\to$ ILI9341 &
+    \fixed\ by SoC (SPI0 MOSI). High-speed serial data to display controller.
+    33\,$\Omega$ series resistor on PCB.
+    \jref{J1-Pin13} \\
+
+  \rowcolor{rowB}
+  21 & GPIO9 & I & SPI0 MISO $\leftarrow$ ILI9341 &
+    \fixed\ by SoC (SPI0 MISO). Read-back from display and optional SD card.
+    33\,$\Omega$ series resistor on PCB.
+    \jref{J1-Pin12} \\
+
+  \rowcolor{oddcol}
+  23 & GPIO11 & O & SPI0 SCLK $\to$ ILI9341 &
+    \fixed\ by SoC (SPI0 clock).
+    33\,$\Omega$ series resistor on PCB.
+    \jref{J1-Pin11} \\
+
+  \rowcolor{pwrcol}
+  25 & \na & GND & Ground &
+    Additional odd-side ground.
+    \jref{J1-Pin15 shared} \\
+
+  \rowcolor{pwrcol}
+  27 & GPIO0 & \na & PIN REMOVED --- DO NOT USE &
+    HAT ID EEPROM pin. Physical pin removed from header on this prototype. \\
+
+  \rowcolor{oddcol}
+  29 & GPIO5 & \na & Spare / SD Card CS &
+    Unassigned. May be used as active-low chip select for
+    microSD slot on 1651 shield if SD card use is implemented.
+    33\,$\Omega$ series resistor on PCB.
+    \jref{J1-Pin8} \\
+
+  \rowcolor{rowB}
+  31 & GPIO6 & O & TFT DC (Data/Command) &
+    Data/Command select line for ILI9341.
+    High = data byte; Low = command byte.
+    Driven by software before each SPI0 transaction.
+    33\,$\Omega$ series resistor on PCB.
+    \jref{J1-Pin7} \\
+
+  \rowcolor{oddcol}
+  33 & GPIO13 & PWM & Backlight PWM $\to$ 1651 LITE &
+    \textbf{Hardware PWM channel~1 (PWM1).}
+    Controls display backlight brightness via 1651 LITE pin.
+    Solder the LITE/\#3 jumper on the 1651 shield to enable.
+    33\,$\Omega$ series resistor on PCB.
+    See Section~\ref{sec:pwm} for shared clock constraints with GPIO12.
+    \jref{J1-Pin9} \\
+
+  \rowcolor{rowB}
+  35 & GPIO19 & I & SPI1 MISO (breakout) &
+    SPI1 MISO pin. Not currently connected to any active device.
+    Exposed at J4 for future use (e.g.\ a second SPI1 peripheral with MISO).
+    Note: GPIO19 is also hardware PWM capable --- not used for PWM here.
+    \jref{J4-Pin4} \\
+
+  \rowcolor{pwrcol}
+  37 & GPIO26 & \na & Spare &
+    Unassigned. Routed to J1 for future use.
+    \jref{J1-Pin16} \\
+
+  \rowcolor{pwrcol}
+  39 & \na & GND & Ground &
+    Odd-side ground. \\
+
+  \midrule
+  % ── EVEN SIDE ───────────────────────────────────────────────
+  \multicolumn{5}{l}{\cellcolor{evencol}%
+    \textbf{Even-side pins --- general I/O: MOSFETs, SPI1 shift register,
+    buzzer, 1-Wire, interface headers}} \\
+  \midrule
+
+  \rowcolor{pwrcol}
+  2 & \na & PWR & 5\,V $\to$ 1651 VIN &
+    Powers Adafruit 1651 shield via J1.
+    Shield's onboard regulator converts to 3.3\,V for ILI9341 and TSC2007.
+    \textbf{Do not use RPi 3.3\,V rail for 1651 power.}
+    100\,nF ceramic + 10\,$\mu$F tantalum decoupling at J1 (fitted).
+    \jref{J1-Pin1} \\
+
+  \rowcolor{pwrcol}
+  4 & \na & PWR & 5\,V $\to$ LED loads &
+    Supplies 5\,V to LED/MOSFET drain circuits via J5--J8 Pin~1.
+    100\,nF ceramic decoupling near each LED bank (fitted).
+    \jref{J5-Pin1, J6-Pin1, J7-Pin1, J8-Pin1} \\
+
+  \rowcolor{pwrcol}
+  6 & \na & GND & Ground &
+    Even-side primary ground return. \\
+
+  \rowcolor{evencol}
+  8 & GPIO14 & \na & UART TX --- DO NOT USE &
+    Linux serial console TX. Leave unconnected. \\
+
+  \rowcolor{rowB}
+  10 & GPIO15 & \na & UART RX --- DO NOT USE &
+    Linux serial console RX. Leave unconnected. \\
+
+  \rowcolor{evencol}
+  12 & GPIO18 & \na & Dual-purpose via jumpers &
+    GPIO18 routes to two destinations via solder jumpers.
+    \textbf{JP2 (closed):} GPIO18 $\to$ J3-Pin4 (interface header).
+    \textbf{JP1 (open):} GPIO18 $\to$ J4-Pin6 (interface header).
+    Current state: JP2 closed, JP1 open.
+    GPIO18 is also SPI1~CE0 --- see Section~\ref{sec:spi1config}.
+    \textbf{Warning:} closing both JP1 and JP2 simultaneously
+    shorts J3-Pin4 to J4-Pin6. Do not close both jumpers.
+    \jref{JP1, JP2, J3-Pin4, J4-Pin6} \\
+
+  \rowcolor{pwrcol}
+  14 & \na & GND & Ground &
+    Additional even-side ground. \\
+
+  \rowcolor{evencol}
+  16 & GPIO23 & \na & Spare / JP2 pin~3 &
+    Routed to JP2 pin~3. Not yet dedicated to a function.
+    Available for button, indicator, or interface signal.
+    \jref{JP2-Pin3, J3-Pin3} \\
+
+  \rowcolor{rowB}
+  18 & GPIO24 & O & 74HC595 RCLK (latch) &
+    Output. Drives 74HC595 pin~12 (RCLK / storage register clock).
+    A rising edge on this pin latches the shift register contents
+    to the 74HC595 output pins (QA--QH), updating all 8 MOSFET gates
+    simultaneously.
+    Pulse this pin \emph{after} each SPI1 byte transmission to update outputs.
+    33\,$\Omega$ series resistor on PCB. \\
+
+  \rowcolor{pwrcol}
+  20 & \na & GND & Ground &
+    Additional even-side ground. \\
+
+  \rowcolor{evencol}
+  22 & GPIO25 & O & MOSFET channel~10 (direct GPIO) &
+    Drives gate of AO3400A MOSFET for LED channel~10.
+    500\,$\Omega$ gate resistor + 10\,k$\Omega$ bleed resistor to GND.
+    See Section~\ref{sec:mosfet} for switching caution. \\
+
+  \rowcolor{rowB}
+  24 & GPIO8 & O & TFT CS $\to$ ILI9341 (SPI0 CE0) &
+    \fixed\ by SoC (SPI0 CE0). Hardware-managed chip select.
+    Asserted low automatically by SPI0 hardware during display transactions.
+    33\,$\Omega$ series resistor on PCB.
+    \jref{J1 ICSP area} \\
+
+  \rowcolor{evencol}
+  26 & GPIO7 & O & MOSFET channel~9 (direct GPIO) &
+    Drives gate of AO3400A MOSFET for LED channel~9.
+    500\,$\Omega$ gate resistor + 10\,k$\Omega$ bleed resistor to GND.
+    Note: GPIO7 is SPI0~CE1 --- not a conflict since SPI0~CE1 is unused.
+    See Section~\ref{sec:mosfet} for switching caution. \\
+
+  \rowcolor{pwrcol}
+  28 & GPIO1 & \na & PIN REMOVED --- DO NOT USE &
+    HAT ID EEPROM pin. Physical pin removed on this prototype. \\
+
+  \rowcolor{pwrcol}
+  30 & \na & GND & Ground &
+    Additional even-side ground. \\
+
+  \rowcolor{rowB}
+  32 & GPIO12 & PWM & Buzzer (via MMBT3904 BJT) &
+    \textbf{Hardware PWM channel~0-A (PWM0).}
+    PWM signal drives base of MMBT3904 NPN BJT.
+    BJT collector connects to buzzer ($-$) terminal.
+    Buzzer ($+$) connects to 5\,V rail.
+    Flyback diode fitted: cathode (line-marked end) to buzzer($+$)/5\,V,
+    anode to buzzer($-$)/collector.
+    1\,k$\Omega$ base resistor.
+    See Section~\ref{sec:pwm} for shared clock constraints with GPIO13. \\
+
+  \rowcolor{pwrcol}
+  34 & \na & GND & Ground &
+    Additional even-side ground. \\
+
+  \rowcolor{evencol}
+  36 & GPIO16 & IO & 1-Wire data bus &
+    \textbf{Non-default 1-Wire pin.}
+    Requires \texttt{dtoverlay=w1-gpio,gpiopin=16} in
+    \texttt{/boot/firmware/config.txt} (BCM number, not physical pin).
+    4.7\,k$\Omega$ pull-up to 3.3\,V on PCB (hard requirement of 1-Wire protocol;
+    internal RPi pull-up is too weak).
+    Connects to J2-Pin2 (1-Wire probe plug) and J5--J8 Pin~8 (LED plugs).
+    100\,nF ceramic decoupling at each device end of J5--J8 (fitted).
+    See Section~\ref{sec:1wire} for J2 cable note.
+    \jref{J2-Pin2, J5-Pin8, J6-Pin8, J7-Pin8, J8-Pin8} \\
+
+  \rowcolor{rowB}
+  38 & GPIO20 & O & SPI1 MOSI $\to$ 74HC595 SER &
+    \fixed\ for SPI1 function. Drives 74HC595 pin~14 (SER / serial data input).
+    Also exposed at J4-Pin5 for potential future SPI1 device.
+    33\,$\Omega$ series resistor on PCB.
+    \jref{74HC595 pin~14, J4-Pin5} \\
+
+  \rowcolor{pwrcol}
+  39 & \na & GND & Ground &
+    Odd-side ground (between pins 38 and 40). \\
+
+  \rowcolor{evencol}
+  40 & GPIO21 & O & SPI1 SCLK $\to$ 74HC595 SRCLK &
+    \fixed\ for SPI1 function. Drives 74HC595 pin~11 (SRCLK / shift register clock).
+    Each rising edge shifts one bit from SER into the shift register.
+    Also exposed at J4-Pin3 for potential future SPI1 device.
+    33\,$\Omega$ series resistor on PCB.
+    \jref{74HC595 pin~11, J4-Pin3} \\
+
+\end{longtable}
+
+% =============================================================
+\section{74HC595 Shift Register --- As-Built Pin Table}
+\label{sec:595}
+
+The 74HC595 provides 8 parallel output lines (QA--QH) from a 3-wire
+SPI1 serial interface.  It controls LED channels 1--8 via AO3400A MOSFETs.
+
+\vspace{4pt}
+\setlength{\tabcolsep}{4pt}
+\renewcommand{\arraystretch}{1.3}
+
+\begin{longtable}{C{1.2cm} C{1.4cm} C{1.6cm} L{3.2cm} L{6.8cm}}
+  \toprule
+  \rowcolor{hdr}
+  \color{white}\textbf{595 Pin} &
+  \color{white}\textbf{Name} &
+  \color{white}\textbf{Connects to} &
+  \color{white}\textbf{Function} &
+  \color{white}\textbf{Notes} \\
+  \midrule
+  \endfirsthead
+  \toprule
+  \rowcolor{hdr}
+  \color{white}\textbf{595 Pin} &
+  \color{white}\textbf{Name} &
+  \color{white}\textbf{Connects to} &
+  \color{white}\textbf{Function} &
+  \color{white}\textbf{Notes} \\
+  \midrule
+  \endhead
+  \bottomrule
+  \endfoot
+
+  \rowcolor{rowB}
+  1 & QB & MOSFET ch~2 & Parallel output B &
+    500\,k$\Omega$ to MOSFET gate, 10\,k$\Omega$ bleed to GND.
+    LED channel~2. \\
+  \rowcolor{oddcol}
+  2 & QC & MOSFET ch~3 & Parallel output C & LED channel~3. \\
+  \rowcolor{rowB}
+  3 & QD & MOSFET ch~4 & Parallel output D & LED channel~4. \\
+  \rowcolor{oddcol}
+  4 & QE & MOSFET ch~5 & Parallel output E & LED channel~5. \\
+  \rowcolor{rowB}
+  5 & QF & MOSFET ch~6 & Parallel output F & LED channel~6. \\
+  \rowcolor{oddcol}
+  6 & QG & MOSFET ch~7 & Parallel output G & LED channel~7. \\
+  \rowcolor{rowB}
+  7 & QH & MOSFET ch~8 & Parallel output H & LED channel~8. \\
+  \rowcolor{pwrcol}
+  8 & GND & GND & Ground &
+    \textbf{Caution:} 100\,nF decoupling cap fitted at VCC (pin~16),
+    but ground path to pin~8 is circuitous.
+    Solder a short jumper wire directly from cap ground pad to pin~8
+    before testing to improve decoupling effectiveness. \\
+  \rowcolor{rowB}
+  9 & QH' & Not connected & Serial cascade output &
+    Not used. No daisy-chain in this design. \\
+  \rowcolor{oddcol}
+  10 & !SRCLR & 3.3\,V & Shift register clear &
+    Tied high (3.3\,V). Active-low --- holding high keeps shift register enabled.
+    To clear all outputs: pulse low in software (requires a GPIO if needed later). \\
+  \rowcolor{rowB}
+  11 & SRCLK & RPi pin~40 / GPIO21 & Shift register clock &
+    SPI1 SCLK. Rising edge shifts one bit from SER into the register.
+    8 rising edges load a complete byte. \\
+  \rowcolor{oddcol}
+  12 & RCLK & RPi pin~18 / GPIO24 & Storage register clock (latch) &
+    Manual GPIO output (not a hardware SPI signal).
+    Rising edge copies all 8 shift register bits to output pins simultaneously.
+    Pulse \emph{after} each SPI1 byte write.
+    This separation prevents output glitching during bit-shifting. \\
+  \rowcolor{rowB}
+  13 & !OE & GND & Output enable &
+    Tied to GND (active-low). Outputs are permanently enabled.
+    To tri-state outputs (e.g.\ power-down): a GPIO and a trace cut would be needed. \\
+  \rowcolor{oddcol}
+  14 & SER & RPi pin~38 / GPIO20 & Serial data input &
+    SPI1 MOSI. Receives one bit per SRCLK rising edge.
+    MSB should be sent first for QA=bit7, QH=bit0 (verify with software). \\
+  \rowcolor{pwrcol}
+  15 & QA & MOSFET ch~1 & Parallel output A &
+    First bit clocked in appears here after latch.
+    LED channel~1.
+    500\,k$\Omega$ to MOSFET gate, 10\,k$\Omega$ bleed to GND. \\
+  \rowcolor{pwrcol}
+  16 & VCC & 3.3\,V & Supply voltage &
+    3.3\,V from RPi rail. Output high level $\approx$3.0--3.3\,V,
+    sufficient for AO3400A gate threshold (1.5\,V typical).
+    100\,nF ceramic decoupling fitted (see pin~8 note above). \\
+
+\end{longtable}
+
+% =============================================================
+\section{Connector Pin Tables}
+\label{sec:connectors}
+
+\subsection{J1 --- 16-pin header, Adafruit 1651 shield interface}
+
+Point-to-point wiring between J1 and the 1651 shield header pins.
+Series resistors (33\,$\Omega$) are placed on the PCB between the RPi
+header and J1 on all signal lines.
+
+\vspace{4pt}
+\begin{longtable}{C{1.4cm} C{2.2cm} C{2.5cm} L{7.0cm}}
+  \toprule
+  \rowcolor{hdr}
+  \color{white}\textbf{J1 Pin} &
+  \color{white}\textbf{RPi Pin/BCM} &
+  \color{white}\textbf{1651 Shield Pin} &
+  \color{white}\textbf{Signal / Notes} \\
+  \midrule
+  \endfirsthead
+  \toprule
+  \rowcolor{hdr}
+  \color{white}\textbf{J1 Pin} &
+  \color{white}\textbf{RPi Pin/BCM} &
+  \color{white}\textbf{1651 Shield Pin} &
+  \color{white}\textbf{Signal / Notes} \\
+  \midrule
+  \endhead
+  \bottomrule
+  \endfoot
+
+  \rowcolor{pwrcol}
+  1  & Pin~2 / 5\,V    & Arduino 5V / VIN & 5\,V supply to shield. 100\,nF + 10\,$\mu$F decoupling fitted. \\
+  \rowcolor{oddcol}
+  2  & Pin~3 / GPIO2   & SDA              & I2C SDA $\to$ TSC2007. \\
+  \rowcolor{pwrcol}
+  3  & GND             & GND              & Ground. \\
+  \rowcolor{rowB}
+  4  & Pin~5 / GPIO3   & SCL              & I2C SCL $\to$ TSC2007. \\
+  \rowcolor{pwrcol}
+  5  & GND             & GND              & Ground. \\
+  \rowcolor{oddcol}
+  6  & \na             & \na              & Not connected. \\
+  \rowcolor{rowB}
+  7  & Pin~31 / GPIO6  & Arduino D9       & TFT DC (Data/Command select). \\
+  \rowcolor{oddcol}
+  8  & Pin~29 / GPIO5  & Arduino D4       & SD Card CS (unassigned; spare). \\
+  \rowcolor{rowB}
+  9  & Pin~33 / GPIO13 & Arduino D3 / LITE & Backlight PWM. Solder LITE/\#3 jumper on shield. \\
+  \rowcolor{oddcol}
+  10 & Pin~7 / GPIO4   & Arduino D2 / TSIRQ & Touch interrupt (active-low). Solder TSIRQ/\#2 jumper on shield. \\
+  \rowcolor{rowB}
+  11 & Pin~23 / GPIO11 & ICSP SCK         & SPI0 SCLK. \\
+  \rowcolor{oddcol}
+  12 & Pin~21 / GPIO9  & ICSP MISO        & SPI0 MISO $\leftarrow$ ILI9341. \\
+  \rowcolor{rowB}
+  13 & Pin~19 / GPIO10 & ICSP MOSI        & SPI0 MOSI $\to$ ILI9341. \\
+  \rowcolor{oddcol}
+  14 & Pin~11 / GPIO17 & \na              & Spare GPIO. \\
+  \rowcolor{pwrcol}
+  15 & GND             & GND              & Ground. \\
+  \rowcolor{rowB}
+  16 & Pin~37 / GPIO26 & \na              & Spare GPIO. \\
+
+\end{longtable}
+
+\begin{warnbox}
+\textbf{1651 VddIO jumper --- must be set before power-on:}
+The shield's VddIO solder jumper selects the logic voltage reference for
+the onboard 74LVX245 level shifters.
+\textbf{Set to 3V} (solder left pad to centre pad).
+The RPi Zero 2\,W is a 3.3\,V logic device; incorrect setting risks damaged GPIO pins.
+
+\smallskip
+\textbf{Shield jumpers to solder:}
+LITE/\#3 (enables backlight PWM control) and TSIRQ/\#2 (enables touch interrupt).
+\end{warnbox}
+
+\subsection{J2 --- 3-pin polarised, 1-Wire temperature probe}
+
+\begin{tabular}{C{1.4cm} C{2.2cm} L{9cm}}
+  \toprule
+  \rowcolor{hdr}
+  \color{white}\textbf{J2 Pin} &
+  \color{white}\textbf{Signal} &
+  \color{white}\textbf{Notes} \\
+  \midrule
+  1 & 3.3\,V  & Supply to 1-Wire device. \\
+  2 & Data    & 1-Wire data. RPi pin~36 / GPIO16. 4.7\,k$\Omega$ pull-up to 3.3\,V on PCB. \\
+  3 & GND     & Ground. \\
+  \bottomrule
+\end{tabular}
+
+\begin{notebox}
+\textbf{J2 cable note:} J2 connects to a 1-Wire temperature probe via a
+$\approx$1\,metre cable. There is no decoupling capacitor at J2 on the PCB.
+The nearest decoupling caps on the 3.3\,V rail are $\approx$5\,inches away
+via J5--J8. The 4.7\,k$\Omega$ pull-up resistor is on the PCB side.
+This arrangement is expected to work at standard 1-Wire speed (15.4\,kbps),
+as the pull-up source impedance is the dominant factor, not proximity of bypass caps.
+If communication errors occur during testing, fit a 100\,nF ceramic cap
+between pins 1 and 3 of J2 (3.3\,V to GND) as the first corrective step.
+\end{notebox}
+
+\subsection{J3 --- 4-pin polarised, interface control (partial)}
+
+\begin{tabular}{C{1.4cm} C{2.2cm} L{9cm}}
+  \toprule
+  \rowcolor{hdr}
+  \color{white}\textbf{J3 Pin} &
+  \color{white}\textbf{Signal} &
+  \color{white}\textbf{Notes} \\
+  \midrule
+  1 & GND     & Ground. \\
+  2 & 3.3\,V  & 3.3\,V supply. \\
+  3 & GPIO23  & RPi pin~16. Spare / unassigned. Probably button or switch. \\
+  4 & GPIO18  & RPi pin~12 via \textbf{JP2 (closed)}. See jumper note below. \\
+  \bottomrule
+\end{tabular}
+
+\subsection{J4 --- 6-pin polarised, interface control / SPI1 breakout}
+
+\begin{tabular}{C{1.4cm} C{2.2cm} L{9cm}}
+  \toprule
+  \rowcolor{hdr}
+  \color{white}\textbf{J4 Pin} &
+  \color{white}\textbf{Signal} &
+  \color{white}\textbf{Notes} \\
+  \midrule
+  1 & 3.3\,V  & 3.3\,V supply. \\
+  2 & GND     & Ground. \\
+  3 & GPIO21  & RPi pin~40. SPI1 SCLK. Also drives 74HC595 SRCLK. \\
+  4 & GPIO19  & RPi pin~35. SPI1 MISO. Not currently connected to a device. \\
+  5 & GPIO20  & RPi pin~38. SPI1 MOSI. Also drives 74HC595 SER. \\
+  6 & GPIO18  & RPi pin~12 via \textbf{JP1 (open)}. Not currently active. \\
+  \bottomrule
+\end{tabular}
+
+\begin{notebox}
+\textbf{JP1 / JP2 --- solder jumpers for GPIO18 routing:}
+GPIO18 is connected to both J3-Pin4 (via JP2) and J4-Pin6 (via JP1).
+\textbf{Current state: JP2 closed, JP1 open.}
+GPIO18 is therefore active only at J3-Pin4.
+\textbf{Do not close both jumpers simultaneously} --- this would short
+J3-Pin4 directly to J4-Pin6 through GPIO18.
+GPIO18 is also the hardware SPI1~CE0 pin; see Section~\ref{sec:spi1config}.
+\end{notebox}
+
+\subsection{J5, J6, J7, J8 --- 8-pin ribbon headers, LED banks}
+
+J5 and J6 carry identical signals (LED channels~1--5).
+J7 and J8 carry identical signals (LED channels~6--10).
+Duplicate headers allow either plug to connect to the same LED bank.
+
+\begin{tabular}{C{1.4cm} C{2.8cm} L{8.5cm}}
+  \toprule
+  \rowcolor{hdr}
+  \color{white}\textbf{Pin} &
+  \color{white}\textbf{Signal} &
+  \color{white}\textbf{Notes} \\
+  \midrule
+  1 & 5\,V (RPi pin~4) & LED anode supply. 100\,nF ceramic decoupling near each bank. \\
+  2--6 & LED channels   & MOSFET drain-switched.  See channel assignment table below. \\
+  7 & GND              & Ground return for LED loads. \\
+  8 & 1-Wire data      & GPIO16 / pin~36. 100\,nF ceramic cap at device end (fitted). \\
+  \bottomrule
+\end{tabular}
+
+\vspace{6pt}
+\textbf{LED channel assignment across headers:}
+
+\begin{tabular}{C{1.4cm} C{2.2cm} C{2.8cm} L{5cm}}
+  \toprule
+  \rowcolor{hdr}
+  \color{white}\textbf{Header pin} &
+  \color{white}\textbf{J5, J6 channel} &
+  \color{white}\textbf{J7, J8 channel} &
+  \color{white}\textbf{Drive source} \\
+  \midrule
+  \rowcolor{rowB}
+  2 & Ch~1  & Ch~6  & 74HC595 QA / QB \\
+  \rowcolor{oddcol}
+  3 & Ch~2  & Ch~7  & 74HC595 QB / QC \\
+  \rowcolor{rowB}
+  4 & Ch~3  & Ch~8  & 74HC595 QC / QD \\
+  \rowcolor{oddcol}
+  5 & Ch~4  & Ch~9  & 74HC595 QD / GPIO7 (direct) \\
+  \rowcolor{rowB}
+  6 & Ch~5  & Ch~10 & 74HC595 QE / GPIO25 (direct) \\
+  \bottomrule
+\end{tabular}
+
+\begin{notebox}
+Channel assignment across J5--J8 is inferred from the as-built description
+(channels~1--5 on J5/J6, channels~6--10 on J7/J8, 8 channels via 595, 2 via direct GPIO).
+Verify pin~2--6 assignments against the PCB during testing.
+\end{notebox}
+
+% =============================================================
+\section{OS Configuration --- \texttt{/boot/firmware/config.txt}}
+\label{sec:osconfig}
+
+All settings below are required in \texttt{/boot/firmware/config.txt}
+(Raspberry Pi OS Bookworm and later; older releases use \texttt{/boot/config.txt}).
+Add or confirm each line before first power-on test.
+
+\subsection{SPI0 --- ILI9341 display}
+
+\begin{alltt}\small
+dtparam=spi=on
+\end{alltt}
+
+Enables SPI0 (GPIO8--11). Required for ILI9341 display and optional SD card.
+CE0 (GPIO8) is managed automatically by the spidev driver.
+
+\subsection{SPI1 --- 74HC595 shift register}
+\label{sec:spi1config}
+
+\begin{alltt}\small
+dtoverlay=spi1-1cs,cs0_pin=24
+\end{alltt}
+
+\begin{warnbox}
+\textbf{SPI1 CE0 conflict --- read carefully before configuring.}
+
+The default \texttt{spi1-1cs} overlay assigns \textbf{GPIO18 as CE0}.
+GPIO18 in this design is used for JP2/J3 routing --- not for SPI1 CE0.
+
+The 74HC595 does not use a hardware chip select at all.
+RCLK (GPIO24) is controlled manually in software to latch outputs.
+
+The recommended approach is:
+\begin{enumerate}[noitemsep]
+  \item Load the overlay with a remapped CS pin that is not in use:
+        \texttt{dtoverlay=spi1-1cs,cs0\_pin=24} redirects CE0 to GPIO24.
+        However, GPIO24 is already used for RCLK.
+        A cleaner alternative: use \texttt{cs0\_pin=X} where X is a confirmed
+        spare GPIO (e.g.\ GPIO23/pin~16 if it remains unassigned).
+  \item In Python, open SPI1 with \texttt{no\_cs=True} via spidev,
+        disabling hardware CE entirely:
+\begin{alltt}\small
+import spidev
+spi1 = spidev.SpiDev()
+spi1.open(1, 0)
+spi1.no_cs = True
+spi1.max_speed_hz = 1_000_000
+\end{alltt}
+  \item After each \texttt{spi1.writebytes([byte])}, pulse GPIO24 (RCLK) manually:
+\begin{alltt}\small
+import RPi.GPIO as GPIO
+GPIO.setmode(GPIO.BCM)
+GPIO.setup(24, GPIO.OUT)
+
+def shift_out(byte_val):
+    spi1.writebytes([byte_val])
+    GPIO.output(24, GPIO.HIGH)   # latch rising edge
+    GPIO.output(24, GPIO.LOW)    # return low
+\end{alltt}
+\end{enumerate}
+This keeps GPIO18 free and gives precise control of the latch timing.
+\end{warnbox}
+
+\subsection{I2C --- TSC2007 touch controller}
+
+\begin{alltt}\small
+dtparam=i2c_arm=on
+\end{alltt}
+
+Enables I2C bus~1 (GPIO2, GPIO3).
+TSC2007 default I2C address: \texttt{0x48}.
+Verify with \texttt{sudo i2cdetect -y 1} after wiring.
+
+\subsection{1-Wire --- temperature probe on GPIO16}
+\label{sec:1wire}
+
+\begin{alltt}\small
+dtoverlay=w1-gpio,gpiopin=16
+\end{alltt}
+
+\begin{warnbox}
+\textbf{Non-default pin.} The standard 1-Wire pin is GPIO4.
+This design uses \textbf{GPIO16 / physical pin~36}.
+The overlay parameter \texttt{gpiopin=} takes the \textbf{BCM number (16)},
+not the physical pin number.
+Using \texttt{gpiopin=7} (the BCM number of physical pin~26, SPI0~CE1) would
+configure the wrong pin and leave GPIO16 inactive.
+
+\smallskip
+The 4.7\,k$\Omega$ pull-up to 3.3\,V on the PCB is a hard requirement.
+The RPi internal pull-up ($\approx$50\,k$\Omega$) is insufficient for 1-Wire timing.
+
+\smallskip
+After configuration, probe devices will appear under:
+\texttt{/sys/bus/w1/devices/}
+Temperature sensors (DS18B20 etc.) register as \texttt{28-xxxxxxxxxxxx}.
+Read temperature:
+\texttt{cat /sys/bus/w1/devices/28-*/w1\_slave}
+\end{warnbox}
+
+\subsection{Hardware PWM --- GPIO12 (buzzer) and GPIO13 (backlight)}
+\label{sec:pwm}
+
+Hardware PWM requires no \texttt{config.txt} entry --- it is always available
+on GPIO12, GPIO13, GPIO18, GPIO19.
+However, using it from Python requires either \texttt{pigpio} or direct
+register access. \textbf{Use \texttt{pigpio} --- it handles all clock arithmetic.}
+
+\begin{alltt}\small
+# Start the pigpio daemon (add to /etc/rc.local or use systemd):
+sudo pigpiod
+
+# Python usage:
+import pigpio
+pi = pigpio.pi()
+
+# Set backlight first, then buzzer
+# (pigpio optimises the shared clock for the last call;
+#  setting buzzer last gives it priority for exact frequency)
+pi.hardware_PWM(13, 2000, 700000)   # backlight: 2000 Hz, 70% duty
+pi.hardware_PWM(12, 2048, 500000)   # buzzer: 2048 Hz, 50% duty
+
+# Adjust buzzer frequency in real time (fine-grained, 1 Hz steps):
+for freq in range(1500, 2500, 10):
+    pi.hardware_PWM(12, freq, 500000)
+    time.sleep(0.05)
+
+# Silence buzzer without disturbing backlight:
+pi.hardware_PWM(12, 2048, 0)        # duty=0 silences output
+
+# Adjust backlight brightness (0-100%):
+def set_backlight(percent):
+    pi.hardware_PWM(13, 2000, percent * 10000)
+\end{alltt}
+
+\begin{warnbox}
+\textbf{Shared PWM clock constraint --- GPIO12 and GPIO13.}
+
+GPIO12 and GPIO13 share the same hardware PWM clock divider (PWM0/PWM1 on the RP3A0).
+Their output frequencies are derived from a single base clock frequency.
+This means:
+\begin{itemize}[noitemsep]
+  \item You can set \emph{independent duty cycles} on GPIO12 and GPIO13.
+  \item You \emph{cannot} set \emph{completely independent frequencies} simultaneously ---
+        both frequencies must be achievable from the same base clock.
+  \item \texttt{pigpio} handles this automatically: it finds the best shared clock
+        for both requested frequencies and minimises error.
+        Typical frequency accuracy is within 1\% across the audio range.
+  \item \textbf{Always set the backlight first, then the buzzer.}
+        \texttt{pigpio} optimises the clock for the last call,
+        giving the buzzer (the frequency-critical channel) priority.
+  \item At 2000\,Hz (backlight) and 2048\,Hz (buzzer), \texttt{pigpio} will find
+        a common base clock that satisfies both to within a few Hz.
+        The backlight frequency may deviate slightly from 2000\,Hz ---
+        this is imperceptible and does not affect LED brightness control.
+\end{itemize}
+
+\textbf{Practical buzzer frequency range for CEM-1203(42):}
+\begin{itemize}[noitemsep]
+  \item Rated resonant frequency: 2048\,Hz (loudest output)
+  \item Useful audible range: 800--4000\,Hz
+  \item Best efficiency / loudest: 1500--2500\,Hz
+  \item \texttt{pigpio} supports any integer Hz value; 1\,Hz steps throughout the range
+\end{itemize}
+\end{warnbox}
+
+\subsection{Complete \texttt{config.txt} additions summary}
+
+Add the following lines to \texttt{/boot/firmware/config.txt}:
+
+\begin{alltt}\small
+# Colorimeter prototype configuration
+dtparam=spi=on                        # SPI0: ILI9341 display
+dtparam=i2c_arm=on                    # I2C1: TSC2007 touch
+dtoverlay=w1-gpio,gpiopin=16          # 1-Wire: GPIO16 (non-default)
+dtoverlay=spi1-1cs,cs0_pin=X         # SPI1: 74HC595 (replace X with spare GPIO)
+\end{alltt}
+
+Enable and start \texttt{pigpio} daemon for hardware PWM:
+\begin{alltt}\small
+sudo systemctl enable pigpiod
+sudo systemctl start pigpiod
+\end{alltt}
+
+% =============================================================
+\section{Hardware Cautions for Testing}
+\label{sec:cautions}
+
+\subsection{74HC595 gate resistors --- slow MOSFET switching}
+\label{sec:mosfet}
+
+\begin{notebox}
+The 74HC595 output pins connect to AO3400A MOSFET gates through
+\textbf{500\,k$\Omega$} resistors (10\,k$\Omega$ bleed resistors to GND).
+The direct-GPIO MOSFETs (channels~9 and~10) use 500\,$\Omega$ gate resistors.
+
+\smallskip
+\textbf{Effect of 500\,k$\Omega$ gate resistor:}
+The AO3400A input capacitance ($C_{iss}$) is approximately 130\,pF.
+Time constant $\tau = 500\,\text{k}\Omega \times 130\,\text{pF} = 65\,\mu$s.
+The MOSFET reaches full enhancement (Vgs $\approx$ 3.3\,V) after approximately
+$5\tau = 325\,\mu$s.
+Turn-off time through the 10\,k$\Omega$ bleed is approximately
+$5 \times 10\,\text{k}\Omega \times 130\,\text{pF} = 6.5\,\mu$s (faster).
+
+\smallskip
+\textbf{Practical impact:}
+For LED switching at 100--5000\,ms intervals, the 325\,$\mu$s turn-on delay
+is negligible ($<$0.3\% of the shortest cycle).
+The MOSFET will briefly pass through its linear region during turn-on,
+dissipating some heat.
+At your duty cycles ($<$10 cycles per analysis, $<$1 analysis per 10 minutes),
+this is not a thermal concern.
+
+\smallskip
+\textbf{Observation to watch for during testing:}
+LED onset may appear slightly soft (not an instantaneous step) on an oscilloscope.
+If any MOSFETs feel warm to the touch after repeated cycling, note it for revision.
+The AO3400A is rated 5.7\,A continuous drain current --- it is not at risk of damage.
+\end{notebox}
+
+\subsection{74HC595 decoupling ground path}
+
+The 100\,nF decoupling capacitor at the 74HC595 VCC pin has a circuitous
+ground path back to pin~8 (GND).
+\textbf{Before testing:} solder a short jumper wire directly from the capacitor's
+ground pad to pin~8 of the 74HC595 to provide a low-inductance local ground return.
+Without this, the decoupling is partially ineffective at SPI clock frequencies.
+
+\subsection{SPI1 CE0 and GPIO18}
+
+See Section~\ref{sec:spi1config}.
+The \texttt{spi1-1cs} overlay claims GPIO18 as CE0 by default.
+If the overlay is loaded without the \texttt{cs0\_pin} parameter,
+GPIO18 will be driven by the kernel SPI driver, which will conflict
+with the JP2 routing to J3-Pin4.
+Configure the overlay correctly \emph{before} first power-on with SPI1 active.
+
+\subsection{Buzzer flyback diode orientation}
+
+The flyback diode is fitted with the cathode (line-marked end) at buzzer(+) / 5\,V,
+and the anode at buzzer($-$) / MMBT3904 collector.
+This is the correct orientation for inductive kickback suppression:
+when the BJT switches off, the collapsing magnetic field in the buzzer coil
+drives the collector positive, forward-biasing the diode and clamping
+the voltage spike.
+\textbf{Verify diode orientation before first power-on.}
+
+% =============================================================
+\section{Adafruit 1651 Shield Pin Mapping}
+\label{sec:1651}
+
+\vspace{4pt}
+\renewcommand{\arraystretch}{1.30}
+
+\begin{longtable}{C{1.6cm} C{1.5cm} L{2.8cm} L{6.8cm}}
+  \toprule
+  \rowcolor{hdr}
+  \color{white}\textbf{1651 Pin} \newline \color{white}\footnotesize(Arduino label) &
+  \color{white}\textbf{RPi Pin / BCM} &
+  \color{white}\textbf{Description} &
+  \color{white}\textbf{Notes} \\
+  \midrule
+  \endfirsthead
+  \toprule
+  \rowcolor{hdr}
+  \color{white}\textbf{1651 Pin} \newline \color{white}\footnotesize(Arduino label) &
+  \color{white}\textbf{RPi Pin / BCM} &
+  \color{white}\textbf{Description} &
+  \color{white}\textbf{Notes} \\
+  \midrule
+  \endhead
+  \bottomrule
+  \endfoot
+
+  \rowcolor{pwrcol}
+  \textbf{5V / VIN} & Pin~2 / 5\,V &
+  Board power in &
+  5\,V from RPi. Onboard regulator supplies 3.3\,V to ILI9341 and TSC2007. \\
+
+  \rowcolor{pwrcol}
+  \textbf{GND} & GND &
+  Ground &
+  J1-Pin3, Pin5, Pin15. \\
+
+  \rowcolor{oddcol}
+  \textbf{ICSP MOSI} & Pin~19 / GPIO10 &
+  SPI0 MOSI $\to$ ILI9341 &
+  \fixed. J1-Pin13. 33\,$\Omega$ series resistor. \\
+
+  \rowcolor{rowB}
+  \textbf{ICSP MISO} & Pin~21 / GPIO9 &
+  SPI0 MISO $\leftarrow$ ILI9341 &
+  \fixed. J1-Pin12. 33\,$\Omega$ series resistor. \\
+
+  \rowcolor{oddcol}
+  \textbf{ICSP SCK} & Pin~23 / GPIO11 &
+  SPI0 clock &
+  \fixed. J1-Pin11. 33\,$\Omega$ series resistor. \\
+
+  \rowcolor{evencol}
+  \textbf{D10} --- TFT CS & Pin~24 / GPIO8 &
+  Display chip select (SPI0 CE0) &
+  \fixed\ (SPI0 CE0). Hardware-managed. 33\,$\Omega$ series resistor. \\
+
+  \rowcolor{rowB}
+  \textbf{D9} --- TFT DC & Pin~31 / GPIO6 &
+  Data/Command select &
+  Soft. J1-Pin7. 33\,$\Omega$ series resistor. \\
+
+  \rowcolor{oddcol}
+  \textbf{D4} --- SD CS & Pin~29 / GPIO5 &
+  microSD chip select &
+  Unassigned. J1-Pin8. Wire present; not yet driven in software. \\
+
+  \rowcolor{rowB}
+  \textbf{SDA} & Pin~3 / GPIO2 &
+  I2C SDA $\to$ TSC2007 &
+  \fixed. Shield has onboard 4.7\,k$\Omega$ pull-up. J1-Pin2. \\
+
+  \rowcolor{oddcol}
+  \textbf{SCL} & Pin~5 / GPIO3 &
+  I2C SCL $\to$ TSC2007 &
+  \fixed. Shield has onboard 4.7\,k$\Omega$ pull-up. J1-Pin4. \\
+
+  \rowcolor{rowB}
+  \textbf{D2} --- TSIRQ & Pin~7 / GPIO4 &
+  Touch interrupt (active-low) &
+  Soft. Solder TSIRQ/\#2 jumper on shield. RPi internal pull-up in software. J1-Pin10. \\
+
+  \rowcolor{oddcol}
+  \textbf{D3} --- LITE & Pin~33 / GPIO13 &
+  Backlight PWM &
+  Soft. Solder LITE/\#3 jumper on shield. Hardware PWM1. J1-Pin9. \\
+
+  \rowcolor{warn}
+  \textbf{VddIO jumper} &
+  \multicolumn{3}{L{11.1cm}}{%
+    \textbf{CRITICAL:} Set to \textbf{3V} (solder left pad to centre pad).
+    Selects 3.3\,V as logic reference for onboard level shifters.
+    Incorrect setting (5V) risks permanent GPIO damage.} \\
+
+\end{longtable}
+
+% =============================================================
+\section{Spare and Reserved Pins}
+\label{sec:spare}
+
+\begin{tabular}{C{1.8cm} C{1.8cm} L{9.5cm}}
+  \toprule
+  \rowcolor{hdr}
+  \color{white}\textbf{Physical} & \color{white}\textbf{BCM} &
+  \color{white}\textbf{Status} \\
+  \midrule
+  \rowcolor{rowB}
+  Pin~11 & GPIO17 & Spare. Routed to J1-Pin14. No function assigned. \\
+  \rowcolor{oddcol}
+  Pin~13 & GPIO27 & No connect. Available. \\
+  \rowcolor{rowB}
+  Pin~15 & GPIO22 & No connect. Available. \\
+  \rowcolor{oddcol}
+  Pin~16 & GPIO23 & Routed to JP2-Pin3 and J3-Pin3. Function TBD (button/switch likely). \\
+  \rowcolor{rowB}
+  Pin~18 & GPIO24 & 74HC595 RCLK (assigned). \\
+  \rowcolor{oddcol}
+  Pin~29 & GPIO5  & Spare. Routed to J1-Pin8 (SD CS). Not yet driven in software. \\
+  \rowcolor{rowB}
+  Pin~35 & GPIO19 & SPI1 MISO breakout at J4-Pin4. No device connected. \\
+  \rowcolor{oddcol}
+  Pin~37 & GPIO26 & Spare. Routed to J1-Pin16. No function assigned. \\
+  \rowcolor{pwrcol}
+  Pin~27 & GPIO0  & EEPROM. Physical pin removed. DO NOT USE. \\
+  \rowcolor{pwrcol}
+  Pin~28 & GPIO1  & EEPROM. Physical pin removed. DO NOT USE. \\
+  \rowcolor{pwrcol}
+  Pin~8  & GPIO14 & UART TX. Leave unconnected. \\
+  \rowcolor{pwrcol}
+  Pin~10 & GPIO15 & UART RX. Leave unconnected. \\
+  \bottomrule
+\end{tabular}
+
+\end{document}

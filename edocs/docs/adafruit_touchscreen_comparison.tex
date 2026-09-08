@@ -1,0 +1,59 @@
+\section{Adafruit Touch Screen Display Comparison: 1651 vs.\ 1947}
+
+\subsection{Overview}
+
+The Adafruit 1651 is a 2.8-inch TFT display with resistive touch detection, while the 1947 is the same form factor with capacitive touch detection. Both feature 240×320 pixel resolution and 18-bit color (262,000 shades), but their touch technologies create significant practical differences for lab and field instrument applications.
+
+\subsection{Touch Detection Method}
+
+The 1651 resistive model uses pressure-based detection via a TSC2007 controller, while the 1947 capacitive version detects electrical properties of conductive materials. This fundamental difference affects every aspect of operation in the field.
+
+\subsection{Glove \& Stylus Compatibility}
+
+The 1651 (resistive) has a decisive advantage in this category. Resistive screens work with gloved fingers, styluses, and other objects---users can apply pressure through thick safety gloves or insulated freezer gloves. The 1947 capacitive screen requires bare skin or conductive gloves, making it unsuitable if technicians wear protective gloves during fieldwork.
+
+\subsection{Water \& Environmental Resistance}
+
+Resistive screens are more robust in wet, dusty, and dirty environments since water and dust do not apply enough pressure to trigger false touches. The capacitive 1947, by contrast, can be accidentally activated by water droplets, rain, humidity, and condensation on the surface, causing false inputs and reduced accuracy. This is critical if your instrument operates outdoors or in humid lab conditions.
+
+\subsection{Screen Clarity \& Display Quality}
+
+The 1947 (capacitive) has the advantage in visual performance. Capacitive screens offer higher transparency, better brightness, and smoother visual performance, while resistive screens are slightly thicker with multiple layers that reduce clarity. The 1947 features a glossy glass cover, giving it a more modern appearance and easier visibility.
+
+\subsection{Multi-Touch \& Gesture Support}
+
+The 1947 supports only single-touch operation, while capacitive technology can support multi-touch gestures such as pinch-to-zoom. If your instrument needs advanced user interface interactions (zooming graphs, rotating views), capacitive is the better choice. For most traditional lab instruments, single-touch operation is sufficient.
+
+\subsection{Durability \& Mechanical Wear}
+
+Resistive screens rely on pressure-based contact, which can lead to mechanical wear over extended use and abuse. Capacitive screens are extremely durable unless the conductive grid itself is physically damaged. They also enable touch through protective layers and thick glass windows, providing longer operational lifespan in controlled environments.
+
+\subsection{Cost}
+
+Resistive screens are generally less expensive to produce due to their simple mechanical structure. The 1651 is priced at \$24.95, while the 1947 capacitive version costs \$44.95, representing a significant cost difference for high-volume instrument deployments.
+
+\subsection{Selection Guidance}
+
+\subsubsection{Choose the 1651 Resistive Display If}
+
+\begin{itemize}
+  \item Your instrument operates outdoors or in wet and dusty conditions
+  \item Operators wear safety gloves or work in cold environments
+  \item The application requires stylus input for precise control
+  \item Budget constraints limit component selection
+  \item False touches from water or environmental contamination would be problematic
+\end{itemize}
+
+\subsubsection{Choose the 1947 Capacitive Display If}
+
+\begin{itemize}
+  \item Your instrument operates in clean, controlled laboratory conditions
+  \item Users need rapid finger interaction without gloves
+  \item Display clarity and modern aesthetics are important to the application
+  \item Multi-touch gestures are required (uncommon in traditional lab instruments)
+  \item Screen longevity in a stable, protected environment is prioritized
+\end{itemize}
+
+\subsection{Recommendation}
+
+For most field instruments in variable conditions, the \textbf{1651 resistive display is the more practical choice} due to superior glove compatibility and environmental robustness. Conversely, instruments designed for benchtop laboratory use in controlled settings would benefit from the 1947's superior visual clarity and durability in those stable conditions.

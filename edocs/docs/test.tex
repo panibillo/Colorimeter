@@ -1,0 +1,65 @@
+\documentclass[12pt,letterpaper]{article}
+
+% ── Packages ──────────────────────────────────────────────────────────────────
+\usepackage[margin=1in]{geometry}
+\usepackage{booktabs}
+\usepackage{longtable}
+\usepackage{array}
+\usepackage{xcolor}
+\usepackage{colortbl}
+\usepackage{siunitx}
+\usepackage{amsmath}
+\usepackage{hyperref}
+\usepackage{graphicx}
+\usepackage{enumitem}
+\usepackage{fancyhdr}
+\usepackage{titlesec}
+\usepackage{caption}
+\usepackage{tikz}
+\usepackage[american, siunitx]{circuitikz}
+\usepackage{float}
+
+\usepackage{parskip}
+
+% ── Colors ────────────────────────────────────────────────────────────────────
+\definecolor{violet}{RGB}{109,40,217}
+\definecolor{ledblue}{RGB}{29,111,181}
+\definecolor{ledgreen}{RGB}{21,128,61}
+\definecolor{ledred}{RGB}{185,28,28}
+\definecolor{rowgray}{RGB}{245,245,245}
+\definecolor{headblue}{RGB}{30,64,175}
+\definecolor{warnred}{RGB}{185,28,28}
+\definecolor{notegreen}{RGB}{21,128,61}
+\definecolor{lightviolet}{RGB}{237,233,254}
+\definecolor{lightblue}{RGB}{219,234,254}
+\definecolor{lightgreen}{RGB}{220,252,231}
+\definecolor{lightred}{RGB}{254,226,226}
+
+% ── Header / Footer ───────────────────────────────────────────────────────────
+\pagestyle{fancy}
+\fancyhf{}
+\rhead{\small Color Analyzer LED Driver Design}
+\lhead{\small \leftmark}
+\rfoot{\small Page \thepage}
+\lfoot{\small \today}
+
+% ── Section formatting ────────────────────────────────────────────────────────
+\titleformat{\section}{\large\bfseries\color{headblue}}{{\thesection}}{1em}{}[\titlerule]
+\titleformat{\subsection}{\normalsize\bfseries}{{\thesubsection}}{1em}{}
+
+% ── Hyperref setup ────────────────────────────────────────────────────────────
+\hypersetup{colorlinks=true, linkcolor=headblue, urlcolor=headblue}
+
+% ── siunitx setup ─────────────────────────────────────────────────────────────
+\sisetup{per-mode=symbol}
+
+% ── Column types ─────────────────────────────────────────────────────────────
+\newcolumntype{C}[1]{>{\centering\arraybackslash}p{#1}}
+\newcolumntype{L}[1]{>{\raggedright\arraybackslash}p{#1}}
+\newcolumntype{R}[1]{>{\raggedleft\arraybackslash}p{#1}}
+
+% ─────────────────────────────────────────────────────────────────────────────
+\begin{document}
+	
+	Hello world 1
+\end{document}

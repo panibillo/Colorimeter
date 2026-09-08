@@ -1,0 +1,4 @@
+(fp_lib_table
+	(version 7)
+	(lib (name "colorimeter_footprints") (type "KiCad") (uri "/home/bill/Projects/Colorimeter/edocs/kicad/libs/footprints.pretty") (options "") (descr ""))
+)

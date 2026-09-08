@@ -1,0 +1,303 @@
+% ============================================================
+%  Buzzer Sub-Circuit  –  Revised layout
+%  RPi GPIO → R1 → MMBT3904 (NPN) → Buzzer (vertical) → +5V
+%  Flyback diode 1N4148W to the left of the buzzer
+% ============================================================
+
+\documentclass[border=12pt]{standalone}
+\usepackage{circuitikz}
+\usepackage{xcolor}
+
+% ── Layout constants (easy to tweak) ──────────────────────
+%  y=0   : R1 / NPN base line
+%  x=0   : left edge (GPIO label)
+%  x=6   : NPN centre
+%  x=9   : buzzer / diode column
+
+\begin{document}
+	\begin{circuitikz}[american, scale=1.15, transform shape,
+		/tikz/circuitikz/bipoles/length=1.4cm]
+		% bipoles/length scales component body size uniformly
+		
+		% ══════════════════════════════════════════════════════
+		%  TRANSISTOR  (centre of universe)
+		% ══════════════════════════════════════════════════════
+		% npn node centred at (6, -1) so that the Base pin
+		% sits at y=0 (base is ~1 unit above centre for npn)
+		\node[npn] (T1) at (6, -1) {};
+		
+		% ══════════════════════════════════════════════════════
+		%  INPUT PATH:  GPIO  ──  R1  ──  Base
+		% ══════════════════════════════════════════════════════
+		% Open-circle pin (o-) at left, plain wire (-) at right
+		\draw (0, 0)
+		node[left]{\textbf{GPIO (PWM)}}
+		to[R, o-, l=R1, a=1\,k$\Omega$]   % resistor on the wire
+		(T1.B);                             % ends at Base pin
+		
+		% ══════════════════════════════════════════════════════
+		%  EMITTER  ──  GND
+		% ══════════════════════════════════════════════════════
+		\draw (T1.E)
+		to[short]
+		(T1.E |- 0,-3)      % straight down to y=-3
+		node[ground]{};     % GND symbol
+		
+		% ══════════════════════════════════════════════════════
+		%  COLLECTOR  ──  bottom of buzzer
+		% ══════════════════════════════════════════════════════
+		% Named coordinate where collector wire meets buzzer column
+		\coordinate (CBOT) at (9, -1);   % buzzer bottom terminal
+		\coordinate (CTOP) at (9,  2);   % buzzer top  terminal  (+5V)
+		
+		% Horizontal wire: Collector → buzzer-bottom
+		\draw (T1.C) -- (CBOT);
+		
+		% ══════════════════════════════════════════════════════
+		%  BUZZER  (vertical, bottom→top = Collector→+5V)
+		% ══════════════════════════════════════════════════════
+		% CircuiTikZ 'buzzer' draws horizontally by default;
+		% 'rotate=-90' inside component options re-orients it
+		% so current flows bottom-to-top.
+		% '*-*' puts filled junction dots at both terminals.
+		\draw (CBOT)
+		to[buzzer, *-*, rotate=-90,           % vertical orientation
+		l_={\small CEM-1203(42)},           % label to right (l_ = right side)
+		a_={\small Piezo Buzzer}]           % annotation to right
+		(CTOP);
+		
+		% ══════════════════════════════════════════════════════
+		%  +5V  RAIL
+		% ══════════════════════════════════════════════════════
+		\draw (CTOP)
+		to[short, -*]              % short wire, dot at end
+		++(0, 0.3)                 % tiny upward stub
+		node[vcc]{\textbf{+5V}};  % VCC / supply symbol
+		
+		% ══════════════════════════════════════════════════════
+		%  FLYBACK DIODE  (left of buzzer, anode at bottom)
+		% ══════════════════════════════════════════════════════
+		% Placed at x=7.2, spanning same y range as buzzer.
+		% Anode (positive) at bottom → Collector side (CBOT y)
+		% Cathode at top             → +5V side       (CTOP y)
+		% Drawing path goes bottom→top, so normal 'D' orientation
+		% has anode at start = bottom. ✓
+		\coordinate (DBOT) at (7.2, -1);   % anode  (= CBOT y)
+		\coordinate (DTOP) at (7.2,  2);   % cathode (= CTOP y)
+		
+		% Horizontal connecting wires from buzzer terminals to diode
+		\draw (CBOT) -- (DBOT);   % bottom junction
+		\draw (CTOP) -- (DTOP);   % top    junction
+		
+		% Diode drawn bottom→top; labels forced to the left
+		\draw (DBOT)
+		to[D, *-*,                           % dots at both ends
+		l_={\small 1N4148W},              % label  left
+		a_={\small Flyback}]              % annotation left
+		(DTOP);
+		% Note: l_ and a_ with the underscore push labels to the
+		% "negative" side of the path — which is the left when
+		% the path runs upward.
+		
+		% ══════════════════════════════════════════════════════
+		%  TERMINAL LABELS  (minimal)
+		% ══════════════════════════════════════════════════════
+		\node[below right, font=\tiny] at (T1.B) {B};
+		\node[above right, font=\tiny] at (T1.C) {C};
+		\node[below right, font=\tiny] at (T1.E) {E};
+		\node[below, font=\small]      at (T1.center) {MMBT3904};
+		
+	\end{circuitikz}
+\end{document}
+
+
+
+% ============================================================
+%  Buzzer Sub-Circuit: RPi GPIO → NPN transistor → Buzzer
+%  Components: R1 (1kΩ), MMBT3904 (NPN), CEM-1203(42) buzzer,
+%              1N4148W flyback diode
+%
+%  HOW TO COMPILE:
+%    pdflatex buzzer_circuit.tex
+%  Requires: circuitikz package (part of TeX Live / MiKTeX)
+% ============================================================
+
+\documentclass[border=10pt]{standalone}
+% 'standalone' produces a tight bounding box around the drawing.
+% 'border=10pt' adds a small margin around the content.
+
+\usepackage{circuitikz}
+% The main package for drawing electronic circuits in LaTeX.
+% It builds on TikZ and provides component shapes (resistors,
+% transistors, diodes, etc.) via \draw ... to[component] ...
+
+\usepackage{xcolor}
+% Lets us name colors for annotation text.
+
+% ── Convenience color for annotation comments ──────────────
+\definecolor{annotate}{RGB}{0,100,180}
+
+\begin{document}
+	
+	% ----------------------------------------------------------
+	% \begin{circuitikz}[...]
+		%   Opens the drawing environment.
+		%   american  → uses American resistor symbol (zigzag)
+		%   european  → would use IEC rectangle style
+		%   scale / transform shape scale → resize all components
+		% ----------------------------------------------------------
+		\begin{circuitikz}[european, scale=1.1, transform shape]
+			
+			% ── COORDINATE LAYOUT (all distances in cm) ─────────────
+			% We place named coordinates first so that wires and
+			% components can reference them by name.
+			%
+			%  RPi ──R1──┬── Base(B)
+			%            │
+			%       Emitter(E) ── GND
+			%  +5V ─ Buzzer ──┬── Collector(C)
+			%                 │
+			%            1N4148W (flyback, anode→C, cathode→+5V)
+			
+			% ── 1. INPUT LABEL: RPi GPIO (PWM) ──────────────────────
+			% \node places text or a shape at a coordinate.
+			% [left] aligns the anchor to the left of the coordinate.
+			\node[left] at (0,0) {\textbf{RPi GPIO (PWM)}};
+			
+			% ── 2. SERIES RESISTOR R1 ───────────────────────────────
+			% \draw begins a path.
+			% (0,0) is the start coordinate.
+			% -- is a straight wire segment to the next point or component.
+			% to[R, ...] draws a resistor along the path.
+			%   R        → resistor component type
+			%   l=R1     → label above the component (l=label)
+			%   a=1\,k$\Omega$ → label below (a=annotation)
+			%   *-       → draw a filled dot at the start terminal
+			%   -*       → filled dot at the end terminal
+			%   (use - with no * for no dot)
+			\draw (0,0)
+			to[R, l=R1, a=1\,k$\Omega$, o-] (3,0);
+			%       ↑ 'o-' draws an open circle at the left terminal
+			%         (useful for external connection points / pins)
+			
+			% ── 3. JUNCTION NODE at base-resistor join ───────────────
+			% After the resistor we mark the junction explicitly.
+			% 'node[circ]' draws a filled dot (junction marker).
+			\draw (3,0) node[circ]{};
+			
+			% ── 4. NPN TRANSISTOR (MMBT3904) ─────────────────────────
+			% 'npn' is the CircuiTikZ keyword for an NPN BJT.
+			% The transistor is placed with its CENTER at (4,0) but
+			% CircuiTikZ anchors it by the *base* pin by default when
+			% using the 'at (x,y)' syntax inside a node.
+			%
+			% Named node syntax:  \node[npn] (T1) at (x,y) {};
+			%   (T1) → gives the transistor the name "T1" so we can
+			%           reference its terminals: T1.B, T1.C, T1.E
+			\node[npn, xscale=1] (T1) at (4.5, 0) {};
+			% xscale=1 → no horizontal flip; use xscale=-1 to mirror
+			
+			% Label the transistor
+			\node[right=4pt] at (T1.center) {MMBT3904};
+			
+			% Wire from resistor junction to transistor Base
+			% T1.B  → the Base terminal anchor of node T1
+			\draw (3,0) -- (T1.B);
+			
+			% ── 5. EMITTER → GND ────────────────────────────────────
+			% T1.E → Emitter terminal of T1
+			% to[short, -*] draws a plain wire with a filled dot at end
+			% 'node[ground]{}' places the ground symbol (GND)
+			\draw (T1.E)
+			to[short] (T1.E |- 0,-2.5)  % vertical drop
+			node[ground]{};             % GND symbol at the bottom
+			% 'node[ground]' draws the three-line GND symbol.
+			% 'T1.E |- 0,-3.5' means: same X as T1.E, same Y as (0,-3.5)
+			% — a TikZ coordinate shorthand for vertical/horizontal intersections.
+		
+		%   new drawing coordinates for buzzer and flyback:
+			\coordinate (lr) at (4.5, 0.5);  % 
+			\coordinate (ur) at (4.5, 2.5);  % 
+			\coordinate (ll) at (2.5, 0.5);  % 
+			\coordinate (ul) at (2.5, 2.5);  % 
+			
+			\draw (T1.C)
+			\to[lr, -*]
+			\to[buzzer, l=l=CEM-1203(42),                 % label above
+			a=Piezo Buzzer] ur;
+			
+			
+			% ── 6. COLLECTOR WIRE up to buzzer ───────────────────────
+			% T1.C → Collector terminal of T1
+			% We'll run the collector wire upward to (4.5, 0.5).
+		%	\coordinate (COL) at (4.5, 0.5);  % named coord for reuse
+		%	\draw (T1.C) -- (COL);
+			
+			% ── 7. FLYBACK DIODE 1N4148W (across buzzer, in parallel) ─
+			% 'D' → generic diode; CircuiTikZ draws it with the standard
+			%       triangle-and-bar symbol.
+			% Direction matters: current flows from anode (+) to cathode (−)
+			% in forward bias.  Flyback diode is reverse-biased normally;
+			% anode at Collector side, cathode at +5V side.
+			%
+			% to[D, invert] → 'invert' flips the diode direction so the
+			%                 arrow points FROM cathode TO anode in the
+			%                 drawing path direction.  Here we draw the
+			%                 path upward (COL → 5V rail) so 'invert'
+			%                 puts the anode at the bottom (Collector).
+			\draw (COL)
+			to[D, invert, l=1N4148W, color=red] (4.5, 2.5);
+			%       ↑ 'color=red' colors just this component for visibility
+			
+			% ── 8. +5V RAIL and BUZZER ──────────────────────────────
+			% We draw the +5V rail from the left, through the buzzer,
+			% down to the Collector/diode node.
+			%
+			% 'buzzer' is a built-in CircuiTikZ component type.
+			% It draws the IEC piezo-buzzer symbol.
+			\draw (0, 2.5)
+			node[left]{\textbf{+5V}}          % +5V label at left
+			to[short, o-] (1.5, 2.5)          % short wire from pin
+			to[buzzer,                         % buzzer component
+			l=CEM-1203(42),                 % label above
+			a=Piezo Buzzer]                 % annotation below
+			(4.5, 2.5);                     % end at diode/collector junction
+			
+			% Filled junction dot where buzzer meets diode/collector rail
+			\draw (4.5, 2.5) node[circ]{};
+			
+			% Vertical wire connecting +5V end down to COL junction
+			% (the diode already covers this path; just confirm node)
+			% Already connected through the diode draw above.
+			
+			% ── 9. ANNOTATION LABELS for terminals ──────────────────
+			% \node with text only, placed near key points.
+			\node[annotate, above=2pt] at (T1.B) {\footnotesize Base (B)};
+			\node[annotate, right=6pt] at (T1.C) {\footnotesize Collector (C)};
+			\node[annotate, right=6pt] at (T1.E) {\footnotesize Emitter (E)};
+			
+			% ── 10. GROUND LABEL ─────────────────────────────────────
+			\node[below=2pt] at (T1.E |- 0,-3.5) {\footnotesize GND};
+			
+		\end{circuitikz}
+		% ----------------------------------------------------------
+		% END OF DRAWING
+		%
+		% KEY CircuiTikZ CONCEPTS USED:
+		%  \node[component](name) at (x,y){}  → place a component node
+		%  \draw (a) to[component, options] (b) → draw component on wire
+		%  to[R]    → resistor
+		%  to[D]    → diode  (add 'invert' to flip direction)
+		%  to[buzzer] → piezo buzzer symbol
+		%  node[npn]  → NPN BJT transistor
+		%  node[ground] → ground symbol
+		%  node[circ]   → filled junction dot
+		%  l=...        → label (above/left of component)
+		%  a=...        → annotation (below/right of component)
+		%  o-  / -o     → open terminal circle (external pin)
+		%  *-  / -*     → filled dot at terminal
+		%  T1.B / T1.C / T1.E → named anchor points on transistor T1
+		%  (A |- B)     → TikZ: x of A, y of B (right-angle helper)
+		% ----------------------------------------------------------
+		
+	\end{document}
