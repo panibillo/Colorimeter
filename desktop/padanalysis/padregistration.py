@@ -1,5 +1,7 @@
 """padregistration.py -- empirical pre-to-post pad registration via edge correlation.
 
+Uses numpy only (no scipy/opencv) for RPi compatibility.
+
 The arithmetic registration in `pre_to_post()` uses fitted pad geometry but does
 not account for actual mechanical shifts, rotation, or other registration errors.
 This module measures real pixel-level shifts by correlating edges.
@@ -12,10 +14,9 @@ Algorithm:
    (b) overwrite perimeter areas with their local offsets.
 5. For rotation: divide into 4-9 areas, compute per-area offsets.
 
-Output: A resampler that applies the measured shifts via scipy.ndimage.map_coordinates.
+Output: A resampler that applies the measured shifts via bilinear interpolation.
 """
 import numpy as np
-from scipy import ndimage, optimize
 from pathlib import Path
 import sys
 
@@ -24,6 +25,50 @@ sys.path.insert(0, str(SP))
 
 from probe import Capture, PRE  # noqa: E402
 from padrect import PadRect  # noqa: E402
+
+
+def _bilinear_interp(image, yy, xx):
+    """
+    Bilinear interpolation of image at (yy, xx) coordinates (pure numpy).
+
+    Args:
+        image: 2D array.
+        yy, xx: Float coordinate arrays (can be fractional).
+
+    Returns:
+        Interpolated values at given coordinates.
+    """
+    image = np.asarray(image, dtype=np.float64)
+    rows, cols = image.shape
+
+    # Clamp to valid range
+    yy = np.clip(yy, 0, rows - 1.001)
+    xx = np.clip(xx, 0, cols - 1.001)
+
+    # Get integer and fractional parts
+    y0 = np.floor(yy).astype(np.int32)
+    x0 = np.floor(xx).astype(np.int32)
+    dy = yy - y0
+    dx = xx - x0
+
+    # Ensure we don't go out of bounds
+    y0 = np.clip(y0, 0, rows - 2)
+    x0 = np.clip(x0, 0, cols - 2)
+    y1 = y0 + 1
+    x1 = x0 + 1
+
+    # Get the four corner values
+    f00 = image[y0, x0]
+    f01 = image[y0, x1]
+    f10 = image[y1, x0]
+    f11 = image[y1, x1]
+
+    # Bilinear interpolation
+    f0 = f00 * (1 - dx) + f01 * dx
+    f1 = f10 * (1 - dx) + f11 * dx
+    result = f0 * (1 - dy) + f1 * dy
+
+    return result
 
 
 def _extract_edge_strips(image, pad_rect, edge_width=5, buffer=2):
@@ -191,13 +236,8 @@ def apply_registration_with_shifts(pre_layer, shifts, shape_post):
     yy_shifted = yy + dy_mean
     xx_shifted = xx + dx_mean
 
-    # Resample with global shifts
-    result = ndimage.map_coordinates(
-        np.asarray(pre_layer, dtype=np.float64),
-        [yy_shifted, xx_shifted],
-        order=1,
-        mode="nearest",
-    )
+    # Resample with global shifts using bilinear interpolation
+    result = _bilinear_interp(pre_layer, yy_shifted, xx_shifted)
 
     return result
 
@@ -227,58 +267,37 @@ def register_pre_to_post_empirical(samp_no, pre_layer, post_layer, max_shift=5):
     return registered, shifts
 
 
-# ── alternative: refinement step ──────────────────────────────────────
+# ── alternative: normalized cross-correlation (numpy only) ──────────────────
 
-def refine_registration_via_optimization(pre_layer, post_layer, initial_shifts=None):
+def compute_ncc(pre_layer, post_layer, shifts):
     """
-    Optional: fine-tune shifts using scipy.optimize.minimize.
+    Compute normalized cross-correlation at given shifts (numpy only).
 
-    Maximizes normalized cross-correlation over the whole image or ROI.
-    More expensive but can find sub-pixel shifts.
+    Can be used to evaluate shift quality or search over discrete shifts.
 
     Args:
         pre_layer: 2D array (pre-image).
         post_layer: 2D array (measurement).
-        initial_shifts: (dx, dy) starting point, or (0, 0) if None.
+        shifts: (dx, dy) tuple or list.
 
     Returns:
-        (dx, dy) refined shifts.
+        NCC value (higher = better alignment). Range [−1, 1].
     """
-    if initial_shifts is None:
-        initial_shifts = (0.0, 0.0)
+    dx, dy = shifts
+    rows, cols = post_layer.shape
+    yy, xx = np.mgrid[0:rows, 0:cols].astype(np.float64)
+    yy_shifted = yy + dy
+    xx_shifted = xx + dx
 
-    def neg_ncc(shifts):
-        """Negative normalized cross-correlation (for minimization)."""
-        dx, dy = shifts
-        yy, xx = np.mgrid[0:pre_layer.shape[0], 0:pre_layer.shape[1]].astype(
-            np.float64
-        )
-        yy_shifted = yy + dy
-        xx_shifted = xx + dx
+    resampled = _bilinear_interp(pre_layer, yy_shifted, xx_shifted)
 
-        resampled = ndimage.map_coordinates(
-            np.asarray(pre_layer, dtype=np.float64),
-            [yy_shifted, xx_shifted],
-            order=1,
-            mode="nearest",
-        )
-
-        # Normalized cross-correlation
-        mean_pre = np.mean(resampled)
-        mean_post = np.mean(post_layer)
-        num = np.sum((resampled - mean_pre) * (post_layer - mean_post))
-        denom = np.sqrt(
-            np.sum((resampled - mean_pre) ** 2) * np.sum((post_layer - mean_post) ** 2)
-        )
-        if denom < 1e-6:
-            return 1.0  # No correlation, penalize
-        return -num / denom
-
-    result = optimize.minimize(
-        neg_ncc,
-        initial_shifts,
-        method="Powell",
-        options={"maxiter": 100, "ftol": 1e-4},
+    # Normalized cross-correlation
+    mean_pre = np.mean(resampled)
+    mean_post = np.mean(post_layer)
+    num = np.sum((resampled - mean_pre) * (post_layer - mean_post))
+    denom = np.sqrt(
+        np.sum((resampled - mean_pre) ** 2) * np.sum((post_layer - mean_post) ** 2)
     )
-
-    return tuple(result.x)
+    if denom < 1e-6:
+        return 0.0  # No correlation
+    return num / denom

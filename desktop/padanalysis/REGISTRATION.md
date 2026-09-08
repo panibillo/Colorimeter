@@ -4,6 +4,8 @@ When computing reflectance `R_inf = sig_measurement / sig_pre`, the pre-image an
 measurement must be spatially aligned. This document explains when to use arithmetic 
 vs. empirical registration.
 
+**Note:** All code uses numpy only (no scipy/opencv dependencies) for RPi compatibility.
+
 ## Quick Start
 
 ### Standard Approach (Recommended for Most Uses)
