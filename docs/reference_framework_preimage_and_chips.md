@@ -23,24 +23,33 @@ Each has different sources of drift and different scope.
 
 Over weeks, ceramic chips accumulate dust and fingerprints. Reflectance drifts ~0.5% per month. This is **slow, gradual, and unrelated to the sample being measured**. It is a **device characteristic**, not a sample characteristic.
 
-### Observation 2: Pre-images are intrinsically superior for per-sample measurement
+### Observation 2: Pre-images replace the flat-field divisor
 
 A pre-image of the same strip, taken the same day before chemistry:
-- Eliminates inter-day camera drift (same sensor, same optics, same day)
-- Eliminates inter-strip pad variability (same physical substrate)
-- Provides pixel-by-pixel correspondence (same pad footprint, same region)
-- Is specific to *this strip*, not generic to the device
+- Is photographed under the same optics, same camera, same illuminant as the measurement
+- Carries the same spatial variation in signal level (lighting, vignetting, sensor response)
+- Provides pixel-by-pixel correspondence (same pad footprint, same region, same coordinate system)
+- Replaces the need for a flat-field divisor (the gray chips' surface model)
 
-Comparison: `R_inf = (sig_measurement) / (sig_pre)` — no gray chips needed.
+Comparison: `R_inf(y, x) = sig_measurement(y, x) / sig_pre(y, x)` — division is per-pixel, 
+not against a scalar reference. This is a *change measurement*: we measure only the 
+delta introduced by the chemistry, not the absolute reflectance level.
 
-### Observation 3: Gray chips provide absolute scale and drift detection
+**Critical:** Pixel-to-pixel correspondence between pre-image and measurement requires 
+registration (aligning the pad's location). This is a separate problem requiring careful 
+thought about possible pad shift between the two captures.
 
-Pre-images measure *relative* change (measurement vs. pre), but not *absolute* reflectance level. Gray chips provide:
+### Observation 3: Gray chips detect device drift, not measurement error
 
-1. **Absolute reflectance scale** — the true numerical value of R_inf across all samples.
-2. **Device drift detection** — a monitor of camera/LED/optical stability over time.
-3. **Cross-strip comparison** — a common reference for comparing different strips on an absolute scale.
-4. **QC flag** — if chip reflectance drifts >1%, something changed in the device.
+Pre-images measure only the *change* (chemistry-induced delta), which is what we want for 
+detecting arsenic. If the pre-image is slightly yellow or has a tint, that cancels out 
+in the division — we measure only what *changed*, not the absolute baseline.
+
+Gray chips serve a different role:
+
+1. **Device stability monitor** — track whether the camera/LED/optics are drifting over time.
+2. **QC flag** — if chip reflectance drifts >1%, something changed in the device (dust, LED aging, etc.).
+3. **Historical record** — chip trends establish whether a measurement session was normal or anomalous.
 
 ---
 
@@ -48,19 +57,23 @@ Pre-images measure *relative* change (measurement vs. pre), but not *absolute* r
 
 ### Level 1: Per-Sample (Primary)
 
-**Question:** What happened to this pad?
+**Question:** What changed on this pad due to chemistry?
 
-**Method:** Use pre-image as the white reference.
+**Method:** Divide measurement by pre-image, pixel-by-pixel.
 
 ```
-R_inf = (sig_measurement) / (R_pre)
-
-where R_pre = median(sig_pre over bare paper region)
+R_inf(y, x) = sig_measurement(y, x) / sig_pre(y, x)
 ```
 
-This is fast, intrinsic to the strip, and drift-free within the capture session.
+This measures the *relative change* at each pixel. A yellow tint in the pre-image 
+cancels out; we measure only the chemistry-induced change. This is fast, intrinsic 
+to the strip, and drift-free within the capture session.
 
-**Requirement:** Pre-images must exist (see `probe.sections()`, `Capture.is_pre`).
+**Prerequisites:**
+- Pre-images must exist (see `probe.sections()`, `Capture.is_pre`).
+- Pad registration: pre-image and measurement must be spatially aligned so that 
+  pixel (y, x) in the pre-image corresponds to the same physical location in the 
+  measurement (see "Alignment and Registration" section below).
 
 ### Level 2: Per-Batch (Secondary, Validation)
 
@@ -98,15 +111,18 @@ c_pre = Capture(samp_no, sec="pre")
 sig_meas = c_meas.layer(led, rung, layer)
 sig_pre = c_pre.layer(led, rung, layer)
 
-# Compute reflectance against pre-image
-R = sig_meas / sig_pre
+# **Prerequisite: register pre-image to measurement**
+# (Align pad location if it shifted; see "Alignment and Registration" section)
+# dx, dy = measure_pad_shift(c_pre, c_meas)
+# sig_pre = warp(sig_pre, dx, dy)
 
-# White reference: bare paper in pre-image
-R_white = median(R_pre[paper_mask])
-
-# Paper-referenced reflectance
-R_inf = R / R_white
+# Per-pixel division: measure only the chemistry-induced change
+R_inf = sig_meas / sig_pre
 ```
+
+The result is a map where:
+- Pixels with no chemistry: `R_inf ≈ 1` (pre-image and measurement identical)
+- Pixels with dye: `R_inf < 1` (measurement darker than pre-image)
 
 Gray chips are **not consulted** for this sample's analysis.
 
@@ -130,36 +146,96 @@ if abs(drift - 1.0) > 0.01:
 
 ---
 
-## Why This Works
+## Dark-Frame Spatial Structure: Verified Empirically
+
+**Question:** Do pre and measurement use different dark frames, and does this matter?
+
+**Answer:** Yes, they use different dark frames (because different exposure times). 
+But it doesn't matter — dark-frame spatial structure is negligible.
+
+**Evidence** (from `devdesk/roi_darkdiff.py` analysis on 2026-08-02 archives):
+- Before/after dark-frame differences over 4 ROI regions × 4 Bayer channels:
+  - **Range:** ±3–4 DN maximum per pixel
+  - **Median:** 0.0 DN (no systematic drift)
+  - **Std dev:** ~1 DN per pixel
+- Typical signal levels: 100–1000+ DN
+- **Dark spatial variation as % of signal: <1%**
+
+**Implication:** The algebraic cancellation of the flat-field polynomial holds in 
+practice. Even though pre uses a 5277µs dark and measurement uses a different dark 
+from a different acquisition time, the spatial structure difference is ~1 DN — 
+negligible compared to signal levels. Therefore:
+
+$$\frac{\text{sig}_{\text{meas}} / \text{sig}_{\text{pre}}}{(\text{different darks})} = \frac{R_{\text{meas}}}{R_{\text{pre}}} \quad \text{to within} \approx 1\% \text{ error}$$
+
+The flat-field polynomial cancels whether or not we apply it explicitly.
+
+**Tool reference:** `devdesk/roi_darkdiff.py` — a comprehensive dark-frame analyzer 
+with three modes: ROI statistics, full-array histograms, and per-pixel bias analysis. 
+Applies only to pre-2026-08 archives (which have matched before/after dark batches).
+
+---
+
+## Alignment and Registration
+
+**Not yet solved; requires careful thought.**
+
+Pre-image and measurement must be spatially registered: pixel (y, x) in the pre-image 
+must correspond to the same physical location in the measurement. Possible sources of shift:
+
+- Pad footprint changes (the fitted rectangle may move ±3 layer pixels between sweeps)
+- Camera/stage mechanical drift (rare but possible)
+- Software reframing or crop changes
+
+Approaches to consider (not yet implemented):
+
+1. **Fixed fiducials** — if there are visible stage markers (chips, edges), use them 
+   to measure and correct pad shift.
+2. **Cross-correlation** — find the best-fit (dx, dy) shift by correlating pad regions.
+3. **Assume fixed position** — if the mechanical tolerance is tight enough, assume no shift.
+
+This is a prerequisite for pixel-to-pixel division but is **out of scope** for this 
+document. It will be addressed when implementing the pre-image workflow.
+
+---
+
+## Why This Works (with registration)
 
 | Scenario | Pre-image | Gray Chips |
 |---|---|---|
 | **Pad-to-pad variation** | Measured (each strip's own baseline) | Invisible (common reference) |
 | **Within-day camera drift** | Eliminated (same day) | Accumulates (stage furniture) |
-| **Inter-day consistency** | Preserved (each strip self-referential) | Drifts with dust/age |
-| **Absolute scale** | Relative only | Provides absolute level |
-| **Cross-strip comparison** | Not comparable without chips | Comparable via chips |
+| **Chemistry-only signal** | Yes (tint cancels in division) | No (captures absolute level) |
+| **Absolute scale** | Not needed (we measure change) | Could track device state |
 | **Device health check** | Not applicable | Detects optical degradation |
 
-**Conclusion:** Pre-images are the measurement reference; gray chips are the system monitor.
+**Conclusion:** Pre-images measure the chemistry-induced change; gray chips monitor 
+device drift.
 
 ---
 
-## Implications for Code
+## Implications for Code (Future Work)
 
-### `analysis_1.py`
+### Pad Alignment and Registration
 
-- `get_balanced_cell_data(samp_no, ...)` already computes R_inf using `median(R[paper])` on the *measurement* section.
-- **Should** compute it using pre-image when available: `R_inf = R_meas / R_pre`.
-- Requires opening both sections: `Capture(samp_no, "")` and `Capture(samp_no, "pre")`.
+**Blocking issue:** Before `R_inf = sig_meas / sig_pre` can be used, we must solve 
+the registration problem. Design decisions needed:
+
+- Which registration method (fiducials, correlation, assume fixed)?
+- How to detect when registration fails or is ambiguous?
+- Error propagation: if pad shift is ±2 layer pixels, how does that affect the 
+  per-pixel R_inf values?
+
+This is a prerequisite for any pre-image-based workflow and should be prototyped 
+before integrating into `analysis_1.py`.
 
 ### Device Drift Monitoring
 
 - Add a new module (e.g., `desktop/padanalysis/device_monitor.py`) to:
   - Store baseline chip reflectance (from commissioning or calibration run).
   - Track measured chip reflectance over time.
-  - Alert if drift exceeds threshold.
-  - Suggest recalibration or data correction.
+  - Alert if drift exceeds threshold (e.g., >1%).
+  - Suggest cleaning, recalibration, or data flagging.
 
 ### Documentation
 
