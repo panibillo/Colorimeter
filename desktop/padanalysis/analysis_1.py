@@ -27,7 +27,7 @@ Sections
 --------
 From schema 4 an archive holds two sweeps of one strip: the measurement at
 the root and the **pre-image** -- the same strip before it met any reagent --
-under `/pre`.  Every method takes `pre=False|True` to say which.  The strip
+under `/pre`.  Every method takes `sec=''|'pre'` to say which.  The strip
 is taken out and put back between the two, so the pad moves; the gray chips
 do not, being stage furniture.  That asymmetry is the whole of the
 registration rule in `get_cell_data`.
@@ -72,7 +72,7 @@ SP = Path(__file__).resolve().parent
 sys.path.insert(0, str(SP))
 
 import padphot                                              # noqa: E402
-from probe import BAYER, RAW_MAX, Capture, sections         # noqa: E402
+from probe import BAYER, PRE, RAW_MAX, Capture, sections    # noqa: E402
 from padrect import PadRect                                 # noqa: E402
 from whitecorr import load_models, rect_mask                # noqa: E402
 from fields import rung_for                                 # noqa: E402
@@ -206,12 +206,7 @@ _manual_reads = {}  # samp_no -> str or None
 
 # ── opening, caching, closing ──────────────────────────────────────────
 
-def _section(pre) -> str:
-    """'pre' or '' -- the section name for a `pre=` flag."""
-    return "pre" if pre else ""
-
-
-def open_sample(samp_no, pre=False) -> Capture:
+def open_sample(samp_no, sec="") -> Capture:
     """
     Return the open `probe.Capture` for one sweep, cached.
 
@@ -220,28 +215,28 @@ def open_sample(samp_no, pre=False) -> Capture:
 
     Args:
         samp_no: Capture name without the .h5, e.g. 'C1020'.
-        pre: True for the `/pre` sweep, False for the measurement.
+        sec: '' for the measurement sweep, 'pre' for the pre-image.
 
     Returns:
         The cached `Capture`.  Do not close it; call `close_all()`.
 
     Raises:
         RuntimeError: The archive's schema or meta version is out of range.
-        KeyError: `pre=True` on an archive with no pre-image.
+        KeyError: `sec='pre'` on an archive with no pre-image.
 
     Example:
         >>> c = open_sample("C1020")                     # doctest: +SKIP
         >>> sorted(c.rects)                              # doctest: +SKIP
         ['bound', 'gray1', 'gray2', 'sample']
     """
-    key = (samp_no, _section(pre))
+    key = (samp_no, sec)
     if key not in _captures:
         path = CAPTURES / f"{samp_no}.h5"
         with Hdf5Reader(str(path)) as r:
             problem = version.check_archive(r.attrs("/"))
         if problem:
             raise RuntimeError(f"{samp_no}.h5: {problem}")
-        _captures[key] = Capture(samp_no, _section(pre))
+        _captures[key] = Capture(samp_no, sec)
     return _captures[key]
 
 
@@ -270,7 +265,7 @@ def close_all() -> None:
     _pads.clear()
 
 
-def layer_shape(samp_no, pre=False) -> tuple:
+def layer_shape(samp_no, sec="") -> tuple:
     """
     The (rows, cols) of this sweep's Bayer-layer grid.
 
@@ -279,18 +274,18 @@ def layer_shape(samp_no, pre=False) -> tuple:
 
     Args:
         samp_no: Capture name.
-        pre: Which sweep.
+        sec: Which sweep -- '' measurement, 'pre' pre-image.
 
     Returns:
         (rows, cols).
     """
-    c = open_sample(samp_no, pre)
+    c = open_sample(samp_no, sec)
     return (c.bound[3] // 2, c.bound[2] // 2)
 
 
 # ── what is actually in the archive ────────────────────────────────────
 
-def cells_present(samp_no, pre=False, modelled=True) -> list:
+def cells_present(samp_no, sec="", modelled=True) -> list:
     """
     The cells this sweep really holds, in `(led, layer)` form.
 
@@ -301,7 +296,7 @@ def cells_present(samp_no, pre=False, modelled=True) -> list:
 
     Args:
         samp_no: Capture name.
-        pre: Which sweep.
+        sec: Which sweep -- '' measurement, 'pre' pre-image.
         modelled: Keep only cells that also have a published flat-field
             model.  False lists everything stored, including cells that
             cannot be white-corrected.
@@ -310,10 +305,10 @@ def cells_present(samp_no, pre=False, modelled=True) -> list:
         Sorted list of `(led, layer)`.
 
     Example:
-        >>> cells_present("C1020", pre=True)             # doctest: +SKIP
+        >>> cells_present("C1020", sec="pre")            # doctest: +SKIP
         [('cyan', 'B'), ('cyan', 'Gb'), ..., ('violet', 'B')]
     """
-    c = open_sample(samp_no, pre)
+    c = open_sample(samp_no, sec)
     keep = set(models()) if modelled else None
     out = []
     for led in c.leds:
@@ -351,14 +346,13 @@ def inventory(samp_no) -> None:
           f"{', '.join(s or '(measurement)' for s in have)}")
     known = set(models())
     for sec in have:
-        pre = sec == "pre"
-        c = open_sample(samp_no, pre)
+        c = open_sample(samp_no, sec)
         a = c.meta
         run = a.get("run", {})
         print(f"\n-- section {sec or '(measurement)'}   mode={run.get('mode')}"
-              f"   bound={c.bound}   grid={layer_shape(samp_no, pre)}")
+              f"   bound={c.bound}   grid={layer_shape(samp_no, sec)}")
         print(f"   {'LED':<11}{'rung':>5}{'us':>8}   layers"
-              f"{'':<14}{'gray1':>9}{'gray2':>9}")
+              f"{'':<8}{'gray1':>9}{'gray2':>9}")
         for led in c.leds:
             for rung in c.labels(led):
                 kept, dropped = [], []
@@ -378,12 +372,36 @@ def inventory(samp_no) -> None:
                 drop = f"  (dropped {'+'.join(dropped)})" if dropped else ""
                 print(f"   {led:<11}{rung:>5}{c.exposure_us(led, rung):>8}"
                       f"   {'+'.join(kept):<14}{g1:>9.1f}{g2:>9.1f}{drop}")
+
+        darks = c.dark_groups()
+        if not darks:
+            print("   dark frames: none recorded in this archive")
+        else:
+            print(f"\n   dark frames (taken after the sweep, one per exposure,"
+                  f" shared by every LED at that exposure):")
+            print(f"   {'us':>8}{'when':>7}{'time':>14}"
+                  f"{'R':>13}{'Gr':>13}{'Gb':>13}{'B':>13}"
+                  f"   mean/std raw DN  ([x] = layer dropped, -- = absent)")
+            for d in sorted(darks.values(), key=lambda d: d["exposure_us"]):
+                cells = []
+                for lay in BAYER:
+                    v = d["layers"].get(lay)
+                    if v is None:
+                        cells.append("--")
+                    elif v[1] is None:
+                        cells.append(f"[{v[0]:.1f}]")
+                    else:
+                        cells.append(f"{v[0]:.1f}/{v[1]:.2f}")
+                t = d["captured_dt"].split(" ")[-1] or "?"
+                print(f"   {d['exposure_us']:>8}{d['when']:>7}{t:>14}"
+                      + "".join(f"{x:>13}" for x in cells))
+
         print("   lower-case layer = stored but no flat-field model")
-        print(f"   cells usable here: {len(cells_present(samp_no, pre))}"
+        print(f"   cells usable here: {len(cells_present(samp_no, sec))}"
               f" of {len(known)} modelled")
 
 
-def saturation(samp_no, cell, roi=ROISAMPLE, pre=False, rung=None) -> float:
+def saturation(samp_no, cell, roi=ROISAMPLE, sec="", rung=None) -> float:
     """
     Fraction of a region's raw counts at or above the clipping ceiling.
 
@@ -394,7 +412,7 @@ def saturation(samp_no, cell, roi=ROISAMPLE, pre=False, rung=None) -> float:
         samp_no: Capture name.
         cell: `(led, layer)`.
         roi: One of the ROI names.
-        pre: Which sweep.
+        sec: Which sweep -- '' measurement, 'pre' pre-image.
         rung: Exposure rung, or None for the one this method would pick.
 
     Returns:
@@ -402,21 +420,21 @@ def saturation(samp_no, cell, roi=ROISAMPLE, pre=False, rung=None) -> float:
         not stored at all, so a screen written as `sat > MAX_SAT_FRACTION`
         rejects a missing cell too.
     """
-    c = open_sample(samp_no, pre)
+    c = open_sample(samp_no, sec)
     led, layer = cell
-    rung = rung or _pick_rung(samp_no, cell, pre)
+    rung = rung or _pick_rung(samp_no, cell, sec)
     if rung is None:
         return 1.0
     got = c.layer(led, rung, layer)
     if got is None:
         return 1.0
-    region = _region(samp_no, roi, pre)
+    region = _region(samp_no, roi, sec)
     return float((got[1][region] >= SATURATED_DN).mean())
 
 
 # ── the pad, and where it is ───────────────────────────────────────────
 
-def pad_of(samp_no, pre=False) -> PadRect:
+def pad_of(samp_no, sec="") -> PadRect:
     """
     Return the fitted `padrect.PadRect` for one sweep, cached.
 
@@ -428,7 +446,7 @@ def pad_of(samp_no, pre=False) -> PadRect:
 
     Args:
         samp_no: Capture name.
-        pre: Which sweep.
+        sec: Which sweep -- '' measurement, 'pre' pre-image.
 
     Returns:
         The cached `PadRect`.  `.describe()` is its one-line QC summary;
@@ -437,22 +455,22 @@ def pad_of(samp_no, pre=False) -> PadRect:
     Example:
         >>> print(pad_of("C1020").describe())            # doctest: +SKIP
     """
-    key = (samp_no, _section(pre))
+    key = (samp_no, sec)
     if key not in _pads:
-        _pads[key] = PadRect(open_sample(samp_no, pre), rung=PAD_RUNG)
+        _pads[key] = PadRect(open_sample(samp_no, sec), rung=PAD_RUNG)
     return _pads[key]
 
 
-def _region(samp_no, roi, pre=False, erode=ERODE) -> np.ndarray:
+def _region(samp_no, roi, sec="", erode=ERODE) -> np.ndarray:
     """Boolean mask of one ROI on the layer grid.  See `get_cell_data`."""
     if roi not in _ROI_NAMES:
         raise ValueError(f"roi must be one of {_ROI_NAMES}, got {roi!r}")
-    shape = layer_shape(samp_no, pre)
+    shape = layer_shape(samp_no, sec)
     if roi == ROIBOUND:
         return np.ones(shape, dtype=bool)
     if roi in (ROIGRAY1, ROIGRAY2):
-        return rect_mask(shape, open_sample(samp_no, pre).rects[roi])
-    pad = pad_of(samp_no, pre)
+        return rect_mask(shape, open_sample(samp_no, sec).rects[roi])
+    pad = pad_of(samp_no, sec)
     if roi == ROISAMPLE:
         return pad.mask(erode)
     paper, depth = pad.paper_mask()
@@ -521,16 +539,15 @@ def locate_pad(samp_no, write=True) -> dict:
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     rows = {}
     for sec in sections(samp_no):
-        pre = sec == "pre"
         _pads.pop((samp_no, sec), None)          # always a fresh fit
-        p = pad_of(samp_no, pre)
-        bx, by, bw, bh = open_sample(samp_no, pre).bound
+        p = pad_of(samp_no, sec)
+        bx, by, bw, bh = open_sample(samp_no, sec).bound
         tr = None if np.isnan(p.top_residual) else float(p.top_residual)
         rows[sec] = dict(
             samp_no=samp_no, section=sec, add_dt=now,
             rung=",".join(sorted(
-                {rung_for(open_sample(samp_no, pre), led, PAD_RUNG)
-                 for led in open_sample(samp_no, pre).leds})),
+                {rung_for(open_sample(samp_no, sec), led, PAD_RUNG)
+                 for led in open_sample(samp_no, sec).leds})),
             aL=float(p.aL), aR=float(p.aR), width=float(p.width),
             height=float(p.height), m=float(p.m), yc=float(p.yc),
             angle_deg=float(p.angle_deg), top=float(p.top),
@@ -563,13 +580,13 @@ def locate_pad(samp_no, write=True) -> dict:
     return rows
 
 
-def read_sample_roi(samp_no, pre=False) -> dict:
+def read_sample_roi(samp_no, sec="") -> dict:
     """
     Read one sweep's stored geometry back out of `sample_roi`.
 
     Args:
         samp_no: Capture name.
-        pre: Which sweep.
+        sec: Which sweep -- '' measurement, 'pre' pre-image.
 
     Returns:
         The row as a dict of column: value.
@@ -582,13 +599,13 @@ def read_sample_roi(samp_no, pre=False) -> dict:
     try:
         row = conn.execute(
             "SELECT * FROM sample_roi WHERE samp_no = ? AND section = ?",
-            (samp_no, _section(pre))).fetchone()
+            (samp_no, sec)).fetchone()
     except sqlite3.OperationalError as e:
         raise KeyError(f"sample_roi unavailable: {e}") from e
     finally:
         conn.close()
     if row is None:
-        raise KeyError(f"no sample_roi row for {samp_no}/{_section(pre)}"
+        raise KeyError(f"no sample_roi row for {samp_no}/{sec}"
                        f" -- run locate_pad({samp_no!r})")
     return dict(row)
 
@@ -641,8 +658,8 @@ def pre_to_post(samp_no):
     Raises:
         KeyError: The archive has no pre-image.
     """
-    post, pre = pad_of(samp_no, False), pad_of(samp_no, True)
-    rows, cols = layer_shape(samp_no, False)
+    post, pre = pad_of(samp_no, ""), pad_of(samp_no, PRE)
+    rows, cols = layer_shape(samp_no, "")
     yy, xx = np.mgrid[0:rows, 0:cols].astype(np.float64)
     u = xx - (post.aL + post.m * (yy - post.yc))
     y_pre = pre.top + (yy - post.top)
@@ -660,7 +677,7 @@ def _register(frame, samp_no):
 
 # ── reading a cell ─────────────────────────────────────────────────────
 
-def _measured_region(samp_no, pre=False, erode=ERODE) -> np.ndarray:
+def _measured_region(samp_no, sec="", erode=ERODE) -> np.ndarray:
     """
     The pixels a rung has to be good over: the pad and the two gray chips.
 
@@ -685,12 +702,12 @@ def _measured_region(samp_no, pre=False, erode=ERODE) -> np.ndarray:
     outright.  Exposure group 1 over-exposes them; group 3, which C1016-18
     used, does not.
     """
-    return (_region(samp_no, ROISAMPLE, pre, erode)
-            | _region(samp_no, ROIGRAY1, pre)
-            | _region(samp_no, ROIGRAY2, pre))
+    return (_region(samp_no, ROISAMPLE, sec, erode)
+            | _region(samp_no, ROIGRAY1, sec)
+            | _region(samp_no, ROIGRAY2, sec))
 
 
-def rung_verdict(samp_no, cell, pre=False, erode=ERODE) -> tuple:
+def rung_verdict(samp_no, cell, sec="", erode=ERODE) -> tuple:
     """
     Which rung this cell should be read at, and why -- especially why not.
 
@@ -707,7 +724,7 @@ def rung_verdict(samp_no, cell, pre=False, erode=ERODE) -> tuple:
     Args:
         samp_no: Capture name.
         cell: `(led, layer)`.
-        pre: Which sweep.
+        sec: Which sweep -- '' measurement, 'pre' pre-image.
         erode: Layer px backed off the pad edge.
 
     Returns:
@@ -718,11 +735,11 @@ def rung_verdict(samp_no, cell, pre=False, erode=ERODE) -> tuple:
         >>> rung_verdict("C1020", ("cyan", "Gr"))        # doctest: +SKIP
         (None, 'clipped: 89% of the pad at the 1023 ceiling')
     """
-    c = open_sample(samp_no, pre)
+    c = open_sample(samp_no, sec)
     led, layer = cell
     if led not in c.leds:
         return None, "LED not lit in this sweep"
-    region = _measured_region(samp_no, pre, erode)
+    region = _measured_region(samp_no, sec, erode)
     best, why = None, "layer dropped by the capture keep screen"
     for rung in c.labels(led):
         got = c.layer(led, rung, layer)
@@ -747,12 +764,12 @@ def rung_verdict(samp_no, cell, pre=False, erode=ERODE) -> tuple:
     return (best[0], "ok") if best else (None, why)
 
 
-def _pick_rung(samp_no, cell, pre=False, erode=ERODE):
+def _pick_rung(samp_no, cell, sec="", erode=ERODE):
     """The rung from `rung_verdict`, or None.  See it for the screens."""
-    return rung_verdict(samp_no, cell, pre, erode)[0]
+    return rung_verdict(samp_no, cell, sec, erode)[0]
 
 
-def get_cell_data(samp_no, LED, Bayerlayer, roi=ROISAMPLE, pre=False,
+def get_cell_data(samp_no, LED, Bayerlayer, roi=ROISAMPLE, sec="",
                   erode=ERODE, rung=None, register=True, crop=False):
     """
     The dark-subtracted signal of one cell over one ROI, in counts.
@@ -795,7 +812,7 @@ def get_cell_data(samp_no, LED, Bayerlayer, roi=ROISAMPLE, pre=False,
                   dropped as marks on the paper.  There is no `white` rect
                   in the roi table in force, and this is not a rectangle.
 
-    **Registration.**  With `pre=True` and `register=True` the pre-image is
+    **Registration.**  With `sec='pre'` and `register=True` the pre-image is
     resampled onto the measurement's grid so `post / pre` divides pixel by
     pixel.  This applies only to the strip-attached ROIs -- 'sample' and
     'white' -- because only the strip moves between the two sweeps; the gray
@@ -809,11 +826,11 @@ def get_cell_data(samp_no, LED, Bayerlayer, roi=ROISAMPLE, pre=False,
         LED: LED colour name, e.g. 'royal_blue'.
         Bayerlayer: One of 'R', 'Gr', 'Gb', 'B'.
         roi: One of ROIBOUND, ROIWHITE, ROIGRAY1, ROIGRAY2, ROISAMPLE.
-        pre: True to read the `/pre` sweep.
+        sec: '' for the measurement, 'pre' to read the `/pre` sweep.
         erode: Layer px backed off from the pad edge, and from the paper
             region's edge.  Ignored by the rect ROIs.
         rung: Exposure rung, or None to take the brightest unclipped one.
-        register: See above.  Ignored unless `pre` and a strip ROI.
+        register: See above.  Ignored unless `sec='pre'` and a strip ROI.
         crop: True to return the ROI's bounding box instead of the full grid.
 
     Returns:
@@ -823,15 +840,15 @@ def get_cell_data(samp_no, LED, Bayerlayer, roi=ROISAMPLE, pre=False,
 
     Raises:
         ValueError: `roi` is not one of the five names.
-        KeyError: `pre=True` on an archive with no pre-image.
+        KeyError: `sec='pre'` on an archive with no pre-image.
 
     Example:
         >>> a = get_cell_data("C1020", "royal_blue", "B")   # doctest: +SKIP
         >>> a.shape, a.count()                              # doctest: +SKIP
         ((130, 183), 1690)
     """
-    c = open_sample(samp_no, pre)
-    rung = rung or _pick_rung(samp_no, (LED, Bayerlayer), pre, erode)
+    c = open_sample(samp_no, sec)
+    rung = rung or _pick_rung(samp_no, (LED, Bayerlayer), sec, erode)
     if rung is None:
         return None
     got = c.layer(LED, rung, Bayerlayer)
@@ -839,11 +856,11 @@ def get_cell_data(samp_no, LED, Bayerlayer, roi=ROISAMPLE, pre=False,
         return None
     sig = got[0]
 
-    if pre and register and roi in _STRIP_ROIS:
+    if sec and register and roi in _STRIP_ROIS:
         sig = _register(sig, samp_no)
-        region = _region(samp_no, roi, pre=False, erode=erode)
+        region = _region(samp_no, roi, "", erode=erode)
     else:
-        region = _region(samp_no, roi, pre, erode)
+        region = _region(samp_no, roi, sec, erode)
 
     out = np.ma.masked_array(sig, mask=~region)
     if not crop:
@@ -857,7 +874,7 @@ class BalancedCell:
     One cell, balanced, with every step of the chain kept.
 
     Attributes:
-        samp_no, cell, roi, pre: what was asked for.
+        samp_no, cell, roi, sec: what was asked for.
         rung, exposure_us: the exposure actually read.
         sig: dark-subtracted counts, masked to the ROI.
         div: the gray-chip level at this region, counts (`padphot.divisor`).
@@ -880,7 +897,7 @@ class BalancedCell:
             refers it to the paper is missing.
     """
 
-    __slots__ = ("samp_no", "cell", "roi", "pre", "rung", "exposure_us",
+    __slots__ = ("samp_no", "cell", "roi", "sec", "rung", "exposure_us",
                  "sig", "div", "R", "R_white", "R_inf", "A", "KS",
                  "KS_signed", "sat_frac", "paper_sat", "paper_clipped")
 
@@ -890,7 +907,7 @@ class BalancedCell:
 
     def __repr__(self):
         head = (f"<BalancedCell {self.samp_no}"
-                f"{'/pre' if self.pre else ''} {cell_name(self.cell)}"
+                f"{('/' + self.sec) if self.sec else ''} {cell_name(self.cell)}"
                 f" {self.roi} rung={self.rung} n={self.R.count()}"
                 f" R={self.R.mean():.4f}")
         if self.paper_clipped:
@@ -900,7 +917,7 @@ class BalancedCell:
 
 
 def get_balanced_cell_data(samp_no, LED, Bayerlayer, roi=ROISAMPLE,
-                           pre=False, erode=ERODE, rung=None, register=True,
+                           sec="", erode=ERODE, rung=None, register=True,
                            quantity=None):
     """
     Read one cell and carry it through the whole photometric chain.
@@ -964,7 +981,7 @@ def get_balanced_cell_data(samp_no, LED, Bayerlayer, roi=ROISAMPLE,
         Bayerlayer: 'R', 'Gr', 'Gb' or 'B'.
         roi: Which region to return.  The gray chips and the paper are read
             from the whole frame regardless, since they are the references.
-        pre: True to read the `/pre` sweep.
+        sec: '' for the measurement, 'pre' to read the `/pre` sweep.
         erode: Layer px backed off from the pad and paper edges.
         rung: Exposure rung, or None to pick the brightest unclipped one.
         register: Resample a pre-image onto the measurement grid; see
@@ -989,8 +1006,8 @@ def get_balanced_cell_data(samp_no, LED, Bayerlayer, roi=ROISAMPLE,
     model = models().get(cell)
     if model is None or not model.usable:
         return None
-    c = open_sample(samp_no, pre)
-    rung = rung or _pick_rung(samp_no, cell, pre, erode)
+    c = open_sample(samp_no, sec)
+    rung = rung or _pick_rung(samp_no, cell, sec, erode)
     if rung is None:
         return None
     got = c.layer(LED, rung, Bayerlayer)
@@ -1000,14 +1017,14 @@ def get_balanced_cell_data(samp_no, LED, Bayerlayer, roi=ROISAMPLE,
 
     # References are read in the sweep the cell came from, on the whole
     # frame, before any registration: the chips do not move with the strip.
-    chip1 = _region(samp_no, ROIGRAY1, pre)
-    chip2 = _region(samp_no, ROIGRAY2, pre)
-    paper = _region(samp_no, ROIWHITE, pre, erode)
-    measured = _region(samp_no, roi, pre, erode)
+    chip1 = _region(samp_no, ROIGRAY1, sec)
+    chip2 = _region(samp_no, ROIGRAY2, sec)
+    paper = _region(samp_no, ROIWHITE, sec, erode)
+    measured = _region(samp_no, roi, sec, erode)
 
     div = padphot.divisor(model, measured, chip1, chip2, raw_sig)
 
-    a = get_cell_data(samp_no, LED, Bayerlayer, roi=roi, pre=pre,
+    a = get_cell_data(samp_no, LED, Bayerlayer, roi=roi, sec=sec,
                       erode=erode, rung=rung, register=register)
     if a is None:
         return None
@@ -1027,7 +1044,7 @@ def get_balanced_cell_data(samp_no, LED, Bayerlayer, roi=ROISAMPLE,
         KS_signed = padphot.km_remission_signed(R_inf)
 
     out = BalancedCell(
-        samp_no=samp_no, cell=cell, roi=roi, pre=pre, rung=rung,
+        samp_no=samp_no, cell=cell, roi=roi, sec=sec, rung=rung,
         exposure_us=c.exposure_us(LED, rung), sig=a, div=div, R=R,
         R_white=R_white, R_inf=R_inf, A=A, KS=KS, KS_signed=KS_signed,
         sat_frac=float((raw_lit[measured] >= SATURATED_DN).mean()),
@@ -1079,12 +1096,12 @@ def writeh5_sampcell(samp_no, cellname, array, **attrs) -> Path:
     ANALYSIS.mkdir(parents=True, exist_ok=True)
     path = _sampcell_path(samp_no)
     root = {}
-    for pre in (False, True):
-        key = (samp_no, _section(pre))
+    for sec in ("", PRE):
+        key = (samp_no, sec)
         if key in _captures:
             c = _captures[key]
             bx, by, bw, bh = c.bound
-            tag = "pre_" if pre else ""
+            tag = f"{sec}_" if sec else ""
             root.update({f"{tag}bound_x": bx, f"{tag}bound_y": by,
                          f"{tag}bound_w": bw, f"{tag}bound_h": bh})
     with Hdf5Reader(str(CAPTURES / f"{samp_no}.h5")) as r:
@@ -1273,9 +1290,9 @@ def _finish(fig, samp_no, what, figs=True, savefigs=False):
     return out
 
 
-def roi_overlay(samp_no, pre=False, erode=ERODE, figs=True, savefigs=False):
+def roi_overlay(samp_no, sec=None, erode=ERODE, figs=True, savefigs=False):
     """
-    The crop as measured, beside the same crop with every region drawn on.
+    The crop as measured, beside the same crop with every roi drawn on.
 
     Look at this before believing any number.  The left panel is the raw
     composite field the finder worked on; the right is that field with the
@@ -1284,6 +1301,10 @@ def roi_overlay(samp_no, pre=False, erode=ERODE, figs=True, savefigs=False):
     the paper region is not on bare paper, everything downstream is void and
     no amount of arithmetic will say so.
 
+    One row of panels per sweep, measurement above the pre-image, so the
+    two `locate_pad` fits are checked together -- the pad moves between the
+    sweeps and the pre fit is usually the looser of the two.
+
     Read `PadRect.describe()` alongside it -- printed here.  Want a width
     near 41.3 layer px, a tilt within about a degree, an edge rms under
     0.3 px, and a positive clearance (negative means the stage mask hides
@@ -1291,57 +1312,68 @@ def roi_overlay(samp_no, pre=False, erode=ERODE, figs=True, savefigs=False):
 
     Args:
         samp_no: Capture name without the .h5.
-        pre: True to inspect the `/pre` sweep.
+        sec: None (default) draws every sweep the archive holds; pass '' or
+            'pre' to restrict to one.
         erode: Layer px backed off the pad and paper edges, as drawn.
         figs: Show the figure.
-        savefigs: Also write `fig/analysis1_<samp_no>_roi[_pre].png`.
+        savefigs: Also write `fig/analysis1_<samp_no>_roi[_<sec>].png`.
 
     Returns:
-        The `PadRect`.
+        `{section: PadRect}`, one entry per sweep drawn.
 
     Example:
         >>> roi_overlay("C1020", savefigs=True)          # doctest: +SKIP
     """
     import matplotlib.pyplot as plt
-    c = open_sample(samp_no, pre)
-    pad = pad_of(samp_no, pre)
-    comp = pad.comp
-    print("  " + pad.describe().strip())
+    secs = sections(samp_no) if sec is None else [sec]
 
-    fig, axes = plt.subplots(1, 2, figsize=(13, 5), layout="constrained")
-    for ax in axes:
-        ax.imshow(comp, cmap="gray", origin="upper",
-                  vmin=0, vmax=np.percentile(comp, 99.5))
-        ax.set_aspect("equal")
-    axes[0].set_title(f"{_samp_title(samp_no)}{'/pre' if pre else ''}  "
-                      f"composite reflectance (raw)")
+    fig, axes = plt.subplots(len(secs), 2, figsize=(13, 5 * len(secs)),
+                             squeeze=False, layout="constrained")
+    pads = {}
+    for row, s in zip(axes, secs):
+        prepost = s if s else 'post'
+        c = open_sample(samp_no, s)
+        pad = pad_of(samp_no, s)
+        pads[s] = pad
+        comp = pad.comp
+        print(f"  {samp_no}/{prepost:<4} " + pad.describe().strip())
 
-    ax = axes[1]
-    for name, colour in ((ROIGRAY1, "tab:cyan"), (ROIGRAY2, "tab:cyan"),
-                         (ROISAMPLE, "tab:orange")):
-        x, y, w, h = c.rects[name]
-        ax.add_patch(plt.Rectangle((x - .5, y - .5), w, h, fill=False,
-                                   ec=colour, lw=1.2, ls="--"))
-        ax.text(x, y - 2, name + (" (seed)" if name == ROISAMPLE else ""),
-                color=colour, fontsize=7)
-    xy = pad.corners() + pad.corners()[:1]
-    ax.plot([p[0] for p in xy], [p[1] for p in xy], "-", color="tab:red",
-            lw=1.6, label="fitted pad")
-    ax.contour(_region(samp_no, ROISAMPLE, pre, erode).astype(float),
-               levels=[0.5], colors="tab:red", linewidths=0.9,
-               linestyles=":")
-    ax.contour(_region(samp_no, ROIWHITE, pre, erode).astype(float),
-               levels=[0.5], colors="tab:green", linewidths=1.2)
-    ax.plot([], [], color="tab:green", label=f"{ROIWHITE} (bare paper)")
-    ax.plot([], [], color="tab:red", ls=":", label=f"pad eroded {erode:g} px")
-    ax.legend(fontsize=7, loc="lower right")
-    ax.set_title(f"regions   tilt={pad.angle_deg:+.2f} deg  "
-                 f"W={pad.width:.2f}  rms={pad.edge_rms:.3f} px")
-    _finish(fig, samp_no, "roi_pre" if pre else "roi", figs, savefigs)
-    return pad
+        for ax in row:
+            ax.imshow(comp, cmap="gray", origin="upper",
+                      vmin=0, vmax=np.percentile(comp, 99.5))
+            ax.set_aspect("equal")
+        row[0].set_title(f"{prepost}: {_samp_title(samp_no)}  "
+                         f"composite reflectance (raw)")
+
+        ax = row[1]
+        for name, colour in ((ROIGRAY1, "tab:cyan"), (ROIGRAY2, "tab:cyan"),
+                             (ROISAMPLE, "tab:orange")):
+            x, y, w, h = c.rects[name]
+            ax.add_patch(plt.Rectangle((x - .5, y - .5), w, h, fill=False,
+                                       ec=colour, lw=1.2, ls="--"))
+            ax.text(x, y - 2, name + (" (seed)" if name == ROISAMPLE else ""),
+                    color=colour, fontsize=7)
+        xy = pad.corners() + pad.corners()[:1]
+        ax.plot([p[0] for p in xy], [p[1] for p in xy], "-", color="tab:red",
+                lw=1.6, label="fitted pad")
+        ax.contour(_region(samp_no, ROISAMPLE, s, erode).astype(float),
+                   levels=[0.5], colors="tab:red", linewidths=0.9,
+                   linestyles=":")
+        ax.contour(_region(samp_no, ROIWHITE, s, erode).astype(float),
+                   levels=[0.5], colors="tab:green", linewidths=1.2)
+        ax.plot([], [], color="tab:green", label=f"{ROIWHITE} (bare paper)")
+        ax.plot([], [], color="tab:red", ls=":",
+                label=f"pad eroded {erode:g} px")
+        ax.legend(fontsize=7, loc="lower right")
+        ax.set_title(f"{prepost}: roi   "
+                     f"tilt={pad.angle_deg:+.2f} deg  "
+                     f"W={pad.width:.2f}  rms={pad.edge_rms:.3f} px")
+
+    _finish(fig, samp_no, f"roi_{sec}" if sec else "roi", figs, savefigs)
+    return pads
 
 
-def contact_sheet(samp_no, pre=False, quantity="R", figs=True,
+def contact_sheet(samp_no, sec="", quantity="R", figs=True,
                   savefigs=False):
     """
     Every modeled cell of one sweep as a small panel, on one shared scale.
@@ -1354,7 +1386,7 @@ def contact_sheet(samp_no, pre=False, quantity="R", figs=True,
 
     Args:
         samp_no: Capture name.
-        pre: Which sweep.
+        sec: Which sweep -- '' measurement, 'pre' pre-image.
         quantity: 'R' (against the gray chips), 'R_inf' (against the
             strip's own paper), 'A' or 'KS'.
         figs: Show the figure.
@@ -1368,7 +1400,7 @@ def contact_sheet(samp_no, pre=False, quantity="R", figs=True,
     """
     import matplotlib.pyplot as plt
     from duotone import cell_nm
-    cells = sorted(cells_present(samp_no, pre),
+    cells = sorted(cells_present(samp_no, sec),
                    key=lambda c: (cell_nm(c), c[1]))
     if not cells:
         raise RuntimeError(f"{samp_no}: no modeled cell in this sweep")
@@ -1382,12 +1414,12 @@ def contact_sheet(samp_no, pre=False, quantity="R", figs=True,
     im = None
     for ax, cell in zip([a for row in axes for a in row], cells):
         b = get_balanced_cell_data(samp_no, cell[0], cell[1], roi=ROIBOUND,
-                                   pre=pre)
+                                   sec=sec)
         v = None if b is None else getattr(
             b, "KS_signed" if quantity == "KS" else quantity)
         if v is None:
             ax.axis("off")
-            why = (rung_verdict(samp_no, cell, pre)[1] if b is None else
+            why = (rung_verdict(samp_no, cell, sec)[1] if b is None else
                    f"bare paper clipped ({b.paper_sat:.0%})")
             ax.set_title(f"{cell_name(cell)}\n{why}", fontsize=6.5,
                          color="tab:red")
@@ -1403,14 +1435,14 @@ def contact_sheet(samp_no, pre=False, quantity="R", figs=True,
     for ax in [a for row in axes for a in row][len(cells):]:
         ax.axis("off")
     fig.colorbar(im, ax=axes, shrink=0.6, label=quantity)
-    fig.suptitle(f"{_samp_title(samp_no)}{'/pre' if pre else ''}  {quantity}  "
+    fig.suptitle(f"{_samp_title(samp_no)}{('/' + sec) if sec else ''}  {quantity}  "
                  f"({len(cells)} modelled cells)", fontsize=10)
-    _finish(fig, samp_no, f"cells_{quantity}" + ("_pre" if pre else ""),
+    _finish(fig, samp_no, f"cells_{quantity}" + (f"_{sec}" if sec else ""),
             figs, savefigs)
     return cells
 
 
-def cell_table(samp_no, roi=ROISAMPLE, pre=False, erode=ERODE,
+def cell_table(samp_no, roi=ROISAMPLE, sec="", erode=ERODE,
                quantity="R_inf") -> dict:
     """
     Print one row per cell: how many pixels, and how they are distributed.
@@ -1422,7 +1454,7 @@ def cell_table(samp_no, roi=ROISAMPLE, pre=False, erode=ERODE,
     Args:
         samp_no: Capture name.
         roi: Which region to summarise.
-        pre: Which sweep.
+        sec: Which sweep -- '' measurement, 'pre' pre-image.
         erode: Layer px backed off the pad and paper edges.
         quantity: 'sig', 'R', 'R_inf', 'A', 'KS' or 'KS_signed'.
 
@@ -1435,19 +1467,19 @@ def cell_table(samp_no, roi=ROISAMPLE, pre=False, erode=ERODE,
         >>> cell_table("C1020", roi=ROIWHITE)            # doctest: +SKIP
     """
     from duotone import cell_nm
-    cells = sorted(cells_present(samp_no, pre),
+    cells = sorted(cells_present(samp_no, sec),
                    key=lambda c: (cell_nm(c), c[1]))
-    print(f"=== {samp_no}{'/pre' if pre else ''}   roi={roi}   "
+    print(f"=== {samp_no}{('/' + sec) if sec else ''}   roi={roi}   "
           f"erode={erode:g}   {quantity}")
     print(f"   {'cell':<16}{'nm':>5}{'rung':>5}{'us':>7}{'n':>6}"
           f"{'mean':>10}{'std':>9}{'p10':>9}{'p50':>9}{'p90':>9}{'sat':>8}")
     out = {}
     for cell in cells:
         b = get_balanced_cell_data(samp_no, cell[0], cell[1], roi=roi,
-                                   pre=pre, erode=erode)
+                                   sec=sec, erode=erode)
         if b is None:
             print(f"   {cell_name(cell):<16}{cell_nm(cell):>5}"
-                  f"      -- {rung_verdict(samp_no, cell, pre, erode)[1]}")
+                  f"      -- {rung_verdict(samp_no, cell, sec, erode)[1]}")
             continue
         out[cell] = b
         if getattr(b, quantity) is None:
@@ -1501,14 +1533,14 @@ def pre_post_overlay(samp_no, LED="royal_blue", Bayerlayer="B",
     """
     import matplotlib.pyplot as plt
     post = get_balanced_cell_data(samp_no, LED, Bayerlayer, erode=erode)
-    pre = get_balanced_cell_data(samp_no, LED, Bayerlayer, pre=True,
-                                 erode=erode, register=True)
-    if post is None or pre is None:
+    pre_cell = get_balanced_cell_data(samp_no, LED, Bayerlayer, sec=PRE,
+                                      erode=erode, register=True)
+    if post is None or pre_cell is None:
         raise RuntimeError(f"{cell_name((LED, Bayerlayer))} is not stored in "
                            f"both sweeps of {samp_no}; see PRECELLS")
 
     y_pre, x_pre = pre_to_post(samp_no)
-    pad_post, pad_pre = pad_of(samp_no, False), pad_of(samp_no, True)
+    pad_post, pad_pre = pad_of(samp_no, ""), pad_of(samp_no, PRE)
     worst = 0.0
     for (xc, yc) in pad_post.corners():
         iy, ix = int(round(yc)), int(round(xc))
@@ -1524,16 +1556,16 @@ def pre_post_overlay(samp_no, LED="royal_blue", Bayerlayer="B",
           f"   tilt {pad_pre.angle_deg:+.2f} -> {pad_post.angle_deg:+.2f} deg")
     print(f"  corner disagreement after the map: {worst:.4f} layer px")
 
-    ratio = post.R_inf / pre.R_inf
+    ratio = post.R_inf / pre_cell.R_inf
     ys, xs = np.nonzero(~np.ma.getmaskarray(post.R_inf))
     box = (slice(max(ys.min() - 4, 0), ys.max() + 5),
            slice(max(xs.min() - 4, 0), xs.max() + 5))
     # One scale for the pre and the post, so the flat dry pad reads as flat
     # instead of being stretched into noise by its own narrow range.
-    lo = float(min(pre.R_inf.min(), post.R_inf.min()))
+    lo = float(min(pre_cell.R_inf.min(), post.R_inf.min()))
     fig, axes = plt.subplots(1, 3, figsize=(13, 4.6), layout="constrained")
     for ax, v, title, kw in (
-            (axes[0], pre.R_inf, "pre-image, registered",
+            (axes[0], pre_cell.R_inf, "pre-image, registered",
              dict(vmin=lo, vmax=1.05)),
             (axes[1], post.R_inf, "measurement",
              dict(vmin=lo, vmax=1.05)),
@@ -1548,7 +1580,7 @@ def pre_post_overlay(samp_no, LED="royal_blue", Bayerlayer="B",
                  f"(a ring at the pad edge in post/pre means the "
                  f"registration is off, not chemistry)", fontsize=9)
     _finish(fig, samp_no, "prepost", figs, savefigs)
-    return pre.R_inf, post.R_inf, ratio
+    return pre_cell.R_inf, post.R_inf, ratio
 
 
 def cell_PCA(samp_no, figs=True, savefigs=False, erode=0.0,
@@ -1612,7 +1644,7 @@ def cell_PCA(samp_no, figs=True, savefigs=False, erode=0.0,
                          residual_rms, unmix)
     from duotone import endmembers as fit_endmembers
 
-    cube = PadCube(open_sample(samp_no, False), models(), erode=erode)
+    cube = PadCube(open_sample(samp_no, ""), models(), erode=erode)
     if len(cube.cells) < 3:
         raise RuntimeError(f"{samp_no}: {len(cube.cells)} cells is too few "
                            f"for a two-dye model")
@@ -1707,7 +1739,7 @@ def cell_PCA(samp_no, figs=True, savefigs=False, erode=0.0,
 
 # ── procedural steps: edit for each run ────────────────────────────────
 
-def run_sampno(SAMP = "C1020"):
+def run_sampno():
 
     # ── Edit this block for each run.  
     # ── Use guards to choose choose which portions to run.
@@ -1715,32 +1747,34 @@ def run_sampno(SAMP = "C1020"):
     # ── locate_pad() must run before anything that measures the pad.
     SAMPS = [f"C{n}" for n in range(1022, 1026)]
     # SAMPS = ['C1025']
-    SAMP = SAMPS[0]
+    SAMP = SAMPS[-1]
+    SAMPS = [SAMP]
 
     # 1. What is actually in the archive.  Run this first, every time.
     if 0: 
-        inventory(SAMP)
+        for SAMP in SAMPS:
+            print(f"\n=== inventory ({SAMP!r})")
+            inventory(SAMP)
         return
     
     # 2. Find the pad, in both sweeps, and record where it is.
     if 0:
-        print(f"\n=== locate_pad({SAMP!r})")
         for SAMP in SAMPS:
-            locate_pad(SAMP)
-        return
+            print(f"\n=== locate_pad({SAMP!r})")
+            locate_pad(SAMP, write=False)
+        # return
 
     # 3. LOOK at it before believing anything.  The fitted rectangle has to
     #    be on the pad and the green region on bare paper.
     if 0:
-        print(f"\n=== roi_overlay({SAMP!r})")
         for SAMP in SAMPS:
+            print(f"\n=== roi_overlay({SAMP!r})")
             roi_overlay(SAMP, figs=True, savefigs=True)
-            # roi_overlay(SAMP, pre=True, figs=True, savefigs=True)
         return
 
     # 4. Every cell at once, then the same thing as numbers.
     #    quantity = one of 'sig', 'R', 'R_inf', 'A', 'KS', 'KS_signed' 
-    if 0:
+    if 1:
         for SAMP in SAMPS:
             for quantity in ["R_inf"]:
             # for quantity in [ 'R', 'R_inf', 'A', 'KS']:
@@ -1771,7 +1805,7 @@ def run_sampno(SAMP = "C1020"):
             pre_post_overlay(SAMP, "royal_blue", "B", figs=True, savefigs=False)
 
     # 7. The two-dye separation, and its figure.
-    if 1:
+    if 0:
         for SAMP in SAMPS:
             print(f"\n=== cell_PCA({SAMP!r})")
             # yellow, brown = cell_PCA(SAMP, figs=True, savefigs=True)

@@ -204,6 +204,52 @@ class Capture:
                (1 if n.startswith("before_") else 2))
         return m[0]
 
+    def dark_groups(self) -> dict:
+        """
+        The shared dark frames this sweep holds, one entry per exposure batch.
+
+        Dark frames are photographed once per exposure time, after the sweep
+        (hence the "after_" prefix), and stored under
+        `/<section>/dark/<when>_<us>us`; every `/leds/<led>/dark/<when>_<label>`
+        is a soft link to one of them.  Ten LEDs at the same exposure share
+        one dark frame, so the truthful listing is per exposure, not per LED.
+
+        `Capture.layer` already subtracts these, so this is for inspection
+        only -- reading the noise floor and the fixed-pattern offset a
+        Delta(K/S) can be trusted above.
+
+        Returns:
+            `{name: info}` in name order.  `info` carries `exposure_us`,
+            `when` ('after' or 'before'), `captured_dt`, and `layers` --
+            `{ch: (mean, std)}` of the raw DN for a stored layer, or
+            `{ch: (raw_mean, None)}` for one the keep screen dropped (its
+            array is empty but its statistics were kept).  A channel never
+            written at all is absent from `layers`.  Empty dict when the
+            archive keeps no shared dark groups.
+        """
+        base = f"{self._at}/dark"
+        if not self.reader.exists(base):
+            return {}
+        out = {}
+        for name in sorted(self.reader.list_children(base)):
+            gp = f"{base}/{name}"
+            us, cdt, layers = 0, "", {}
+            for ch in BAYER:
+                cp = f"{gp}/{ch}"
+                if not self.reader.exists(cp):
+                    continue
+                a = self.reader.attrs(cp)
+                us = us or int(a.get("exposure_us", 0))
+                cdt = cdt or a.get("captured_dt", "")
+                if capture_h5.is_omitted(a):
+                    layers[ch] = (float(a.get("raw_mean", float("nan"))), None)
+                else:
+                    v = self.reader.read_array(cp).astype(np.float64)
+                    layers[ch] = (float(v.mean()), float(v.std()))
+            out[name] = {"exposure_us": us, "when": name.split("_", 1)[0],
+                         "captured_dt": cdt, "layers": layers}
+        return out
+
     def close(self):
         self.reader.close()
 
