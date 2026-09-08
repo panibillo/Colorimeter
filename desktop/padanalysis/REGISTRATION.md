@@ -31,29 +31,41 @@ R_inf = sig_meas / sig_pre_aligned
 
 This uses the arithmetic pre_to_post() transform (O(1) speed, ~nm-class accuracy).
 
-### Empirical Refinement (Experimental — Not Recommended)
+### Empirical Refinement (Conditional Benefit — Evaluate per Sample)
 
 ```python
 from padregistration import register_pre_to_post_empirical
+from analysis_1 import _measured_region
 
-# Measure shifts via edge correlation (not recommended)
+# Measure shifts via edge correlation
 sig_pre_aligned, shifts = register_pre_to_post_empirical(
     samp_no, sig_pre, sig_meas, max_shift=5
 )
 
-R_inf = sig_meas / sig_pre_aligned
+# Evaluate on interior pad region only (erode=6)
+mask_region = _measured_region(samp_no, sec="", erode=6)
+mask = (sig_pre_aligned > 1) & mask_region
+r_inf = sig_meas[mask] / sig_pre_aligned[mask]
 ```
 
-**Status:** Testing on 11 samples showed empirical registration **degrades** R_inf
-by 8.6% on average (−28% to +6%). Arithmetic registration is superior.
+**Status:** Testing showed **sample-dependent results**. When evaluated on interior 
+pad region only (erode=6, excluding noisy edges):
 
-**Why it fails:** Edge-based correlation measures shifts from pad boundary regions,
-which are noisier and less representative than the interior pad used for actual
-measurements. Global mean of edges also fails under rotation (8/11 samples had
-misaligned edge shifts).
+- **Improves 3/8 samples:** C1018 (+10%), C1021 (+12%), C1023 (+15%)
+- **Degrades 5/8 samples:** C1020, C1022, C1024, C1019, C1025 (−1% to −10%)
 
-**Recommendation:** Use arithmetic registration (standard approach). Keep empirical
-code as reference for future work (e.g., interior strip selection).
+**Root cause of previous conclusion:** Earlier tests used full-layer measurement 
+(no erosion), including edge regions where empirical performs poorly due to 
+correlation noise. With proper erosion, empirical registration IS valuable for 
+certain samples.
+
+**What distinguishes winners vs losers?** Not yet clear:
+- Not edge shift agreement (C1020 and C1021 have identical patterns, opposite results)
+- Not tilt difference (C1020 has largest, but degrades)
+- Possibly: signal quality, pad fit precision, or pre-image exposure level
+
+**Recommendation:** Use for now, but investigate which samples benefit. Consider 
+heuristic (e.g., pre-image RMS residual threshold) to choose per-sample.
 
 ## Decision Tree
 

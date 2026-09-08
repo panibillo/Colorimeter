@@ -241,16 +241,22 @@ print(f"Per-edge: {shifts['edges']}")
 
 | Scenario | Method | Reason |
 |---|---|---|
-| **All production use** | Arithmetic only | Empirical refinement tested on 11 samples; degrades by 8.6% on average |
+| **Interior pad measurement** (with erode=6) | Empirical helps 3/8 cases | +10–15% improvement on C1018, C1021, C1023 |
+| **Default for unknown samples** | Arithmetic | Degrades on 5/8 recent samples; no heuristic yet to predict winners |
 
-**Important finding:** Tested empirical registration (edge-correlation) on all 11 available
-pre-image samples (C1014–C1025):
-- **Result:** Degraded R_inf by 8.6% average (range: −28% to +6%)
-- **Root cause:** Edge-based correlation is noisy; edges are less representative
-  than interior pad used for measurements
-- **Tested fixes:** Per-area (3×3) shifts to handle rotation; still worse than arithmetic
-- **Conclusion:** Arithmetic registration (`pre_to_post()`) is superior; empirical approach
-  not recommended without fundamental rethinking (e.g., interior strip selection)
+**Updated finding:** Initial test conclusion ("empirical always worse") was misleading.
+Re-evaluated with proper erosion (interior pad only, erode=6):
+
+- **Helps:** C1018 (+10.2%), C1021 (+11.9%), C1023 (+14.5%)
+- **Hurts:** C1020 (−9.5%), C1022, C1024, C1019, C1025 (−1% to −3%)
+- **Root cause of original error:** Full-layer measurement included noisy edge regions
+  where empirical fails due to correlation artifacts
+- **Why it helps interior:** Unknown. Not explained by edge shift agreement, tilt
+  difference, or edge variance. Possibly signal quality or pad fit precision.
+- **Per-area (3×3) shifts:** Also failed; rotation handling is not the issue
+
+**Recommendation:** Empirical is worth using (conditional benefit), but need heuristic 
+to identify when it helps. Evaluate both methods per sample until pattern found.
 
 ---
 
