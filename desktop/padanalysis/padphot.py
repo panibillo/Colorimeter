@@ -227,8 +227,7 @@ def reflectance_infinity(R, R_white):
     are neither white nor a standard, so it has to be rescaled before
     `km_remission()` means anything.
 
-    Two references are available on this instrument and they are not
-    interchangeable:
+    The references available on this instrument are not interchangeable:
 
       * **the strip's own bare paper** -- `PadRect.paper_mask()`.  Same
         paper, same strip, same illumination, no chemistry.  Cancels
@@ -238,6 +237,11 @@ def reflectance_infinity(R, R_white):
         thing in the frame and it is attached to the sample.
       * **a measured white standard** -- a captured reference of known
         diffuse reflectance, if one is ever put in the frame.
+      * **the strip's own dry pad** -- the pre-image, read inside its own
+        eroded pad rectangle.  The same paper at the same place before any
+        reagent, so R_inf is the fraction of the dry pad's brightness left.
+        This is the one `analysis_1.get_balanced_cell_data` uses, since
+        2026-09-27; the bare paper is not used there any more.
 
     Because f(R) is non-linear, the choice matters and does not divide out
     downstream.  Pass it explicitly; there is no default.

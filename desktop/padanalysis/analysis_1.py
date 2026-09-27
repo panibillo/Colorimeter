@@ -57,7 +57,14 @@ sig     (signal)
     - Whenever you see sig in this file, read it as:
          "dark-subtracted DN counts for this LED/Bayer-layer/ROI, 
           still in raw camera units,
-          before any gray-card or paper normalization."
+          before any gray-chip balancing or white referencing."
+
+R_white (the white reference)
+    - One number per cell: the median reflectance of the strip's own dry
+      pad, read from the pre-image inside the pre-image's own fitted pad
+      rectangle, backed off from its edges by `erode`.
+    - Not the bare paper below the pad.  Until 2026-09-27 it was; see
+      `get_balanced_cell_data`, step 3.
 
 """
 import json
@@ -153,14 +160,12 @@ PRECELLS = [
 #: at equal exposure_us report the same frame and are not independent.
 DARKCELLS = list(GRAYCELLS)
 
-#: Cells read on the bare paper to build R_inf.  Every balanced cell needs a
-#: white reference, so this tracks GRAYCELLS -- but the bare paper is about
-#: twice as bright as the gray chips, so on the short wavelengths it reaches
-#: the ceiling before the pad does and the reference is simply unavailable.
-#: `BalancedCell.paper_clipped` says when.  On C1020 that costs nothing
-#: extra, because the same three cells were already lost on the pad; on a
-#: capture exposed a rung lower it would cost R_inf alone.
-WHITECELLS = list(GRAYCELLS)
+#: Cells that can have a white reference, and so an R_inf, A and K/S.  The
+#: white reference is the strip's own dry pad in the pre-image, so only a
+#: cell the pre-image holds can have one: on the current recipe that is
+#: PRECELLS.  Every other cell still gets R (against the gray chips) but
+#: stops there.  `BalancedCell.white_why` says why a cell has none.
+WHITECELLS = list(PRECELLS)
 
 # ── the ROI names ──────────────────────────────────────────────────────
 #: The whole bound crop: every pixel, no mask.
@@ -168,6 +173,8 @@ ROIBOUND = "bound"
 #: The strip's own bare paper below the pad -- geometric, not a rect.  There
 #: is no `white` rect in force in the `roi` table; the two `white_balance`
 #: rects are the gray chips.  See `get_cell_data` for why this is a mask.
+#: **No longer the white reference** (since 2026-09-27): that is the
+#: pre-image's pad.  Still drawn by `roi_overlay` and readable by name.
 ROIWHITE = "white"
 #: The left gray chip (stream rect `gray1`).  Stage furniture: does not move
 #: with the strip.
@@ -204,7 +211,9 @@ MAX_SAT_FRACTION = 0.001
 #: reused.  Change this whenever a step of the chain changes.
 #: History: "dark_level+divisor_map" (2026-09-27), then "+hot_mask" the same
 #: day when hot pixels began to be left out.
-CHAIN = "dark_level+divisor_map+hot_mask"
+#: Then "+pre_white" the same day, when R_white moved from the bare paper
+#: to the pre-image's own pad.
+CHAIN = "dark_level+divisor_map+hot_mask+pre_white"
 
 _STRIP_ROIS = (ROISAMPLE, ROIWHITE)     # move with the strip; see registration
 _ROI_NAMES = (ROIBOUND, ROIWHITE, ROIGRAY1, ROIGRAY2, ROISAMPLE)
@@ -727,10 +736,10 @@ def _measured_region(samp_no, sec="", erode=ERODE) -> np.ndarray:
     bright as the gray chips, so on the short-wavelength illuminants it
     reaches the sensor ceiling one or two rungs before the pad and the chips
     do.  A rung where only the paper clipped still measures the pad
-    perfectly well, and screening on the paper would throw that away, so the
-    paper carries its own screen in `get_balanced_cell_data` and a cell that
-    fails it keeps its R and loses only R_inf.  `measure.py` makes the same
-    split and for the same reason.
+    perfectly well, and screening on the paper would throw that away.
+    Nothing is read from the paper any more in any case: the white
+    reference is the pre-image's pad, and that pad is screened here, by
+    this same rule, when `rung_verdict` is asked about the pre-image.
 
     C1020 is not an example of that: there `blue.B`, `cyan.Gr` and `cyan.Gb`
     clip on 100 % of the paper *and* on 58-89 % of the pad, so they are lost
@@ -851,6 +860,7 @@ def get_cell_data(samp_no, LED, Bayerlayer, roi=ROISAMPLE, sec="",
                   must exceed `erode`, and pixels far below its median are
                   dropped as marks on the paper.  There is no `white` rect
                   in the roi table in force, and this is not a rectangle.
+                  Not the white reference; see `get_balanced_cell_data`.
 
     **Registration.**  With `sec='pre'` and `register=True` the pre-image is
     resampled onto the measurement's grid so `post / pre` divides pixel by
@@ -910,6 +920,71 @@ def get_cell_data(samp_no, LED, Bayerlayer, roi=ROISAMPLE, sec="",
     return out[ys.min():ys.max() + 1, xs.min():xs.max() + 1]
 
 
+def pre_white(samp_no, cell, erode=ERODE) -> tuple:
+    """
+    The white reference for one cell: the strip's own dry pad.
+
+    Read from the pre-image -- the photograph of the same strip taken before
+    it met any reagent -- inside the pre-image's own fitted pad rectangle,
+    backed off `erode` px from every edge.  The pre-image is balanced
+    against its own gray chips in its own frame, exactly as the measurement
+    is (steps 1 and 2 of `get_balanced_cell_data`), and the median of that
+    reflectance over the pad is the answer.
+
+    It is the same number whichever sweep is being balanced and whichever
+    region is being returned, so a pre-image and its measurement are
+    referred to one and the same white.
+
+    Why the dry pad and not the bare paper below it: the pad is the very
+    paper being measured, at the very place it is measured, before any
+    colour developed.  Dividing by it leaves only the change the reagent
+    made.  The bare paper is a different patch of the strip, sits in
+    different light, and was never under the reagent.
+
+    Args:
+        samp_no: Capture name.
+        cell: `(led, layer)`.
+        erode: Layer px backed off from the pre-image pad's edges.
+
+    Returns:
+        `(R_white, rung, why)`.  `R_white` is the median reflectance
+        against the gray chips (a float), or None when there is no usable
+        reference; `rung` is the pre-image rung it was read at, or None;
+        `why` is 'ok' or a short phrase saying why there is none -- the
+        archive has no pre-image, the pre-image does not hold this cell, or
+        the pre-image's pad failed the `rung_verdict` screens.
+
+    Example:
+        >>> pre_white("C1020", ("royal_blue", "B"))      # doctest: +SKIP
+        (2.2035..., 'e0', 'ok')
+    """
+    if PRE not in sections(samp_no):
+        return None, None, "archive has no pre-image"
+    model = models().get(cell)
+    if model is None or not model.usable:
+        return None, None, "no published flat-field model"
+    led, layer = cell
+    rung, why = rung_verdict(samp_no, cell, PRE, erode)
+    if rung is None:
+        return None, None, f"pre-image: {why}"
+    c = open_sample(samp_no, PRE)
+    sig = c.layer(led, rung, layer)[0]
+    hot = _hot(samp_no, PRE)
+    chip1 = _region(samp_no, ROIGRAY1, PRE) & ~hot
+    chip2 = _region(samp_no, ROIGRAY2, PRE) & ~hot
+    pad = _region(samp_no, ROISAMPLE, PRE, erode) & ~hot
+    div = padphot.divisor_map(model, c.bound, chip1, chip2, sig)
+    R = padphot.reflectance(sig, div)
+    vals = np.asarray(R, dtype=np.float64)[pad]
+    vals = vals[np.isfinite(vals)]
+    if vals.size == 0:
+        return None, None, "pre-image: no usable pixel on the eroded pad"
+    R_white = float(np.median(vals))
+    if R_white <= 0:
+        return None, None, f"pre-image: pad median {R_white:.4f} is not positive"
+    return R_white, rung, "ok"
+
+
 class BalancedCell:
     """
     One cell, balanced, with every step of the chain kept.
@@ -923,26 +998,26 @@ class BalancedCell:
             (`padphot.divisor_map`).  NaN outside the flat-field domain.
         R: reflectance against the gray chips, `sig / div` per pixel.  1.0
             means as bright as the chips would be at that spot.
-        R_white: the bare-paper reflectance this cell was referred to, a
-            scalar -- the median of R over the paper region.  **None** when
-            the paper clipped at this rung; see `paper_clipped`.
-        R_inf: `R / R_white`.  1.0 on the strip's own paper.  None when
+        R_white: the white reference this cell was divided by, a scalar --
+            the median of R over the strip's own dry pad in the pre-image
+            (`pre_white`).  **None** when there is no such reference; see
+            `white_why`.
+        white_rung: the pre-image rung R_white was read at, or None.
+        white_why: 'ok', or why there is no white reference -- most often
+            that the pre-image does not hold this cell (it holds only
+            PRECELLS) or that the archive has no pre-image at all.
+        R_inf: `R / R_white`.  About 1.0 on the dry pad.  None when
             R_white is None, and so are A, KS and KS_signed.
-        A: `-log10(R_inf)`.  0 on the paper.
-        KS: `(1 - R_inf)^2 / 2 R_inf` = K/S.  0 on the paper.
+        A: `-log10(R_inf)`.  About 0 on the dry pad.
+        KS: `(1 - R_inf)^2 / 2 R_inf` = K/S.  About 0 on the dry pad.
         KS_signed: the same, carrying the sign of (1 - R_inf); use this one
             wherever K/S is averaged over pixels that straddle R_inf = 1.
         sat_frac: fraction of this ROI's raw counts at the ceiling.
-        paper_sat: the same for the bare-paper region.
-        paper_clipped: True when `paper_sat` exceeds MAX_SAT_FRACTION, so
-            this cell has no per-strip white reference at this rung.  The
-            pad measurement is still sound -- R is valid; only the step that
-            refers it to the paper is missing.
     """
 
     __slots__ = ("samp_no", "cell", "roi", "sec", "rung", "exposure_us",
-                 "sig", "div", "R", "R_white", "R_inf", "A", "KS",
-                 "KS_signed", "sat_frac", "paper_sat", "paper_clipped")
+                 "sig", "div", "R", "R_white", "white_rung", "white_why",
+                 "R_inf", "A", "KS", "KS_signed", "sat_frac")
 
     def __init__(self, **kw):
         for k in self.__slots__:
@@ -953,9 +1028,10 @@ class BalancedCell:
                 f"{('/' + self.sec) if self.sec else ''} {cell_name(self.cell)}"
                 f" {self.roi} rung={self.rung} n={self.R.count()}"
                 f" R={self.R.mean():.4f}")
-        if self.paper_clipped:
-            return head + f" paper clipped ({self.paper_sat:.3f})>"
-        return (head + f" R_inf={self.R_inf.mean():.4f}"
+        if self.R_inf is None:
+            return head + f" no white reference ({self.white_why})>"
+        return (head + f" R_white={self.R_white:.4f}"
+                f" R_inf={self.R_inf.mean():.4f}"
                 f" A={self.A.mean():+.4f} KS={self.KS_signed.mean():+.5f}>")
 
 
@@ -973,8 +1049,8 @@ def get_balanced_cell_data(samp_no, LED, Bayerlayer, roi=ROISAMPLE,
        subtracted pixel by pixel.  See `probe.Capture.layer` and the comment
        above `capture_h5.dark_level` for the measurements behind that.
        Known hot pixels (the `hotpixels` table, hot in any Bayer layer --
-       see `_hot`) are then left out: masked in the pad, the paper and both
-       gray chips, not repaired.
+       see `_hot`) are then left out: masked in the pad and both gray
+       chips, not repaired.
 
     2. *Illumination and gray balance.*  The two gray chips sit either side
        of the strip and the illumination is not flat between them.  The
@@ -991,64 +1067,75 @@ def get_balanced_cell_data(samp_no, LED, Bayerlayer, roi=ROISAMPLE,
        over the region asked for, so the pad was not flattened and the
        paper was divided by the pad's number rather than its own.
 
-    3. *White balance.*  Kubelka-Munk wants reflectance against a diffuse
-       white.  The gray chips are neither white nor a standard, so R is
-       re-referred to the strip's own bare paper -- same paper, same strip,
-       no chemistry, and now each pixel corrected for its own light:
+    3. *White balance.*  Kubelka-Munk wants reflectance against a white.
+       The gray chips are not that, so R is divided by the strip's own
+       **dry pad**: the same pad, photographed in the pre-image before it
+       met any reagent, put through steps 1 and 2 in its own frame against
+       its own gray chips (`pre_white`):
 
-           R_white = median(R over the bare-paper region)
+           R_white = median(R of the pre-image, inside the pre-image's own
+                            pad rectangle, `erode` px in from its edges)
            R_inf   = R / R_white
 
-       Note what cancels: `div`'s level is set by the chips, and a common
-       scale factor divides out of R_inf.  What does not cancel, and is the
-       point of the map, is the polynomial's *shape* -- the difference in
-       light between each pad pixel and the paper.
+       So R_inf says what fraction of the dry pad's brightness is left.
+       R_inf = 1 is "no change from the dry pad"; R_inf = 0.8 is "20 %
+       darker than it was before the reagent".
 
-       This is `chemistry.Reduction`'s `rho`, and it cancels anything that
-       changed between one session's gray card and the next's.  The paper is
-       about twice as bright as the chips, so on the short wavelengths it
-       clips before the pad does; when it has, R_white and everything past
-       it are **None** and `paper_clipped` says so.  Step 2 is unaffected.
+       Until 2026-09-27 the white reference was the bare paper below the
+       pad, in the same sweep.  That was the wrong reference: the paper is a
+       different patch of the strip, in different light, never under the
+       reagent, and about twice as bright as the chips, so it clipped on the
+       short wavelengths.  It is no longer read at all.
+
+       R_white is one number per cell, the same whichever sweep is being
+       balanced (a pre-image is divided by its own pad, and so is the
+       measurement) and whichever `roi` is returned.  It is taken at
+       whatever pre-image rung `rung_verdict` picks for the pre-image, which
+       need not be the rung the measurement is read at; that is fine,
+       because R has already been divided by the chips *in its own frame*,
+       and exposure cancels in that division.
+
+       Only cells the pre-image holds can have a white reference -- the
+       eight PRECELLS on the current recipe, two on C1014 and earlier, none
+       on an archive with no pre-image.  Every other cell keeps R and stops
+       there: R_white, R_inf, A, KS and KS_signed are **None**, and
+       `white_why` says why.
 
     4. *The transforms.*  `A = -log10(R_inf)` and `KS = f(R_inf) = K/S`.
        They are different linearisations of the same measurement, not two
        names for one; see `padphot` for which to trust when.
 
-    **What the numbers mean.**  On the bare paper itself R_inf is 1, so A
-    and KS are 0 there by construction -- that is the arithmetic check the
-    chain was wired right.  On a stained pad R_inf < 1, A > 0, KS > 0, and
-    KS grows faster than A as the stain deepens.  None of these is yet
-    proportional to arsenic: that needs the blank subtracted,
-    `padphot.delta_ks(KS_exposed, KS_blank)`, with the blank being this
-    strip's own pre-image where it has one.
+    **What the numbers mean.**  On the dry pad itself (the pre-image, roi
+    'sample') the median R_inf is 1, so A and KS are 0 there by
+    construction -- that is the arithmetic check the chain was wired right.
+    On a stained pad R_inf < 1, A > 0, KS > 0, and KS grows faster than A as
+    the stain deepens.  Because the reference is already this strip's own
+    blank, A and KS on the measurement are already "change since the dry
+    pad"; `padphot.delta_ks(KS_exposed, KS_blank)` against the pre-image's
+    KS would subtract a number that is about 0.
 
-    **Which white reference.**  R_white is taken from the *same sweep* the
-    cell came from, so a pre-image is referred to its own paper and a
-    measurement to its own.  That is deliberate: it removes the session, and
-    leaves the pad-versus-paper contrast, which is the chemistry.
-
-    **The pre-image is not used by the analysis yet.**  Nothing downstream
-    subtracts or divides the pre-image out of the measurement: `cell_PCA`
-    reads the measurement only, `pre_post_overlay` shows `post/pre` as a
-    registration check, and `padphot.delta_ks` is defined but never called.
-    Using it is the next thing to explore.  When it is: the pre-image
-    covers only the eight PRECELLS, at a different exposure (1000 us against
-    ~2193 us), and the dark level does NOT cancel between the two, because
-    every step here divides rather than subtracts raw counts.
+    **What cancels and what does not.**  The gray chips' own shade cancels,
+    since both sweeps are divided by the same chips.  The dark level does
+    not cancel exactly: it is subtracted in each sweep before any division,
+    and the two sweeps are at different exposures (royal_blue.B on C1032:
+    1000 us in the pre-image, 2193 us in the measurement).
 
     **Registration and the divisor.**  The light belongs to the stage and
     the strip moves, so a pre-image is divided by its own `div` in its own
     frame first, and only then is R resampled onto the measurement's grid.
+    R_white needs no registration: it is one number.
 
     Args:
         samp_no: Capture name without the .h5.
         LED: LED colour name.
         Bayerlayer: 'R', 'Gr', 'Gb' or 'B'.
-        roi: Which region to return.  The gray chips and the paper are read
-            from the whole frame regardless, since they are the references.
+        roi: Which region to return.  The gray chips and the white
+            reference are read from their own regions regardless.
         sec: '' for the measurement, 'pre' to read the `/pre` sweep.
-        erode: Layer px backed off from the pad and paper edges.
+        erode: Layer px backed off from the pad edges -- both the pad being
+            returned and the pre-image pad the white reference is read on.
         rung: Exposure rung, or None to pick the brightest unclipped one.
+            Applies to `sec` only; the white reference picks its own.
         register: Resample a pre-image onto the measurement grid; see
             `get_cell_data`.
         quantity: None for the whole `BalancedCell`; or one of 'sig', 'R',
@@ -1064,8 +1151,8 @@ def get_balanced_cell_data(samp_no, LED, Bayerlayer, roi=ROISAMPLE,
     Example:
         >>> b = get_balanced_cell_data("C1020", "royal_blue", "B")
         ...                                              # doctest: +SKIP
-        >>> round(float(b.R_inf.mean()), 3)              # doctest: +SKIP
-        0.412
+        >>> b.white_why, round(b.R_white, 3)             # doctest: +SKIP
+        ('ok', 2.204)
     """
     cell = (LED, Bayerlayer)
     model = models().get(cell)
@@ -1080,13 +1167,12 @@ def get_balanced_cell_data(samp_no, LED, Bayerlayer, roi=ROISAMPLE,
         return None
     raw_sig, raw_lit = got
 
-    # References are read in the sweep the cell came from, on the whole
-    # frame, before any registration: the chips do not move with the strip.
-    # Hot pixels (`_hot`) are left out of every one of them.
+    # The gray chips are read in the sweep the cell came from, on the whole
+    # frame, before any registration: they do not move with the strip.
+    # Hot pixels (`_hot`) are left out of both.
     hot = _hot(samp_no, sec)
     chip1 = _region(samp_no, ROIGRAY1, sec) & ~hot
     chip2 = _region(samp_no, ROIGRAY2, sec) & ~hot
-    paper = _region(samp_no, ROIWHITE, sec, erode) & ~hot
     measured = _region(samp_no, roi, sec, erode) & ~hot
 
     # Per-pixel divisor, in this sweep's own frame.  R is formed here, then
@@ -1109,14 +1195,12 @@ def get_balanced_cell_data(samp_no, LED, Bayerlayer, roi=ROISAMPLE,
     # pixel, or drawn from a pre-image hot pixel -- is masked too.
     R = np.ma.masked_invalid(np.ma.masked_array(R_grid, mask=~region))
 
-    # The paper's own saturation screen.  It clips before the pad does on
-    # the short wavelengths, and when it has, this cell simply has no
-    # per-strip white reference at this rung -- R stays valid.
-    paper_sat = float((raw_lit[paper] >= SATURATED_DN).mean())
-    if paper_sat > MAX_SAT_FRACTION:
-        R_white = R_inf = A = KS = KS_signed = None
+    # White reference: the strip's own dry pad, from the pre-image.  When
+    # there is none, R stays valid and the chain stops at R.
+    R_white, white_rung, white_why = pre_white(samp_no, cell, erode)
+    if R_white is None:
+        R_inf = A = KS = KS_signed = None
     else:
-        R_white = float(np.nanmedian(R_frame[paper]))
         R_inf = padphot.reflectance_infinity(R, R_white)
         A = padphot.absorbance(R_inf)
         KS = padphot.km_remission(R_inf)
@@ -1125,9 +1209,9 @@ def get_balanced_cell_data(samp_no, LED, Bayerlayer, roi=ROISAMPLE,
     out = BalancedCell(
         samp_no=samp_no, cell=cell, roi=roi, sec=sec, rung=rung,
         exposure_us=c.exposure_us(LED, rung), sig=a, div=div, R=R,
-        R_white=R_white, R_inf=R_inf, A=A, KS=KS, KS_signed=KS_signed,
+        R_white=R_white, white_rung=white_rung, white_why=white_why,
+        R_inf=R_inf, A=A, KS=KS, KS_signed=KS_signed,
         sat_frac=float((raw_lit[measured] >= SATURATED_DN).mean()),
-        paper_sat=paper_sat, paper_clipped=paper_sat > MAX_SAT_FRACTION,
     )
     if quantity is None:
         return out
@@ -1467,7 +1551,9 @@ def contact_sheet(samp_no, sec="", quantity="R", figs=True,
         samp_no: Capture name.
         sec: Which sweep -- '' measurement, 'pre' pre-image.
         quantity: 'R' (against the gray chips), 'R_inf' (against the
-            strip's own paper), 'A' or 'KS'.
+            strip's own dry pad in the pre-image), 'A' or 'KS'.  Only the
+            cells the pre-image holds have R_inf, A and KS; the rest are
+            drawn as empty panels saying why.
         figs: Show the figure.
         savefigs: Also write `fig/analysis1_<samp_no>_cells[_pre].png`.
 
@@ -1499,7 +1585,7 @@ def contact_sheet(samp_no, sec="", quantity="R", figs=True,
         if v is None:
             ax.axis("off")
             why = (rung_verdict(samp_no, cell, sec)[1] if b is None else
-                   f"bare paper clipped ({b.paper_sat:.0%})")
+                   f"no white reference: {b.white_why}")
             ax.set_title(f"{cell_name(cell)}\n{why}", fontsize=6.5,
                          color="tab:red")
             continue
@@ -1539,11 +1625,12 @@ def cell_table(samp_no, roi=ROISAMPLE, sec="", erode=ERODE,
 
     Returns:
         `{(led, layer): BalancedCell}` for every cell that had a usable
-        exposure rung -- including cells whose bare paper clipped, which
-        carry R but no R_inf.  A cell with no usable rung is absent.
+        exposure rung -- including cells with no white reference (not in
+        the pre-image), which carry R but no R_inf.  A cell with no usable
+        rung is absent.
 
     Example:
-        >>> cell_table("C1020", roi=ROIWHITE)            # doctest: +SKIP
+        >>> cell_table("C1020", sec=PRE)                 # doctest: +SKIP
     """
     from duotone import cell_nm
     cells = sorted(cells_present(samp_no, sec),
@@ -1563,8 +1650,8 @@ def cell_table(samp_no, roi=ROISAMPLE, sec="", erode=ERODE,
         out[cell] = b
         if getattr(b, quantity) is None:
             print(f"   {cell_name(cell):<16}{cell_nm(cell):>5}{b.rung:>5}"
-                  f"{b.exposure_us:>7}      -- bare paper clipped "
-                  f"({b.paper_sat:.3f}); no {quantity}, R is still good")
+                  f"{b.exposure_us:>7}      -- no white reference "
+                  f"({b.white_why}); no {quantity}, R is still good")
             continue
         v = getattr(b, quantity).compressed()
         print(f"   {cell_name(cell):<16}{cell_nm(cell):>5}{b.rung:>5}"
@@ -1864,12 +1951,15 @@ def run_sampno():
             cell_table(SAMP, roi=ROISAMPLE)
         return
 
-    # 5. The arithmetic check: on the strip's own bare paper R_inf must be
-    #    1, and A and K/S must be 0.  If they are not, the chain is wrong.
+    # 5. The arithmetic check: on the strip's own dry pad (the pre-image,
+    #    which is the white reference) the median R_inf must be 1, and A and
+    #    K/S must be 0.  The p50 column should read 1.0000 to within the
+    #    small blur of registering the pre-image onto the measurement grid.
+    #    If it does not, the chain is wrong.
     if 0:
         for SAMP in SAMPS:
-            print(f"\n=== arithmetic check on strip white ({SAMP!r})")
-            cell_table(SAMP, roi=ROIWHITE)
+            print(f"\n=== arithmetic check on the dry pad ({SAMP!r})")
+            cell_table(SAMP, roi=ROISAMPLE, sec=PRE)
         return
 
     # 6. One cell end to end, and the strip against its own dry self.
