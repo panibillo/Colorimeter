@@ -8,14 +8,74 @@
 
 ## Context & Motivation
 
-Recent work (empirical registration, pre-image framework) moved quickly through implementation. The new sample exposure geometry changes the measurement problem fundamentally and requires **careful, deliberate investigation** of:
+Recent work (empirical registration, pre-image framework) moved too quickly through 
+implementation without pausing for user guidance. 
+The AI model has some analysis biases that may be misleading, including a desire 
+for white patch analysis.
+The new sample exposure geometry changes the measurement problem fundamentally.
+We now begin **careful, deliberate, one step at a time, investigation** of:
 
-1. How the color dot forms and grows
-2. How to separately quantify area vs. color
-3. How multiple colors (yellow, brown) interact in measurement
-4. How erosion affects measurement precision at different dot sizes
+1. How to measure multiple colors (white, yellow, brown) objectively & quantifiably.
+   - In docs/reference_framework_preimage_and_chips.md, we determined to divide by the
+     preimage rather than a scalar from the white or gray chip models. I want to 
+     re-visit division by the gray chip polynomial to compute R_inf.  
+     Not every conclusion in that .md is confirmed by Bill.
+   - We analyzed different registration methods for the preimage, and returned to an 
+     algebraic method.  The error of importance are whether the observed pixel variations
+     in the preimage contain more noise than signal: Would the smoothed polynomial improve
+     the S/N ratio?  
+   - Dark layer noise has been studied. Bill wants a clear understanding of the analysis.
+   - Measurement error & noise come from  
+		- dark layer subtraction
+		- reference divisor
+		- from sub-pixel scale features
+		- registration error.  
+2. A color dot forms in the middle of the pad, first yellow, then brown with a yellow border. 
+3. Can area and color be independently quantified?
+4. How multiple colors (yellow, brown) interact in measurement
+5. How erosion of pad edge affects measurement precision at different dot sizes
+6. We seek an analysis chain that
+     - is understandable
+     - is aware of noise and error sources
+	 - does not polish errors beyond levels that are significant,
+	 - includes error detection and quantification
 
-**Key insight:** The new geometry may be **more analyzable than the old spread-pattern**, but only if we understand each step carefully. Moving too fast risks missing the physics.
+**Key insights:**
+
+1. The early focus on the white patch was a false lead.  R_inf need not be near 1. 
+2. Bill needs to understand each mathematical step.
+3. The mathematical steps should show derivations where possible.
+4. Taking large steps risks missing the physics.
+
+---
+
+## Decisions and Findings — 2026-09-27
+
+Details and numbers: `desktop/padanalysis/HOWTO.md` §8.11.
+
+- **Dot samples:** C1028–C1036 are the new circular-dot geometry.
+- **Dark correction is one number per Bayer layer per sweep:** the mean
+  of the sweep's shortest-exposure dark frame (`capture_h5.dark_level`),
+  not a frame subtracted pixel by pixel.  The dark level is 64.02–64.04 DN
+  at every exposure from 1 to 51 ms.  **1000 µs is the shortest reliable
+  dark exposure** (the shortest ever captured; shorter is untested).
+- **Hot pixels persist:** 8–21 per Bayer layer, 0.5–1.4 DN above the
+  frame mean, the same pixels from 10 Aug to 26 Sep.  Stored in the
+  `hotpixels` database table (k = 6, C1014–C1036, 73 pixels,
+  analysisref 'dark2026-09-27'); kept in the database rather than an .h5
+  file.  Applied as a mask that leaves them out, not repaired: the union
+  over all four Bayer layers, so every cell keeps the same pixel positions
+  (`analysis_1._hot`, `probe.Capture.hot_mask`).
+- **Gray-chip divisor is per pixel:** the flat-field polynomial pegged to
+  the two gray chips of the same frame (`padphot.divisor_map`), placed by
+  sensor position.  It replaces the single region-average number.
+- **The pre-image is not used yet.**  Nothing in the chain subtracts or
+  divides it out: `cell_PCA` uses the measurement only, `pre_post_overlay`
+  is a registration check, and `padphot.delta_ks` is never called.  We want
+  to explore using it soon.  The dark level does not cancel between pre and
+  post, because every step divides rather than subtracting raw counts.
+- **Dot finding (`find_dot`) is on hold** until the pre-processing above
+  is settled.
 
 ---
 
@@ -26,8 +86,8 @@ Recent work (empirical registration, pre-image framework) moved quickly through 
 - **Formation:** Color appears as a **dot in the center** of the pad (different from old spread pattern)
 - **Growth:** As exposure increases (longer time), dot grows larger
 - **Color separation:** At higher exposures, two distinct colors emerge:
-  - **Yellow** (outer region) — quantify as (area_yellow, R_yellow)
-  - **Brown** (inner region) — quantify as (area_brown, R_brown)
+  - **Yellow** (outer region) — quantify as (area_yellow, R_yellow) characteristic of bonding 1 or 2 molecules
+  - **Brown** (inner region) — quantify as (area_brown, R_brown)characteristic of bonding 2 or 3 molecules
   - Possibly 3 colors, but likely not
 - **Small dot regime:** When dot is small, noisy pad edges are irrelevant
 - **Large dot regime:** When dot is large, erosion (background removal) loses critical pad edge information

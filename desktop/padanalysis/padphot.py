@@ -7,8 +7,10 @@ reference that formula is measured against.
 
 The chain, from sensor counts to the quantity a dose is fitted against:
 
-    sig   = lit - dark                    counts, done by probe.Capture.layer
-    div   = divisor(...)                  the gray-chip level at this region
+    sig   = lit - dark_level              counts, done by probe.Capture.layer;
+                                          dark_level is ONE number per Bayer
+                                          layer per sweep, not a frame
+    div   = divisor_map(...)              the gray-chip level at every pixel
     R     = reflectance(sig, div)         referred to the gray chips
     R_inf = reflectance_infinity(R, Rw)   referred to a diffuse white
     A     = absorbance(R_inf)             -log10(R)
@@ -62,6 +64,12 @@ def divisor(model, region, chip1, chip2, sig) -> float:
     """
     The gray-chip signal level as seen at one region, in counts.
 
+    **Superseded by `divisor_map()`** in the analysis_1 / duotone chain; kept
+    for the older report scripts.  Two faults: it is one number for a whole
+    region, and it reads the gain field by *crop* position (`gain()`), which
+    is 20 layer rows off for every capture from C1014 on -- see
+    `whitecorr.LayerModel.gain_at`.
+
     The two gray chips sit either side of the strip and the illumination is
     not flat between them, so neither chip alone is the reference for a
     region lying between them.  `whitecorr.anchor_weights` reads the cell's
@@ -96,6 +104,76 @@ def divisor(model, region, chip1, chip2, sig) -> float:
     return w1 * float(np.mean(sig[chip1])) + w2 * float(np.mean(sig[chip2]))
 
 
+def divisor_map(model, bound, chip1, chip2, sig) -> np.ndarray:
+    """
+    The gray-chip signal level at every pixel, in counts.
+
+    The cell's published flat-field polynomial gives the *shape* of the
+    light over the stage; the two gray chips, read in this very frame, give
+    its *level*.  "Pegging" the polynomial to the chips means scaling it so
+    that it reproduces the chips' measured means:
+
+        g(y, x)   = the unit-mean polynomial, placed by sensor position
+                    (`whitecorr.LayerModel.gain_at`)
+        g1, g2    = mean of g over chip 1, chip 2
+        S1, S2    = mean of sig over chip 1, chip 2          (counts)
+
+      '2anchor' (26 of the 27 cells): the level may drift linearly across
+      the frame between the chips, so each chip pegs its own side --
+
+        t(x)      = (x - x1) / (x2 - x1)     x1, x2 = the chips' centre columns
+        div(y, x) = g(y, x) * [ (1 - t(x)) * S1/g1  +  t(x) * S2/g2 ]
+
+      '1anchor': one scale for the whole frame, the least-squares fit of
+      g to both chips --
+
+        div(y, x) = g(y, x) * (g1*S1 + g2*S2) / (g1^2 + g2^2)
+
+    At the two chips this reproduces S1 and S2 exactly ('2anchor') or as
+    nearly as one scale can ('1anchor'), and in between it follows the
+    polynomial rather than a straight line.
+
+    This replaces `divisor()`, which returned this map's average over one
+    region -- one number for the whole pad, and the same number applied to
+    the paper, although the light there is different.
+
+    Args:
+        model: The published cell, a `whitecorr.LayerModel`.
+        bound: The capture's own stream rect (x, y, w, h).
+        chip1: Boolean mask of the left gray chip (roi 'gray1').
+        chip2: Boolean mask of the right gray chip (roi 'gray2').
+        sig: Dark-corrected signal over the whole bound crop, in counts.
+
+    Returns:
+        (rows, cols) float array in counts, NaN where the polynomial was not
+        fitted (see `gain_at`).  Divide `sig` by it to get R.
+
+    Raises:
+        ValueError: A chip lies outside the fitted domain, or reads no signal.
+
+    Example:
+        >>> div = divisor_map(model, c.bound, chip1, chip2, sig)
+        ...                                          # doctest: +SKIP
+        >>> R = reflectance(sig, div)                # doctest: +SKIP
+    """
+    sig = np.ma.getdata(sig)
+    g = model.gain_at(bound, sig.shape)
+    g1, g2 = float(np.mean(g[chip1])), float(np.mean(g[chip2]))
+    if not (np.isfinite(g1) and np.isfinite(g2)):
+        raise ValueError("a gray chip lies outside the flat-field domain")
+    s1, s2 = float(np.mean(sig[chip1])), float(np.mean(sig[chip2]))
+    if not (s1 > 0 and s2 > 0):
+        raise ValueError(f"gray chips read no signal ({s1:.1f}, {s2:.1f})")
+    if model.form == "1anchor":
+        level = (g1 * s1 + g2 * s2) / (g1 * g1 + g2 * g2)
+        return g * level
+    x1 = float(np.nonzero(chip1)[1].mean())
+    x2 = float(np.nonzero(chip2)[1].mean())
+    t = (np.arange(sig.shape[1], dtype=np.float64) - x1) / (x2 - x1)
+    level = (1.0 - t) * s1 / g1 + t * s2 / g2          # one per column
+    return g * level[None, :]
+
+
 # -- step 2: reflectance -----------------------------------------------------
 
 def reflectance(sig, div):
@@ -115,21 +193,26 @@ def reflectance(sig, div):
     diffuse white standard.
 
     Args:
-        sig: Dark-subtracted signal in counts.  ndarray or MaskedArray.
-        div: The gray-chip level from `divisor()`, in counts.
+        sig: Dark-corrected signal in counts.  ndarray or MaskedArray.
+        div: The gray-chip level in counts: the per-pixel map from
+            `divisor_map()`, or a single number.  NaN in the map (outside
+            the flat-field domain) gives NaN in R.
 
     Returns:
         Reflectance, same shape and masking as `sig`.
 
     Raises:
-        ValueError: `div` is not positive.
+        ValueError: `div` is not positive where it is defined.
 
     Example:
         >>> reflectance(np.array([100.0, 400.0]), 400.0)
         array([0.25, 1.  ])
+        >>> reflectance(np.array([100.0, 400.0]), np.array([200.0, 400.0]))
+        array([0.5, 1. ])
     """
-    if not div > 0:
-        raise ValueError(f"divisor must be positive, got {div!r}")
+    d = np.asarray(div, dtype=np.float64)
+    if np.any(d[np.isfinite(d)] <= 0):
+        raise ValueError("divisor must be positive")
     return sig / div
 
 

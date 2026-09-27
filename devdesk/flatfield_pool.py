@@ -472,9 +472,11 @@ class Pool:
             group-to-group spread.
         by_file: {archive name: signal}, for per-capture diagnostics such as
             the rotation control.
-        black: Median dark level in DN, measured from the subtracted darks.
+        black: Median over the captures of the dark level subtracted, DN.
         exposure_us: Exposure the captures agree on.
-        dark_links: {archive name: dark group actually subtracted}.
+        dark_links: {archive name: dark link matching the lit exposure}.
+            Kept for provenance; the level subtracted comes from the
+            archive's shortest-exposure dark (flatfield.dark_level_for).
         led, label, channel: What this cell is.
     """
     frame: Frame
@@ -560,11 +562,10 @@ def load_pool(captures: Sequence[Capture], led: str, label: str,
     """
     Load one cell from every capture and pool it into a single frame.
 
-    Per capture: read the lit layer and the dark that `flatfield.find_dark_link`
-    selects, subcrop both to the target bound, subtract the full dark *frame*
-    pixel by pixel (a dark mean would throw away the fixed-pattern component,
-    which is exactly the part that would masquerade as illumination structure),
-    and mask with the same rule flatfield.load_frame() uses.
+    Per capture: read the lit layer, subcrop it to the target bound, subtract
+    the dark level `flatfield.dark_level_for` returns -- one number per
+    Bayer layer, not a dark frame; see flatfield.load_frame() for why -- and
+    mask with the same rule flatfield.load_frame() uses.
 
     Then, in two steps:
       1. average pixel-wise **within** each placement group, so an untouched
@@ -609,12 +610,11 @@ def load_pool(captures: Sequence[Capture], led: str, label: str,
                 f"'{label}'")
         lit = ff_mod.read_layer(
             r, f"/leds/{led}/lit/{label}/{channel}")[cap.slices]
-        dark = ff_mod.read_layer(
-            r, f"/leds/{led}/dark/{dark_link}/{channel}")[cap.slices]
+        black = ff_mod.dark_level_for(r, led, label, channel)
 
-        signal = lit - dark
+        signal = lit - black
         masks.append((lit < SATURATED_DN) & (signal > 0.0))
-        blacks.append(float(np.median(dark)))
+        blacks.append(black)
         by_file[cap.name] = signal
         dark_links[cap.name] = dark_link
         exposures[cap.name] = ff_mod.lit_exposure_us(r, led, label)

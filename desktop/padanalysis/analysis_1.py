@@ -39,16 +39,17 @@ one is checked against.
 quantities
 ----------
 sig     (signal)   
-    - sig comes from c.layer(LED, rung, Bayerlayer), whose docstring at 
-      analysis_1.py:866 says probe.Capture.layer already returns 
-      lit - dark per pixel, so sig is already dark-subtracted, not raw 
-      counts.
+    - sig comes from c.layer(LED, rung, Bayerlayer): probe.Capture.layer
+      returns lit - dark_level, where dark_level is ONE number per Bayer
+      layer per sweep (the mean of the sweep's shortest-exposure dark
+      frame), not a dark frame subtracted pixel by pixel.  So sig is
+      dark-corrected, not raw counts.
     - sig is a numpy.ma.MaskedArray on the full frame grid, masked to 
-      whatever ROI was requested (get_cell_data, analysis_1.py:711).
-    - sig is the input to gray-chip balancing: R = sig / div 
-      (analysis_1.py:820, :880), where div is the interpolated 
-      gray-chip level. So sig sits one step before reflectance R in 
-      the chain: sig → R → R_inf → A/KS.
+      whatever ROI was requested (get_cell_data).
+    - sig is the input to gray-chip balancing: R = sig / div, where div
+      is a per-pixel map -- the cell's flat-field polynomial pegged to the
+      two gray chips of the same frame (padphot.divisor_map).  So sig sits
+      one step before reflectance R in the chain: sig → R → R_inf → A/KS.
     - In BalancedCell (analysis_1.py:818), sig is stored as the 
       dark-subtracted counts for that cell, alongside raw counts used
       separately just for the saturation/clipping checks 
@@ -143,8 +144,9 @@ PRECELLS = [
 ]
 
 #: Cells whose dark frame is worth characterising for the noise floor.
-#: The dark is already subtracted by `probe.Capture.layer`, so this list is
-#: not used to correct anything -- it says where to *measure* read noise and
+#: The dark level is already subtracted by `probe.Capture.layer` (one number
+#: per Bayer layer, not a frame), so this list is not used to correct
+#: anything -- it says where to *measure* read noise and
 #: fixed-pattern offset, which sets the floor a Delta(K/S) can be trusted
 #: above.  One dark frame is shared by every LED at the same exposure
 #: (`capture_h5._dark_key` keys on microseconds, not on the LED), so cells
@@ -194,6 +196,15 @@ SATURATED_DN = 1000
 MIN_SIGNAL_DN = 25.0
 #: A region with more than this fraction clipped is not measurable.
 MAX_SAT_FRACTION = 0.001
+
+#: Names the photometric chain an interim-store array was computed with.
+#: Stamped on every array `writeh5_sampcell` writes; a cached result whose
+#: stamp differs (or is missing -- written before 2026-09-27, with the
+#: per-pixel dark frame and one scalar gray divisor) is recomputed, not
+#: reused.  Change this whenever a step of the chain changes.
+#: History: "dark_level+divisor_map" (2026-09-27), then "+hot_mask" the same
+#: day when hot pixels began to be left out.
+CHAIN = "dark_level+divisor_map+hot_mask"
 
 _STRIP_ROIS = (ROISAMPLE, ROIWHITE)     # move with the strip; see registration
 _ROI_NAMES = (ROIBOUND, ROIWHITE, ROIGRAY1, ROIGRAY2, ROISAMPLE)
@@ -668,11 +679,35 @@ def pre_to_post(samp_no):
 
 
 def _register(frame, samp_no):
-    """Resample a pre-image frame onto the measurement's layer grid."""
+    """
+    Resample a pre-image frame onto the measurement's layer grid.
+
+    The pre-image's own hot pixels are set to NaN first.  Bilinear
+    resampling mixes each output pixel from four input pixels, so a hot
+    pixel would otherwise leak into up to four measurement pixels; as NaN it
+    marks those four as missing instead, and callers mask NaN.
+    """
     y_pre, x_pre = pre_to_post(samp_no)
     data = frame.filled(np.nan) if np.ma.isMaskedArray(frame) else frame
-    return ndimage.map_coordinates(np.asarray(data, dtype=np.float64),
-                                   [y_pre, x_pre], order=1, mode="nearest")
+    data = np.array(data, dtype=np.float64)
+    data[_hot(samp_no, PRE)] = np.nan
+    return ndimage.map_coordinates(data, [y_pre, x_pre], order=1,
+                                   mode="nearest")
+
+
+def _hot(samp_no, sec="") -> np.ndarray:
+    """
+    Pixel positions left out of every measurement: hot in any Bayer layer.
+
+    From the `hotpixels` table via `probe.Capture.hot_mask`, on this
+    sweep's own layer grid.  The union over the four layers is used, not
+    each cell's own layer, so that every cell keeps the same pixel
+    positions and their pixel lists line up one to one -- about 70 of the
+    23790 positions, 0-10 of them on a pad.  They are left out, not
+    repaired.  `_region` stays purely geometric; this is applied where
+    pixel values are read.
+    """
+    return open_sample(samp_no, sec).hot_mask()
 
 
 # ── reading a cell ─────────────────────────────────────────────────────
@@ -796,6 +831,11 @@ def get_cell_data(samp_no, LED, Bayerlayer, roi=ROISAMPLE, sec="",
     Arithmetic between two masked arrays takes the union of their masks, so
     a post frame divided by a pre frame is masked wherever either was.
 
+    **Hot pixels are masked too.**  Every position in the `hotpixels` table
+    (hot in any Bayer layer, see `_hot`) is masked in every ROI, including
+    'bound'.  With registration, the pre-image's own hot pixels are masked
+    as well, wherever resampling drew on them.
+
     **The ROIs.**  Two are rectangles and two are not, which is why this
     returns a mask rather than a rect:
 
@@ -858,11 +898,12 @@ def get_cell_data(samp_no, LED, Bayerlayer, roi=ROISAMPLE, sec="",
 
     if sec and register and roi in _STRIP_ROIS:
         sig = _register(sig, samp_no)
-        region = _region(samp_no, roi, "", erode=erode)
+        region = _region(samp_no, roi, "", erode=erode) & ~_hot(samp_no, "")
     else:
-        region = _region(samp_no, roi, sec, erode)
+        region = _region(samp_no, roi, sec, erode) & ~_hot(samp_no, sec)
 
-    out = np.ma.masked_array(sig, mask=~region)
+    # NaN marks pixels a registered pre-image drew from a hot pixel.
+    out = np.ma.masked_invalid(np.ma.masked_array(sig, mask=~region))
     if not crop:
         return out
     ys, xs = np.nonzero(region)
@@ -876,10 +917,12 @@ class BalancedCell:
     Attributes:
         samp_no, cell, roi, sec: what was asked for.
         rung, exposure_us: the exposure actually read.
-        sig: dark-subtracted counts, masked to the ROI.
-        div: the gray-chip level at this region, counts (`padphot.divisor`).
-        R: reflectance against the gray chips, `sig / div`.  1.0 means as
-            bright as the chips.
+        sig: dark-corrected counts (`lit - dark_level`), masked to the ROI.
+        div: the gray-chip level at every pixel, counts, a (rows, cols)
+            array on the sweep's own grid, not registered
+            (`padphot.divisor_map`).  NaN outside the flat-field domain.
+        R: reflectance against the gray chips, `sig / div` per pixel.  1.0
+            means as bright as the chips would be at that spot.
         R_white: the bare-paper reflectance this cell was referred to, a
             scalar -- the median of R over the paper region.  **None** when
             the paper clipped at this rung; see `paper_clipped`.
@@ -924,33 +967,42 @@ def get_balanced_cell_data(samp_no, LED, Bayerlayer, roi=ROISAMPLE,
 
     **The algorithm**, one `padphot` function per step:
 
-    1. *Dark.*  `probe.Capture.layer` returns `lit - dark` already.  The
-       dark frame is the one taken at the same exposure in the same run,
-       linked into the LED's own group; one frame is shared by every LED at
-       that exposure.  So there is no dark step here to get wrong -- but
-       note it is a *frame* subtraction, per pixel, not a scalar offset.
+    1. *Dark.*  `probe.Capture.layer` returns `lit - dark_level` already.
+       `dark_level` is ONE number per Bayer layer per sweep -- the mean of
+       the sweep's shortest-exposure dark frame -- not a dark frame
+       subtracted pixel by pixel.  See `probe.Capture.layer` and the comment
+       above `capture_h5.dark_level` for the measurements behind that.
+       Known hot pixels (the `hotpixels` table, hot in any Bayer layer --
+       see `_hot`) are then left out: masked in the pad, the paper and both
+       gray chips, not repaired.
 
     2. *Illumination and gray balance.*  The two gray chips sit either side
-       of the strip and the illumination is not flat between them, so the
-       reference for a region is an interpolation of the two, weighted
-       through that cell's published flat-field surface
-       (`whitecorr.anchor_weights`, from the `layermodels` table).  The
-       weights depend on where the region is, so they are recomputed for the
-       region actually measured rather than taken from the published pair:
+       of the strip and the illumination is not flat between them.  The
+       cell's published flat-field polynomial (the `layermodels` table)
+       gives the shape of the light at every pixel; the chips, read in this
+       same frame, peg its level:
 
-           div = w1 * mean(sig[gray1]) + w2 * mean(sig[gray2])
-           R   = sig / div
+           div(y, x) = padphot.divisor_map(...)     counts, per pixel
+           R(y, x)   = sig(y, x) / div(y, x)
 
-       R is reflectance *against the gray chips*: R = 1 means as bright as
-       the chips.  It is what `measure.py` reports as `ratio`.
+       See `padphot.divisor_map` for the formula.  R is reflectance *against
+       the gray chips*: R = 1 means as bright as the chips would be at that
+       spot.  Until 2026-09-27 `div` was a single number, the map's average
+       over the region asked for, so the pad was not flattened and the
+       paper was divided by the pad's number rather than its own.
 
     3. *White balance.*  Kubelka-Munk wants reflectance against a diffuse
        white.  The gray chips are neither white nor a standard, so R is
        re-referred to the strip's own bare paper -- same paper, same strip,
-       same illumination, no chemistry:
+       no chemistry, and now each pixel corrected for its own light:
 
            R_white = median(R over the bare-paper region)
            R_inf   = R / R_white
+
+       Note what cancels: `div`'s level is set by the chips, and a common
+       scale factor divides out of R_inf.  What does not cancel, and is the
+       point of the map, is the polynomial's *shape* -- the difference in
+       light between each pad pixel and the paper.
 
        This is `chemistry.Reduction`'s `rho`, and it cancels anything that
        changed between one session's gray card and the next's.  The paper is
@@ -974,6 +1026,19 @@ def get_balanced_cell_data(samp_no, LED, Bayerlayer, roi=ROISAMPLE,
     cell came from, so a pre-image is referred to its own paper and a
     measurement to its own.  That is deliberate: it removes the session, and
     leaves the pad-versus-paper contrast, which is the chemistry.
+
+    **The pre-image is not used by the analysis yet.**  Nothing downstream
+    subtracts or divides the pre-image out of the measurement: `cell_PCA`
+    reads the measurement only, `pre_post_overlay` shows `post/pre` as a
+    registration check, and `padphot.delta_ks` is defined but never called.
+    Using it is the next thing to explore.  When it is: the pre-image
+    covers only the eight PRECELLS, at a different exposure (1000 us against
+    ~2193 us), and the dark level does NOT cancel between the two, because
+    every step here divides rather than subtracts raw counts.
+
+    **Registration and the divisor.**  The light belongs to the stage and
+    the strip moves, so a pre-image is divided by its own `div` in its own
+    frame first, and only then is R resampled onto the measurement's grid.
 
     Args:
         samp_no: Capture name without the .h5.
@@ -1017,18 +1082,32 @@ def get_balanced_cell_data(samp_no, LED, Bayerlayer, roi=ROISAMPLE,
 
     # References are read in the sweep the cell came from, on the whole
     # frame, before any registration: the chips do not move with the strip.
-    chip1 = _region(samp_no, ROIGRAY1, sec)
-    chip2 = _region(samp_no, ROIGRAY2, sec)
-    paper = _region(samp_no, ROIWHITE, sec, erode)
-    measured = _region(samp_no, roi, sec, erode)
+    # Hot pixels (`_hot`) are left out of every one of them.
+    hot = _hot(samp_no, sec)
+    chip1 = _region(samp_no, ROIGRAY1, sec) & ~hot
+    chip2 = _region(samp_no, ROIGRAY2, sec) & ~hot
+    paper = _region(samp_no, ROIWHITE, sec, erode) & ~hot
+    measured = _region(samp_no, roi, sec, erode) & ~hot
 
-    div = padphot.divisor(model, measured, chip1, chip2, raw_sig)
+    # Per-pixel divisor, in this sweep's own frame.  R is formed here, then
+    # registered: the light is fixed to the stage, not to the strip.
+    div = padphot.divisor_map(model, c.bound, chip1, chip2, raw_sig)
+    R_frame = padphot.reflectance(raw_sig, div)
+    R_frame[hot] = np.nan
 
     a = get_cell_data(samp_no, LED, Bayerlayer, roi=roi, sec=sec,
                       erode=erode, rung=rung, register=register)
     if a is None:
         return None
-    R = padphot.reflectance(a, div)
+    if sec and register and roi in _STRIP_ROIS:
+        R_grid = _register(R_frame, samp_no)
+        region = _region(samp_no, roi, "", erode=erode) & ~_hot(samp_no, "")
+    else:
+        R_grid = R_frame
+        region = measured
+    # NaN -- where the flat-field polynomial was not fitted, or at a hot
+    # pixel, or drawn from a pre-image hot pixel -- is masked too.
+    R = np.ma.masked_invalid(np.ma.masked_array(R_grid, mask=~region))
 
     # The paper's own saturation screen.  It clips before the pad does on
     # the short wavelengths, and when it has, this cell simply has no
@@ -1037,7 +1116,7 @@ def get_balanced_cell_data(samp_no, LED, Bayerlayer, roi=ROISAMPLE,
     if paper_sat > MAX_SAT_FRACTION:
         R_white = R_inf = A = KS = KS_signed = None
     else:
-        R_white = float(np.median(padphot.reflectance(raw_sig, div)[paper]))
+        R_white = float(np.nanmedian(R_frame[paper]))
         R_inf = padphot.reflectance_infinity(R, R_white)
         A = padphot.absorbance(R_inf)
         KS = padphot.km_remission(R_inf)
@@ -1081,7 +1160,8 @@ def writeh5_sampcell(samp_no, cellname, array, **attrs) -> Path:
             name works, and '/' makes subgroups.
         array: The ndarray or MaskedArray to store.
         **attrs: Scalars recorded on the group.  Say what the array is --
-            the quantity, the erosion, the rung.
+            the quantity, the erosion, the rung.  `chain` is added
+            automatically (see CHAIN).
 
     Returns:
         The path written.
@@ -1120,8 +1200,7 @@ def writeh5_sampcell(samp_no, cellname, array, **attrs) -> Path:
         if masked:
             w.write_array(f"/{cellname}", "mask",
                           np.ma.getmaskarray(array).astype(np.uint8))
-        if attrs:
-            w.set_attrs(f"/{cellname}", attrs)
+        w.set_attrs(f"/{cellname}", {"chain": CHAIN, **attrs})
     return path
 
 
@@ -1635,8 +1714,9 @@ def cell_PCA(samp_no, figs=True, savefigs=False, erode=0.0,
             cached_attrs = sampcell_attrs(samp_no, "duotone/yellow")
         except KeyError:
             cached_attrs = None
-        if cached_attrs is not None and float(cached_attrs.get("erode",
-                                              float("nan"))) == erode:
+        if (cached_attrs is not None
+                and cached_attrs.get("chain") == CHAIN
+                and float(cached_attrs.get("erode", float("nan"))) == erode):
             print(f"  {samp_no}: two-dye separation cached, skipping recompute")
             return read_duotone(samp_no)
 
@@ -1745,10 +1825,10 @@ def run_sampno():
     # ── Use guards to choose choose which portions to run.
     # ── Nothing below depends on anything above it except that
     # ── locate_pad() must run before anything that measures the pad.
-    SAMPS = [f"C{n}" for n in range(1022, 1026)]
+    SAMPS = [f"C{n}" for n in range(1034, 1037)] 
     # SAMPS = ['C1025']
-    SAMP = SAMPS[-1]
-    SAMPS = [SAMP]
+    # SAMP = SAMPS[-1]
+    # SAMPS = [SAMP]
 
     # 1. What is actually in the archive.  Run this first, every time.
     if 0: 
@@ -1774,7 +1854,7 @@ def run_sampno():
 
     # 4. Every cell at once, then the same thing as numbers.
     #    quantity = one of 'sig', 'R', 'R_inf', 'A', 'KS', 'KS_signed' 
-    if 1:
+    if 0:
         for SAMP in SAMPS:
             for quantity in ["R_inf"]:
             # for quantity in [ 'R', 'R_inf', 'A', 'KS']:
@@ -1805,7 +1885,7 @@ def run_sampno():
             pre_post_overlay(SAMP, "royal_blue", "B", figs=True, savefigs=False)
 
     # 7. The two-dye separation, and its figure.
-    if 0:
+    if 1:
         for SAMP in SAMPS:
             print(f"\n=== cell_PCA({SAMP!r})")
             # yellow, brown = cell_PCA(SAMP, figs=True, savefigs=True)
@@ -1826,6 +1906,7 @@ def run_sampno():
                                  quantity="K/S, signed", erode=ERODE, rung=b.rung,
                                  exposure_us=b.exposure_us, R_white=b.R_white)
             print(f"\n  interim store: {_sampcell_path(SAMP)}")
+            print()
 
     close_all()
 

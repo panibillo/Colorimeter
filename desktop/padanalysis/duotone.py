@@ -54,7 +54,8 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from padrect import PadRect  # noqa: E402
 from probe import Capture, open_capture  # noqa: E402
-from whitecorr import anchor_weights, load_models, rect_mask  # noqa: E402
+from padphot import divisor_map  # noqa: E402
+from whitecorr import load_models, rect_mask  # noqa: E402
 
 #: Nominal LED peak wavelength in nm, from src/lighting_cal8.py.  White is
 #: broadband and is parked past the red end so orderings put it last.
@@ -118,14 +119,19 @@ class PadCube:
         self.capture = capture
         self.pad = PadRect(capture)
         self.shape = self.pad.tot.shape
-        self.mask = self.pad.mask(erode)
+        # Known hot pixels -- hot in any Bayer layer, from the `hotpixels`
+        # table -- are left out of the pad, the paper and the chips alike,
+        # so every cell keeps the same pixel positions (the cube's rows).
+        # Left out, not repaired.  See analysis_1._hot.
+        hot = capture.hot_mask()
+        self.mask = self.pad.mask(erode) & ~hot
         paper_mask, paper_depth = self.pad.paper_mask()
         # The paper reference has to be bare paper, not the pad's own skirt:
         # trim it the same way measure.py does before it averages.
-        paper_mask = paper_mask & (paper_depth > 2.0)
+        paper_mask = paper_mask & (paper_depth > 2.0) & ~hot
 
-        chip1 = rect_mask(self.shape, capture.rects["gray1"])
-        chip2 = rect_mask(self.shape, capture.rects["gray2"])
+        chip1 = rect_mask(self.shape, capture.rects["gray1"]) & ~hot
+        chip2 = rect_mask(self.shape, capture.rects["gray2"]) & ~hot
 
         self.paper_mask = paper_mask
         cells, planes, rungs, paper, sigma = [], [], {}, [], []
@@ -137,7 +143,7 @@ class PadCube:
             if plane is None:
                 continue
             r, rung = plane
-            ref = float(np.median(r[paper_mask]))
+            ref = float(np.nanmedian(r[paper_mask]))
             if ref <= 0:
                 continue
             a = -np.log10(np.maximum(r, 1e-6) / ref)
@@ -167,17 +173,18 @@ class PadCube:
         """
         Return (reflectance plane, rung) for one cell, or None.
 
-        Reflectance is the white-corrected quantity measure.py:118 uses --
-        signal over the two gray chips weighted through that cell's published
-        illumination surface -- computed here for every pixel rather than for
-        a region mean.  The rung is the brightest one that clips nowhere that
-        matters, so each cell is read where its signal-to-noise is best.
+        Reflectance is signal over `padphot.divisor_map` -- the cell's
+        published flat-field polynomial pegged to the two gray chips of this
+        frame -- per pixel, so the light is corrected at every pad pixel and
+        at every paper pixel separately.  (Until 2026-09-27 this was one
+        number for the pad and paper together.)  The rung is the brightest
+        one that clips nowhere that matters, so each cell is read where its
+        signal-to-noise is best.
         """
         led, layer = cell
         if led not in self.capture.leds:
             return None          # a short sweep -- a pre-image holds two LEDs
         region = self.mask | paper_mask
-        w1, w2, *_ = anchor_weights(model, region, chip1, chip2)
         best = None
         for rung in self.capture.labels(led):
             got = self.capture.layer(led, rung, layer)
@@ -200,8 +207,9 @@ class PadCube:
         if best is None:
             return None
         _, sig, rung = best
-        div = w1 * float(sig[chip1].mean()) + w2 * float(sig[chip2].mean())
-        if div <= 0:
+        try:
+            div = divisor_map(model, self.capture.bound, chip1, chip2, sig)
+        except ValueError:
             return None
         return np.maximum(sig, 1.0) / div, rung
 

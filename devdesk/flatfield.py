@@ -360,14 +360,36 @@ def read_layer(reader: Hdf5Reader, path: str) -> np.ndarray:
     return reader.read_array(path).astype(np.float64)
 
 
+def dark_level_for(reader: Hdf5Reader, led: str, label: str,
+                   channel: str) -> float:
+    """
+    Return the dark level, in DN, to subtract from one lit layer.
+
+    `capture_h5.dark_level` on the archive's shared darks, falling back to
+    the LED's own linked dark for camtest8 conversions that have none.
+
+    Raises:
+        KeyError: No dark frame holds this layer.
+    """
+    link = find_dark_link(reader, led, label)
+    fallback = f"/leds/{led}/dark/{link}/{channel}" if link else None
+    return capture_h5.dark_level(reader, channel, "", fallback)[0]
+
+
 def load_frame(reader: Hdf5Reader, led: str, label: str,
                channel: str) -> Frame:
     """
-    Load one lit Bayer layer, subtract its matching dark frame, and mask it.
+    Load one lit Bayer layer, subtract the dark level, and mask it.
 
-    The full dark *frame* is subtracted pixel by pixel, not a dark mean — a
-    mean throws away the fixed-pattern component, which is exactly the part
-    that would otherwise masquerade as illumination structure.
+    The dark correction is one number per Bayer layer -- the mean of the
+    archive's shortest-exposure dark frame, `capture_h5.dark_level` -- not
+    the matching dark frame subtracted pixel by pixel.  This reverses an
+    earlier choice made for fear that a mean would leave a fixed dark
+    pattern to masquerade as illumination structure; measured over
+    C1002-C1036 that pattern is under 0.1 DN outside about a dozen hot pixels
+    per layer (at most ~1.4 DN), against signals of hundreds of DN, while
+    subtracting a frame adds 0.73 DN of fresh noise to every pixel.  See the
+    comment above `capture_h5.dark_level`.
 
     Masked out: raw lit >= SATURATED_DN (clipped, and common on a white card
     stock stage because the exposure ladder was metered on a sample at frame
@@ -398,8 +420,7 @@ def load_frame(reader: Hdf5Reader, led: str, label: str,
         raise KeyError(f"/leds/{led}/dark has no group matching '{label}'")
 
     lit = read_layer(reader, f"/leds/{led}/lit/{label}/{channel}")
-    dark = read_layer(reader, f"/leds/{led}/dark/{dark_link}/{channel}")
-    signal = lit - dark
+    signal = lit - dark_level_for(reader, led, label, channel)
     mask = (lit < SATURATED_DN) & (signal > 0.0)
 
     return Frame(signal=signal, mask=mask, led=led, label=label,

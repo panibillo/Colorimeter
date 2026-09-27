@@ -232,6 +232,76 @@ def is_omitted(attrs: dict) -> bool:
     return bool(attrs.get(OMITTED_ATTR, False))
 
 
+# The dark correction is one number per Bayer layer per sweep, not a frame.
+#
+# Measured on every dark frame in C1002-C1036 (2564 frames, 1-51 ms, Aug 10 -
+# Sep 26 2026): the frame mean is 64.02-64.04 DN at every exposure and in
+# every layer, the shortest exposure's mean sits within 0.07 DN of every
+# longer one in the same sweep, and a pixel's own dark value is a worse
+# estimate of its offset than the frame mean -- its 0.73 DN of fresh noise
+# is larger than any lasting per-pixel pattern except a dozen hot pixels per
+# layer (tex/dark_signal_characterization.tex, §9;
+# desktop/padanalysis/hotpixel_analysis.persistence_over_time).  So the
+# shortest exposure is used: 1000 us is the shortest ever captured and is
+# reliable; nothing shorter has been tested.
+
+def dark_level(reader, ch: str, section: str = "",
+               fallback: str = None) -> tuple:
+    """
+    Return the dark level for one Bayer layer: the mean of one dark frame.
+
+    The frame used is the sweep's shortest-exposure shared dark
+    (`<section>/dark/<when>_<us>us/<ch>`), "after" preferred over "before"
+    at equal exposure.  A layer the capture keep screen omitted still
+    carries its `raw_mean` attribute (see `_omitted_attrs`), so the level is
+    available even when the array is not.  See the comment above this
+    function for why a scalar and why the shortest exposure.
+
+    Args:
+        reader: An open `hdf5read.Hdf5Reader` on the archive.
+        ch: Bayer layer -- 'R', 'Gr', 'Gb' or 'B'.
+        section: '' for the measurement sweep, 'pre' (or '/pre') for the
+            pre-image.
+        fallback: Dataset path of a dark layer to use when the sweep has no
+            shared `/dark` groups at all -- archives converted from camtest8
+            output keep their darks only under `/leds/<color>/dark/`.
+
+    Returns:
+        `(level_dn, exposure_us)` -- the mean in raw DN as a float, and the
+        exposure of the frame it came from.
+
+    Raises:
+        KeyError: No shared dark holds this layer and no usable fallback
+            was given.
+
+    Example:
+        >>> with Hdf5Reader("captures/C1028.h5") as r:   # doctest: +SKIP
+        ...     dark_level(r, "B")
+        (64.019, 1462)
+    """
+    at = f"/{section.strip('/')}" if section.strip("/") else ""
+    base = f"{at}/dark"
+    found = []
+    if reader.exists(base):
+        for name in reader.list_children(base):
+            path = f"{base}/{name}/{ch}"
+            if not reader.exists(path):
+                continue
+            a = reader.attrs(path)
+            when_rank = 0 if name.startswith("after_") else 1
+            found.append((int(a.get("exposure_us", 0)), when_rank, path, a))
+    if not found and fallback is not None and reader.exists(fallback):
+        a = reader.attrs(fallback)
+        found.append((int(a.get("exposure_us", 0)), 0, fallback, a))
+    for us, _rank, path, a in sorted(found, key=lambda t: t[:2]):
+        if is_omitted(a):
+            if "raw_mean" in a:
+                return float(a["raw_mean"]), us
+            continue
+        return float(reader.read_array(path).mean()), us
+    raise KeyError(f"no dark frame for layer {ch!r} in section {at or '/'!r}")
+
+
 class CaptureSuiteWriter:
     """
     Writes a capture-suite HDF5 archive. Use as a context manager.

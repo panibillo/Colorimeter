@@ -18,12 +18,13 @@
 -- scratch, run db_DDL_reset.sql first — that is the destructive one, and it is
 -- kept in a separate file precisely so it cannot be triggered by accident.
 --
--- Object inventory (7 tables):
+-- Object inventory (8 tables):
 --
 --     colorcard    colour-calibration card patch geometry
 --     config       every instrument setting — see config_repo.py
 --     data         generic timestamped key/value measurements
 --     exposure     calibrated exposure ladders, per LED and group
+--     hotpixels    known hot pixels, per camera context and Bayer layer
 --     layermodels  illumination correction, per LED and Bayer layer
 --     roi          regions of interest in camera stream coordinates
 --     samples      one row per test run — the main record
@@ -307,6 +308,94 @@ CREATE TABLE IF NOT EXISTS layermodels (
 
 CREATE INDEX IF NOT EXISTS ix_layermodels_led_layer_active
     ON layermodels (led_color, bayer_layer, active);
+
+
+-- ────────────────────────────────────────────────────────────────────────────
+-- hotpixels — sensor defects found by src/darkframe.py from a batch of dark
+-- frames, one row per flagged pixel.  Read by src/hotpixel_repo.py; applied by
+-- src/darkframe.py's correct_dark() as part of dark-correcting a raw frame.
+-- Full derivation, the outlier test's math, and the choice to correct by
+-- neighbor-median replacement rather than by a stored per-pixel offset are
+-- written up in tex/dark_signal_characterization.tex (see especially §9,
+-- "Combining it all: the best per-pixel dark estimator", and the module
+-- docstring of src/darkframe.py, which cites it section by section).
+--
+-- Coordinates (x, y) are in **whole-frame Bayer-layer space** — the same
+-- space roi.to_layer_rect() produces from a stream-space rectangle — not
+-- stream-space mosaic coordinates and not a bound-crop's own layer
+-- coordinates (roi.to_layer_rect_within()).  That is what survives a `bound`
+-- ROI edit: frame_w/frame_h (the sensor's configured stream size) do not
+-- change when `bound` is moved, so a row keyed on them stays valid.
+-- Fair alternative not taken: storing stream-space (pre-Bayer-split)
+-- coordinates.  That would also survive a `bound` edit, but a hot pixel is a
+-- property of one photosite behind one Bayer channel, so per-channel layer
+-- coordinates are the natural, smaller-integer unit, and they read directly
+-- against the layer arrays every caller already has in hand.
+--
+-- A hot pixel is specific to one physical photosite behind one Bayer colour
+-- filter, so the four layers of one sensor have four independent hot-pixel
+-- populations — a coordinate found hot in R says nothing about Gr, Gb or B at
+-- that same site.  bayer_layer is therefore part of the row, not a separate
+-- table per layer, and every read/write here is scoped to one layer at a
+-- time (see hotpixel_repo.read_active()'s bayer_layer argument).
+--
+-- Versioned like `exposure`, `roi`, `config` and `layermodels`: active = 1 is
+-- the row in force, 0 is superseded history, never deleted by a normal write.
+-- A write supersedes per (model, hardware_sn, frame_w, frame_h, bayer_layer)
+-- — the same granularity layermodels uses for (led_color, bayer_layer) — so
+-- recalibrating one layer (as of this writing, only channel B has been run
+-- at all; see tex/dark_signal_characterization.tex) leaves the other three
+-- layers' history alone.  See hotpixel_repo.write_hotpixels().
+--
+-- exposure_us and n_frames are provenance, not a lookup key — the same
+-- reasoning layermodels applies to its own w1/w2 (see that section's
+-- comment): the hot-pixel population is a property of the sensor, not of one
+-- particular calibration exposure, so identification at one reference
+-- exposure is taken to hold generally rather than demanding a row per
+-- exposure actually used in service.
+--
+-- score is the deviation found at detection time (in units of the
+-- identification test's own predictive sigma — see darkframe.py); it is kept
+-- as evidence for the verdict but the corrector does not read it, since
+-- correction is by neighbor-median replacement, not by subtracting a stored
+-- offset (a fair alternative considered and rejected — see darkframe.py's
+-- module docstring for why).
+--
+-- Seeded empty — a freshly commissioned instrument has no known hot pixels
+-- until the desktop analysis is run and hotpixel_repo.write_hotpixels() is
+-- called.  An empty/missing context is a normal state, not an error: it means
+-- "correct nothing but the frame mean," the same fallback layermodels uses
+-- for an LED/layer combination that has never been fitted.
+-- ────────────────────────────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS hotpixels (
+    rowid         INTEGER PRIMARY KEY
+                          NOT NULL,
+    active        INTEGER NOT NULL DEFAULT 1,  -- 1 = in force, 0 = superseded
+    add_dt        TEXT,                        -- local timestamp of the write
+    model         TEXT    NOT NULL,            -- camera type, e.g. 'imx708'
+    hardware_sn   TEXT,                        -- camera identifier; this
+                                                --   project's camera and
+                                                --   instrument are one unit,
+                                                --   so the instrument serial
+                                                --   (config role='device')
+                                                --   stands in for a camera id
+    frame_w       INTEGER NOT NULL,            -- stream size the coordinates
+    frame_h       INTEGER NOT NULL,            --   below assume
+    bayer_pattern TEXT,                        -- 'BGGR' | 'RGGB', informational
+    bayer_layer   TEXT    NOT NULL,            -- 'R' | 'Gr' | 'Gb' | 'B'
+    x             INTEGER NOT NULL,            -- whole-frame Bayer-layer
+    y             INTEGER NOT NULL,            --   coordinate — see note above
+    score         REAL,                        -- deviation at detection time,
+                                                --   in predictive-sigma units
+    exposure_us   INTEGER,                     -- reference exposure used to
+                                                --   identify it (provenance)
+    n_frames      INTEGER,                     -- dark frames pooled
+    analysisref   TEXT,                        -- tag naming the analysis run
+    remark        TEXT
+);
+
+CREATE INDEX IF NOT EXISTS ix_hotpixels_context_active
+    ON hotpixels (model, hardware_sn, frame_w, frame_h, bayer_layer, active);
 
 
 -- ────────────────────────────────────────────────────────────────────────────

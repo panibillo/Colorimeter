@@ -1054,18 +1054,21 @@ def cmd_write_db(reader: "Hdf5Reader | SectionView", h5_path: Path, db_path: Pat
                     print(f"  {color}/{label}: {'+'.join(gone)} not stored "
                           f"(too little signal)")
                 for ch in stored:
-                    # The dark layer can be omitted too — the capture path
-                    # stores one only where a lit layer needs it — so check
-                    # this side as well rather than assuming the pair.
-                    if capture_h5.is_omitted(reader.attrs(f"{dark_group}/{ch}")):
+                    # One dark level per Bayer layer -- the mean of the
+                    # archive's shortest-exposure dark -- not the matching
+                    # frame pixel by pixel.  See the comment above
+                    # capture_h5.dark_level.  Rows get processing
+                    # 'dark_level' so they are never mistaken for the older
+                    # per-pixel 'dark_sub' rows.
+                    try:
+                        dark = capture_h5.dark_level(
+                            reader, ch, "", fallback=f"{dark_group}/{ch}")[0]
+                    except KeyError:
                         print(f"  skip {color}/{label}/{ch}: dark not stored")
                         skipped += 1
                         continue
                     lit = reader.read_array(
                         f"/leds/{color}/lit/{label}/{ch}"
-                    ).astype(np.float64)
-                    dark = reader.read_array(
-                        f"{dark_group}/{ch}"
                     ).astype(np.float64)
                     sub = lit - dark
                     for roi_name, (x, y, w, h) in usable.items():
@@ -1076,7 +1079,7 @@ def cmd_write_db(reader: "Hdf5Reader | SectionView", h5_path: Path, db_path: Pat
                             "processing, mean, stdev) VALUES (?,?,?,?,?,?,?,?,?)",
                             (
                                 archive, exposure_us, label, color, ch,
-                                roi_ids[roi_name], "dark_sub", mean, stdev,
+                                roi_ids[roi_name], "dark_level", mean, stdev,
                             ),
                         )
                         written += 1

@@ -166,7 +166,21 @@ class Capture:
             f"{self._at}/leds/{led}", "led_metadata")
 
     def layer(self, led, label, ch):
-        """Dark-subtracted layer, or None if either side was not stored."""
+        """
+        Dark-corrected layer, as `(lit - dark_level, lit)`, or None.
+
+        The dark correction is a single number per Bayer layer per sweep --
+        the mean of the sweep's shortest-exposure dark frame, from
+        `capture_h5.dark_level` -- not the matching dark frame subtracted
+        pixel by pixel.  A pixel's own dark value carries 0.73 DN of fresh
+        noise and almost no lasting pattern, so the frame mean is the better
+        estimate for every pixel but about a dozen hot ones per layer (up to
+        ~1.4 DN, see `hotpixel_analysis.persistence_over_time`), and the
+        dark level does not depend on exposure (64.02-64.04 DN from 1 to
+        51 ms).  See the comment above `capture_h5.dark_level`.
+
+        Returns None if the lit layer was not stored.
+        """
         key = (led, label, ch)
         if key in self._cache:
             return self._cache[key]
@@ -174,17 +188,95 @@ class Capture:
         out = None
         try:
             if not capture_h5.is_omitted(self.reader.attrs(lp)):
-                dl = self._dark_link(led, label)
-                if dl is not None:
-                    dp = f"{self._at}/leds/{led}/dark/{dl}/{ch}"
-                    if not capture_h5.is_omitted(self.reader.attrs(dp)):
-                        lit = self.reader.read_array(lp).astype(np.float64)
-                        dark = self.reader.read_array(dp).astype(np.float64)
-                        out = (lit - dark, lit)
+                lit = self.reader.read_array(lp).astype(np.float64)
+                out = (lit - self.dark_level(ch, led, label), lit)
         except KeyError:
             out = None
         self._cache[key] = out
         return out
+
+    def dark_level(self, ch, led=None, label=None) -> float:
+        """
+        The dark level subtracted from every layer `ch` of this sweep, DN.
+
+        One number per Bayer layer per sweep; see `layer`.  `led` and
+        `label` are only used to find a fallback dark in archives that keep
+        no shared `/dark` groups.
+
+        Raises:
+            KeyError: The sweep has no dark frame for this layer.
+        """
+        key = ("dark_level", ch)
+        if key not in self._cache:
+            fallback = None
+            if led is not None:
+                dl = self._dark_link(led, label)
+                if dl is not None:
+                    fallback = f"{self._at}/leds/{led}/dark/{dl}/{ch}"
+            self._cache[key] = capture_h5.dark_level(
+                self.reader, ch, self.section, fallback)[0]
+        return self._cache[key]
+
+    def hot_mask(self, ch=None) -> np.ndarray:
+        """
+        The known hot pixels on this sweep's layer grid, True where hot.
+
+        Read from the `hotpixels` table (`src/hotpixel_repo.py`) for this
+        archive's own camera -- `sensor_model`, `frame_w`, `frame_h` and
+        `hardware_sn` from its root attributes -- and moved from whole-sensor
+        layer coordinates onto this crop by subtracting `bound // 2`.
+
+        The analysis leaves these pixels OUT rather than repairing them.
+
+        Args:
+            ch: One Bayer layer -- 'R', 'Gr', 'Gb' or 'B' -- or None (the
+                default) for the union of all four: a pixel position that is
+                hot in any layer.  The analysis uses the union, so every
+                cell keeps the same set of pixel positions and the cells'
+                pixel lists line up one to one.
+
+        Returns:
+            (rows, cols) bool array.  All False when the archive does not
+            name its camera or the table holds nothing for it.
+        """
+        key = ("hot_mask", ch)
+        if key in self._cache:
+            return self._cache[key]
+        import darkframe
+        import hotpixel_repo
+        a = self.reader.attrs("/")
+        shape = (self.bound[3] // 2, self.bound[2] // 2)
+        mask = np.zeros(shape, dtype=bool)
+        model = a.get("sensor_model")
+        if model and "frame_w" in a and "frame_h" in a:
+            layers = BAYER if ch is None else (ch,)
+            oy, ox = self.bound[1] // 2, self.bound[0] // 2
+            for layer in layers:
+                rows = hotpixel_repo.read_active(
+                    str(model), int(a["frame_w"]), int(a["frame_h"]),
+                    hardware_sn=a.get("hardware_sn"), bayer_layer=layer)
+                mask |= darkframe.hot_pixel_mask(
+                    shape, [(r.y - oy, r.x - ox) for r in rows])
+        self._cache[key] = mask
+        return mask
+
+    def darklayer(self, led, label, ch):
+        """
+        The dark frame matching one lit exposure, as stored, or None.
+
+        For inspecting the darks (analysis_2, hotpixel_analysis).  It is
+        not what `layer` subtracts -- that is the scalar `dark_level`.
+        """
+        dl = self._dark_link(led, label)
+        if dl is None:
+            return None
+        dp = f"{self._at}/leds/{led}/dark/{dl}/{ch}"
+        try:
+            if capture_h5.is_omitted(self.reader.attrs(dp)):
+                return None
+            return self.reader.read_array(dp).astype(np.float64)
+        except KeyError:
+            return None
 
     def _dark_link(self, led, label):
         """

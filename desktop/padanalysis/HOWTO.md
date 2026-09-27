@@ -415,9 +415,9 @@ can also call on its own.
 
 | step | function | against what |
 |---|---|---|
-| dark-subtracted counts | `probe.Capture.layer` | the dark frame at the same exposure, per pixel |
-| `div` | `padphot.divisor` | the two gray chips, interpolated through this cell's fitted illumination surface at the region actually measured |
-| `R` | `padphot.reflectance` | the gray chips.  `R = 1` means as bright as the chips |
+| dark-corrected counts | `probe.Capture.layer` | `lit − dark_level`: **one number** per Bayer layer per sweep, the mean of the sweep's shortest-exposure dark frame (`capture_h5.dark_level`) — not a frame, see §8.11 |
+| `div` | `padphot.divisor_map` | a per-pixel map: this cell's fitted illumination polynomial, placed by sensor position and pegged to the two gray chips of the same frame |
+| `R` | `padphot.reflectance` | the gray chips.  `R = 1` means as bright as the chips would be at that pixel |
 | `R_inf` | `padphot.reflectance_infinity` | the strip's own bare paper.  `R_inf = 1` on the paper |
 | `A` | `padphot.absorbance` | `-log10(R_inf)`.  0 on the paper |
 | `KS` | `padphot.km_remission` | `(1 − R_inf)² / 2R_inf` = K/S.  0 on the paper |
@@ -449,6 +449,16 @@ where the confusion lives:
 A cell whose *paper* clipped keeps its `R` and loses only `R_inf`, `A` and
 `KS`; `BalancedCell.paper_clipped` says so, and `cell_table` reports it rather
 than dropping the row.
+
+
+**Not used yet: the pre-image.**  No step above subtracts or divides the
+pre-image out of the measurement.  `cell_PCA` reads the measurement only;
+`pre_post_overlay` shows `post / pre` purely as a registration check; and
+`padphot.delta_ks` is defined but nothing calls it.  Using the pre-image is
+the next thing to explore.  Two facts to carry into that: it covers only the
+eight `PRECELLS`, at a different exposure from the measurement (1000 µs
+against ~2193 µs); and the dark level does **not** cancel between pre and
+post, because every step divides rather than subtracting raw counts.
 
 ### 8.4 The arithmetic check
 
@@ -611,3 +621,65 @@ and is hardwired to five captures.  Use `duotone`, which does its PCA with
 **`scipy` is installed but missing from `requirements-frozen.txt`**, even
 though `padrect.py` and `segment.py` already import it.  A fresh environment
 built from that file will not run this module.
+
+### 8.11 Dark and gray-chip corrections (changed 2026-09-27)
+
+**Dark: one number per Bayer layer per sweep.**  Measured over every dark
+frame in C1002–C1036 (2564 frames, 1–51 ms, 10 Aug – 26 Sep 2026):
+
+- The frame mean is 64.02–64.04 DN in every layer at every exposure.  Within
+  one sweep, the shortest exposure's mean is within 0.07 DN of every longer
+  one (typically 0.01 DN).  Exposure length does not matter.
+- **Shortest reliable exposure: 1000 µs**, the shortest ever captured (the
+  pre-image darks).  Its mean is as good as any.  Nothing shorter has been
+  captured, so nothing shorter has been tested; the 64 DN level looks like
+  the sensor's fixed black level, so a shorter dark would probably do, but
+  that needs one capture to confirm.
+- Inside one frame, pixels spread 0.73 DN around the mean.  That spread is
+  almost all fresh noise: the same pixel's offset in August and in
+  September correlates only r = 0.17–0.28.  Subtracting a pixel's own dark
+  value therefore adds 0.73 DN of noise and removes almost nothing real,
+  so `probe.Capture.layer` now subtracts the sweep's shortest-exposure dark
+  mean (`capture_h5.dark_level`).  So do `devdesk/flatfield.py`,
+  `flatfield_pool.py` and `hdf5inspect.py` mode 4, whose rows are now
+  labelled `processing = 'dark_level'` instead of `'dark_sub'`.
+- The exceptions are hot pixels: 8–21 per Bayer layer, sitting 0.5–1.4 DN
+  above the frame mean, rising about 0.3 DN per 10 ms of exposure.  They are
+  the same pixels in August and September
+  (`hotpixel_analysis.persistence_over_time`).  At the signal levels here
+  (100–800 DN) they are a 0.2–1 % error on a dozen pixels.
+- **Stored and applied.**  The pooled test over C1014–C1036 at k = 6
+  (`hotpixel_analysis.save_calibration`) put 19 R, 22 Gr, 16 Gb and 16 B
+  pixels in the `hotpixels` table, in whole-sensor layer coordinates,
+  `analysisref = 'dark2026-09-27'`.  k = 6 because the main score hump ends
+  near z ≈ 5 with no clean gap after it, and a masked pixel costs almost
+  nothing (0–4 of ~2300 pad pixels per layer).
+- **How they are used: left out, not repaired.**  `probe.Capture.hot_mask()`
+  reads the table for the archive's own camera and moves the positions onto
+  its crop.  `analysis_1._hot` takes the union over all four Bayer layers —
+  about 70 positions — and masks them in the pad, the paper and both gray
+  chips; `duotone.PadCube` does the same.  The union is used, not each
+  cell's own layer, so every cell keeps the same pixel positions and the
+  cells' pixel lists line up one to one.  A registered pre-image also loses
+  every pixel that resampling drew from one of *its* hot pixels.  On C1032
+  that removes 2 of 1243 eroded pad pixels (6 more for the registered
+  pre-image) and 8 of 2245 in the PCA.
+
+**Gray chips: a per-pixel divisor.**  `padphot.divisor_map` takes the
+cell's fitted polynomial as the *shape* of the light and pegs its *level*
+to the two gray chips in the same frame.  The old `padphot.divisor` gave
+one number for the whole region and divided the paper by the pad's number.
+On C1032 the light varies 0.4–2 % across the pad and differs 1–4 % between
+pad and paper, so R_inf moves by −0.5 % to +3.9 %.
+
+**The fitted polynomial is placed by sensor position.**  The models were
+fitted on bound 39 (y = 588); C1014 onward are cropped at y = 548, but the
+gray chips sit on the same sensor row in both, so the stage did not move —
+only the crop did.  `whitecorr.LayerModel.gain_at` shifts the surface by
+the difference (20 layer rows) and leaves NaN outside the fitted rows
+rather than extrapolate.  The old `gain()` indexed by crop position and
+was 20 rows off for C1014 onward; on region averages that cost under 0.4 %.
+
+**The interim store is stamped** with `analysis_1.CHAIN`.  Results written
+before this change have no stamp and are recomputed rather than reused.
+

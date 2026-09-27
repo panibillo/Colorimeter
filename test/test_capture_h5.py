@@ -554,5 +554,66 @@ class TestSections(CaptureSuiteWriterTestCase):
             self.assertNotIn("/pre", f)
 
 
+# ---------------------------------------------------------------------------
+# dark_level: one number per Bayer layer per sweep
+# ---------------------------------------------------------------------------
+
+class TestDarkLevel(CaptureSuiteWriterTestCase):
+    """
+    The dark correction is the mean of the sweep's shortest-exposure dark
+    frame, one number per Bayer layer -- see the comment above
+    capture_h5.dark_level for the measurements behind that choice.
+    """
+
+    def level(self, ch, section="", fallback=None):
+        from hdf5read import Hdf5Reader
+        with Hdf5Reader(str(self.path)) as r:
+            return capture_h5.dark_level(r, ch, section, fallback)
+
+    def test_shortest_exposure_is_used(self):
+        with self.writer() as w:
+            w.add_dark(_layers(30), exposure_us=30000)
+            w.add_dark(_layers(20), exposure_us=1000)
+            w.add_dark(_layers(40), exposure_us=5000)
+        self.assertEqual(self.level("B"), (20.0, 1000))
+        self.assertEqual(self.level("R"), (23.0, 1000))   # per layer
+
+    def test_after_preferred_over_before_at_equal_exposure(self):
+        with self.writer() as w:
+            w.add_dark(_layers(50), exposure_us=1000, when="before")
+            w.add_dark(_layers(60), exposure_us=1000, when="after")
+        self.assertEqual(self.level("B"), (60.0, 1000))
+
+    def test_omitted_layer_supplies_its_raw_mean(self):
+        with self.writer() as w:
+            w.add_dark(_layers(20), exposure_us=1000, omit=("B",))
+            w.add_dark(_layers(30), exposure_us=5000)
+        self.assertEqual(self.level("B"), (20.0, 1000))
+
+    def test_each_section_uses_its_own_darks(self):
+        with self.writer() as w:
+            w.add_dark(_layers(20), exposure_us=1000)
+        with self.writer(section="/pre", mode="a") as w:
+            w.add_dark(_layers(70), exposure_us=1000)
+        self.assertEqual(self.level("B"), (20.0, 1000))
+        self.assertEqual(self.level("B", "pre"), (70.0, 1000))
+
+    def test_fallback_when_no_shared_darks(self):
+        with h5py.File(self.path, "w") as f:
+            ds = f.create_dataset("/leds/amber/dark/e0/B",
+                                  data=np.full((4, 3), 7, dtype=np.uint16))
+            ds.attrs["exposure_us"] = 45691
+        self.assertEqual(self.level("B", fallback="/leds/amber/dark/e0/B"),
+                         (7.0, 45691))
+
+    def test_no_dark_at_all_raises(self):
+        with self.writer() as w:
+            w.add_dark(_layers(20), exposure_us=1000)
+        with h5py.File(self.path, "a") as f:
+            del f["/dark"]
+        with self.assertRaises(KeyError):
+            self.level("B")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

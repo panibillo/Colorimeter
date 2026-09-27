@@ -2,7 +2,7 @@
 
 For every capture x LED x layer x exposure rung:
 
-    signal   = lit - dark, per pixel, in DN
+    signal   = lit - dark_level, DN (one number per Bayer layer; see probe)
     region   = the pad rectangle eroded by `erode` layer px (padrect.PadRect)
     divisor  = w1 * mean(chip1 signal) + w2 * mean(chip2 signal), with w1/w2
                recomputed for the region actually measured (whitecorr)
