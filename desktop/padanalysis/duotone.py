@@ -9,7 +9,7 @@ therefore not a pad with a bright middle -- it is two chemical states with
 different spectra, and one number per pad cannot hold both.
 
 The model this module fits, per pixel, in absorbance against the strip's own
-bare paper:
+dry pad (the pre-image):
 
     A[px, cell] = g[px] * 1 + y[px] * eps_y[cell] + b[px] * eps_b[cell]
 
@@ -38,13 +38,26 @@ Coordinates and units
 ---------------------
 Everything is in bound-crop Bayer-layer pixels (130 x 183 for bound 39), the
 grid `probe.Capture.layer()` and `padrect.PadRect` already share.  Absorbance
-is base-10, referred to the strip's own bare paper in the same frame under
-the same illuminant, so bare paper sits at 0 by construction and an unstained
-pad sits a little above it.
+is base-10, `A` from `analysis_1.get_balanced_cell_data`: reflectance
+against the gray chips, divided by the strip's own dry pad as photographed
+in the pre-image (`analysis_1.pre_white`).  So the dry pad's median sits at
+0 by construction, and A is the change the reagent made.
 
-Cells are the 27 (LED, Bayer layer) pairs that carry a published flat-field
-model (`whitecorr.load_models`), which are exactly the pairs where an LED
-meaningfully excites a layer.
+The white reference
+-------------------
+Until 2026-09-27 this module referred everything to the strip's bare paper
+below the pad, and measured its noise there.  It no longer reads the bare
+paper at all: the white is the dry pad, and the noise is measured on the
+dry pad too.  Figures and stored results made before that date used the
+paper and are not comparable.
+
+Cells are the (LED, Bayer layer) pairs that carry a published flat-field
+model *and* have a dry-pad reference -- that is, the pre-image lit them
+(`analysis_1.PRECELLS`, eight on the current recipe) and the measurement
+kept them.  On C1017-C1036 that is 6 or 8.  Captures without a pre-image
+(C1002-C1009) have none and cannot be built; C1014's has two.  `look3.py`
+and `report14.py`, which were written on those captures, are kept as
+records of the bare-paper study and no longer run.
 """
 import sys
 from pathlib import Path
@@ -52,10 +65,8 @@ from pathlib import Path
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from padrect import PadRect  # noqa: E402
-from probe import Capture, open_capture  # noqa: E402
-from padphot import divisor_map  # noqa: E402
-from whitecorr import load_models, rect_mask  # noqa: E402
+import analysis_1 as a1  # noqa: E402
+from whitecorr import rect_mask  # noqa: E402
 
 #: Nominal LED peak wavelength in nm, from src/lighting_cal8.py.  White is
 #: broadband and is parked past the red end so orderings put it last.
@@ -65,10 +76,10 @@ NM = {
     "white": 999,
 }
 
-#: Screens lifted from measure.py/pca.py so every tool agrees on what a
-#: usable exposure is.
+#: Clipping screen for `render_rgb`'s picture, the same ceiling
+#: measure.py, pca.py and analysis_1 use.  The measurement itself is
+#: screened by `analysis_1.rung_verdict`.
 SATURATED_DN = 1000
-MIN_SIGNAL_DN = 25.0
 
 #: Wavelength split used to tell the two fitted endmembers apart.  The yellow
 #: product absorbs below the edge and the brown one carries on past it
@@ -92,126 +103,103 @@ class PadCube:
     """
     One capture's pad, as absorbance per pixel per cell.
 
+    Every value comes from `analysis_1.get_balanced_cell_data`, the same
+    chain `R_inf` uses -- dark level, per-pixel gray-chip divisor, and the
+    strip's own dry pad in the pre-image as the white -- so a cube pixel's
+    absorbance is exactly that function's `A` at the same pixel.  The rung
+    and the white are the ones it picks, at its own erosion
+    (`analysis_1.ERODE`), whatever `erode` this cube keeps; `erode` only
+    decides which pad pixels become rows.  Nothing is read from the bare
+    paper below the pad.
+
     Attributes:
-        capture: The open `probe.Capture`.
+        samp_no: Capture name.
+        capture: The open measurement `probe.Capture` (for `render_rgb`).
         pad: The fitted `padrect.PadRect`.
         cells: List of (led, layer) pairs, ordered by wavelength then layer.
-        A: (n_px, n_cells) absorbance of the pad pixels against bare paper.
+        A: (n_px, n_cells) absorbance of the pad pixels against the dry pad.
         depth: (n_px,) distance inside the pad edge, layer px.
         yx: (n_px, 2) row/column of each pad pixel, for painting maps back.
         shape: (rows, cols) of the layer grid.
-        mask: (rows, cols) bool, the pad pixels A's rows correspond to.
-        sigma: (n_cells,) per-pixel absorbance noise, measured on bare paper.
-        rungs: {cell: rung} actually used.
-        paper: (n_cells,) the bare-paper reflectance each cell was referred to.
+        mask: (rows, cols) bool, the pad pixels A's rows correspond to --
+            the pad eroded by `erode`, less hot pixels and any pixel that
+            is not finite in every cell.
+        sigma: (n_cells,) pixel-to-pixel scatter in absorbance -- mostly the
+            paper's own texture -- on the pre-image's dry pad (`_pair_noise`).
+        dnoise: (n_pairs, n_cells) the neighbor differences `sigma` came
+            from, kept across all cells so `noise_cov` can see their
+            correlations.
+        rungs: {cell: rung} read on the measurement.
+        white: (n_cells,) the dry-pad reflectance `R_white` each cell was
+            divided by.
+        skipped: {cell: why} for every modelled cell left out.
     """
 
-    def __init__(self, capture: Capture, models: dict, erode: float = 0.0):
+    def __init__(self, samp_no: str, erode: float = 0.0):
         """
         Args:
-            capture: Open capture, already positioned on a section.
-            models: `whitecorr.load_models()` result, shared across captures.
+            samp_no: Capture name, e.g. 'C1032'.
             erode: Pad erosion in layer px.  The default keeps the rim:
                 `report4.py` found the dye-sensitive cells get *worse* with
                 deeper erosion, so the rim holds chemistry, and the flat term
                 is here to deal with the shadow that comes with it.
+
+        Raises:
+            RuntimeError: No cell has a dry-pad white reference -- most
+                often, the archive has no pre-image.
         """
-        self.capture = capture
-        self.pad = PadRect(capture)
+        self.samp_no = samp_no
+        self.capture = a1.open_sample(samp_no, "")
+        self.pad = a1.pad_of(samp_no, "")
         self.shape = self.pad.tot.shape
-        # Known hot pixels -- hot in any Bayer layer, from the `hotpixels`
-        # table -- are left out of the pad, the paper and the chips alike,
-        # so every cell keeps the same pixel positions (the cube's rows).
-        # Left out, not repaired.  See analysis_1._hot.
-        hot = capture.hot_mask()
-        self.mask = self.pad.mask(erode) & ~hot
-        paper_mask, paper_depth = self.pad.paper_mask()
-        # The paper reference has to be bare paper, not the pad's own skirt:
-        # trim it the same way measure.py does before it averages.
-        paper_mask = paper_mask & (paper_depth > 2.0) & ~hot
+        # Known hot pixels -- hot in any Bayer layer -- are left out, so
+        # every cell keeps the same pixel positions (the cube's rows).
+        mask = self.pad.mask(erode) & ~a1._hot(samp_no, "")
 
-        chip1 = rect_mask(self.shape, capture.rects["gray1"]) & ~hot
-        chip2 = rect_mask(self.shape, capture.rects["gray2"]) & ~hot
-
-        self.paper_mask = paper_mask
-        cells, planes, rungs, paper, sigma = [], [], {}, [], []
-        for cell, model in sorted(models.items(), key=lambda kv: (
-                cell_nm(kv[0]), kv[0][1])):
-            if not model.usable:
+        cells, planes, pre_planes, rungs, white = [], [], [], {}, []
+        self.skipped = {}
+        for cell in sorted(a1.models(), key=lambda c: (cell_nm(c), c[1])):
+            b = a1.get_balanced_cell_data(samp_no, *cell, roi=a1.ROIBOUND)
+            if b is None:
+                self.skipped[cell] = a1.rung_verdict(samp_no, cell)[1]
                 continue
-            plane = self._reflectance(cell, model, chip1, chip2, paper_mask)
-            if plane is None:
+            if b.A is None:
+                self.skipped[cell] = f"no white reference: {b.white_why}"
                 continue
-            r, rung = plane
-            ref = float(np.nanmedian(r[paper_mask]))
-            if ref <= 0:
+            # The dry pad on the pre-image's own grid, not shifted onto the
+            # measurement's: resampling would smooth away the very
+            # pixel-to-pixel scatter it is read for.
+            pre = a1.get_balanced_cell_data(samp_no, *cell, roi=a1.ROISAMPLE,
+                                            sec=a1.PRE, register=False)
+            if pre is None or pre.A is None:
+                self.skipped[cell] = "pre-image pad not readable for noise"
                 continue
-            a = -np.log10(np.maximum(r, 1e-6) / ref)
             cells.append(cell)
-            planes.append(a)
-            rungs[cell] = rung
-            paper.append(ref)
-            sigma.append(_paper_noise(a, paper_mask))
+            planes.append(np.ma.filled(b.A.astype(float), np.nan))
+            pre_planes.append(np.ma.filled(pre.A.astype(float), np.nan))
+            rungs[cell] = b.rung
+            white.append(b.R_white)
+        if not cells:
+            raise RuntimeError(f"{samp_no}: no cell has a dry-pad white "
+                               f"reference ({_sections_note(samp_no)})")
 
         self.cells = cells
         self.rungs = rungs
-        self.paper = np.array(paper)
-        self.sigma = np.array(sigma)
+        self.white = np.array(white)
         cube = np.stack(planes, axis=-1)          # (rows, cols, n_cells)
+        self.mask = mask & np.isfinite(cube).all(axis=-1)
         self.A = cube[self.mask]                  # (n_px, n_cells)
-        # Adjacent-pixel differences on bare paper, kept as the raw material
-        # for the noise covariance: same construction as _paper_noise, but
-        # across all cells at once so their correlations survive.
-        pair = paper_mask[:, :-1] & paper_mask[:, 1:]
-        self.dpaper = ((cube[:, 1:, :] - cube[:, :-1, :])[pair]
-                       / np.sqrt(2.0))            # (n_pairs, n_cells)
         self.depth = self.pad.depth[self.mask]
         ys, xs = np.nonzero(self.mask)
         self.yx = np.column_stack([ys, xs])
 
-    def _reflectance(self, cell, model, chip1, chip2, paper_mask):
-        """
-        Return (reflectance plane, rung) for one cell, or None.
-
-        Reflectance is signal over `padphot.divisor_map` -- the cell's
-        published flat-field polynomial pegged to the two gray chips of this
-        frame -- per pixel, so the light is corrected at every pad pixel and
-        at every paper pixel separately.  (Until 2026-09-27 this was one
-        number for the pad and paper together.)  The rung is the brightest
-        one that clips nowhere that matters, so each cell is read where its
-        signal-to-noise is best.
-        """
-        led, layer = cell
-        if led not in self.capture.leds:
-            return None          # a short sweep -- a pre-image holds two LEDs
-        region = self.mask | paper_mask
-        best = None
-        for rung in self.capture.labels(led):
-            got = self.capture.layer(led, rung, layer)
-            if got is None:
-                continue
-            sig, raw = got
-            if (raw[region | chip1 | chip2] >= SATURATED_DN).any():
-                continue
-            # A dead pixel reads 0 DN, which no illuminated sensor does, and
-            # it survives every other screen: subtract the dark frame and it
-            # is merely dim, take -log10 of it and it is an enormous
-            # absorbance.  C1002's white/e2 R and Gr carry 38 such pixels.
-            if (raw[region] <= 0).any():
-                continue
-            level = float(sig[self.mask].mean())
-            if level < MIN_SIGNAL_DN:
-                continue
-            if best is None or level > best[0]:
-                best = (level, sig, rung)
-        if best is None:
-            return None
-        _, sig, rung = best
-        try:
-            div = divisor_map(model, self.capture.bound, chip1, chip2, sig)
-        except ValueError:
-            return None
-        return np.maximum(sig, 1.0) / div, rung
+        pre = np.stack(pre_planes, axis=-1)       # pre-image grid
+        ok = np.isfinite(pre).all(axis=-1)
+        pair = ok[:, :-1] & ok[:, 1:]
+        self.dnoise = ((pre[:, 1:, :] - pre[:, :-1, :])[pair]
+                       / np.sqrt(2.0))            # (n_pairs, n_cells)
+        self.sigma = np.array([_pair_noise(self.dnoise[:, k])
+                               for k in range(len(cells))])
 
     def paint(self, values, fill=np.nan) -> np.ndarray:
         """
@@ -231,31 +219,41 @@ class PadCube:
         return out
 
 
-def _paper_noise(plane: np.ndarray, paper_mask: np.ndarray) -> float:
-    """
-    Per-pixel absorbance noise of one cell, measured on bare paper.
+def _sections_note(samp_no) -> str:
+    """Say what the archive holds by way of a pre-image, for error text."""
+    if a1.PRE not in a1.sections(samp_no):
+        return "the archive has no pre-image"
+    return (f"the pre-image holds "
+            f"{len(a1.cells_present(samp_no, a1.PRE))} modelled cell(s)")
 
-    Estimated from differences between horizontally adjacent paper pixels
-    rather than from their spread: the paper carries a real illumination
-    gradient, and a plain standard deviation would report that gradient as
-    noise.  Differencing removes anything smooth and leaves what varies pixel
-    to pixel, which is what a per-pixel decision is up against.  The 1/sqrt(2)
-    converts the spread of a difference back to the spread of one pixel.
+
+def _pair_noise(d: np.ndarray) -> float:
+    """
+    Pixel-to-pixel scatter of one cell, from neighbor differences.
+
+    `d` is the differences between horizontally adjacent pixels of the dry
+    pad in the pre-image, already divided by sqrt(2) so its spread is the
+    spread of one pixel.  Differences rather than a plain spread, because
+    the pad carries smooth variation (light fall-off, the paper's own
+    gradient) that a standard deviation would report as scatter; differencing
+    removes anything smooth and leaves what varies pixel to pixel, which is
+    what a per-pixel decision is up against.
+
+    It is mostly the paper's own texture, not camera noise: 90-99 % of it
+    repeats between exposures, camera noise is ~0.002 A (shading_study.py,
+    step 1a), so the pre-image's shorter exposure hardly matters.
 
     Args:
-        plane: (rows, cols) absorbance.
-        paper_mask: (rows, cols) bool, bare paper.
+        d: (n_pairs,) neighbor differences / sqrt(2).
 
     Returns:
         Robust sigma in absorbance units.
     """
-    pair = paper_mask[:, :-1] & paper_mask[:, 1:]
-    if not pair.any():
+    if d.size == 0:
         return float("nan")
-    d = (plane[:, 1:] - plane[:, :-1])[pair]
-    # MAD rather than std: a speck of dust on the paper is not noise.
+    # MAD rather than std: one speck of dust should not decide the spread.
     mad = np.median(np.abs(d - np.median(d)))
-    return float(1.4826 * mad / np.sqrt(2.0))
+    return float(1.4826 * mad)
 
 
 def flat_direction(n: int) -> np.ndarray:
@@ -470,8 +468,8 @@ def amount_sigma(sigma: np.ndarray, eps_y, eps_b) -> tuple:
     """
     u = flat_direction(len(sigma))
     E = np.column_stack([eps_y - (eps_y @ u) * u, eps_b - (eps_b @ u) * u])
-    # Cell noise is independent pixel to pixel; the flat projection mixes it,
-    # so carry the full covariance rather than the diagonal.
+    # Channels are taken as unrelated (diagonal); removing the flat part then
+    # mixes them, so carry the full covariance through the projection.
     P = np.eye(len(sigma)) - np.outer(u, u)
     C = P @ np.diag(sigma ** 2) @ P.T
     pinv = np.linalg.inv(E.T @ E) @ E.T
@@ -483,15 +481,17 @@ def amount_sigma(sigma: np.ndarray, eps_y, eps_b) -> tuple:
 
 def noise_cov(cubes) -> np.ndarray:
     """
-    Per-pixel noise covariance across cells, in absorbance squared.
+    Per-pixel scatter covariance across cells, in absorbance squared.
 
-    The correlations are the point, not a refinement.  Most of the pixel-to-
-    pixel variation on paper is achromatic -- the surface is rough, and a
-    fibre standing proud dims every band together -- so it lies along the
-    same flat direction that shading does, and a projector that removes
-    shading removes most of the noise with it.  Score subsets against a
-    diagonal covariance and that cancellation is invisible, which flatters
-    every subset equally and ranks them wrongly.
+    Measured on the dry pad in the pre-image (`PadCube.dnoise`).
+
+    Why the correlations matter: part of the pad's texture dims every
+    channel together (a fiber standing proud), and removing the flat
+    direction removes that part too; a diagonal covariance cannot see it.
+    How big that part is depends on scale: neighbor differences correlate
+    only 0.01-0.33 between cells on the dry pad (duotone_guide.tex, sec. 9),
+    while texture 1-4 px across agrees between LEDs at 0.5-0.8
+    (shading_study.py, step 1a).
 
     Variances come from the robust per-cell sigmas and correlations from the
     sample covariance, so one speck of dust cannot inflate a variance while
@@ -504,10 +504,10 @@ def noise_cov(cubes) -> np.ndarray:
         (n_cells, n_cells) covariance.
     """
     if isinstance(cubes, dict):
-        d = np.vstack([c.dpaper for c in cubes.values()])
+        d = np.vstack([c.dnoise for c in cubes.values()])
         sigma = np.mean([c.sigma for c in cubes.values()], axis=0)
     else:
-        d, sigma = cubes.dpaper, cubes.sigma
+        d, sigma = cubes.dnoise, cubes.sigma
     corr = np.corrcoef(d.T)
     return np.outer(sigma, sigma) * corr
 
@@ -718,26 +718,24 @@ def render_rgb(cube: PadCube, gamma: float = 2.2,
     return np.clip(rgb / max(scale, 1e-6), 0, 1) ** (1.0 / gamma)
 
 
-def build(names, erode: float = 0.0, models: dict = None) -> dict:
+def build(names, erode: float = 0.0) -> dict:
     """
     Build one `PadCube` per capture, on a cell set they all share.
 
     Cells are intersected rather than assumed: an LED that clipped on one
-    strip is simply absent there, and a matrix with a hole in it is worse
-    than a narrower matrix.
+    strip, or that its pre-image did not light, is simply absent there, and
+    a matrix with a hole in it is worse than a narrower matrix.
 
     Args:
-        names: Capture labels, as `probe.open_capture` takes them.
+        names: Capture names, e.g. 'C1032'.  Each needs a pre-image.
         erode: Pad erosion in layer px.
-        models: `whitecorr.load_models()` result; loaded if not given.
 
     Returns:
         {name: PadCube}, every cube restricted to the shared cell list.
     """
-    models = load_models() if models is None else models
     cubes = {}
     for name in names:
-        cubes[name] = PadCube(open_capture(name), models, erode=erode)
+        cubes[name] = PadCube(name, erode=erode)
 
     shared = set(cubes[names[0]].cells)
     for cube in cubes.values():
@@ -747,9 +745,9 @@ def build(names, erode: float = 0.0, models: dict = None) -> dict:
     for cube in cubes.values():
         keep = [cube.cells.index(c) for c in shared]
         cube.A = cube.A[:, keep]
-        cube.dpaper = cube.dpaper[:, keep]
+        cube.dnoise = cube.dnoise[:, keep]
         cube.sigma = cube.sigma[keep]
-        cube.paper = cube.paper[keep]
+        cube.white = cube.white[keep]
         cube.cells = list(shared)
     return cubes
 
@@ -785,8 +783,8 @@ def fit(cubes: dict, percentile: float = 2.0):
 
 
 if __name__ == "__main__":
-    names = sys.argv[1:] or ["C1002", "C1003", "C1004", "C1005",
-                             "C1008", "C1009", "C1014"]
+    names = sys.argv[1:] or [f"C{n}" for n in (*range(1017, 1026),
+                                               *range(1028, 1037))]
     cubes = build(names)
     cells = cubes[names[0]].cells
     print(f"{len(cells)} shared cells over {len(names)} captures")

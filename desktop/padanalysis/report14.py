@@ -1,5 +1,12 @@
 """report14.py -- which colour sets separate brown from yellow, and how well.
 
+**Kept as a record; no longer runs.**  Written in 2026-08 on C1002-C1014,
+when `duotone.PadCube` referred every cell to the strip's bare paper and
+used up to 27 cells.  Since 2026-09-27 PadCube's white is the strip's own
+dry pad in the pre-image, which C1002-C1009 do not have (C1014's holds two
+cells), so `duotone.build` now raises on these captures.  Its figure in
+`fig/` is from the bare-paper version.
+
 The pad carries two products, not one colour at two strengths: yellow where
 the arsine load is light, brown where it is heavy.  `duotone.py` fits both
 per pixel from all 26 cells; this report asks how few of those cells are

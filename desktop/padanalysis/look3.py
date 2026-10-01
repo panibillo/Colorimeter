@@ -1,5 +1,12 @@
 """look3.py -- the pads as they look, beside what the two-dye model made of them.
 
+**Kept as a record; no longer runs.**  Written in 2026-08 on C1002-C1014,
+when `duotone.PadCube` referred every cell to the strip's bare paper and
+used up to 27 cells.  Since 2026-09-27 PadCube's white is the strip's own
+dry pad in the pre-image, which C1002-C1009 do not have (C1014's holds two
+cells), so `duotone.build` now raises on these captures.  Its figure in
+`fig/` is from the bare-paper version.
+
 Nothing here is a measurement.  It exists to be approved or rejected by eye:
 if the middle row does not agree with what the top row plainly shows, the
 model in `duotone.py` is wrong and no ranking built on it is worth reading.

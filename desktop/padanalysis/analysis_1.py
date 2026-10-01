@@ -1085,7 +1085,7 @@ def get_balanced_cell_data(samp_no, LED, Bayerlayer, roi=ROISAMPLE,
        pad, in the same sweep.  That was the wrong reference: the paper is a
        different patch of the strip, in different light, never under the
        reagent, and about twice as bright as the chips, so it clipped on the
-       short wavelengths.  It is no longer read at all.
+       short wavelengths.  It is no longer read except to find the pad edge.
 
        R_white is one number per cell, the same whichever sweep is being
        balanced (a pre-image is divided by its own pad, and so is the
@@ -1102,7 +1102,7 @@ def get_balanced_cell_data(samp_no, LED, Bayerlayer, roi=ROISAMPLE,
        `white_why` says why.
 
     4. *The transforms.*  `A = -log10(R_inf)` and `KS = f(R_inf) = K/S`.
-       They are different linearisations of the same measurement, not two
+       They are different linearizations of the same measurement, not two
        names for one; see `padphot` for which to trust when.
 
     **What the numbers mean.**  On the dry pad itself (the pre-image, roi
@@ -1762,6 +1762,12 @@ def cell_PCA(samp_no, figs=True, savefigs=False, erode=0.0,
     shading direction is projected out.  The PCA is the step that finds the
     plane that cloud lives in.
 
+    **Which cells.**  The absorbance is `A` from `get_balanced_cell_data`,
+    white = the strip's own dry pad in the pre-image, so only cells that
+    have that reference take part: 6 or 8 on C1017-C1036.  (Until
+    2026-09-27 `duotone.PadCube` referred to the bare paper and used up to
+    27; figures from before then are not comparable.)
+
     **Which endmembers.**  Fitted on this pad alone by default, which is the
     honest first look at one strip but is not comparable between strips:
     "brown" would mean a different spectrum on each.  Pass `endmembers` from
@@ -1811,7 +1817,7 @@ def cell_PCA(samp_no, figs=True, savefigs=False, erode=0.0,
                          residual_rms, unmix)
     from duotone import endmembers as fit_endmembers
 
-    cube = PadCube(open_sample(samp_no, ""), models(), erode=erode)
+    cube = PadCube(samp_no, erode=erode)
     if len(cube.cells) < 3:
         raise RuntimeError(f"{samp_no}: {len(cube.cells)} cells is too few "
                            f"for a two-dye model")
