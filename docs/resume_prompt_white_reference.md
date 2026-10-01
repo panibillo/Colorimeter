@@ -192,13 +192,10 @@ that the paper is no longer the white reference.
 
 ---
 
-## Suggested first step (waits for Bill)
+## Suggested next step
 
-Show Bill, for one capture (C1032), the yellow and brown layers from
-`cell_PCA` as they are now (paper reference) next to the same layers
-built from the 8 pre-image channels against the dry pad.  Let him judge
-by eye whether losing the other 19 channels costs anything visible, before
-deciding question 1.
+None pending.  The `PadCube` switch is committed (`ab8c5e9`); the
+remaining items above (2-5) wait for Bill to pick one.
 
 ---
 
