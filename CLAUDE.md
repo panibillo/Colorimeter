@@ -22,6 +22,8 @@ This project's guidance is organized into three focused documents:
 - Code style and error handling
 - Documentation standards (docstrings, markdown)
 - Testing and performance guidelines
+- Use plain English and avoid jargon.  
+- U.S. spelling.
 
 ---
 
@@ -30,6 +32,7 @@ This project's guidance is organized into three focused documents:
 - **New to the project?** → Start with [PROJECT_OVERVIEW.md](PROJECT_OVERVIEW.md)
 - **Implementing features?** → Check [ARCHITECTURE.md](ARCHITECTURE.md) then [CODING_GUIDELINES.md](CODING_GUIDELINES.md)
 - **Code review?** → Use [CODING_GUIDELINES.md](CODING_GUIDELINES.md) as a checklist
+- **Working on the analysis chain** (images, statistics, color, write-ups)? → Read [How_best_to_help_Bill.md](How_best_to_help_Bill.md) first
 
 ## Why Separate Docs?
 
