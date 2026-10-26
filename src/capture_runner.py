@@ -165,9 +165,10 @@ MODE_PRE         = "pre"
 #
 #   Fewer LEDs.  Only the illuminants the measurement actually uses need a
 #     blank. capture.preimage_led_order holds them (royal_blue and red).
-#   One exposure, shifted down.  capture.preimage_rung_shift moves it two
-#     rungs below e* — see exposure_repo.shift_exposures() for why an
-#     undyed pad needs a shorter exposure than the gray card does.
+#   The flagged exposures only.  Calibration marks which of an LED's tested
+#     exposures the pre-image takes (the `preimage` column of the exposure
+#     table; one, the middle of the usable range, unless it is told otherwise).
+#     Every one of them was tested not to clip the white patch of the test pad.
 #   No photograph.  The closing colour photo is taken under the white LED,
 #     which is exactly the broadband flash this path exists to avoid.
 #
@@ -181,38 +182,6 @@ MODE_PRE         = "pre"
 # file; the measurement run reopens it with mode="a", by way of
 # CaptureConfig.archive_path.
 PRE_SECTION = "/pre"
-
-# Per-LED rung shifts for pre-image captures
-# ------------------------------------------
-# The unreacted pad's brightness varies by wavelength. Shorter wavelengths
-# (violet, blue) see a bright pad that needs more aggressive exposure reduction.
-# Longer wavelengths (cyan, green, red) see a dimmer pad that needs less
-# reduction to preserve pre-image SNR. See docs/preimage_exposure_explanation.md.
-def preimage_rung_shift_for_led(led: str) -> int:
-    """Return the rung shift for pre-image of one LED.
-
-    Based on analysis in docs/exposure_optimization_2026-08-20.md, Section 4.2.
-    Wavelength-dependent shifts preserve signal-to-noise in blank measurements:
-    - Short wavelengths (violet, blue, royal_blue): -2 rungs (pad is bright)
-    - Mid wavelengths (cyan, green): -1 rung (pad is dimmer)
-    - Long wavelengths (red, photo_red, amber): -2 rungs (pad is bright again)
-    - Broadband (white): -2 rungs (conservative default)
-
-    Returns the default -2 for unknown LEDs.
-    """
-    shifts = {
-        'violet': -2,
-        'royal_blue': -2,
-        'blue': -2,
-        'cyan': -1,
-        'green': -1,
-        'amber': -2,
-        'red_orange': -2,
-        'red': -2,
-        'photo_red': -2,
-        'white': -2,
-    }
-    return shifts.get(led, -2)
 
 # TODO(undecided): consider moving exposure calibration WHOLLY to the
 # Menu → Capture screen as a standalone operation, run outside the context of a
@@ -238,14 +207,6 @@ class CaptureConfig:
     # group to use — its name is the number of images per LED ('1'..'5').
     mode:           str = MODE_CALIBRATION
     exposure_group: str = "1"
-    # Whole ladder rungs to move every stored exposure by before capturing
-    # (normal/pre only) — negative shortens. 0 shoots the group as calibrated,
-    # which is what a measurement wants: e* puts the gray card near half scale
-    # and the card is what the measurement is referred to. A pre-image is
-    # photographing an undyed pad instead, which reflects about 2.2x the card
-    # in royal blue and would clip at e*, so it asks for -2. See
-    # exposure_repo.shift_exposures().
-    rung_shift:     int = 0
     # An existing archive to add this run to, instead of creating one. Set by
     # the measurement run of a sample whose pre-image already opened the file,
     # so both sweeps of one strip land together. None (the default) creates a
@@ -1556,6 +1517,22 @@ class CaptureRunner:
     # "before" batch is gone. The schema still names the batch ("after_<us>us")
     # and readers still prefer it, so archives holding both remain readable.
 
+    def _stored_exposures(self, color: str, group: str) -> "list[int]":
+        """
+        The exposures to shoot for one LED.
+
+        A pre-image takes the ones flagged for it; if none are flagged, the
+        middle of group 1.  Any other run takes the whole stored group.
+        Empty when the LED has no usable calibration.
+        """
+        if self._is_pre():
+            flagged = exposure_repo.read_preimage_exposures(color)
+            if flagged:
+                return flagged
+            middle = exposure_repo.middle_exposure(color, "1")
+            return [middle] if middle else []
+        return exposure_repo.read_exposures(color, group)
+
     def run_prefetch(self) -> Iterator[Progress]:
         """
         Normal-path stage 1: camera init, focus, and opening the archive.
@@ -1619,27 +1596,12 @@ class CaptureRunner:
             distinct_us: set = set()
 
             for color in self._color_order:
-                exposures_us = exposure_repo.read_exposures(color, group)
+                exposures_us = self._stored_exposures(color, group)
                 used_fallback = not exposures_us
                 if used_fallback:
                     exposures_us = [cfg.initial_us]
                     log.warning("LED %s has no exposures for group %s — "
                                 "falling back to %d µs", color, group, cfg.initial_us)
-                else:
-                    # Only a calibrated ladder is shifted. The fallback is a
-                    # bare guess with no rung to be two rungs below, so moving
-                    # it would be arithmetic on a number that means nothing.
-                    # In pre-image mode, use per-LED shifts to optimize SNR
-                    # (cyan/green need -1 rung; others -2). Otherwise use the
-                    # uniform rung_shift (normal mode or explicit override).
-                    rung_shift = (preimage_rung_shift_for_led(color)
-                                  if self._is_pre() else cfg.rung_shift)
-                    if rung_shift:
-                        shifted = exposure_repo.shift_exposures(
-                            exposures_us, rung_shift)
-                        log.info("LED %s: %+d rung(s) — %s µs -> %s µs",
-                                 color, rung_shift, exposures_us, shifted)
-                        exposures_us = shifted
                 self._color_exposures[color] = exposures_us
                 self._color_labels[color]    = [f"e{i}" for i in range(len(exposures_us))]
                 self._color_fallback[color]  = used_fallback
@@ -1683,12 +1645,10 @@ class CaptureRunner:
         leds = self._leds
         w    = self._writer
         try:
-            shift = self.config.rung_shift
             yield self._progress(
                 "capture",
                 f"{'Pre-image' if self._is_pre() else 'Normal capture'} — "
-                f"exposure group {self._group}"
-                f"{f', {shift:+d} rung(s)' if shift else ''}")
+                f"exposure group {self._group}")
 
             for color in self._color_order:
                 self._led_index    += 1

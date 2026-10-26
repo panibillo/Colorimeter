@@ -88,7 +88,6 @@ Public surface
     capture_dir() / capture_suite_id() / capture_archive_name()
     capture_led_color_order() / capture_camera_warmup_s()
     capture_preimage_enabled() / capture_preimage_led_order()
-    capture_preimage_rung_shift()
     capture_prefetch_budget_s()
     capture_layer_keep_min_dn() / capture_layer_keep_max_dn()
     calibration_window_low_dn() / calibration_window_high_dn()
@@ -932,19 +931,6 @@ def capture_preimage_led_order() -> list:
     """
     raw = str(get("capture", "preimage_led_order"))
     return [c.strip() for c in raw.split(",") if c.strip()]
-
-
-def capture_preimage_rung_shift() -> int:
-    """
-    Whole ladder rungs below e* the pre-image shoots at (negative shortens).
-
-    Seeded -2.  The exposure ladder is calibrated so e* puts the gray card near
-    half scale, and an unexposed pad reflects about 2.2x the card in royal
-    blue: at e* it would clip, and a clipped blank is no blank at all.  Two
-    rungs is 1/2.25, which lands it near mid-scale.  See
-    exposure_repo.shift_exposures().
-    """
-    return int(get("capture", "preimage_rung_shift"))
 
 
 def capture_photo_wb_gains() -> tuple:

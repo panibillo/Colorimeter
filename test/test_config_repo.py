@@ -110,7 +110,6 @@ class TestSeededValues(ConfigTestCase):
         self.assertTrue(config.capture_preimage_enabled())
         self.assertEqual(config.capture_preimage_led_order(),
                          ["royal_blue", "red"])
-        self.assertEqual(config.capture_preimage_rung_shift(), -2)
 
     def test_calibration_window(self):
         """The window is its own pair of limits, not the layer-keep ones."""

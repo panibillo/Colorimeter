@@ -107,9 +107,7 @@ INSERT OR IGNORE INTO config (active, isdefault, editable, add_dt, role, name,
    'offer a pre-image of the unreacted strip before reagent 1'),
   (0, 1, 1, '2026-08-18 00:00:00', 'capture', 'preimage_led_order', 'str',
    'royal_blue,red', 'seed',
-   'LEDs the pre-image sweeps; keep it short — this light falls on an unreacted pad'),
-  (0, 1, 1, '2026-08-18 00:00:00', 'capture', 'preimage_rung_shift', 'int', '-2', 'seed',
-   'ladder rungs below e* the pre-image shoots at; an undyed pad clips at e*');
+   'LEDs the pre-image sweeps; keep it short — this light falls on an unreacted pad');
 -- ── calibration ─────────────────────────────────────────────────────────────
 -- The window every stored exposure bracket must fit on the test pad (white,
 -- yellow and brown patches) and the gray chips.  Placeholders for Bill to tune.

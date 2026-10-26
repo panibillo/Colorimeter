@@ -344,20 +344,16 @@ class Arbiter:
         # Menu screen state: the slot to return to when the menu closes.
         self._pre_menu_slot: Slot | None = None
 
-        # Capture screen state (Menu → Capture): the staged path + images
-        # choice, which view is showing, and the run's progress/result text.
-        # A menu-launched capture uses self._capture with _capture_slot = None
-        # (the None marks it standalone, so pump_capture routes it here).
-        # _cap_mode is the Path radio: it selects the mode a Capture takes
-        # during a *test sequence* (ReadPhase → request_capture).  The Menu →
-        # Capture "Calibrate Exposures" button is calibration-only and does NOT
-        # read it — the standalone run's mode is _cap_run_mode, fixed at start.
-        self._cap_mode:     str = "normal"    # Path radio: "calibration" | "normal"
-        self._cap_run_mode: str = "calibration"  # the in-flight standalone run's mode
+        # Capture screen state (Menu → Capture): which view is showing and what
+        # kind of run is in flight.  A menu-launched run uses self._capture with
+        # _capture_slot = None (the None marks it standalone, so pump_capture
+        # routes it to _pump_capture_screen).  _cap_mode is the capture path a
+        # *test sequence* takes (ReadPhase → request_capture); the Capture page
+        # no longer sets it.
+        self._cap_mode:     str = "normal"    # "calibration" | "normal"
+        self._cap_run_mode: str = "fit"       # the in-flight standalone run: "fit" | "show"
         self._cap_group: str = "1"            # images per LED, '1'..'5'
-        self._cap_view:  str | None = None    # None | "choice" | "progress" | "done"
-        self._cap_progress: str = ""
-        self._cap_result:   str = ""
+        self._cap_view:  str | None = None    # None | "choice" | "show"
         # Choice form: the LED chosen on the bar, the settings fields' text, and
         # the line of help or status under them.
         self._cap_led: str | None = None
@@ -2073,8 +2069,6 @@ class Arbiter:
         self._cap_fit = None
         self._cap_running = None
         self._cap_stage_from_config()
-        self._cap_progress = ""
-        self._cap_result   = ""
         self._render_capture_choice()
 
     def _initial_exposure_group(self) -> str:
@@ -2584,116 +2578,12 @@ class Arbiter:
         r = layout.SHOW_CANVAS
         return show_plot.render(drawn, (r.w, r.h), window.low_dn, window.high_dn)
 
-    def _render_capture_progress(self) -> None:
-        if self._pool is None:
-            return
-        self._cap_view = "progress"
-        p = self._pool
-        p.hide_all()
-        p["cap_title"].rect = layout.CAP_TITLE       # full width (no corner buttons here)
-        p.put("cap_title", "Calibrating" if self._cap_run_mode == "calibration"
-              else "Capturing")
-        p.put("cap_progress", self._cap_progress or "Working...")
-        p.put("cap_back", "Cancel", on=self._cap_cancel)
-        p.render(self._disp)
-        self._rebuild_focus()
-
-    def _render_capture_done(self) -> None:
-        if self._pool is None:
-            return
-        self._cap_view = "done"
-        p = self._pool
-        p.hide_all()
-        p["cap_title"].rect = layout.CAP_TITLE       # full width (no corner buttons here)
-        failed = "fail" in self._cap_result.lower()
-        p.put("cap_title", "Failed" if failed else "Done")
-        p.put("cap_progress", self._cap_result or "")
-        p.put("cap_start", "OK", on=self._cap_done_ok)
-        p.render(self._disp)
-        self._rebuild_focus()
-
-    def _cap_done_ok(self) -> None:
-        self._cap_view = None
-        self._render_menu()
-
-    def _cap_cancel(self) -> None:
-        """Abandon a running menu capture and return to the Menu."""
-        if self._capture is not None:
-            try:
-                self._capture.cancel()
-            except Exception:
-                log.exception("Arbiter: menu capture cancel failed")
-        self._capture = None
-        self._capture_slot = None
-        self._cap_view = None
-        self._render_menu()
-
     def _pump_capture_screen(self, session) -> None:
-        """Drive a menu-launched capture and mirror it onto the capture screen."""
-        if self._cap_run_mode == "fit":
-            self._pump_fit(session)
-            return
+        """Drive a menu-launched fit or Show capture."""
         if self._cap_run_mode == "show":
             self._pump_show(session)
-            return
-        progress = session.step()
-        if progress is not None:
-            self._cap_progress = (getattr(progress, "message", "")
-                                  or getattr(progress, "color", ""))
-            if self._cap_view == "progress" and self._pool is not None:
-                self._pool.set("cap_progress", self._cap_progress)
-                self._pool.redraw(self._disp, "cap_progress")
-            return
-
-        # step() returned None: the run ended.
-        self._capture = None
-        self._capture_slot = None
-        if session.error is not None:
-            self._cap_result = f"Capture failed: {str(session.error)[:40]}"
-            self._render_capture_done()
-            return
-        if self._cap_run_mode == "calibration":
-            self._persist_calibration(session)
-            self._cap_result = self._analyze_calibration(session)
         else:
-            self._cap_result = self._analyze_normal(session)
-        self._render_capture_done()
-
-    def _persist_calibration(self, session) -> None:
-        """
-        Write each LED's discovered ideal exposure (e*) to the exposure table as
-        its family of groups. All LEDs in one run share a single add_dt so the
-        run's rows group together; prior calibrations are kept (active=0).
-        """
-        runner = getattr(session, "runner", None)
-        results = getattr(runner, "results", None) or []
-        add_dt = self.timestamp()
-        suite = getattr(runner, "suite_id", "")
-        written = 0
-        for r in results:
-            estar = (getattr(r, "metadata", {}) or {}).get("e3_final_us")
-            if estar is None:
-                continue
-            try:
-                exposure_repo.write_estar(r.color, estar, add_dt=add_dt,
-                                          remark=f"calib {suite}")
-                written += 1
-            except Exception:
-                log.exception("Arbiter: failed to persist exposures for %s", r.color)
-        log.info("Arbiter: persisted exposure groups for %d LED(s)", written)
-
-    def _analyze_calibration(self, session) -> str:
-        """Placeholder calibration-analysis path (engine TODO)."""
-        runner = getattr(session, "runner", None)
-        n = len(getattr(runner, "results", None) or [])
-        log.info("Arbiter: calibration analysis (placeholder) for %d LED(s)", n)
-        return f"Calibrated {n} LED(s); exposures saved."
-
-    def _analyze_normal(self, session) -> str:
-        """Placeholder normal-analysis path (engine TODO)."""
-        log.info("Arbiter: normal analysis (placeholder)")
-        name = session.out_path.name if session.out_path else "archive"
-        return f"Capture complete: {name}"
+            self._pump_fit(session)
 
     # ── Phase contract: modals ─────────────────────────────────────────────────
 
@@ -2771,7 +2661,6 @@ class Arbiter:
         from capture_runner import CaptureConfig, MODE_PRE
         return CaptureConfig(mode=MODE_PRE, exposure_group="1",
                              led_colors=config.capture_preimage_led_order(),
-                             rung_shift=config.capture_preimage_rung_shift(),
                              sample_rowid=slot.record.get("db_rowid"))
 
     def request_preimage(self, slot: Slot) -> bool:
@@ -3602,9 +3491,9 @@ class Arbiter:
             return _clamp_us(self._view_exposure_us)
         try:
             for group in ("1", "3", "5"):
-                us = exposure_repo.read_exposures(_PREVIEW_LED_NAME, group)
+                us = exposure_repo.middle_exposure(_PREVIEW_LED_NAME, group)
                 if us:
-                    return _clamp_us(us[len(us) // 2])
+                    return _clamp_us(us)
         except Exception:
             log.exception("Arbiter: could not read a calibrated preview exposure")
         return _PREVIEW_FALLBACK_US
@@ -6061,16 +5950,19 @@ def _selftest() -> None:
           _roi.load_active()[_SAMPLE].xywh(), _orig)
 
     print("== edit mode: Save writes, snapping to even ==")
+    # Inside whatever the bound is now: it moves when the pad is re-measured.
+    _bx, _by = _roi.load_active()["bound"].xywh()[:2]
+    _bx, _by = _bx + 50 - _bx % 2, _by + 50 - _by % 2
     arb._view_edit()
-    arb._view_editing = _roi.Rect(1151, 791, 41, 41, name=_SAMPLE)
+    arb._view_editing = _roi.Rect(_bx + 1, _by + 1, 41, 41, name=_SAMPLE)
     arb._view_editing.role = _roi.ROLE_SAMPLE
     arb._view_save()
     check("back to view mode",   arb._view_mode, "view")
     check("snapped even and stored",
-          _roi.load_active()[_SAMPLE].xywh(), (1150, 790, 40, 40))
+          _roi.load_active()[_SAMPLE].xywh(), (_bx, _by, 40, 40))
     check("Bayer-safe",   _roi.is_bayer_safe(_roi.load_active()[_SAMPLE]), True)
     check("the screen reloaded it",
-          arb._view_rois[_SAMPLE].xywh(), (1150, 790, 40, 40))
+          arb._view_rois[_SAMPLE].xywh(), (_bx, _by, 40, 40))
     check("says what it saved", arb._pool["img_name"].text, "saved 40x40")
     check("history kept, not overwritten", _db.read_val(
         "SELECT COUNT(*) FROM roi WHERE name='sample' AND active=0") >= 1, True)

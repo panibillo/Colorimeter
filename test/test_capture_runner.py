@@ -35,6 +35,7 @@ sys.path.insert(0, str(_ROOT / "dev"))
 
 import capture_runner
 import config_repo
+import db_bootstrap
 import roi
 from capture_runner import CaptureConfig, CaptureRunner, EXP_LABELS
 
@@ -46,6 +47,12 @@ FRAME_W, FRAME_H = 2304, 1296
 _MEDIAN_GAIN = 0.65
 _TARGET_US   = 45_000
 _SCALE       = capture_runner.HALF_SAT / (_MEDIAN_GAIN * _TARGET_US)
+
+
+AMBER_GROUPS = {"1": [30_000], "2": [20_000, 45_000],
+                "3": [20_000, 30_000, 45_000],
+                "4": [14_000, 20_000, 30_000, 45_000]}
+BLUE_GROUPS = {"1": [20_000], "3": [14_000, 20_000, 30_000]}
 
 
 class FakeCam:
@@ -664,8 +671,9 @@ class CalibratedExposures(RunnerTestCase):
         shutil.copy(_ROOT / "src" / "colorimeter.sqlite", tmpdb)
         db.DBNAME = str(tmpdb)
         db.write_one("DELETE FROM exposure")
-        exposure_repo.write_all_groups("amber", exposure_repo.groups_from_estar(30_000))
-        exposure_repo.write_all_groups("blue",  exposure_repo.groups_from_estar(20_000))
+        db_bootstrap.ensure(tmpdb)       # a live copy may predate new columns
+        exposure_repo.write_all_groups("amber", AMBER_GROUPS, preimage_group="1")
+        exposure_repo.write_all_groups("blue",  BLUE_GROUPS,  preimage_group="1")
 
     def tearDown(self):
         self._db.DBNAME = self._saved_dbname
@@ -789,10 +797,9 @@ class TestPreImage(CalibratedExposures):
         return super().make_runner(**kwargs)
 
     def pre_runner(self, **kwargs):
-        """A pre-image run: one exposure, two rungs down, as configured."""
+        """A pre-image run: the exposures flagged for it."""
         kwargs.setdefault("mode", capture_runner.MODE_PRE)
         kwargs.setdefault("exposure_group", "1")
-        kwargs.setdefault("rung_shift", -2)
         return self.make_runner(**kwargs)
 
     # ── where the frames land ───────────────────────────────────────────
@@ -853,17 +860,28 @@ class TestPreImage(CalibratedExposures):
 
     # ── how little light it uses ────────────────────────────────────────
 
-    def test_one_exposure_two_rungs_below_the_group(self):
+    def test_takes_the_exposure_flagged_for_the_preimage(self):
         runner = self.pre_runner()
         self.run_to_completion(runner)
-        want = self._er.shift_exposures(self._er.read_exposures("amber", "1"), -2)
+        self.assertEqual(runner.results[0].exposures_us, [30_000])
 
-        self.assertEqual(runner.results[0].exposures_us, want)
-        self.assertEqual(len(want), 1)
-        self.assertLess(want[0], self._er.read_exposures("amber", "1")[0])
+    def test_a_changed_flag_changes_the_exposures_with_no_new_calibration(self):
+        self._db.write_one(
+            "UPDATE exposure SET preimage = 1 WHERE LED = 'amber' "
+            "AND active = 1 AND exposuregroup = '3'")
+        runner = self.pre_runner()
+        self.run_to_completion(runner)
+        self.assertEqual(runner.results[0].exposures_us,
+                         self._er.read_preimage_exposures("amber"))
+        self.assertGreater(len(runner.results[0].exposures_us), 1)
 
-    def test_no_shift_leaves_the_calibrated_ladder_alone(self):
-        """rung_shift is opt-in: a measurement must get e* exactly."""
+    def test_with_nothing_flagged_it_uses_the_middle_of_group_one(self):
+        self._db.write_one("UPDATE exposure SET preimage = 0")
+        runner = self.pre_runner()
+        self.run_to_completion(runner)
+        self.assertEqual(runner.results[0].exposures_us, [30_000])
+
+    def test_a_measurement_ignores_the_flag(self):
         runner = self.make_runner(mode="normal", exposure_group="3")
         self.run_to_completion(runner)
         self.assertEqual(runner.results[0].exposures_us,
@@ -914,8 +932,6 @@ class TestPreImage(CalibratedExposures):
             meas_meta = json.loads(f["/leds/amber/led_metadata"][()])
         self.assertEqual(pre_meta["mode"], capture_runner.MODE_PRE)
         self.assertEqual(meas_meta["mode"], capture_runner.MODE_NORMAL)
-        self.assertLess(pre_meta["exposures_us"]["e0"],
-                        meas_meta["exposures_us"]["e0"])
 
 
 # ---------------------------------------------------------------------------
