@@ -57,6 +57,15 @@ src/capture_runner.py
 src/capture_profile.py
 src/capture_session.py
 src/exposure_repo.py
+# The tested-bracket exposure calibration (Menu → Capture) and its Show plot.
+# arbiter.py imports these when the Capture page's buttons are used, so they
+# are missed only at the first button press, not at start-up.
+src/exposure_fit.py
+src/exposure_fit_runner.py
+src/exposure_measure.py
+src/exposure_show.py
+src/required_cells.py
+src/show_plot.py
 src/hdf5read.py
 src/hdf5write.py
 # The flat-field result the capture path screens Bayer layers with, and the
