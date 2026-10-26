@@ -369,6 +369,14 @@ class Arbiter:
         self._cap_hint_msg: str = ""
         self._cap_running: str | None = None   # LED being calibrated now
         self._cap_fit = None                   # finished fit, awaiting SAVE
+        # Show screen: the LED, the exposures on offer, what is chosen, the plot.
+        self._show_led: str = ""
+        self._show_exps: list = []
+        self._show_i: int = 0
+        self._show_mode: str = "exposure"
+        self._show_layer: str = "B"
+        self._show_hint_msg: str = ""
+        self._show_image = None
 
         # Phases screen state (Menu → Phases): the reagent countdowns in
         # seconds, staged while the screen is open and written only by its OK.
@@ -2421,38 +2429,160 @@ class Arbiter:
         if self._cap_view == "choice":
             self._render_capture_choice()
 
+    # ── Show screen (Capture page → Show) ──────────────────────────────────────
+    # Photographs the test pad with the chosen LED and plots the pad pixels'
+    # sorted signal against the LED's window.  "One exposure" takes one frame
+    # and plots all four Bayer layers; "One layer" takes a frame at each of the
+    # LED's stored exposures and plots that layer at each.  Nothing is stored.
+
     def _cap_show(self) -> None:
-        self._cap_hint("Show: not wired yet")
-
-    def _cap_start(self) -> None:
-        """
-        Launch the standalone "Calibrate Exposures" run.
-
-        This always calibrates, independent of the Path radio (_cap_mode): the
-        run's mode is pinned to calibration in _cap_run_mode so the progress
-        title and the completion path (persist e*) can't be diverted by whatever
-        Path was selected for test-sequence captures.
-        """
-        if not self.capture_available():
-            self._cap_result = "Camera busy — try again later"
-            self._render_capture_done()
+        """Open the Show screen for the chosen LED."""
+        led = self._cap_led
+        if led is None:
             return
-        self._cap_run_mode = "calibration"
         from capture_runner import CaptureConfig
-        cfg = CaptureConfig(mode=self._cap_run_mode,
-                            exposure_group=self._cap_group)
-        session = self._new_session(cfg)
+        self._cap_commit()
+        self._show_led = led
+        self._show_exps = (exposure_repo.read_led_exposures(led)
+                           or [CaptureConfig().initial_us])
+        self._show_i = len(self._show_exps) // 2
+        self._show_mode = "exposure"
+        self._show_layer = self._cap_layers[led][0] if self._cap_layers[led] else "B"
+        self._show_hint_msg = "Tap Capture"
+        self._show_image = None
+        self._render_show()
+
+    def _show_values(self) -> "tuple[list[int], list[str]]":
+        """(exposures, layers) the next Capture will photograph and plot."""
+        if self._show_mode == "exposure":
+            return [self._show_exps[self._show_i]], ["R", "Gr", "Gb", "B"]
+        return list(self._show_exps), [self._show_layer]
+
+    def _render_show(self) -> None:
+        if self._pool is None:
+            return
+        from palette import color
+        sel, unsel = color("start_green"), color("btn_gray")
+        self._cap_view = "show"
+        p = self._pool
+        p.hide_all()
+        busy = self._capture is not None
+        p["cap_title"].rect = layout.MENU_TITLE
+        p.put("menu_cancel_btn", "BACK", on=self._show_back)
+        p.put("cap_title", f"Show\n{self._show_led}")
+        p.put("menu_ok_btn", "Capture", on=self._show_capture, enabled=not busy)
+        exp_mode = self._show_mode == "exposure"
+        p.put("show_mode_exp", "One exposure", on=lambda: self._show_set_mode("exposure"))
+        p["show_mode_exp"].color = sel if exp_mode else unsel
+        p.put("show_mode_layer", "One layer", on=lambda: self._show_set_mode("layer"))
+        p["show_mode_layer"].color = unsel if exp_mode else sel
+        if exp_mode:
+            n = len(self._show_exps)
+            p.put("show_prev", "◀", on=lambda: self._show_step(-1),
+                  enabled=not busy and self._show_i > 0)
+            p.put("show_value",
+                  f"{self._show_exps[self._show_i]} us  ({self._show_i + 1} of {n})")
+            p.put("show_next", "▶", on=lambda: self._show_step(1),
+                  enabled=not busy and self._show_i < n - 1)
+        else:
+            for i, layer in enumerate(("R", "Gr", "Gb", "B"), 1):
+                p.put(f"show_layer{i}", layer,
+                      on=lambda l=layer: self._show_pick_layer(l), enabled=not busy)
+                p[f"show_layer{i}"].color = sel if layer == self._show_layer else unsel
+        p.put("show_hint", self._show_hint_msg)
+        p.put("show_canvas")
+        p["show_canvas"].set_image(self._show_image)
+        p.render(self._disp)
+        self._rebuild_focus()
+
+    def _show_hint(self, text: str) -> None:
+        self._show_hint_msg = text
+        if self._pool is not None and self._cap_view == "show":
+            self._pool.set("show_hint", text)
+            self._pool.redraw(self._disp, "show_hint")
+
+    def _show_set_mode(self, mode: str) -> None:
+        self._show_mode = mode
+        self._show_image = None
+        self._show_hint_msg = "Tap Capture"
+        self._render_show()
+
+    def _show_step(self, delta: int) -> None:
+        self._show_i = max(0, min(len(self._show_exps) - 1, self._show_i + delta))
+        self._show_image = None
+        self._render_show()
+
+    def _show_pick_layer(self, layer: str) -> None:
+        self._show_layer = layer
+        self._show_image = None
+        self._render_show()
+
+    def _show_back(self) -> None:
+        """Back to the Capture page, abandoning any capture under way."""
+        if self._cap_run_mode == "show" and self._capture is not None:
+            self._capture.cancel()
+            self._capture = None
+            self._capture_slot = None
+        self._render_capture_choice()
+
+    def _show_capture(self) -> None:
+        """Photograph the pad at the chosen exposure(s) and plot the result."""
+        if not self.capture_available():
+            self._show_hint("Camera busy - try again later")
+            return
+        import exposure_show
+        from capture_runner import CaptureConfig
+        exposures, layers = self._show_values()
+        led = self._show_led
+
+        def make_runner(cam, leds, cfg):
+            return exposure_show.ExposureShowRunner(
+                cam, leds, led, exposures, layers, cfg,
+                on_status=lambda _led, text: self._show_hint(text))
+
+        session = self._new_session(CaptureConfig(), runner_factory=make_runner)
         if not session.start():
-            log.error("Arbiter: capture failed to start: %s", session.error)
-            self._cap_result = f"Camera failed: {session.error}"
-            self._render_capture_done()
+            log.error("Arbiter: show failed to start: %s", session.error)
+            self._show_hint(f"Camera failed: {session.error}"[:48])
             return
         self._capture = session
-        self._capture_slot = None          # standalone (menu-launched) capture
-        self._cap_progress = "Starting camera..."
-        log.info("Arbiter: menu capture started (%s, group %s)",
-                 self._cap_run_mode, self._cap_group)
-        self._render_capture_progress()
+        self._capture_slot = None
+        self._cap_run_mode = "show"
+        self._show_image = None
+        self._show_hint("Starting camera ...")
+        self._render_show()
+
+    def _pump_show(self, session) -> None:
+        """Drive a running Show capture; plot it when it ends."""
+        if session.step() is not None:
+            return
+        self._capture = None
+        self._capture_slot = None
+        if session.error is not None:
+            self._show_hint(f"Capture failed: {session.error}"[:48])
+            self._show_image = None
+        else:
+            self._show_image = self._show_plot(session.runner.curves)
+            self._show_hint("Pad pixels, dark to light; window in magenta")
+        if self._cap_view == "show":
+            self._render_show()
+
+    def _show_plot(self, curves):
+        """The curves as an image the size of the canvas."""
+        import colorsys
+        import show_plot
+        window = self._cap_run_settings()[self._show_led].window
+        if self._show_mode == "exposure":
+            rgbs = {l: self._CAP_LAYER_SWATCH[l][0] for l in ("R", "Gr", "Gb", "B")}
+            drawn = [(rgbs[c.layer], c.signal) for c in curves]
+        else:
+            n = max(len(curves) - 1, 1)
+            drawn = []
+            for i, c in enumerate(curves):      # blue (shortest) to red (longest)
+                r, g, b = colorsys.hsv_to_rgb(0.66 * (1 - i / n), 1.0, 0.85)
+                drawn.append(((int(r * 255), int(g * 255), int(b * 255)), c.signal))
+        r = layout.SHOW_CANVAS
+        return show_plot.render(drawn, (r.w, r.h), window.low_dn, window.high_dn)
 
     def _render_capture_progress(self) -> None:
         if self._pool is None:
@@ -2502,6 +2632,9 @@ class Arbiter:
         """Drive a menu-launched capture and mirror it onto the capture screen."""
         if self._cap_run_mode == "fit":
             self._pump_fit(session)
+            return
+        if self._cap_run_mode == "show":
+            self._pump_show(session)
             return
         progress = session.step()
         if progress is not None:
@@ -5005,50 +5138,42 @@ def _selftest() -> None:
     arb._cap_choice_cancel()
     check("CANCEL stored nothing", len(_stored), 1)
 
-    print("== capture screen: Calibrate button persists e*, even with Path=Normal ==")
-    _db.write_one("DELETE FROM exposure")
-    cap_cal = _FakeCapture(steps=2)
-    cap_cal.runner.results = [_R("amber", 30000), _R("blue", 20000)]
-    arb._capture_factory = lambda: cap_cal
+    print("== show screen: pick, capture, plot ==")
+    import numpy as _np
+    from exposure_show import Curve as _Curve
+    exposure_repo.write_all_groups("green", {"1": [20000], "2": [10000, 40000]})
+    cap_show = _FakeCapture(steps=2)
+    cap_show.runner = SimpleNamespace(curves=[
+        _Curve(20000, l, _np.linspace(100, 800, 60)) for l in ("R", "Gr", "Gb", "B")])
+    arb._capture_factory = lambda: cap_show
     arb._menu_open_capture()
-    check("Path is normal", arb._cap_mode, "normal")
-    arb._cap_start()
-    check("run pinned to calibration", arb._cap_run_mode, "calibration")
-    check("progress title Calibrating", arb._pool["cap_title"].text, "Calibrating")
-    check("progress view",        arb._cap_view, "progress")
-    check("camera busy in run",   arb.capture_available(), False)
+    arb._cap_pick_led("green")
+    arb._pool["cap_show"].on_press()
+    check("show view",            arb._cap_view, "show")
+    check("exposures on offer",   arb._show_exps, [10000, 20000, 40000])
+    check("starts on the middle", arb._show_i, 1)
+    check("value shown",          arb._pool["show_value"].text, "20000 us  (2 of 3)")
+    arb._pool["show_next"].on_press()
+    check("stepped",              arb._show_values()[0], [40000])
+    check("exposure mode: all layers", arb._show_values()[1], ["R", "Gr", "Gb", "B"])
+    arb._pool["show_mode_layer"].on_press()
+    check("layer mode: all exposures", arb._show_values()[0], [10000, 20000, 40000])
+    arb._pool["show_layer3"].on_press()
+    check("layer mode: one layer", arb._show_values()[1], ["Gb"])
+    arb._pool["show_mode_exp"].on_press()
+    arb._pool["menu_ok_btn"].on_press()                 # Capture
+    check("camera busy",          arb.capture_available(), False)
+    check("capture disabled while busy", arb._pool["menu_ok_btn"].enabled, False)
     for _ in range(5):
         arb.pump_capture()
-    check("done view",            arb._cap_view, "done")
     check("camera freed",         arb.capture_available(), True)
-    check("amber e* persisted",   exposure_repo.read_exposures("amber", "1"), [30000])
-    check("blue e* persisted",    exposure_repo.read_exposures("blue", "1"), [20000])
-    check("result names LEDs",    "2 LED" in arb._cap_result, True)
-    arb._cap_done_ok()
-    check("OK returns to menu",   arb._cap_view, None)
-
-    print("== capture screen: Path radio survives a Calibrate run (test-seq mode) ==")
-    arb._menu_open_capture()
-    check("reopen resets Path to normal", arb._cap_mode, "normal")
-    arb._cap_mode = "calibration"           # test-sequence Path (set elsewhere)
-    check("Path now calibration", arb._cap_mode, "calibration")
-    cap_x = _FakeCapture(steps=1)
-    arb._capture_factory = lambda: cap_x
-    arb._cap_start()
-    for _ in range(3):
-        arb.pump_capture()
-    check("Path unchanged by the run", arb._cap_mode, "calibration")
-
-    print("== capture screen: cancel aborts and frees the camera ==")
-    cap_cancel = _FakeCapture(steps=99)      # long-running
-    arb._capture_factory = lambda: cap_cancel
-    arb._menu_open_capture()
-    arb._cap_start()
-    arb.pump_capture()                       # one step, still running
-    check("still running",        arb.capture_available(), False)
-    arb._cap_cancel()
-    check("camera freed on cancel", arb.capture_available(), True)
-    check("cancel leaves capture view", arb._cap_view, None)
+    check("plot drawn",           arb._show_image is not None, True)
+    check("plot is canvas sized", arb._show_image.size,
+          (layout.SHOW_CANVAS.w, layout.SHOW_CANVAS.h))
+    arb._pool["menu_cancel_btn"].on_press()             # BACK
+    check("back on the capture page", arb._cap_view, "choice")
+    check("LED still chosen",     arb._cap_led, "green")
+    arb._cap_choice_cancel()
 
     # ── Menu grid + Phases screen ────────────────────────────────────────────
     # The Phases screen writes to the `config` table, which is already the

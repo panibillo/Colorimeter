@@ -276,6 +276,17 @@ CAP_HINT      = Rect(  6, 158, 308,  18)
 CAP_SUITE     = Rect(  4, 180, 100,  46)    # Calibrate suite
 CAP_COLOR     = Rect(110, 180, 100,  46)    # Calibrate color
 CAP_SHOW      = Rect(216, 180, 100,  46)    # Show
+# Show screen (Capture page's Show button), under the BACK / title / Capture row
+# that reuses the menu's corners.
+SHOW_MODE_EXP   = Rect(  4,  54, 154, 30)     # "One exposure"
+SHOW_MODE_LAYER = Rect(162,  54, 154, 30)     # "One layer"
+SHOW_PREV       = Rect(  4,  88,  40, 30)     # step to the previous exposure
+SHOW_VALUE      = Rect( 48,  88, 224, 30)     # "5000 us  (3 of 7)"
+SHOW_NEXT       = Rect(276,  88,  40, 30)
+SHOW_LAYER1     = Rect(  4,  88,  75, 30)     # R, Gr, Gb, B, pitch 79
+SHOW_LAYER_PITCH = 79
+SHOW_HINT       = Rect(  6, 120, 308, 16)
+SHOW_CANVAS     = Rect( 10, 138, 300, 100)    # the sorted-signal plot
 CAP_PROGRESS  = Rect(  8,  56, 304, 120)     # progress / result text
 CAP_BACK      = Rect(  8, 184, 100,  48)     # Cancel (running-capture progress view)
 CAP_START     = Rect( 84, 184, 152,  48)     # "Calibrate Exposures" (run) / done OK

@@ -339,6 +339,15 @@ def _insert_rows(led: str, groups: Dict[str, List[int]],
     return len(rows)
 
 
+def read_led_exposures(led: str) -> List[int]:
+    """Every distinct active exposure (µs) stored for the LED, any group, ascending."""
+    rows = db.read_all(
+        "SELECT DISTINCT microseconds FROM exposure "
+        "WHERE LED = ? AND active = 1 AND microseconds IS NOT NULL "
+        "ORDER BY microseconds", (led,))
+    return [int(us) for (us,) in rows]
+
+
 def read_preimage_exposures(led: str) -> List[int]:
     """The LED's active exposures flagged for the pre-image, ascending."""
     rows = db.read_all(

@@ -96,6 +96,24 @@ def patch_levels(layers: Dict[str, np.ndarray], patches: Dict[str, Rect],
     return out
 
 
+def pad_samples(layers: Dict[str, np.ndarray], patches: Dict[str, Rect],
+                layer: str, black_dn: float = BLACK_DN) -> np.ndarray:
+    """
+    Every pixel of the test pad's patches in one Bayer layer, black level
+    removed and sorted ascending.  The curve shows the pad's brown, yellow and
+    white as steps, and how wide each one spreads.
+
+    Raises:
+        ValueError: if a test-pad patch is missing from `patches`.
+    """
+    missing = [r for r in roi.TEST_PAD_ROLES if r not in patches]
+    if missing:
+        raise ValueError("test pad is missing: " + ", ".join(missing))
+    pixels = np.concatenate([layers[layer][patches[r].xyslice()].ravel()
+                             for r in roi.TEST_PAD_ROLES])
+    return np.sort(pixels.astype(float)) - black_dn
+
+
 def make_measure(grab: Grab, patches: Dict[str, Rect], channels: Iterable[str],
                  low_pctl: float, high_pctl: float,
                  black_dn: float = BLACK_DN) -> Measure:

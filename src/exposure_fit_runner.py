@@ -128,29 +128,31 @@ class ExposureFitRunner(CaptureRunner):
         finally:
             self._all_off()
 
-    def _run_fit(self) -> Iterator[Progress]:
+    def _prepare(self) -> Iterator[Progress]:
+        """
+        Resolve the LEDs, start the camera, check the pad and chips are
+        defined, and focus.  Sets self.pad and self.pattern.  Nothing is lit
+        until this has passed.
+        """
         cfg, cam = self.config, self._cam
-        self.fits = {}
         self._frames = 0
-
         colors = [self.only] if self.only is not None else cfg.led_colors
         self._order = cr._resolve_color_order(self._leds, colors)
 
         cam.set_exposure(cfg.initial_us)
         with self.prof.time("camera.setup"):
             cam.setup_camera()
-        pattern = cam.bayer_pattern
+        self.pattern = cam.bayer_pattern
         cam_w, cam_h = cam.config_size
 
         self.rois = cr._load_rois(cam)
         model = getattr(cam, "model", None)
-        pad = roi.load_test_pad(cam_w, cam_h, model)
+        self.pad = roi.load_test_pad(cam_w, cam_h, model)
         # Checked before any LED is lit, so a missing pad costs a message.
-        em.calibration_patches(self.rois, pad)
-        params = self.params or ef.FitParams.from_config()
+        em.calibration_patches(self.rois, self.pad)
 
         yield self._progress(
-            "setup", f"Camera {cam.model_description}  pattern={pattern}  "
+            "setup", f"Camera {cam.model_description}  pattern={self.pattern}  "
                      f"{cam_w}×{cam_h}")
 
         self.prof.set_section("focus")
@@ -159,24 +161,37 @@ class ExposureFitRunner(CaptureRunner):
             focus_pos, focus_mode, _ = self._set_focus()
         yield self._progress("focus", f"Focus: {focus_pos:.2f} diopters ({focus_mode})")
 
+    def _light(self, channel: int, color: str) -> Iterator[Progress]:
+        """Select the LED, switch it on, and let it warm up."""
+        self._led_index += 1
+        self._captures_done = 0
+        self._current_color = color
+        self.prof.set_section(color)
+        yield self._progress("calibrate", f"--- {self._leds.label(channel)} ---")
+        self._led_on(channel)
+        self._status(color, f"{color} warming up ...")
+        yield from self._wait(cr.LED_ON_WARMUP_S, f"{color} LED on, warming up")
+
+    def _grabber(self, color: str):
+        """grab(exposure_us) -> the frame's Bayer layers, for the lit LED."""
+        def grab(exposure_us: int):
+            _, bayer, _ = self._settle(exposure_us)
+            layers = self._extract(bayer, self.pattern)
+            self._frames += 1
+            if self.on_capture is not None:
+                self.on_capture(color, exposure_us, self._frames)
+            return layers
+        return grab
+
+    def _run_fit(self) -> Iterator[Progress]:
+        self.fits = {}
+        yield from self._prepare()
+        params = self.params or ef.FitParams.from_config()
+        pad = self.pad
+
         for channel, color in self._order:
-            self._led_index += 1
-            self._captures_done = 0
-            self._current_color = color
-            self.prof.set_section(color)
-            yield self._progress("calibrate", f"--- {self._leds.label(channel)} ---")
-
-            self._led_on(channel)
-            self._status(color, f"{color} warming up ...")
-            yield from self._wait(cr.LED_ON_WARMUP_S, f"{color} LED on, warming up")
-
-            def grab(exposure_us: int, _color=color):
-                _, bayer, _ = self._settle(exposure_us)
-                layers = self._extract(bayer, pattern)
-                self._frames += 1
-                if self.on_capture is not None:
-                    self.on_capture(_color, exposure_us, self._frames)
-                return layers
+            yield from self._light(channel, color)
+            grab = self._grabber(color)
 
             led = self.settings_for(color)
             led_params = dataclasses.replace(

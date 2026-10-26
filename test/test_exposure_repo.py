@@ -110,6 +110,14 @@ class TestExposureTable(unittest.TestCase):
             ("2", 40_000, "high DN (pad_white.Gb)", None, 840.0, "Gb Gr", 0)])
         self.assertEqual(er.read_preimage_exposures("green"), [20_000])
 
+    def test_read_led_exposures_is_distinct_active_and_ascending(self):
+        er.write_all_groups("green", {"1": [20_000], "2": [10_000, 40_000],
+                                      "3": [10_000, 20_000, 40_000]})
+        self.assertEqual(er.read_led_exposures("green"), [10_000, 20_000, 40_000])
+        er.write_all_groups("green", {"1": [5_000]})
+        self.assertEqual(er.read_led_exposures("green"), [5_000])
+        self.assertEqual(er.read_led_exposures("violet"), [])
+
     def test_no_preimage_flag_means_none_for_the_preimage(self):
         er.write_all_groups("green", {"1": [20_000]})
         self.assertEqual(er.read_preimage_exposures("green"), [])

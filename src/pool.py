@@ -306,6 +306,20 @@ class Pool:
         button("cap_color", L.CAP_COLOR, "btn_text", "btn_gray", 14,
                text="Calibrate\ncolor")
         button("cap_show",  L.CAP_SHOW,  "btn_text", "btn_gray", 14, text="Show")
+        # Show screen: mode, one-exposure stepper or one-layer buttons, the plot.
+        button("show_mode_exp",   L.SHOW_MODE_EXP,   "btn_text", "btn_gray", 14,
+               text="One exposure")
+        button("show_mode_layer", L.SHOW_MODE_LAYER, "btn_text", "btn_gray", 14,
+               text="One layer")
+        button("show_prev", L.SHOW_PREV, "btn_text", "btn_gray", 18, text="◀")
+        label("show_value", L.SHOW_VALUE, "black", "white", 16)
+        button("show_next", L.SHOW_NEXT, "btn_text", "btn_gray", 18, text="▶")
+        for i, layer in enumerate(("R", "Gr", "Gb", "B")):
+            r = Rect(L.SHOW_LAYER1.x + i * L.SHOW_LAYER_PITCH, L.SHOW_LAYER1.y,
+                     L.SHOW_LAYER1.w, L.SHOW_LAYER1.h)
+            button(f"show_layer{i + 1}", r, "black", "btn_gray", 14, text=layer)
+        label("show_hint", L.SHOW_HINT, "black", "white", 12, align="left")
+        p._add("show_canvas", ImageWidget(L.SHOW_CANVAS, bg=color("black")))
         label("cap_progress",   L.CAP_PROGRESS,  "black", "white", 16, align="left")
         button("cap_back",  L.CAP_BACK,  "btn_text", "btn_gray",    16, text="Back")
         button("cap_start", L.CAP_START, "btn_text", "start_green", 18, text="START")
