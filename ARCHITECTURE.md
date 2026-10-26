@@ -168,10 +168,17 @@ Raw-Bayer, multi-exposure, LED-sweep capture, streamed to one HDF5 archive:
   capture pipeline. (A separate GPIO-pin `LedController` in
   `dev/lighting_lightboard1.py` serves the web prototype — see the doc note in
   WEB_INTERFACE.md.)
-- `capture_runner.py` — the suite workflow as a **generator**: white-LED
-  exposure calibration, focus, then per-LED exposure bracketing (7 exposures,
-  lit + dark). Yields `Progress` between camera ops so the caller stays
-  responsive; waits yield every 50 ms.
+- `capture_runner.py` — the suite workflow as a **generator**: focus, then per-LED
+  capture at the exposures stored in the `exposure` table (the Normal path),
+  or the pre-image's flagged exposures (lit + dark). Yields `Progress` between
+  camera ops so the caller stays responsive; waits yield every 50 ms.
+- Exposure calibration (see `docs/exposure_calibration_2026-10-26.md`):
+  `exposure_fit.py` (pure search for tested brackets), `exposure_measure.py`
+  (reads the test pad and gray chips from a frame), `required_cells.py` (which
+  Bayer layers must pass for each LED, and per-LED windows),
+  `exposure_fit_runner.py` (drives the camera and LEDs; one LED or all) and
+  `exposure_show.py` (photographs the pad for the Show screen). The Capture page
+  in `arbiter.py` runs them; `exposure_repo.py` stores the result.
 - `capture_session.py` — wraps the generator so a UI can `step()` it once per
   loop pass and inspect `active` / `error`.
 - `capture_h5.py` + `hdf5write.py` / `hdf5read.py` — the HDF5 suite archive (one

@@ -50,19 +50,48 @@ mechanically.
 
 ---
 
-## 6c — Exposure calibration 🚧
+## 6c — Exposure calibration 🟡
 
-The capture pipeline has two paths — a **Calibration path** that measures the
-exposure ladder and a **Normal path** that reuses saved exposures (stored in the
-`exposure` table, seeded per exposure group). On a fresh DB the `exposure` table
-is empty and the capture screen opens on the config table's
-`defaults.exposuregroup` row, whose seeded value is group `"3"`.
+Every stored exposure bracket is **tested** on a calibration test pad and the
+gray chips, so none of them is over- or under-exposed. The method, the window
+and the storage are described in
+[docs/exposure_calibration_2026-10-26.md](../exposure_calibration_2026-10-26.md).
+This section is the procedure.
 
-The operator-facing "Calibrate Exposures" flow is **still being wired up** (UI +
-persistence). Until it lands, a new unit runs on the seeded group, which is
-adequate for bring-up but not final metrology.
+**Before the first run**
 
-*Placeholder — fill in once the exposure-calibration UI/runner is complete.*
+1. Put the **calibration test pad** (white, yellow and brown patches) in the
+   card holder next to the gray chips.
+2. Define its three regions. They are `roi` rows with `active = 2` and the
+   roles `pad_white`, `pad_yellow` and `pad_brown`. There is no screen for this
+   yet; until the physical pad exists the regions are not seeded, and a run
+   stops at once with a message naming the missing ones. Nothing is lit first.
+3. Check the window under **Menu → Capture** (High DN, Low DN, High %, Low %).
+   The seeded 100 / 850 DN at the 10th / 90th percentile are placeholders.
+
+**Running it** (Menu → Capture)
+
+| Control | Effect |
+|---|---|
+| LED color bar | Choose an LED. The boxes then show that LED's own window and the Bayer layers that must pass for it light up. |
+| Bayer layer column (R, Gr, Gb, B) | Tap to add or drop a layer for the chosen LED. |
+| Calibrate suite | Fits every LED with its own layers and window. Clears the chosen LED. |
+| Calibrate color | Fits only the chosen LED (one to four layers). |
+| Show | Photographs the test pad and plots its sorted signal against the window. |
+| SAVE | Writes the settings and the fitted brackets. A single-LED fit saved this way is used in operation; a later suite run replaces it. |
+| CANCEL | Discards everything on the page. |
+
+While a fit runs, the line above the buttons reports the LED and the rung
+(`green calibrating rung 3 of 7 ...`) and the LED being fitted has a black
+border. The screen does not take touches during one rung, so CANCEL acts
+between LEDs.
+
+**If an LED does not fit.** The page ends with `x of y fitted`. A group that
+cannot be fitted is dropped from that LED, and the log names the patch that
+limited it (`pad_brown too dark below ... us`). The usual cause is a pad whose
+white and brown patches differ by more than the window allows: the window's
+ratio (850 / 100 = 8.5) must exceed the pad's white-to-brown ratio times the
+group's spread. Widen the window or use a lower-contrast pad.
 
 ---
 
@@ -109,7 +138,7 @@ yet designed.
 |---|---|---|
 | Touchscreen | `config/touch_cal.json` (on Pi) | ✅ run `calibrate_screen.py` |
 | Camera focus | `config/focus_cal.json` (on Pi, IMX708) | 🟡 via bench tooling |
-| Exposure ladder | `exposure` table | 🚧 UI/runner in progress |
+| Exposure brackets | `exposure` table | 🟡 working; needs the physical test pad and tuned window |
 | Color/measurement | analysis output | 🚧 engine not implemented |
 | Illumination flat field | `flatfield` table + `.npy` gain maps | 🟡 analysis works; delivery to instrument undesigned |
 
