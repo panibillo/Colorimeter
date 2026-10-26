@@ -132,7 +132,7 @@ MODAL_3C    = Rect(208, 134,  84,  46)
 # Options sit in a 3-row x 2-column grid filling the body; the menu draws no
 # footer, so the bottom row may run to the foot of the screen.
 #
-#       Capture  | View Image
+#       Advanced | View Image
 #       Defaults | Config
 #       Reagent
 #       Phases   | Power
@@ -144,12 +144,28 @@ MENU_TITLE      = Rect(100,   5, 120,  40)   # borrowed by the config/phases/cap
 # does not show.
 MENU_VER_TITLE  = Rect(100,   5, 120,  46)
 MENU_OK_BTN     = Rect(220,   0, 100,  50)   # top-right: save staged choices
-MENU_CAPTURE    = Rect(  8,  54, 148,  56)   # row 1 left: capture choice screen
+MENU_CAPTURE    = Rect(  8,  54, 148,  56)   # row 1 left: Advanced screen
 MENU_STUB1      = Rect(164,  54, 148,  56)   # row 1 right: image viewer
 MENU_DEFAULTS   = Rect(  8, 118, 148,  56)   # row 2 left
 MENU_STUB2      = Rect(164, 118, 148,  56)   # row 2 right: config editor
 MENU_CONFIG     = Rect(  8, 182, 148,  56)   # row 3 left: reagent durations
 MENU_POWER      = Rect(164, 182, 148,  56)   # row 3 right
+
+# ── advanced screen (Menu → Advanced) ─────────────────────────────────────────
+# The Menu's grid and corners again, for the tools an operator rarely needs.
+#
+#       Capture       | Test LED
+#       Capture Image | Wifi
+ADV_CAPTURE     = Rect(  8,  54, 148,  56)   # row 1 left: capture choice screen
+ADV_TEST_LED    = Rect(164,  54, 148,  56)   # row 1 right: LED test
+ADV_CAP_IMAGE   = Rect(  8, 118, 148,  56)   # row 2 left
+ADV_WIFI        = Rect(164, 118, 148,  56)   # row 2 right
+
+# ── LED test (Menu → Advanced → Test LED) ─────────────────────────────────────
+# Under the CANCEL / title / SAVE row: the Capture page's LED bar (CAP_LED1),
+# a line of instructions, and a line saying which LED is lit.
+LEDT_HINT       = Rect(  6,  92, 308,  18)
+LEDT_STATUS     = Rect(  6, 120, 308,  30)
 
 # ── config editor (Menu → Config: every setting in the config table) ───────────
 # Four body-row slots on a 38 px pitch (y 52..202), then a five-button footer
@@ -252,7 +268,8 @@ CFG_R2_P60  = Rect(275, 104,  39,  40)   # +60 s  ┘
 CFG_HINT    = Rect(  8, 152, 304,  26)   # units + the mm:ss the seconds mean
 CFG_RESTORE = Rect(  8, 184, 148,  48)   # back to the configured durations
 
-# ── capture screen (Menu → Capture: pick path + images, run, show result) ───────
+# ── capture screen (Menu → Advanced → Capture: pick path + images, run, show
+# result) ───────────────────────────────────────────────────────────────────────
 # One screen of its own, reused for three views: the choice form, the running
 # progress, and the done/result. Selector rects and the wide progress rect
 # overlap in y, but the two are never shown together.

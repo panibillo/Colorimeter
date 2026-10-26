@@ -48,7 +48,8 @@ Arbiter contract (what phases call; arbiter.py implements it)
     arb.render(slot)                re-render slot's current phase in place
     arb.request_capture(slot)->bool start a capture if the camera is free
     arb.capture_available()->bool   is the (single) camera free right now
-    arb.cap_mode -> str              "calibration" | "normal" (Menu -> Capture selection)
+    arb.cap_mode -> str              "calibration" | "normal" (Menu -> Advanced
+                                     -> Capture selection)
     arb.open_modal(slot, modal_id)  push a modal, remembering the return phase
     arb.close_modal(slot)           pop back to the remembered phase
     arb.cancel_test(slot)           abandon this run
@@ -918,9 +919,9 @@ class ReadPhase(Phase):
             pool["run_btn"].size = _RUN_BTN_SIZE_2LINE
             pool.put("color_lbl", "Imaging - DO NOT TOUCH")
         else:
-            # Reflect what a press will actually do — the Menu -> Capture
-            # screen's Path selection governs this capture too, so a stale
-            # "CAPTURE" label can no longer hide a full calibration sweep.
+            # Reflect what a press will actually do — the Menu -> Advanced ->
+            # Capture screen's Path selection governs this capture too, so a
+            # stale "CAPTURE" label can no longer hide a full calibration sweep.
             label = ("Calibrate\nExposures" if arb.cap_mode == "calibration"
                      else f"Capture\n{slot.name}")
             pool.put("run_btn", label,

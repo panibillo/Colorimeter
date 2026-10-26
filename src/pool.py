@@ -196,16 +196,29 @@ class Pool:
         button("menu_cancel_btn", L.MENU_CANCEL_BTN, "hdr_text", "btn_gray",   18, text="CANCEL")
         label("menu_title",       L.MENU_VER_TITLE,   "black",   "white",     20, text=f"Menu\nV {version.__version__}")
         button("menu_ok_btn",     L.MENU_OK_BTN,       "hdr_text", "start_green", 18, text="OK")
-        # The 3x2 option grid: left column Capture/Defaults/Phases, right column
-        # View Image/Config/Power.  The two grid slots still named for the stubs
+        # The 3x2 option grid: left column Advanced/Defaults/Phases, right
+        # column View Image/Config/Power.  The two grid slots still named for the stubs
         # they started as are positional, like the body rows — the arbiter says
         # what each one opens.
-        button("menu_capture",    L.MENU_CAPTURE,      "hdr_text", "start_green", 18, text="Capture")
+        button("menu_capture",    L.MENU_CAPTURE,      "hdr_text", "start_green", 18, text="Advanced")
         button("menu_stub1",      L.MENU_STUB1,        "hdr_text", "btn_gray",    18, text="View\nImage")
         button("menu_defaults",   L.MENU_DEFAULTS,     "hdr_text", "slot_a_bg",   18, text="LED\nColors")
         button("menu_stub2",      L.MENU_STUB2,        "hdr_text", "btn_gray",    18, text="Config")
         button("menu_config",     L.MENU_CONFIG,       "hdr_text", "slot_b_bg",   18, text="Reagent\nPhases")
         button("menu_power",      L.MENU_POWER,        "hdr_text", "label_coral", 18, text="Power")
+
+        # ── advanced screen (Menu → Advanced): the Menu's corners and grid ─────
+        label("adv_title",        L.MENU_TITLE,        "black",   "white",       20, text="Advanced")
+        button("adv_capture",     L.ADV_CAPTURE,       "hdr_text", "start_green", 18, text="Capture")
+        button("adv_test_led",    L.ADV_TEST_LED,      "hdr_text", "slot_a_bg",   18, text="Test LED")
+        button("adv_cap_image",   L.ADV_CAP_IMAGE,     "hdr_text", "btn_gray",    18, text="Capture\nImage")
+        button("adv_wifi",        L.ADV_WIFI,          "hdr_text", "btn_gray",    18, text="Wifi")
+
+        # ── LED test (Menu → Advanced → Test LED): the LED bar is the Capture
+        # page's cap_led1..10, so only the title and two text lines are new.
+        label("ledt_title",       L.MENU_TITLE,        "black",   "white",       20, text="LED Test")
+        label("ledt_hint",        L.LEDT_HINT,         "black",   "white",       13, align="left")
+        label("ledt_status",      L.LEDT_STATUS,       "black",   "white",       18, align="left")
 
         # ── config editor (Menu → Config): roles, one role, one parameter ──────
         # Built two ways — 8 grid buttons for the roles list, and 4 rows of a
@@ -280,7 +293,8 @@ class Pool:
         label("cfg_hint",    L.CFG_HINT,   "black", "white", 13, align="left")
         button("cfg_restore", L.CFG_RESTORE, "btn_text", "btn_gray", 16, text="Restore")
 
-        # ── capture screen (Menu → Capture): choice form, progress, result ──────
+        # ── capture screen (Menu → Advanced → Capture): choice form, progress,
+        # result.
         # Mode + N buttons act as radio groups — the arbiter recolours the
         # selected one green and the rest gray on each render.
         label("cap_title",      L.CAP_TITLE,     "black", "white",       22, text="Capture")

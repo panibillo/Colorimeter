@@ -184,8 +184,8 @@ MODE_PRE         = "pre"
 PRE_SECTION = "/pre"
 
 # TODO(undecided): consider moving exposure calibration WHOLLY to the
-# Menu → Capture screen as a standalone operation, run outside the context of a
-# sample reading — rather than exposing "calibration" as a capture path that a
+# Menu → Advanced → Capture screen as a standalone operation, run outside the
+# context of a sample reading — rather than exposing "calibration" as a capture path that a
 # sample's ReadPhase could invoke. Launching a calibration run from the Menu
 # (see the arbiter's capture screen) has proven a cleaner fit than bolting a
 # second capture path onto a regular reading. Not yet decided — both paths stay

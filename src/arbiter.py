@@ -344,10 +344,18 @@ class Arbiter:
         # Menu screen state: the slot to return to when the menu closes.
         self._pre_menu_slot: Slot | None = None
 
-        # Capture screen state (Menu → Capture): which view is showing and what
-        # kind of run is in flight.  A menu-launched run uses self._capture with
-        # _capture_slot = None (the None marks it standalone, so pump_capture
-        # routes it to _pump_capture_screen).  _cap_mode is the capture path a
+        # LED test state (Menu → Advanced → Test LED): whether the screen is
+        # up, which LED it has lit, and a message in place of the lit line
+        # (e.g. the LED bank failed to open).  While the screen is up the
+        # shared LED bank is held open and no prefetch starts.
+        self._ledtest_open = False
+        self._ledtest_lit: str | None = None
+        self._ledtest_msg = ""
+
+        # Capture screen state (Menu → Advanced → Capture): which view is
+        # showing and what kind of run is in flight.  A menu-launched run uses
+        # self._capture with _capture_slot = None (the None marks it
+        # standalone, so pump_capture routes it to _pump_capture_screen).  _cap_mode is the capture path a
         # *test sequence* takes (ReadPhase → request_capture); the Capture page
         # no longer sets it.
         self._cap_mode:     str = "normal"    # "calibration" | "normal"
@@ -1142,6 +1150,8 @@ class Arbiter:
             return
         if self._focused is not None:
             self.render(self._focused)
+        elif self._ledtest_open:
+            self._ledtest_render()
         else:
             self._render_menu()
 
@@ -1191,8 +1201,9 @@ class Arbiter:
         # while a capture is in flight — the imaging tools share the camera and
         # LED bank with the capture path.  "Reagent Phases" edits the two
         # reagent countdowns; "Config" is the general editor over every
-        # setting, reagent countdowns included.
-        self._pool.put("menu_capture",    "Capture",  on=self._menu_open_capture)
+        # setting, reagent countdowns included.  "Advanced" holds the rarely
+        # used tools, Capture among them.
+        self._pool.put("menu_capture",    "Advanced", on=self._render_advanced)
         self._pool.put("menu_stub1",      "View\nImage",
                        on=self._menu_open_image_view,
                        enabled=self.capture_available())
@@ -1232,6 +1243,123 @@ class Arbiter:
         still get their say over anything staged before the viewer was opened.
         """
         self.open_image_view(slot=None)
+
+    # ── Advanced screen (Menu → Advanced) ───────────────────────────────────────
+    # The Menu's layout again, for tools an operator rarely needs.  Like the
+    # Menu, nothing is staged here, so OK and CANCEL both go back to the Menu.
+    # Capture Image and Wifi are placeholders until their screens exist.
+
+    def _render_advanced(self) -> None:
+        if self._pool is None:
+            return
+        p = self._pool
+        p.hide_all()
+        p.put("menu_cancel_btn", "CANCEL", on=self._render_menu)
+        p.put("adv_title",       "Advanced")
+        p.put("menu_ok_btn",     "OK",     on=self._render_menu)
+        p.put("adv_capture",   "Capture",  on=self._menu_open_capture)
+        p.put("adv_test_led",  "Test LED", on=self._ledtest_open_screen,
+              enabled=self._ledtest_available())
+        p.put("adv_cap_image", "Capture\nImage", enabled=False)
+        p.put("adv_wifi",      "Wifi",     enabled=False)
+        p.render(self._disp)
+        self._rebuild_focus()
+
+    # ── LED test (Menu → Advanced → Test LED) ───────────────────────────────────
+    # Tap a swatch on the LED bar to light that LED; tap it again to put it
+    # out.  At most one is lit: tapping another puts the first out before
+    # lighting the second.  Nothing is saved, so SAVE and CANCEL both leave,
+    # and leaving always puts every LED out.  Only the LED bank is used — the
+    # camera is not opened.
+
+    def _ledtest_available(self) -> bool:
+        """True when no capture or prefetch is using the LED bank."""
+        return self.capture_available() and self._prefetch is None
+
+    def _ledtest_open_screen(self) -> None:
+        if not self._ledtest_available():
+            return
+        self._ledtest_open = True
+        self._ledtest_lit = None
+        self._ledtest_msg = ""
+        if self._ledtest_bank() is None:
+            self._ledtest_msg = "LED bank failed to open - see the log"
+        self._ledtest_render()
+
+    def _ledtest_bank(self):
+        """The shared LED bank, opened here if no capture has opened it; or None."""
+        if self._leds is None:
+            try:
+                from lighting_cal8 import LEDBank
+                self._leds = LEDBank()
+            except Exception:
+                log.exception("Arbiter: LED test could not open the LED bank")
+                return None
+        return self._leds
+
+    def _ledtest_toggle(self, led: str) -> None:
+        """Light `led`, or put it out if it is the one lit."""
+        leds = self._ledtest_bank()
+        if leds is None:
+            return
+        try:
+            leds.all_off()
+            self._ledtest_lit = None if led == self._ledtest_lit else led
+            if self._ledtest_lit is not None:
+                leds.set_channel(led, True)
+            self._ledtest_msg = ""
+        except Exception:
+            log.exception("Arbiter: LED test could not switch %s", led)
+            self._ledtest_lit = None
+            self._ledtest_msg = f"Could not switch {led} - see the log"
+        self._ledtest_render()
+
+    def _ledtest_all_off(self) -> None:
+        if self._leds is not None:
+            try:
+                self._leds.all_off()
+            except Exception:
+                log.exception("Arbiter: LED test could not switch the LEDs off")
+        self._ledtest_lit = None
+
+    def _ledtest_leave(self) -> None:
+        """Put every LED out and go back to the Advanced screen."""
+        self._ledtest_all_off()
+        self._ledtest_open = False
+        self._render_advanced()
+
+    def _ledtest_status_text(self) -> str:
+        if self._ledtest_msg:
+            return self._ledtest_msg
+        if self._ledtest_lit is None:
+            return "All LEDs off"
+        return f"On: {self._ledtest_lit}"
+
+    def _ledtest_render(self) -> None:
+        if self._pool is None:
+            return
+        from palette import color, rgb
+        from lighting_cal8 import LEDBank
+        p = self._pool
+        p.hide_all()
+        p.put("menu_cancel_btn", "CANCEL", on=self._ledtest_leave)
+        p.put("ledt_title",      "LED Test")
+        p.put("menu_ok_btn",     "SAVE",   on=self._ledtest_leave)
+        usable = self._leds is not None
+        for i, led in enumerate(LEDBank.color_names(), 1):
+            name = f"cap_led{i}"
+            fill_rgb, text_name = _LEDPICK_SWATCH[led]
+            lit = led == self._ledtest_lit
+            p.put(name, "ON" if lit else _led_initials(led),
+                  on=lambda l=led: self._ledtest_toggle(l), enabled=usable)
+            w = p[name]
+            w.color = w.disabled_color = rgb(*fill_rgb)
+            w.text_color = color(text_name)
+            w.border_color = color("black") if lit else None
+        p.put("ledt_hint",   "Tap color to toggle LED on or off")
+        p.put("ledt_status", self._ledtest_status_text())
+        p.render(self._disp)
+        self._rebuild_focus()
 
     # ── Phases screen (Menu → Phases) ──────────────────────────────────────────
     # Custom reagent countdowns, entered on the instrument itself.  The two
@@ -2053,7 +2181,7 @@ class Arbiter:
         for name in ("ledpick_rowid", "ledpick_value1", "ledpick_value2"):
             p[name].bg = bg
 
-    # ── Capture screen (Menu → Capture) ────────────────────────────────────────
+    # ── Capture screen (Menu → Advanced → Capture) ─────────────────────────────
     # A standalone capture launched from the Menu: pick a path (Calibration or
     # Normal) and a number of images per LED (1..5 = the exposure group), run it,
     # and see a placeholder analysis result. It uses the single camera via
@@ -2308,7 +2436,7 @@ class Arbiter:
         return out
 
     def _cap_choice_save(self) -> None:
-        """Write the staged settings and any finished fit, then leave to the Menu."""
+        """Write the staged settings and any finished fit, then leave to Advanced."""
         import required_cells
         problem = self._cap_problem()
         if problem:
@@ -2340,10 +2468,10 @@ class Arbiter:
             log.info("Arbiter: stored %d calibrated exposure(s)", rows)
             self._cap_fit = None
         self._cap_view = None
-        self._render_menu()
+        self._render_advanced()
 
     def _cap_choice_cancel(self) -> None:
-        """Leave to the Menu; nothing staged on this screen is written."""
+        """Leave to Advanced; nothing staged on this screen is written."""
         if self._cap_run_mode == "fit" and self._capture is not None:
             self._capture.cancel()
             self._capture = None
@@ -2351,7 +2479,7 @@ class Arbiter:
         self._cap_fit = None
         self._cap_running = None
         self._cap_view = None
-        self._render_menu()
+        self._render_advanced()
 
     def _cap_calibrate_suite(self) -> None:
         self._cap_start_fit(None)
@@ -2653,7 +2781,7 @@ class Arbiter:
 
     @property
     def cap_mode(self) -> str:
-        """Current Menu -> Capture path selection: 'calibration' | 'normal'."""
+        """Current Menu -> Advanced -> Capture path: 'calibration' | 'normal'."""
         return self._cap_mode
 
     def _measurement_config(self, slot: Slot):
@@ -2664,9 +2792,9 @@ class Arbiter:
         so a run cannot get a different archive or a different path depending
         on whether its reagent2 countdown left time to prefetch.
 
-        Uses the Menu -> Capture screen's staged path + images choice, same as
-        the standalone menu capture — a sample's Read-phase capture must not
-        silently fall back to a full calibration sweep.
+        Uses the Menu -> Advanced -> Capture screen's staged path + images
+        choice, same as the standalone menu capture — a sample's Read-phase
+        capture must not silently fall back to a full calibration sweep.
 
         When the slot has already been pre-imaged its archive exists, and this
         run adds to it rather than opening a second file: one strip, one .h5.
@@ -3092,6 +3220,8 @@ class Arbiter:
         """
         if self._capture is not None or self._prefetch is not None:
             return
+        if self._ledtest_open:          # the LED test is switching the LEDs
+            return
         if self._cap_mode != "normal":
             return
         budget = config.capture_prefetch_budget_s()
@@ -3333,7 +3463,7 @@ class Arbiter:
         if self._camera is None and self._leds is None:
             return
         if (self._capture is not None or self._prefetch is not None
-                or self._camera_wanted()):
+                or self._camera_wanted() or self._ledtest_open):
             return
         log.info("Arbiter: no slot needs the camera — releasing it")
         self._release_camera()
@@ -4922,7 +5052,7 @@ def _selftest() -> None:
     A.record["h5file"] = ""
     arb._capture_factory = _FakeCapture
 
-    # ── Capture screen (Menu → Capture) ──────────────────────────────────────
+    # ── Capture screen (Menu → Advanced → Capture) ───────────────────────────
     # Runs against a throwaway copy of the DB so the exposure table and the
     # saved default group are exercised for real without touching live data.
     import shutil
@@ -5139,6 +5269,89 @@ def _selftest() -> None:
     check("stub2 enabled",       arb._pool["menu_stub2"].enabled, True)
     check("config slot is Reagent Phases",
           arb._pool["menu_config"].label, "Reagent\nPhases")
+
+    print("== advanced: Menu → Advanced → Capture, and back ==")
+    check("first slot is Advanced", arb._pool["menu_capture"].label, "Advanced")
+    arb._pool["menu_capture"].on_press()
+    check("Advanced is up",        arb._pool["adv_title"].visible, True)
+    check("menu grid hidden",      arb._pool["menu_capture"].visible, False)
+    for _name in ("adv_capture", "adv_test_led", "adv_cap_image", "adv_wifi"):
+        check(f"{_name} shown", arb._pool[_name].visible, True)
+    check("Capture Image not built yet", arb._pool["adv_cap_image"].enabled, False)
+    check("Wifi not built yet",    arb._pool["adv_wifi"].enabled, False)
+    arb._pool["adv_capture"].on_press()
+    check("Capture page up",       arb._cap_view, "choice")
+    arb._cap_choice_cancel()
+    check("CANCEL → Advanced",     arb._pool["adv_title"].visible, True)
+    arb._pool["adv_capture"].on_press()
+    arb._cap_choice_save()
+    check("SAVE → Advanced",       arb._pool["adv_title"].visible, True)
+    arb._pool["menu_ok_btn"].on_press()
+    check("OK → Menu",             arb._pool["menu_title"].text, "Menu")
+
+    print("== LED test: one LED at a time, all off on leaving ==")
+
+    class _SwitchLeds:
+        """Records what is lit, like LEDBank's set_channel / all_off."""
+        def __init__(self):  self.lit, self.closed = set(), False
+        def set_channel(self, ch, on):
+            (self.lit.add if on else self.lit.discard)(ch)
+        def all_off(self):   self.lit.clear()
+        def close(self):     self.closed = True
+
+    _saved_leds, _saved_cam = arb._leds, arb._camera
+    arb._camera, arb._leds = None, _SwitchLeds()
+    _tl = arb._leds
+    arb._render_advanced()
+    check("Test LED enabled when idle", arb._pool["adv_test_led"].enabled, True)
+    arb._pool["adv_test_led"].on_press()
+    check("LED test up",           arb._pool["ledt_title"].visible, True)
+    check("SAVE in the corner",    arb._pool["menu_ok_btn"].label, "SAVE")
+    check("instructions shown",    arb._pool["ledt_hint"].text,
+          "Tap color to toggle LED on or off")
+    check("nothing lit at first",  (_tl.lit, arb._pool["ledt_status"].text),
+          (set(), "All LEDs off"))
+    from lighting_cal8 import LEDBank as _LB
+    _i_green = _LB.color_names().index("green") + 1
+    _i_red = _LB.color_names().index("red") + 1
+    arb._pool[f"cap_led{_i_green}"].on_press()
+    check("green lit",             _tl.lit, {"green"})
+    check("green marked",          arb._pool[f"cap_led{_i_green}"].border_color
+                                   is not None, True)
+    check("status names it",       arb._pool["ledt_status"].text, "On: green")
+    check("lit swatch says ON",    arb._pool[f"cap_led{_i_green}"].label, "ON")
+    arb._pool[f"cap_led{_i_red}"].on_press()
+    check("red replaces green",    _tl.lit, {"red"})
+    check("green unmarked",        arb._pool[f"cap_led{_i_green}"].border_color, None)
+    arb._pool[f"cap_led{_i_red}"].on_press()
+    check("tap again → off",       _tl.lit, set())
+    arb._maybe_release_camera()
+    check("LED bank held while up", arb._leds is _tl, True)
+    arb._maybe_start_prefetch()
+    check("no prefetch while up",  arb._prefetch, None)
+    arb._pool[f"cap_led{_i_green}"].on_press()
+    arb._pool["menu_ok_btn"].on_press()                 # SAVE
+    check("SAVE leaves all off",   _tl.lit, set())
+    check("SAVE → Advanced",       arb._pool["adv_title"].visible, True)
+    arb._pool["adv_test_led"].on_press()
+    arb._pool[f"cap_led{_i_red}"].on_press()
+    arb._pool["menu_cancel_btn"].on_press()             # CANCEL
+    check("CANCEL leaves all off", _tl.lit, set())
+    check("screen closed",         arb._ledtest_open, False)
+    _phases = {n: s.active_phase for n, s in arb._slots.items()}
+    for s in arb._slots.values():               # no slot wants the camera
+        s.active_phase = "entry"
+    arb._maybe_release_camera()
+    check("LED bank released after", (arb._leds, _tl.closed), (None, True))
+    for n, s in arb._slots.items():
+        s.active_phase = _phases[n]
+
+    arb._capture = object()                             # the camera is busy
+    arb._render_advanced()
+    check("Test LED disabled while busy", arb._pool["adv_test_led"].enabled, False)
+    arb._capture = None
+    arb._camera, arb._leds = _saved_cam, _saved_leds
+    arb._render_menu()
 
     # Two different baselines, and the difference matters on a development
     # instrument.  _file_* is what config_defaults.sql commissioned — what
