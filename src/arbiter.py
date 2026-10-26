@@ -2424,7 +2424,9 @@ class Arbiter:
             good = sum(1 for f in runner.fits.values() if f.ok)
             bad = next((f for f in runner.fits.values() if not f.ok), None)
             if bad is None:
-                self._cap_hint(f"{good} of {len(runner.fits)} fitted. SAVE to keep.")
+                spread = sum(1 for f in runner.fits.values() if f.spread)
+                note = f" {spread} spread." if spread else ""
+                self._cap_hint(f"{good} of {len(runner.fits)} fitted.{note} SAVE to keep.")
             else:
                 self._cap_hint(bad.short_reason()[:60])
         if self._cap_view == "choice":

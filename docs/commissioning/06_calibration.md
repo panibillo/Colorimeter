@@ -53,7 +53,9 @@ mechanically.
 ## 6c — Exposure calibration 🟡
 
 Every stored exposure bracket is **tested** on a calibration test pad and the
-gray chips, so none of them is over- or under-exposed. The method, the window
+gray chips, so none of them is over- or under-exposed. When the pad is too
+contrasty for one exposure to suit every patch, the brackets are **spread**
+across the pad instead (see "Spread brackets" below). The method, the window
 and the storage are described in
 [docs/exposure_calibration_2026-10-26.md](../exposure_calibration_2026-10-26.md).
 This section is the procedure.
@@ -90,12 +92,26 @@ While a fit runs, the line above the buttons reports the LED and the rung
 border. The screen does not take touches during one rung, so CANCEL acts
 between LEDs.
 
-**If an LED does not fit.** The page ends with `x of y fitted`. A group that
-cannot be fitted is dropped from that LED, and the log names the patch that
-limited it (`pad_brown too dark below ... us`). The usual cause is a pad whose
-white and brown patches differ by more than the window allows: the window's
-ratio (850 / 100 = 8.5) must exceed the pad's white-to-brown ratio times the
-group's spread. Widen the window or use a lower-contrast pad.
+**Spread brackets.** If white and brown differ by more than the window allows
+(for example blue on layer B, where brown needs 12177 µs and white allows
+7673 µs), no single exposure can put every patch in range. The fit then runs
+the brackets from the white-limited exposure (nothing clips, brown may be dim)
+to the brown-limited one (brown is in range, white may clip). Each bracket
+passes only the patches it can see; together they cover the whole pad. The
+page ends with `x of y fitted. n spread. SAVE to keep.`, and the stored
+remarks end in `spread`. This is normal for high-contrast channels, not a
+failure.
+
+**If an LED does not fit.** The page ends with the reason for the first LED
+that failed. A group is dropped from that LED when:
+
+- a patch shows no signal even at the longest exposure (`pad_brown shows no
+  signal ...`): check the pad is in place and the patch region is on it;
+- the band between the limits is too narrow to keep neighbors 1.2× apart for
+  that many brackets (`too narrow for 5 brackets`): smaller groups may still
+  be kept. Widen the window or use a pad with less contrast.
+
+The log names the limiting patch.
 
 ---
 
