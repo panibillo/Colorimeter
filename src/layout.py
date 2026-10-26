@@ -273,9 +273,10 @@ CAP_FLD_HIGH_PC = Rect(238,  88, 56, 30)
 CAP_LBL_LOW_PC  = Rect(164, 122, 72, 30)    # "Low %"
 CAP_FLD_LOW_PC  = Rect(238, 122, 56, 30)
 CAP_HINT      = Rect(  6, 158, 308,  18)
-CAP_SUITE     = Rect(  4, 180, 100,  46)    # Calibrate suite
-CAP_COLOR     = Rect(110, 180, 100,  46)    # Calibrate color
-CAP_SHOW      = Rect(216, 180, 100,  46)    # Show
+CAP_SUITE     = Rect(  4, 180,  76,  46)    # Calibrate suite
+CAP_COLOR     = Rect( 82, 180,  76,  46)    # Calibrate color
+CAP_SHOW      = Rect(160, 180,  76,  46)    # Show
+CAP_PAD       = Rect(238, 180,  78,  46)    # Pad areas: place the test pad's patches
 # Show screen (Capture page's Show button), under the BACK / title / Capture row
 # that reuses the menu's corners.
 SHOW_MODE_EXP   = Rect(  4,  54, 154, 30)     # "One exposure"

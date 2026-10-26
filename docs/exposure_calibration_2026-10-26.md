@@ -75,14 +75,16 @@ middle of group 1. The preview also starts from the middle exposure.
 | `exposure_fit_runner.py` | Lights the LED, grabs frames, runs the fit; one LED or all. |
 | `exposure_show.py`, `show_plot.py` | The Show screen's capture and plot. |
 | `exposure_repo.py` | Reads and writes the table. |
-| `roi.py` | `load_test_pad()`: regions with `active = 2` and role `pad_white/yellow/brown`. |
+| `roi.py` | `load_test_pad()`: regions with `active = 2` and role `pad_white/yellow/brown`; `init_test_pad_from_sample()`. |
 
 A startup check warns if the window is wider than the layer-keep limits, which
 would let a bracket pass calibration and then be discarded at capture.
 
 ## Open items
 
-- The physical pad does not exist yet; its three regions are not seeded.
+- The physical pad does not exist yet. Capture → Pad areas creates the three
+  regions from the sample region (yellow top third, brown middle, white bottom)
+  as a starting point; they must be moved onto the real patches.
 - The window values are placeholders to tune on real pads.
 - Linear spacing instead of log is deferred.
 - The old gray-card calibration path (`e3_final_us`) is still in

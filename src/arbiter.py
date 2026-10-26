@@ -410,6 +410,7 @@ class Arbiter:
         self._view_frame     = None    # the whole captured frame, numpy BGR
         self._view_bayer     = None    # that frame's raw mosaic, for recap saves
         self._view_state     = None    # image_view.ViewState over that frame
+        self._view_pad:   bool = False   # editing the test pad, not the measurement ROIs
         self._view_rois:  dict = {}    # name -> rect.Rect, in image space
         self._view_selected: str | None = None   # one name, or None
         self._view_return_slot: Slot | None = None
@@ -2194,6 +2195,8 @@ class Arbiter:
               enabled=settings_ok and has_layers)
         p.put("cap_show",  "Show", on=self._cap_show,
               enabled=settings_ok and has_layers)
+        p.put("cap_pad", "Pad\nareas", on=self._cap_pad_areas,
+              enabled=not self._any_slot_active() and self._capture is None)
         p.put("cap_hint", self._cap_hint_text())
         p.render(self._disp)
         self._rebuild_focus()
@@ -2422,6 +2425,36 @@ class Arbiter:
             self._cap_hint(f"{good} of {len(runner.fits)} fitted. SAVE to keep.")
         if self._cap_view == "choice":
             self._render_capture_choice()
+
+    def _cap_pad_areas(self) -> None:
+        """
+        Open the image viewer on the test pad's three patches.
+
+        Any patch not yet placed is first created from the sample region: the
+        top third is yellow, the middle brown, the bottom white.  Exit returns
+        here, with the settings as they were.
+        """
+        import roi
+        if not self.capture_available():
+            self._cap_hint("Camera busy - try again later")
+            return
+        self._cap_read_fields()
+        created = roi.init_test_pad_from_sample()
+        if len(roi.load_test_pad()) < len(roi.TEST_PAD_ROLES):
+            self._cap_hint("No sample region to start the pad from")
+            return
+        if created:
+            log.info("Arbiter: test pad patches created: %s", created)
+        self._cap_view = None            # the boxes were read; the viewer owns the screen
+        self.open_image_view(slot=None, pad=True)
+
+    def _view_fit_pad(self) -> None:
+        """Zoom the viewer to the three patches together."""
+        from rect import Rect
+        rs = list(self._view_rois.values())
+        x0, y0 = min(r.x for r in rs), min(r.y for r in rs)
+        x1, y1 = max(r.x2() for r in rs), max(r.y2() for r in rs)
+        self._view_state.fit_to(Rect(x0, y0, x1 - x0, y1 - y0, name="pad"))
 
     # ── Show screen (Capture page → Show) ──────────────────────────────────────
     # Photographs the test pad with the chosen LED and plots the pad pixels'
@@ -3581,7 +3614,8 @@ class Arbiter:
     # already there, out to the frame edge.
 
     def open_image_view(self, slot: Slot | None = None,
-                        focus_role: str | None = None):
+                        focus_role: str | None = None,
+                        pad: bool = False):
         """
         Open the image viewer, taking one preview frame first.
 
@@ -3598,6 +3632,9 @@ class Arbiter:
                         A role, not a name, because the caller means "the
                         sample patch", not whatever the operator last called
                         it — see the note in roi.py.
+            pad:        Show and edit the exposure-calibration test pad's three
+                        patches (the active=2 set) instead of the measurement
+                        ROIs.  Exit then returns to the Capture page.
         """
         if not self.capture_available():
             log.info("Arbiter: image view refused — a capture is in flight")
@@ -3611,6 +3648,7 @@ class Arbiter:
         self._view_editing = None
         self._view_armed = None
         self._focused = None
+        self._view_pad = pad
         self._view_rois = self._load_view_rois()
         # Resolve the requested role to the name the rest of the viewer keys
         # on — tap selection and the edit path both work in names. An
@@ -3623,6 +3661,9 @@ class Arbiter:
                         focus_role)
         self._view_selected = target.name if target is not None else None
         self._view_reimage(focus_roi=self._view_selected)
+        if pad and self._view_state is not None and self._view_rois:
+            self._view_fit_pad()
+            self._render_image_view()
 
     def _load_view_rois(self) -> dict:
         """
@@ -3634,8 +3675,12 @@ class Arbiter:
         try:
             import roi
             size = getattr(self._camera, "config_size", None) or (None, None)
-            return roi.load_active(size[0], size[1],
-                                   getattr(self._camera, "model", None))
+            model = getattr(self._camera, "model", None)
+            if self._view_pad:
+                return {n: r for n, r in
+                        roi.load_calibration(size[0], size[1], model).items()
+                        if r.role in roi.TEST_PAD_ROLES}
+            return roi.load_active(size[0], size[1], model)
         except Exception:
             log.exception("Arbiter: could not load ROIs for the image view")
             return {}
@@ -4294,7 +4339,8 @@ class Arbiter:
                 and not roi.contains_rect(bound, sample):
             return self._view_reject(f"{sample.name} outside {bound.name}")
 
-        rowid = roi.save(snapped.name, snapped, remark="edited on the instrument")
+        rowid = roi.save(snapped.name, snapped, remark="edited on the instrument",
+                         active=2 if self._view_pad else 1)
         if not rowid:
             return self._view_reject("save failed")
         log.info("Arbiter: saved ROI %r as %s (rowid %s)",
@@ -4337,6 +4383,10 @@ class Arbiter:
         self._view_mode = "view"
         slot = self._view_return_slot
         self._view_return_slot = None
+        if self._view_pad:
+            self._view_pad = False
+            self._render_capture_choice()
+            return
         if slot is not None:
             self.focus(slot)
         else:
@@ -5765,6 +5815,41 @@ def _selftest() -> None:
     check("frame released",    arb._view_frame, None)
     check("camera no longer wanted", arb._camera_wanted(), False)
     check("back on the Menu",  arb._pool["menu_title"].text, "Menu")
+
+    print("== test pad areas: Capture page → Pad areas → viewer ==")
+    _db.write_one("DELETE FROM roi WHERE active = 2")
+    arb._menu_open_capture()
+    arb._cap_pick_led("green")
+    arb._pool["cap_pad"].on_press()
+    check("viewer open on the pad",   (arb._view_open, arb._view_pad), (True, True))
+    check("three patches made from the sample", sorted(arb._view_rois),
+          sorted(_roi.TEST_PAD_ROLES))
+    _s = _roi.by_role(_roi.load_active(), _roi.ROLE_SAMPLE)
+    _ys = {n: r.y for n, r in arb._view_rois.items()}
+    check("yellow above brown above white",
+          _ys["pad_yellow"] < _ys["pad_brown"] < _ys["pad_white"], True)
+    check("pad lies inside the sample",
+          all(r.y >= _s.y and r.y2() <= _s.y2() for r in arb._view_rois.values()),
+          True)
+    arb._view_selected = "pad_brown"
+    arb._view_edit()
+    arb._view_editing.y = arb._view_editing.y + 2
+    _new = arb._view_editing.xywh()
+    arb._view_save()
+    check("brown patch saved in the pad set",
+          _roi.load_test_pad()[_roi.ROLE_PAD_BROWN].xywh(), _new)
+    check("measurement ROIs untouched",
+          _roi.by_role(_roi.load_active(), _roi.ROLE_SAMPLE).xywh(), _s.xywh())
+    arb._view_exit()
+    check("Exit returns to the Capture page", arb._cap_view, "choice")
+    check("viewer closed",            arb._view_open, False)
+    check("pad mode cleared",         arb._view_pad, False)
+    check("LED choice kept",          arb._cap_led, "green")
+    arb._cap_choice_cancel()
+    arb.open_image_view(slot=None)
+    check("a normal open shows the measurement ROIs",
+          _roi.ROLE_PAD_BROWN in [r.role for r in arb._view_rois.values()], False)
+    arb._view_exit()
 
     print("== image viewer: locked out while a capture is in flight ==")
     arb._capture = _FakeCapture()

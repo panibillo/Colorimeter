@@ -62,10 +62,13 @@ This section is the procedure.
 
 1. Put the **calibration test pad** (white, yellow and brown patches) in the
    card holder next to the gray chips.
-2. Define its three regions. They are `roi` rows with `active = 2` and the
-   roles `pad_white`, `pad_yellow` and `pad_brown`. There is no screen for this
-   yet; until the physical pad exists the regions are not seeded, and a run
-   stops at once with a message naming the missing ones. Nothing is lit first.
+2. Place its three regions: **Menu → Capture → Pad areas**. The first time,
+   the viewer opens with the sample region split into three equal bands (top
+   yellow, middle brown, bottom white). Select a patch, press Edit, and move its
+   edges onto the real patch as in Menu → View Image; Save keeps it (the old
+   rows stay as history). Exit returns to the Capture page. Until all three
+   exist a run stops at once with a message naming the missing ones, before any
+   LED is lit.
 3. Check the window under **Menu → Capture** (High DN, Low DN, High %, Low %).
    The seeded 100 / 850 DN at the 10th / 90th percentile are placeholders.
 
@@ -78,6 +81,7 @@ This section is the procedure.
 | Calibrate suite | Fits every LED with its own layers and window. Clears the chosen LED. |
 | Calibrate color | Fits only the chosen LED (one to four layers). |
 | Show | Photographs the test pad and plots its sorted signal against the window. |
+| Pad areas | Opens the image viewer on the three test-pad patches. |
 | SAVE | Writes the settings and the fitted brackets. A single-LED fit saved this way is used in operation; a later suite run replaces it. |
 | CANCEL | Discards everything on the page. |
 

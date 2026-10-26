@@ -796,6 +796,41 @@ def missing_test_pad_roles(pad: Dict[str, Rect]) -> Tuple[str, ...]:
     return tuple(role for role in TEST_PAD_ROLES if role not in pad)
 
 
+def init_test_pad_from_sample() -> list:
+    """
+    Create any missing test-pad patch from the `sample` region.
+
+    The sample region is split into three equal bands, top to bottom: yellow,
+    brown, white (the order the pad is laid out in).  Each patch spans the
+    sample's width and is snapped to even coordinates.  A patch that already
+    exists is left alone, so this never overwrites an edit.
+
+    Returns:
+        The roles created, in pad order (empty when the pad was complete or
+        there is no sample region to start from).
+    """
+    sample = by_role(load_active(), ROLE_SAMPLE)
+    if sample is None:
+        log.error("roi.init_test_pad_from_sample: no sample region to start from")
+        return []
+    row = db.read_one(_SELECT + "WHERE name = ? AND active = 1", (sample.name,))
+    _, _, _, _, _, _, _, fw, fh, model, _ = row
+    have = {r.role for r in load_calibration().values()}
+    band = (sample.h // 3) // 2 * 2
+    created = []
+    for i, role in enumerate((ROLE_PAD_YELLOW, ROLE_PAD_BROWN, ROLE_PAD_WHITE)):
+        if role in have:
+            continue
+        patch = snap_even(Rect(sample.x, sample.y + i * band, sample.w, band,
+                               name=role))
+        _insert(role, role, patch, fw, fh, model, None,
+                "initialized from the sample region", active=2)
+        created.append(role)
+    if created:
+        log.info("roi: test pad initialized from %r: %s", sample.name, created)
+    return created
+
+
 def _insert(name: str, role: Optional[str], r: Rect,
             frame_w: int, frame_h: int, model: Optional[str],
             color: Optional[str], remark: Optional[str],
@@ -812,7 +847,7 @@ def _insert(name: str, role: Optional[str], r: Rect,
 
 def save(name: str, rect: Rect, remark: Optional[str] = None,
          frame: Optional[Tuple[int, int]] = None,
-         model: Optional[str] = None) -> int:
+         model: Optional[str] = None, active: int = 1) -> int:
     """
     Supersede the active ROI named `name` with an edited rectangle.
 
@@ -831,6 +866,8 @@ def save(name: str, rect: Rect, remark: Optional[str] = None,
         remark: Optional note stored on the new row.
         frame:  Optional (w, h) to record instead of the superseded row's.
         model:  Optional sensor model to record instead of the superseded row's.
+        active: Which set the ROI belongs to: 1 = in force (the default),
+                2 = the calibration set (the test pad's patches live there).
 
     Returns:
         The new row's rowid, or 0 if `name` is not in the table.
@@ -838,7 +875,7 @@ def save(name: str, rect: Rect, remark: Optional[str] = None,
     Example:
         >>> save('sample', Rect(1150, 792, 68, 68), remark='nudged down')  # doctest: +SKIP
     """
-    row = db.read_one(_SELECT + "WHERE name = ? AND active = 1", (name,))
+    row = db.read_one(_SELECT + "WHERE name = ? AND active = ?", (name, active))
     if row is None:
         log.error("roi.save: no active ROI named %r — nothing to supersede", name)
         return 0
@@ -850,10 +887,10 @@ def save(name: str, rect: Rect, remark: Optional[str] = None,
                  name, snapped.xywh(), rect.xywh())
 
     fw, fh = frame if frame else (src_w, src_h)
-    db.write_one("UPDATE roi SET active = 0 WHERE name = ? AND active = 1",
-                 (name,))
+    db.write_one("UPDATE roi SET active = 0 WHERE name = ? AND active = ?",
+                 (name, active))
     rowid = _insert(name, role, snapped, fw, fh, model or src_model,
-                    color, remark)
+                    color, remark, active=active)
     log.info("roi.save: %r -> %s (rowid %s)", name, snapped.xywh(), rowid)
     return rowid
 

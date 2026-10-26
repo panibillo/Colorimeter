@@ -301,11 +301,12 @@ class Pool:
             field(f"cap_fld_{key}", getattr(L, f"CAP_FLD_{key.upper()}"),
                   16, "field_blue", align="center")
         label("cap_hint", L.CAP_HINT, "black", "white", 12, align="left")
-        button("cap_suite", L.CAP_SUITE, "btn_text", "start_green", 14,
+        button("cap_suite", L.CAP_SUITE, "btn_text", "start_green", 12,
                text="Calibrate\nsuite")
-        button("cap_color", L.CAP_COLOR, "btn_text", "btn_gray", 14,
+        button("cap_color", L.CAP_COLOR, "btn_text", "btn_gray", 12,
                text="Calibrate\ncolor")
-        button("cap_show",  L.CAP_SHOW,  "btn_text", "btn_gray", 14, text="Show")
+        button("cap_show",  L.CAP_SHOW,  "btn_text", "btn_gray", 12, text="Show")
+        button("cap_pad",   L.CAP_PAD,   "btn_text", "btn_gray", 12, text="Pad\nareas")
         # Show screen: mode, one-exposure stepper or one-layer buttons, the plot.
         button("show_mode_exp",   L.SHOW_MODE_EXP,   "btn_text", "btn_gray", 14,
                text="One exposure")
