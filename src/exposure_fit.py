@@ -125,6 +125,14 @@ class UsableRange:
         return self.known and self.e_min <= self.e_max
 
     @property
+    def crossed(self) -> bool:
+        """
+        True when every patch showed signal but no one exposure suits them all:
+        the brightest patch clips before the darkest rises out of the noise.
+        """
+        return self.known and self.e_min > self.e_max
+
+    @property
     def span(self) -> float:
         """Longest usable exposure over shortest (below 1 means infeasible)."""
         return self.e_max / self.e_min if self.known else 0.0
@@ -159,6 +167,10 @@ class LedFit:
     failed: Dict[str, str] = field(default_factory=dict)
     usable: Optional[UsableRange] = None
     captures: int = 0
+    # True when no single exposure suits every patch, so the brackets were
+    # spread from the white-limited exposure to the brown-limited one: each
+    # bracket is good for the patches it can see, and together they cover all.
+    spread: bool = False
     # {exposure_us: RungNote} for the tested exposures that were kept.
     notes: Dict[int, "RungNote"] = field(default_factory=dict)
 
@@ -267,7 +279,10 @@ def _find_range(measure: _Counted, seed_us: float,
 
     The sensor is only roughly linear, so the range is re-measured at its own
     middle until the middle stops moving.  A patch with no signal makes the
-    exposure longer first.  Returns None if no measurement could be made.
+    exposure longer first.  When the range is crossed (no exposure suits every
+    patch) the short end of the band between the two limits is re-measured
+    instead, since a clipped patch misjudges its own limit.  Returns None if
+    no measurement could be made.
     """
     exposure = int(_clamp(seed_us, params))
     rng = None
@@ -278,22 +293,30 @@ def _find_range(measure: _Counted, seed_us: float,
                 return rng
             exposure = int(_clamp(exposure * NO_SIGNAL_STEP, params))
             continue
-        if not rng.feasible:
+        lo, hi = sorted(_effective(rng, params))
+        if lo <= 0:
             return rng
-        lo, hi = _effective(rng, params)
-        if lo > hi:
-            return rng
-        target = int(_clamp(math.sqrt(lo * hi), params))
+        # A crossed range is re-measured at its short end, where nothing
+        # clips, so the bright patch's own limit is not misjudged.
+        aim = lo if rng.crossed else math.sqrt(lo * hi)
+        target = int(_clamp(aim, params))
         if abs(target / exposure - 1) < CONVERGED:
             return rng
         exposure = target
     return rng
 
 
-def _fit_rung(measure: _Counted, exposure: int, params: FitParams
-              ) -> Tuple[Optional[int], str, Levels]:
+NEED_ALL, NEED_NO_CLIP, NEED_NO_DIM, NEED_NONE = "all", "no_clip", "no_dim", "none"
+
+
+def _fit_rung(measure: _Counted, exposure: int, params: FitParams,
+              need: str = NEED_ALL) -> Tuple[Optional[int], str, Levels]:
     """
-    Measure one bracket and nudge it until every patch passes.
+    Measure one bracket and nudge it until it passes.
+
+    `need` says what passing means: every patch inside the window (the
+    default), only that no patch clips (the short end of a spread ladder), only
+    that no patch is too dark (its long end), or nothing (the rungs between).
 
     Returns (exposure, "", levels) on success, or (None, reason, {}).
     """
@@ -301,6 +324,10 @@ def _fit_rung(measure: _Counted, exposure: int, params: FitParams
     for _ in range(params.max_iter):
         levels = measure(exposure)
         too_dark, too_bright = check_levels(levels, params)
+        if need in (NEED_NO_CLIP, NEED_NONE):
+            too_dark = []
+        if need in (NEED_NO_DIM, NEED_NONE):
+            too_bright = []
         if not too_dark and not too_bright:
             return exposure, "", levels
         if too_dark and too_bright:
@@ -332,23 +359,53 @@ def _position_label(pos: float) -> str:
     return f"{f.numerator}/{f.denominator}"
 
 
-def _note(pos: float, levels: Levels) -> RungNote:
-    """Describe the rung at `pos` from its measurement."""
-    if pos <= 0.0:
-        name, (lo, _) = min(levels.items(), key=lambda kv: kv[1][0])
-        return RungNote(f"low DN ({name})", low_dn=lo)
-    if pos >= 1.0:
+def _note(pos: float, levels: Levels, spread: bool = False) -> RungNote:
+    """
+    Describe the rung at `pos` from its measurement.
+
+    The short end of a normal ladder is fixed by the darkest patch's low limit
+    and the long end by the brightest patch's high limit; in a spread ladder
+    it is the other way round (the short end stops the white patch clipping,
+    the long end lifts the brown patch out of the dark).  A spread ladder says
+    so on every rung.
+    """
+    tail = " spread" if spread else ""
+    if pos in (0.0, 1.0):
+        limited_by_low = (pos == 0.0) != spread
+        if limited_by_low:
+            name, (lo, _) = min(levels.items(), key=lambda kv: kv[1][0])
+            return RungNote(f"low DN ({name}){tail}", low_dn=lo)
         name, (_, hi) = max(levels.items(), key=lambda kv: kv[1][1])
-        return RungNote(f"high DN ({name})", high_dn=hi)
-    return RungNote(f"log rung {_position_label(pos)}")
+        return RungNote(f"high DN ({name}){tail}", high_dn=hi)
+    return RungNote(f"log rung {_position_label(pos)}{tail}")
 
 
 def _positions_us(rng: UsableRange, params: FitParams
-                  ) -> Optional[Tuple[float, float]]:
-    """The usable range pulled in by the edge margin, or None if nothing is left."""
+                  ) -> Optional[Tuple[float, float, bool]]:
+    """
+    The exposures the ladder runs between, as (shortest, longest, spread).
+
+    Normally that is the usable range pulled in by the edge margin.  When the
+    range is crossed (the darkest patch needs more light than the brightest
+    can take) it is the band between the two limits instead: the shortest end
+    keeps the brightest patch from clipping and the longest lifts the darkest
+    patch out of the dark, and `spread` is True.  None if nothing is left.
+    """
     lo, hi = _effective(rng, params)
+    if rng.crossed:
+        lo, hi = sorted((lo, hi))
+        lo = max(lo * (1 - EDGE_MARGIN), params.min_us)
+        hi = min(hi * (1 + EDGE_MARGIN), params.max_us)
+        return (lo, hi, True) if lo < hi else None
     lo, hi = lo * (1 + EDGE_MARGIN), hi * (1 - EDGE_MARGIN)
-    return (lo, hi) if lo <= hi else None
+    return (lo, hi, False) if lo <= hi else None
+
+
+def _need(pos: float, spread: bool) -> str:
+    """What a rung at `pos` must satisfy (see _fit_rung)."""
+    if not spread:
+        return NEED_ALL
+    return {0.0: NEED_NO_CLIP, 1.0: NEED_NO_DIM}.get(pos, NEED_NONE)
 
 
 def _group_feasible(n: int, span: float, params: FitParams) -> bool:
@@ -390,20 +447,24 @@ def fit_led(led: str, measure: Measure, seed_us: float,
         on_rung(0, total)
     rng = _find_range(counted, seed_us, params)
     result.usable = rng
-    edges = _positions_us(rng, params) if rng is not None and rng.feasible else None
+    edges = None
+    if rng is not None and rng.known:
+        edges = _positions_us(rng, params)
     if edges is None:
         why = _infeasible_reason(rng)
         for n in sizes:
             result.failed[str(n)] = why
     else:
-        lo, hi = edges
+        lo, hi, spread = edges
+        result.spread = spread
         span = hi / lo
         # Test only the positions some feasible group will use.
         feasible = [n for n in sizes if _group_feasible(n, span, params)]
         for n in sizes:
             if n not in feasible:
                 result.failed[str(n)] = (
-                    f"usable range too narrow for {n} brackets "
+                    f"{'band between the limits' if spread else 'usable range'}"
+                    f" too narrow for {n} brackets "
                     f"({rng.dark_patch} too dark below {rng.e_min:.0f} us, "
                     f"{rng.bright_patch} too bright above {rng.e_max:.0f} us)")
         needed = sorted({p for n in feasible for p in GROUP_POSITIONS[n]})
@@ -415,12 +476,13 @@ def fit_led(led: str, measure: Measure, seed_us: float,
             if on_rung:
                 on_rung(i, total)
             got, reason, levels = _fit_rung(
-                counted, int(round(lo * span ** pos)), params)
+                counted, int(round(lo * span ** pos)), params,
+                _need(pos, spread))
             if got is None:
                 reasons[pos] = reason
             else:
                 fitted[pos] = got
-                result.notes[got] = _note(pos, levels)
+                result.notes[got] = _note(pos, levels, spread)
         for n in feasible:
             lost = [p for p in GROUP_POSITIONS[n] if p not in fitted]
             if lost:

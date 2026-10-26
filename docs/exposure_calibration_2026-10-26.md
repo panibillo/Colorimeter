@@ -33,8 +33,8 @@ The sensor is linear, so one measurement says how far exposure can move:
 - `e_min`: the exposure at which the darkest patch just reaches Low DN.
 - `e_max`: the exposure at which the brightest patch just reaches High DN.
 
-Every bracket must lie between them, so all of them pass white and brown at
-once. Between them, exposure is placed **log-spaced** at fixed positions
+When `e_min` is at or below `e_max`, every bracket lies between them, so all of
+them pass white and brown at once. Between them, exposure is placed **log-spaced** at fixed positions
 (0 is `e_min`, 1 is `e_max`, both pulled in 3%):
 
 | Group (images per LED) | Positions |
@@ -52,11 +52,31 @@ can be stored once. A group is dropped if the range is too narrow to keep
 neighbors at least 1.2× apart (5 brackets need a usable range of about 2.1×).
 The log names the limiting patch.
 
+### When no exposure suits the whole pad (spread mode)
+
+If white and brown differ by more than the window allows (`e_min` above
+`e_max`, as with blue on layer B: brown needs 12177 µs, white allows 7673 µs),
+no bracket can pass every patch. The ladder is then **spread across the pad**,
+automatically, for any LED:
+
+- Position 0 is the white-limited exposure `e_max`: nothing clips, but the
+  dark patches may be below Low DN.
+- Position 1 is the brown-limited exposure `e_min`: brown reaches Low DN, but
+  white (and maybe yellow) may clip.
+- Middle positions are placed log-spaced between them and are kept as placed.
+
+Each bracket passes only the patches it can; together the brackets cover white
+through brown. Only the two ends are checked (position 0 for clipping,
+position 1 for darkness). Every stored remark of a spread ladder ends in
+`spread`, e.g. `high DN (pad_white.B) spread`, so the table shows the mode.
+A group is still dropped if the band between the two limits is too narrow to
+keep neighbors 1.2× apart, and a patch with no signal at all still fails.
+
 ## What is stored (`exposure` table)
 
 One row per LED, group and exposure, with `active` marking the set in force
 (older sets stay as history). New columns: `remark` (`low DN (pad_brown.Gb)`,
-`high DN (...)`, or `log rung 1/4`), `low_dn` / `high_dn` (the measured signal,
+`high DN (...)`, or `log rung 1/4`, plus ` spread` in spread mode), `low_dn` / `high_dn` (the measured signal,
 only on the rung that fixed that limit), `layers` (the layers that had to pass,
 e.g. `Gb Gr`) and `preimage`.
 

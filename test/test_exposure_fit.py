@@ -148,20 +148,38 @@ class TestFitLed(unittest.TestCase):
         self.assert_every_bracket_passes(fit, 0.05, PAD_DARK_BROWN)
 
     def test_the_short_reason_names_the_two_patches_that_disagree(self):
-        very_dark = dict(PAD, pad_brown=0.02)
-        fit = ef.fit_led("violet", Sensor(0.05, very_dark), 10_000, P)
-        text = fit.short_reason()
-        self.assertTrue(text.startswith("violet: brown needs "), text)
-        self.assertIn("white allows", text)
+        fit = ef.LedFit("violet", failed={"1": "x"},
+                        usable=ef.UsableRange(12177, 7673, "pad_brown", "pad_white"))
+        self.assertEqual(fit.short_reason(),
+                         "violet: brown needs 12177us, white allows 7673us")
         self.assertEqual(ef.fit_led("red", Sensor(0.05), 10_000, P).short_reason(), "")
 
-    def test_a_pad_the_window_cannot_hold_fails_every_group(self):
+    def test_a_pad_the_window_cannot_hold_is_spread_across_the_pad(self):
         very_dark = dict(PAD, pad_brown=0.02)
-        fit = ef.fit_led("violet", Sensor(0.05, very_dark), 10_000, P)
+        sensor = Sensor(0.05, very_dark)
+        fit = ef.fit_led("violet", sensor, 10_000, P)
+        self.assertTrue(fit.spread)
+        self.assertTrue(fit.usable.crossed)
+        self.assertIn("5", fit.groups)
+        g = fit.groups["5"]
+        short, long_ = g[0], g[-1]
+        # The shortest bracket clips nothing; the longest lifts brown out of the dark.
+        lows, highs = zip(*sensor(short).values())
+        self.assertLessEqual(max(highs), P.high_dn)
+        lows, highs = zip(*sensor(long_).values())
+        self.assertGreaterEqual(sensor(long_)["pad_brown"][0], P.low_dn)
+        self.assertTrue(all(n.endswith("spread") for n in
+                            (fit.notes[e].remark for e in g)))
+        self.assertTrue(fit.notes[short].remark.startswith("high DN"))
+        self.assertTrue(fit.notes[long_].remark.startswith("low DN"))
+        self.assertTrue(fit.ok)
+
+    def test_a_patch_with_no_signal_still_fails(self):
+        fit = ef.fit_led("violet", Sensor(0.05, dict(PAD, pad_brown=0.0)),
+                         10_000, P)
         self.assertEqual(fit.groups, {})
-        self.assertEqual(sorted(fit.failed), ["1", "2", "3", "4", "5"])
-        self.assertIn("pad_brown", fit.failed["1"])
         self.assertFalse(fit.ok)
+        self.assertIn("pad_brown", fit.failed["1"])
 
     def test_a_starting_exposure_with_no_signal_recovers(self):
         class Dead(Sensor):
