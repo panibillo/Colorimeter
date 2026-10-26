@@ -35,7 +35,7 @@ from typing import Callable, Dict, List, Optional
 
 import layout
 from palette import color
-from rect import Rect
+from geometry import Rect
 from widgets import Button, ImageWidget, Label, RectWidget, TextBox, Widget
 import version
 from timer import TimerWidget
