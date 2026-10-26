@@ -361,7 +361,11 @@ class Arbiter:
         # Choice form: the LED chosen on the bar, the settings fields' text, and
         # the line of help or status under them.
         self._cap_led: str | None = None
-        self._cap_values: dict[str, str] = {}
+        self._cap_values: dict[str, str] = {}    # the boxes' text, for the chosen LED
+        self._cap_global: dict[str, str] = {}    # the global window's text
+        self._cap_over: dict[str, dict] = {}     # LEDs with a window of their own
+        self._cap_layers: dict[str, list] = {}   # required Bayer layers per LED
+        self._cap_layers0: dict[str, list] = {}  # ... as stored, to spot changes
         self._cap_hint_msg: str = ""
         self._cap_running: str | None = None   # LED being calibrated now
         self._cap_fit = None                   # finished fit, awaiting SAVE
@@ -2060,9 +2064,7 @@ class Arbiter:
         self._cap_hint_msg = ""
         self._cap_fit = None
         self._cap_running = None
-        self._cap_values = {
-            key: str(config.get("calibration", row))
-            for key, row, *_ in self._CAP_SETTINGS}
+        self._cap_stage_from_config()
         self._cap_progress = ""
         self._cap_result   = ""
         self._render_capture_choice()
@@ -2102,11 +2104,44 @@ class Arbiter:
          "Percentile of a patch's pixels held to High DN"),
     )
 
+    # The Bayer layer swatches' colors, and the text color that reads on each.
+    _CAP_LAYER_SWATCH = {"R": ((213, 0, 0), "white"), "Gr": ((0, 170, 0), "white"),
+                         "Gb": ((0, 110, 90), "white"), "B": ((0, 0, 255), "white")}
+
+    def _cap_stage_from_config(self) -> None:
+        """
+        Stage everything the form edits from the database: the global window,
+        each LED's own window (if it has one), and each LED's required layers.
+        Nothing reaches the database until SAVE.
+        """
+        import required_cells
+        from lighting_cal8 import LEDBank
+        self._cap_global = {
+            key: str(config.get("calibration", row))
+            for key, row, *_ in self._CAP_SETTINGS}
+        self._cap_over = {
+            led: self._cap_values_of(w)
+            for led, w in config.calibration_led_windows().items()}
+        cells = config.calibration_required_cells()
+        self._cap_layers = {
+            led: list(required_cells.required_channels(led, cells))
+            for led in LEDBank.color_names()}
+        self._cap_layers0 = {led: list(v) for led, v in self._cap_layers.items()}
+        self._cap_values = dict(self._cap_global)
+
+    @staticmethod
+    def _cap_values_of(w) -> "dict[str, str]":
+        """A LedWindow as the form's field texts."""
+        return {"low_dn": str(w.low_dn), "high_dn": str(w.high_dn),
+                "low_pc": f"{w.low_pctl:g}", "high_pc": f"{w.high_pctl:g}"}
+
     def _render_capture_choice(self) -> None:
         if self._pool is None:
             return
         from palette import color, rgb
         from lighting_cal8 import LEDBank
+        if self._cap_view == "choice":
+            self._cap_read_fields()          # keep text typed since the last draw
         self._cap_view = "choice"
         p = self._pool
         p.hide_all()
@@ -2128,20 +2163,35 @@ class Arbiter:
             w.border_color = (color("black")
                               if led in (self._cap_led, self._cap_running)
                               else None)
+        # The Bayer layers the chosen LED must pass: lit = required.
+        shown = self._cap_led or self._cap_running
+        for i, layer in enumerate(("R", "Gr", "Gb", "B"), 1):
+            name = f"cap_layer{i}"
+            on = shown is not None and layer in self._cap_layers[shown]
+            p.put(name, layer, on=lambda l=layer: self._cap_toggle_layer(l),
+                  enabled=self._cap_led is not None)
+            w = p[name]
+            fill_rgb, text_name = self._CAP_LAYER_SWATCH[layer]
+            w.color = rgb(*fill_rgb) if on else color("btn_gray")
+            w.disabled_color = w.color
+            w.text_color = color(text_name) if on else color("black")
+            w.border_color = color("black") if on else None
         for key, _row, _kind, help_text in self._CAP_SETTINGS:
             p.put(f"cap_lbl_{key}", p[f"cap_lbl_{key}"].label,
                   on=lambda t=help_text: self._cap_hint(t))
             p.put(f"cap_fld_{key}", self._cap_values[key])
-        problem = self._cap_staged_settings()
-        settings_ok = not isinstance(problem, str)
+        problem = self._cap_problem()
+        settings_ok = problem is None
         if not settings_ok:
             self._cap_hint_msg = problem
+        has_layers = (self._cap_led is not None
+                      and bool(self._cap_layers[self._cap_led]))
         p.put("cap_suite", "Calibrate\nsuite", on=self._cap_calibrate_suite,
               enabled=settings_ok)
         p.put("cap_color", "Calibrate\ncolor", on=self._cap_calibrate_color,
-              enabled=settings_ok and self._cap_led is not None)
+              enabled=settings_ok and has_layers)
         p.put("cap_show",  "Show", on=self._cap_show,
-              enabled=settings_ok and self._cap_led is not None)
+              enabled=settings_ok and has_layers)
         p.put("cap_hint", self._cap_hint_text())
         p.render(self._disp)
         self._rebuild_focus()
@@ -2149,7 +2199,10 @@ class Arbiter:
     def _cap_hint_text(self) -> str:
         if self._cap_hint_msg:
             return self._cap_hint_msg
-        return f"LED: {self._cap_led}" if self._cap_led else "Tap an LED color"
+        if self._cap_led is None:
+            return "Tap an LED color"
+        return (f"{self._cap_led}: " + (" ".join(self._cap_layers[self._cap_led])
+                                        or "tap a Bayer layer"))
 
     def _cap_hint(self, text: str) -> None:
         """Show a line of help (or status) under the settings."""
@@ -2158,11 +2211,14 @@ class Arbiter:
             self._pool.set("cap_hint", text)
             self._pool.redraw(self._disp, "cap_hint")
 
-    def _cap_pick_led(self, led: str) -> None:
-        self._cap_led = None if self._cap_led == led else led
-        self._cap_hint_msg = ""
-        self._cap_read_fields()
-        self._render_capture_choice()
+    def _cap_write_fields(self) -> None:
+        """Show the staged values in the boxes."""
+        if self._pool is None:
+            return
+        for key, *_ in self._CAP_SETTINGS:
+            field = self._pool.get(f"cap_fld_{key}")
+            if field is not None:
+                field.value = self._cap_values[key]
 
     def _cap_read_fields(self) -> None:
         """Keep what the fields now show: they are editable by keyboard."""
@@ -2173,15 +2229,16 @@ class Arbiter:
             if field is not None:
                 self._cap_values[key] = str(field.value).strip()
 
-    def _cap_staged_settings(self) -> "dict[str, float] | str":
-        """The fields as numbers, or a message saying what is wrong."""
-        self._cap_read_fields()
+    def _cap_parse(self, values: "dict[str, str]") -> "dict[str, float] | str":
+        """Field texts as {config row: number}, or a message saying what is wrong."""
         out = {}
+        labels = {"low_dn": "Low DN", "high_dn": "High DN",
+                  "low_pc": "Low %", "high_pc": "High %"}
         for key, row, kind, _help in self._CAP_SETTINGS:
             try:
-                out[row] = kind(float(self._cap_values[key]))
+                out[row] = kind(float(values[key]))
             except ValueError:
-                return f"{self._pool[f'cap_lbl_{key}'].label}: not a number"
+                return f"{labels[key]}: not a number"
         for row in ("window_low_dn", "window_high_dn"):
             if not 0 <= out[row] <= _CAP_MAX_DN:
                 return f"DN must be 0 to {_CAP_MAX_DN}"
@@ -2191,15 +2248,88 @@ class Arbiter:
             return "Percentiles: 0 <= low < high <= 100"
         return out
 
-    def _cap_choice_save(self) -> None:
-        """Write the staged settings, then leave to the Menu."""
-        staged = self._cap_staged_settings()
-        if isinstance(staged, str):
-            self._cap_hint(staged)
+    def _cap_problem(self) -> "str | None":
+        """What is wrong with the settings now in the fields, or None."""
+        self._cap_read_fields()
+        parsed = self._cap_parse(self._cap_values)
+        return parsed if isinstance(parsed, str) else None
+
+    def _cap_commit(self) -> None:
+        """Store the fields into the global window, or the chosen LED's own."""
+        self._cap_read_fields()
+        if self._cap_led is None:
+            self._cap_global = dict(self._cap_values)
+        elif self._cap_values == self._cap_global:
+            self._cap_over.pop(self._cap_led, None)
+        else:
+            self._cap_over[self._cap_led] = dict(self._cap_values)
+
+    def _cap_pick_led(self, led: str) -> None:
+        """Choose an LED (or clear it): the boxes then show that LED's window."""
+        problem = self._cap_problem()
+        if problem:                          # do not leave a bad window behind
+            self._cap_hint(problem)
             return
-        for row, value in staged.items():
+        self._cap_commit()
+        self._cap_led = None if self._cap_led == led else led
+        self._cap_hint_msg = ""
+        self._cap_values = dict(self._cap_over.get(self._cap_led, self._cap_global))
+        self._cap_write_fields()
+        self._render_capture_choice()
+
+    def _cap_toggle_layer(self, layer: str) -> None:
+        """Add or drop a Bayer layer from the chosen LED's required layers."""
+        led = self._cap_led
+        if led is None:
+            return
+        have = set(self._cap_layers[led]) ^ {layer}
+        self._cap_layers[led] = [l for l in ("R", "Gr", "Gb", "B") if l in have]
+        self._cap_hint_msg = ""
+        self._cap_read_fields()
+        self._render_capture_choice()
+
+    def _cap_run_settings(self) -> dict:
+        """Every LED's staged layers and window, for the fit runner."""
+        import exposure_fit_runner as efr
+        import required_cells
+        out = {}
+        for led, layers in self._cap_layers.items():
+            parsed = self._cap_parse(self._cap_over.get(led, self._cap_global))
+            if not layers:                    # nothing chosen: its default channel
+                layers = list(required_cells.required_channels(led, []))
+            out[led] = efr.LedSettings(tuple(layers), required_cells.LedWindow(
+                parsed["window_low_dn"], parsed["window_high_dn"],
+                parsed["window_low_pctl"], parsed["window_high_pctl"]))
+        return out
+
+    def _cap_choice_save(self) -> None:
+        """Write the staged settings and any finished fit, then leave to the Menu."""
+        import required_cells
+        problem = self._cap_problem()
+        if problem:
+            self._cap_hint(problem)
+            return
+        self._cap_commit()
+        global_rows = self._cap_parse(self._cap_global)
+        for row, value in global_rows.items():
             if value != config.get("calibration", row):
                 config.save("calibration", row, value)
+        windows = {}
+        for led, values in self._cap_over.items():
+            w = self._cap_parse(values)
+            windows[led] = required_cells.LedWindow(
+                w["window_low_dn"], w["window_high_dn"],
+                w["window_low_pctl"], w["window_high_pctl"])
+        text = required_cells.format_windows(windows)
+        if text != str(config.get("calibration", "led_windows")):
+            config.save("calibration", "led_windows", text)
+        cells = config.calibration_required_cells()
+        for led, layers in self._cap_layers.items():
+            if layers != self._cap_layers0[led]:
+                cells = required_cells.with_layers(cells, led, layers)
+        text = required_cells.format_cells(cells)
+        if text != str(config.get("calibration", "required_cells")):
+            config.save("calibration", "required_cells", text)
         if self._cap_fit is not None:
             rows = self._cap_fit.persist(add_dt=self.timestamp())
             log.info("Arbiter: stored %d calibrated exposure(s)", rows)
@@ -2228,31 +2358,29 @@ class Arbiter:
         """
         Run the exposure fit on the camera: every LED when `only` is None.
 
-        The fit uses the settings now in the fields, saved or not.  Nothing is
-        stored until SAVE.  The run happens in the background of this screen:
-        the fit repaints the LED bar and the hint line itself, as it goes.
+        The fit uses the layers and windows now staged, saved or not.  Nothing
+        is stored until SAVE.  The run happens in the background of this
+        screen: the fit repaints the LED bar and the hint line itself.
         """
-        import dataclasses
-        if only is None:
-            self._cap_led = None            # a suite run is not about one LED
-        staged = self._cap_staged_settings()
-        if isinstance(staged, str):
-            self._cap_hint(staged)
+        problem = self._cap_problem()
+        if problem:
+            self._cap_hint(problem)
             return
         if not self.capture_available():
             self._cap_hint("Camera busy - try again later")
             return
-        import exposure_fit
+        self._cap_commit()
+        if only is None:                    # a suite run is not about one LED
+            self._cap_led = None
+            self._cap_values = dict(self._cap_global)
+            self._cap_write_fields()
+        settings = self._cap_run_settings()
         import exposure_fit_runner
         from capture_runner import CaptureConfig
-        params = dataclasses.replace(
-            exposure_fit.FitParams.from_config(),
-            low_dn=staged["window_low_dn"], high_dn=staged["window_high_dn"])
-        pctls = (staged["window_low_pctl"], staged["window_high_pctl"])
 
         def make_runner(cam, leds, cfg):
             return exposure_fit_runner.ExposureFitRunner(
-                cam, leds, cfg, only=only, params=params, percentiles=pctls,
+                cam, leds, cfg, only=only, settings=settings,
                 on_status=self._cap_fit_status)
 
         session = self._new_session(CaptureConfig(), runner_factory=make_runner)
@@ -4768,6 +4896,47 @@ def _selftest() -> None:
     check("low DN saved",         config.get("calibration", "window_low_dn"), 120)
     check("high pctl saved",      config.get("calibration", "window_high_pctl"), 95.0)
 
+    print("== capture screen: layers and a window of their own per LED ==")
+    arb._menu_open_capture()
+    arb._cap_pick_led("green")
+    check("green defaults to Gb Gr", arb._cap_layers["green"], ["Gr", "Gb"][::-1])
+    check("layers lit",  arb._pool["cap_layer3"].border_color is not None, True)
+    check("R not lit",   arb._pool["cap_layer1"].border_color, None)
+    arb._cap_toggle_layer("Gb")
+    arb._cap_toggle_layer("R")
+    check("toggled to R Gr", arb._cap_layers["green"], ["R", "Gr"])
+    arb._pool["cap_fld_low_dn"].value = "130"
+    arb._cap_pick_led("violet")                          # moves on, keeps green's
+    check("violet shows the global window",
+          arb._pool["cap_fld_low_dn"].value, arb._cap_global["low_dn"])
+    check("violet keeps its default layer", arb._cap_layers["violet"], ["B"])
+    arb._cap_toggle_layer("Gr")
+    arb._cap_pick_led("violet")                          # clear the choice
+    arb._cap_pick_led("green")
+    check("green's own window came back", arb._pool["cap_fld_low_dn"].value, "130")
+    arb._cap_pick_led("green")                           # clear
+    settings = arb._cap_run_settings()
+    check("run settings: green layers", settings["green"].layers, ("R", "Gr"))
+    check("run settings: green window", settings["green"].window.low_dn, 130)
+    check("run settings: violet layers", settings["violet"].layers, ("Gr", "B"))
+    check("run settings: violet window is global",
+          settings["violet"].window.low_dn, int(arb._cap_global["low_dn"]))
+    arb._cap_choice_save()
+    check("led window saved",
+          config.get("calibration", "led_windows").startswith("green=130:"), True)
+    check("layers saved",
+          ("green", "R") in config.calibration_required_cells(), True)
+    check("violet layers saved",
+          ("violet", "Gr") in config.calibration_required_cells(), True)
+    arb._menu_open_capture()
+    arb._cap_pick_led("green")
+    check("reopened: green layers", arb._cap_layers["green"], ["R", "Gr"])
+    check("reopened: green window", arb._pool["cap_fld_low_dn"].value, "130")
+    arb._cap_choice_cancel()
+    config.save("calibration", "led_windows", "")
+    config.save("calibration", "required_cells",
+                "violet.B,royal_blue.B,cyan.B,green.Gb,green.Gr,photo_red.R")
+
     print("== capture screen: bad settings stay on the form ==")
     arb._menu_open_capture()
     arb._pool["cap_fld_low_dn"].value = "900"           # above High DN
@@ -4779,14 +4948,16 @@ def _selftest() -> None:
     check("non-number refused",   arb._cap_view, "choice")
     arb._pool["cap_fld_low_dn"].value = "100"
     arb._pool["cap_fld_high_dn"].value = "1000"          # past the 960 ceiling
-    arb._cap_pick_led("green")                           # re-reads, re-renders
+    arb._render_capture_choice()                         # re-reads the boxes
     check("out of range: suite off", arb._pool["cap_suite"].enabled, False)
     check("out of range: color off", arb._pool["cap_color"].enabled, False)
     check("out of range: show off",  arb._pool["cap_show"].enabled, False)
     arb._cap_choice_save()
     check("out of range refused", arb._cap_view, "choice")
-    arb._pool["cap_fld_high_dn"].value = "850"
     arb._cap_pick_led("green")
+    check("a bad window blocks choosing an LED", arb._cap_led, None)
+    arb._pool["cap_fld_high_dn"].value = "850"
+    arb._render_capture_choice()
     check("fixed: suite back on",  arb._pool["cap_suite"].enabled, True)
 
     print("== capture screen: CANCEL writes nothing ==")

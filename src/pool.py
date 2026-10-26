@@ -290,6 +290,10 @@ class Pool:
             r = Rect(L.CAP_LED1.x + i * L.CAP_LED_PITCH, L.CAP_LED1.y,
                      L.CAP_LED1.w, L.CAP_LED1.h)
             button(f"cap_led{i + 1}", r, "black", "btn_gray", 10)
+        for i, layer in enumerate(("R", "Gr", "Gb", "B")):
+            r = Rect(L.CAP_LAYER1.x, L.CAP_LAYER1.y + i * L.CAP_LAYER_PITCH,
+                     L.CAP_LAYER1.w, L.CAP_LAYER1.h)
+            button(f"cap_layer{i + 1}", r, "black", "btn_gray", 11, text=layer)
         for key, text in (("low_dn", "Low DN"), ("high_dn", "High DN"),
                           ("low_pc", "Low %"), ("high_pc", "High %")):
             button(f"cap_lbl_{key}", getattr(L, f"CAP_LBL_{key.upper()}"),
