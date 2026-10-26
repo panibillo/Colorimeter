@@ -167,6 +167,24 @@ class LedFit:
         """True when every group was fitted."""
         return not self.failed
 
+    def short_reason(self) -> str:
+        """
+        One line saying why this LED did not fit, short enough for the screen.
+
+        When no exposure suits every patch it names the two that disagree and
+        what each asks for, e.g. 'blue: brown.B needs 12177us, white.B allows
+        7673us'.  Empty when every group was fitted.
+        """
+        if self.ok:
+            return ""
+        u = self.usable
+        if u is not None and u.known and not u.feasible:
+            short = lambda name: (name or "?").replace("pad_", "")
+            return (f"{self.led}: {short(u.dark_patch)} needs {u.e_min:.0f}us, "
+                    f"{short(u.bright_patch)} allows {u.e_max:.0f}us")
+        first = next(iter(self.failed.values()))
+        return f"{self.led}: {first}"
+
 
 # ── Small pure helpers ──────────────────────────────────────────────────────
 

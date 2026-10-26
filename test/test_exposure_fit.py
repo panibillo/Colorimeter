@@ -147,6 +147,14 @@ class TestFitLed(unittest.TestCase):
         self.assertIn("too narrow", fit.failed["5"])
         self.assert_every_bracket_passes(fit, 0.05, PAD_DARK_BROWN)
 
+    def test_the_short_reason_names_the_two_patches_that_disagree(self):
+        very_dark = dict(PAD, pad_brown=0.02)
+        fit = ef.fit_led("violet", Sensor(0.05, very_dark), 10_000, P)
+        text = fit.short_reason()
+        self.assertTrue(text.startswith("violet: brown needs "), text)
+        self.assertIn("white allows", text)
+        self.assertEqual(ef.fit_led("red", Sensor(0.05), 10_000, P).short_reason(), "")
+
     def test_a_pad_the_window_cannot_hold_fails_every_group(self):
         very_dark = dict(PAD, pad_brown=0.02)
         fit = ef.fit_led("violet", Sensor(0.05, very_dark), 10_000, P)

@@ -2422,7 +2422,11 @@ class Arbiter:
         else:
             self._cap_fit = runner
             good = sum(1 for f in runner.fits.values() if f.ok)
-            self._cap_hint(f"{good} of {len(runner.fits)} fitted. SAVE to keep.")
+            bad = next((f for f in runner.fits.values() if not f.ok), None)
+            if bad is None:
+                self._cap_hint(f"{good} of {len(runner.fits)} fitted. SAVE to keep.")
+            else:
+                self._cap_hint(bad.short_reason()[:60])
         if self._cap_view == "choice":
             self._render_capture_choice()
 
@@ -5043,7 +5047,8 @@ def _selftest() -> None:
     _stored = []
     cap_fit = _FakeCapture(steps=2)
     cap_fit.runner = SimpleNamespace(
-        fits={"green": SimpleNamespace(ok=True), "violet": SimpleNamespace(ok=False)},
+        fits={"green": SimpleNamespace(ok=True),
+              "violet": SimpleNamespace(ok=False, short_reason=lambda: "violet: brown needs 9us")},
         persist=lambda add_dt=None: _stored.append(add_dt) or 7)
     arb._capture_factory = lambda: cap_fit
     arb._menu_open_capture()
@@ -5067,8 +5072,8 @@ def _selftest() -> None:
         arb.pump_capture()
     check("camera freed",          arb.capture_available(), True)
     check("highlight cleared",     arb._cap_running, None)
-    check("summary offers SAVE",   arb._pool["cap_hint"].text,
-          "1 of 2 fitted. SAVE to keep.")
+    check("a failed LED says why", arb._pool["cap_hint"].text,
+          "violet: brown needs 9us")
     arb._cap_choice_save()
     check("SAVE persisted the fit", len(_stored), 1)
     check("fit released",          arb._cap_fit, None)
