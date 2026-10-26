@@ -31,7 +31,9 @@ issues specific to commissioning (venv, services, DB).
 
 | Symptom | First check |
 |---|---|
-| Can't SSH after first boot | Wi-Fi country set in Imager? Try the router's DHCP list for the IP; `ping <hostname>.local`. |
+| Can't SSH after first boot | Wi-Fi country set in Imager? Try the router's DHCP list for the IP; `ping <hostname>.local`. The instrument's **Menu → Advanced → Wifi** page shows its IP and hostname. |
+| Wifi page says "Not permitted" | The app runs `sudo -n nmcli` to connect and forget; as the app user, `sudo -n true` must succeed without a password (the Imager-created user has this by default). |
+| Wifi page says "Wi-Fi off" and won't turn on | The Wi-Fi country is not set, so the radio stays blocked: `sudo raspi-config` → Localisation → WLAN Country, then reboot. `rfkill list` shows the block. |
 | `/dev/spidev0.0` missing | `grep spi=on /boot/firmware/config.txt` present and uncommented; rebooted after edit? |
 | `/dev/spidev1.0` missing | `grep spi1 /boot/firmware/config.txt` → `dtoverlay=spi1-1cs,cs0_pin=23` (no spaces). |
 | `/dev/i2c-1` missing | `grep i2c_arm=on /boot/firmware/config.txt`. |

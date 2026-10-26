@@ -363,6 +363,28 @@ class Arbiter:
         self._img_status = ""
         self._img_saving = ""       # the name of the image being captured
 
+        # Wifi state (Menu → Advanced → Wifi): which view is up, the one
+        # nmcli job in flight (polled by pump_wifi) and what the last ones
+        # said.  The backend is made on first use: nmcli on the device, a
+        # fake under simulation (see wifi.backend()).
+        self._wifi_view: str | None = None      # 'status' | 'networks' | 'join'
+        self._wifi_backend = None
+        self._wifi_job = None
+        self._wifi_job_kind = ""
+        self._wifi_device = None                # wifi.Device
+        self._wifi_radio: bool | None = None
+        self._wifi_networks: list = []          # [wifi.Network]
+        self._wifi_saved: list = []             # saved profile names
+        self._wifi_sel: str | None = None       # selected row's key
+        self._wifi_page = 0
+        self._wifi_msg = ""
+        self._wifi_forget_armed: str | None = None
+        self._wifi_ssid = ""
+        self._wifi_password = ""
+        self._wifi_show = False
+        self._wifi_hidden = False
+        self._wifi_connecting = ""
+
         # Capture screen state (Menu → Advanced → Capture): which view is
         # showing and what kind of run is in flight.  A menu-launched run uses
         # self._capture with _capture_slot = None (the None marks it
@@ -1258,7 +1280,6 @@ class Arbiter:
     # ── Advanced screen (Menu → Advanced) ───────────────────────────────────────
     # The Menu's layout again, for tools an operator rarely needs.  Like the
     # Menu, nothing is staged here, so OK and CANCEL both go back to the Menu.
-    # Wifi is a placeholder until its screen exists.
 
     def _render_advanced(self) -> None:
         if self._pool is None:
@@ -1272,7 +1293,7 @@ class Arbiter:
         p.put("adv_test_led",  "Test LED", on=self._ledtest_open_screen,
               enabled=self._ledtest_available())
         p.put("adv_cap_image", "Capture\nImage", on=self._img_open)
-        p.put("adv_wifi",      "Wifi",     enabled=False)
+        p.put("adv_wifi",      "Wifi",     on=self._wifi_open)
         p.render(self._disp)
         self._rebuild_focus()
 
@@ -1566,6 +1587,315 @@ class Arbiter:
                 self._pool["img_fld_name"].value = self._img_name
         if self._cap_view == "image":
             self._img_render()
+
+    # ── Wifi (Menu → Advanced → Wifi) ───────────────────────────────────────────
+    # Status shows what the device is connected to and how to reach it (IP,
+    # MAC, hostname).  Networks lists what the radio sees and the saved
+    # profiles, to connect or forget.  Join takes a network name and password
+    # from a USB keyboard.  All nmcli work runs as one background job at a
+    # time (wifi.py), polled by pump_wifi(), so a slow connect never freezes
+    # the screen.  BACK cancels a job under way.  A joined network is saved
+    # by NetworkManager and rejoins at boot.
+
+    _WIFI_ROWS = 4
+
+    def _wifi(self):
+        if self._wifi_backend is None:
+            import wifi
+            self._wifi_backend = wifi.backend()
+        return self._wifi_backend
+
+    def _wifi_open(self) -> None:
+        self._wifi_msg = ""
+        self._wifi_view = "status"
+        self._wifi_start("status", self._wifi().status())
+
+    def _wifi_start(self, kind: str, job) -> None:
+        """Start a job, cancelling any still running, and repaint."""
+        if self._wifi_job is not None:
+            self._wifi_job.cancel()
+        self._wifi_job, self._wifi_job_kind = job, kind
+        self._wifi_render()
+
+    def _wifi_busy(self) -> bool:
+        return self._wifi_job is not None
+
+    def pump_wifi(self) -> None:
+        """Poll the job in flight; act on its result when it ends."""
+        job = self._wifi_job
+        if job is None:
+            return
+        result = job.poll()
+        if result is None:
+            return
+        kind = self._wifi_job_kind
+        self._wifi_job, self._wifi_job_kind = None, ""
+        self._wifi_done(kind, result)
+
+    def _wifi_done(self, kind: str, result) -> None:
+        import wifi
+        if kind == "status":
+            if result.ok:
+                radio, device, listing = result.outputs
+                self._wifi_radio = wifi.parse_radio(radio)
+                self._wifi_device = wifi.parse_device(device)
+                self._wifi_networks = wifi.parse_networks(listing)
+            else:
+                self._wifi_msg = result.message
+        elif kind == "scan":
+            if result.ok:
+                self._wifi_networks = wifi.parse_networks(result.outputs[0])
+                self._wifi_saved = wifi.parse_saved(result.outputs[1])
+                self._wifi_msg = (f"{len(self._wifi_networks)} networks seen"
+                                  if self._wifi_networks else "No networks seen")
+            else:
+                self._wifi_msg = result.message
+        elif kind == "connect":
+            name, self._wifi_connecting = self._wifi_connecting, ""
+            if result.ok:
+                self._wifi_password = ""
+                self._wifi_msg = f"Connected to {name}"
+                self._wifi_view = "status"
+                self._wifi_start("status", self._wifi().status())
+                return
+            self._wifi_msg = result.message
+            if result.message == "Wrong password?" and self._wifi_view == "networks":
+                self._wifi_join_view(name, hidden=False)   # a saved password failed
+                return
+        elif kind == "forget":
+            self._wifi_msg = (f"Forgot {self._wifi_forget_armed}" if result.ok
+                              else result.message)
+            self._wifi_forget_armed = None
+            if result.ok:
+                self._wifi_start("scan", self._wifi().scan())
+                return
+        elif kind == "radio":
+            if result.ok:
+                self._wifi_start("status", self._wifi().status())
+                return
+            self._wifi_msg = result.message
+        self._wifi_render()
+
+    # Rows of the Networks view: what the radio sees, strongest first, then
+    # the saved profiles it does not see.  A row's key survives a rescan, so
+    # the selection does too.
+
+    def _wifi_rows(self) -> "list[dict]":
+        saved = set(self._wifi_saved)
+        active = self._wifi_device.connection if self._wifi_device else ""
+        rows, seen = [], set()
+        for n in self._wifi_networks:
+            profile = n.ssid if n.ssid in saved else (active if n.in_use else None)
+            if profile:
+                seen.add(profile)
+            seen.add(n.ssid)
+            text = (f"{'* ' if n.in_use else ''}{n.ssid}  {n.signal}%"
+                    f"{' lock' if n.secured else ''}{' saved' if profile else ''}")
+            rows.append({"key": "v:" + n.ssid, "ssid": n.ssid, "profile": profile,
+                         "visible": True, "secured": n.secured, "text": text})
+        for name in self._wifi_saved:
+            if name not in seen:
+                rows.append({"key": "s:" + name, "ssid": name, "profile": name,
+                             "visible": False, "secured": True,
+                             "text": f"{name}  saved, not seen"})
+        return rows
+
+    def _wifi_selected(self) -> "dict | None":
+        return next((r for r in self._wifi_rows() if r["key"] == self._wifi_sel), None)
+
+    def _wifi_pick(self, key: str) -> None:
+        self._wifi_sel = key
+        self._wifi_forget_armed = None
+        self._wifi_msg = ""
+        self._wifi_render()
+
+    def _wifi_step_page(self, delta: int) -> None:
+        pages = max(1, -(-len(self._wifi_rows()) // self._WIFI_ROWS))
+        self._wifi_page = max(0, min(pages - 1, self._wifi_page + delta))
+        self._wifi_render()
+
+    def _wifi_networks_view(self) -> None:
+        self._wifi_view = "networks"
+        self._wifi_msg = "Scanning ..."
+        self._wifi_forget_armed = None
+        self._wifi_start("scan", self._wifi().scan())
+
+    def _wifi_join_view(self, ssid: str, hidden: bool) -> None:
+        self._wifi_view = "join"
+        self._wifi_ssid, self._wifi_hidden = ssid, hidden
+        self._wifi_password = ""
+        if self._pool is not None:          # the render reads the boxes back
+            self._pool["wifi_fld_ssid"].value = ssid
+            self._pool["wifi_fld_pass"].value = ""
+        self._wifi_render()
+
+    def _wifi_connect_selected(self) -> None:
+        row = self._wifi_selected()
+        if row is None:
+            return
+        self._wifi_forget_armed = None
+        if not row["visible"]:
+            self._wifi_begin_connect(row["ssid"], self._wifi().up(row["profile"]))
+        elif row["secured"] and not row["profile"]:
+            self._wifi_join_view(row["ssid"], hidden=False)
+        else:
+            self._wifi_begin_connect(row["ssid"], self._wifi().connect(row["ssid"]))
+
+    def _wifi_begin_connect(self, ssid: str, job) -> None:
+        self._wifi_connecting = ssid
+        self._wifi_msg = f"Connecting to {ssid} ..."
+        self._wifi_start("connect", job)
+
+    def _wifi_forget(self) -> None:
+        """First tap arms, second tap forgets: forgetting can cut off SSH."""
+        row = self._wifi_selected()
+        if row is None or not row["profile"]:
+            return
+        if self._wifi_forget_armed != row["profile"]:
+            self._wifi_forget_armed = row["profile"]
+            self._wifi_msg = f"Tap Forget again to forget {row['profile']}"
+            self._wifi_render()
+            return
+        self._wifi_msg = f"Forgetting {row['profile']} ..."
+        self._wifi_start("forget", self._wifi().forget(row["profile"]))
+
+    def _wifi_read_fields(self) -> None:
+        if self._pool is None or self._wifi_view != "join":
+            return
+        self._wifi_ssid = str(self._pool["wifi_fld_ssid"].value)
+        self._wifi_password = str(self._pool["wifi_fld_pass"].value)
+
+    def _wifi_toggle(self, which: str) -> None:
+        self._wifi_read_fields()
+        if which == "show":
+            self._wifi_show = not self._wifi_show
+        else:
+            self._wifi_hidden = not self._wifi_hidden
+        self._wifi_render()
+
+    def _wifi_join_connect(self) -> None:
+        self._wifi_read_fields()
+        ssid = self._wifi_ssid.strip()
+        if not ssid:
+            self._wifi_msg = "Type the network name"
+            self._wifi_render()
+            return
+        self._wifi_begin_connect(ssid, self._wifi().connect(
+            ssid, self._wifi_password, self._wifi_hidden))
+
+    def _wifi_back(self) -> None:
+        """Join → Networks → Status → Advanced, cancelling any job under way."""
+        self._wifi_read_fields()
+        if self._wifi_job is not None:
+            self._wifi_job.cancel()
+            self._wifi_job, self._wifi_job_kind = None, ""
+            self._wifi_connecting = ""
+        self._wifi_msg = ""
+        if self._wifi_view == "join":
+            self._wifi_password = ""
+            self._wifi_view = "networks"
+            self._wifi_render()
+        elif self._wifi_view == "networks":
+            self._wifi_view = "status"
+            self._wifi_start("status", self._wifi().status())
+        else:
+            self._wifi_view = None
+            self._render_advanced()
+
+    def _wifi_render(self) -> None:
+        if self._pool is None or self._wifi_view is None:
+            return
+        self._wifi_read_fields()
+        p = self._pool
+        p.hide_all()
+        busy = self._wifi_busy()
+        view = self._wifi_view
+        title = {"status": "Wifi", "networks": "Networks", "join": "Join"}[view]
+        p.put("menu_cancel_btn", "BACK", on=self._wifi_back)
+        p.put("wifi_title", title)
+        if view == "status":
+            p.put("menu_ok_btn", "Refresh", enabled=not busy,
+                  on=lambda: self._wifi_start("status", self._wifi().status()))
+            self._wifi_render_status(p, busy)
+        elif view == "networks":
+            p.put("menu_ok_btn", "Scan", enabled=not busy, on=self._wifi_networks_view)
+            self._wifi_render_networks(p, busy)
+        else:
+            p.put("menu_ok_btn", "Connect", on=self._wifi_join_connect, enabled=not busy)
+            self._wifi_render_join(p, busy)
+        p.render(self._disp)
+        self._rebuild_focus()
+
+    def _wifi_render_status(self, p, busy: bool) -> None:
+        import wifi
+        d, radio = self._wifi_device, self._wifi_radio
+        if d is None:
+            lines = ["Reading ..." if busy else "No Wi-Fi details", "", "", "", ""]
+        else:
+            signal = next((f"  {n.signal}%" for n in self._wifi_networks if n.in_use), "")
+            state = "Wi-Fi off" if radio is False else (d.state or "unknown").capitalize()
+            lines = [f"Status  {state}",
+                     f"Network  {d.connection or '-'}{signal}",
+                     f"IP  {', '.join(d.addresses) or '-'}",
+                     f"MAC  {d.mac or '-'}",
+                     ""]
+        lines[4] = f"Host  {wifi.hostname()}.local"
+        for i, text in enumerate(lines, 1):
+            p.put(f"wifi_line{i}", text)
+        p.put("wifi_msg", self._wifi_msg)
+        p.put("wifi_networks", "Networks", on=self._wifi_networks_view,
+              enabled=not busy and radio is not False)
+        if radio is False:
+            p.put("wifi_radio", "Turn\nWi-Fi on", enabled=not busy,
+                  on=lambda: self._wifi_start("radio", self._wifi().radio_on()))
+
+    def _wifi_render_networks(self, p, busy: bool) -> None:
+        from palette import color
+        rows = self._wifi_rows()
+        pages = max(1, -(-len(rows) // self._WIFI_ROWS))
+        self._wifi_page = min(self._wifi_page, pages - 1)
+        first = self._wifi_page * self._WIFI_ROWS
+        for i in range(self._WIFI_ROWS):
+            name = f"wifi_row{i + 1}"
+            if first + i >= len(rows):
+                continue
+            row = rows[first + i]
+            p.put(name, row["text"][:34], on=lambda k=row["key"]: self._wifi_pick(k),
+                  enabled=not busy)
+            w = p[name]
+            chosen = row["key"] == self._wifi_sel
+            w.color = color("start_green") if chosen else color("white")
+            w.disabled_color = w.color
+            w.text_color = color("black") if row["visible"] else color("btn_gray")
+            w.border_color = color("black")
+        p.put("wifi_up", "▲", on=lambda: self._wifi_step_page(-1),
+              enabled=self._wifi_page > 0)
+        p.put("wifi_down", "▼", on=lambda: self._wifi_step_page(1),
+              enabled=self._wifi_page < pages - 1)
+        p.put("wifi_list_msg", self._wifi_msg or "Tap a network")
+        row = self._wifi_selected()
+        p.put("wifi_connect", "Connect", on=self._wifi_connect_selected,
+              enabled=not busy and row is not None)
+        p.put("wifi_forget", "Forget" if self._wifi_forget_armed is None else "Forget?",
+              on=self._wifi_forget,
+              enabled=not busy and row is not None and bool(row["profile"]))
+        p.put("wifi_other", "Other...", enabled=not busy,
+              on=lambda: self._wifi_join_view("", hidden=True))
+
+    def _wifi_render_join(self, p, busy: bool) -> None:
+        from palette import color
+        p.put("wifi_lbl_ssid", "Network")
+        p.put("wifi_fld_ssid", self._wifi_ssid, enabled=not busy)
+        p.put("wifi_lbl_pass", "Password")
+        p.put("wifi_fld_pass", self._wifi_password, enabled=not busy)
+        p["wifi_fld_pass"].secret = not self._wifi_show
+        for name, text, on, key in (("wifi_show", "Show", self._wifi_show, "show"),
+                                    ("wifi_hidden", "Hidden", self._wifi_hidden, "hidden")):
+            p.put(name, text, on=lambda k=key: self._wifi_toggle(k), enabled=not busy)
+            p[name].color = color("start_green") if on else color("btn_gray")
+        p.put("wifi_join_msg", self._wifi_msg or
+              "Type on the keyboard: tap a box, type, Enter.\n"
+              "Hidden: the network does not announce its name.")
 
     # ── Phases screen (Menu → Phases) ──────────────────────────────────────────
     # Custom reagent countdowns, entered on the instrument itself.  The two
@@ -4903,6 +5233,7 @@ class Arbiter:
             self.pump_prefetch()
             self.pump_capture()
             self.pump_analysis()
+            self.pump_wifi()
             self._maybe_release_camera()
 
             if now - last_clock >= 1.0:
@@ -5485,7 +5816,6 @@ def _selftest() -> None:
     check("menu grid hidden",      arb._pool["menu_capture"].visible, False)
     for _name in ("adv_capture", "adv_test_led", "adv_cap_image", "adv_wifi"):
         check(f"{_name} shown", arb._pool[_name].visible, True)
-    check("Wifi not built yet",    arb._pool["adv_wifi"].enabled, False)
     arb._pool["adv_capture"].on_press()
     check("Capture page up",       arb._cap_view, "choice")
     arb._cap_choice_cancel()
@@ -5619,6 +5949,101 @@ def _selftest() -> None:
     arb._pool["menu_ok_btn"].on_press()
     arb._pool["menu_cancel_btn"].on_press()             # BACK mid-capture
     check("BACK abandons the capture", arb._capture, None)
+    check("BACK → Advanced",        arb._pool["adv_title"].visible, True)
+    arb._render_menu()
+
+    print("== Wifi: status, networks, join, forget ==")
+    import wifi as _wifi
+
+    def _wifi_settle():
+        for _ in range(5):
+            arb.pump_wifi()
+
+    _fake = arb._wifi_backend = _wifi.FakeBackend()
+    arb._render_advanced()
+    check("Wifi enabled",           arb._pool["adv_wifi"].enabled, True)
+    arb._pool["adv_wifi"].on_press()
+    check("reading at first",       arb._pool["wifi_line1"].text, "Reading ...")
+    check("Refresh waits",          arb._pool["menu_ok_btn"].enabled, False)
+    _wifi_settle()
+    check("status",                 arb._pool["wifi_line1"].text, "Status  Connected")
+    check("network and signal",     arb._pool["wifi_line2"].text,
+          "Network  Colorimeter Lab  72%")
+    check("IP",                     arb._pool["wifi_line3"].text, "IP  192.168.1.23")
+    check("MAC",                    arb._pool["wifi_line4"].text, "MAC  DC:A6:32:01:02:03")
+    check("host",                   arb._pool["wifi_line5"].text.endswith(".local"), True)
+    check("no radio button when on", arb._pool["wifi_radio"].visible, False)
+
+    arb._pool["wifi_networks"].on_press()
+    _wifi_settle()
+    check("Networks view",          arb._pool["wifi_title"].text, "Networks")
+    check("connected listed first", arb._pool["wifi_row1"].label,
+          "* Colorimeter Lab  72% lock saved")
+    check("Connect waits for a pick", arb._pool["wifi_connect"].enabled, False)
+    check("second page",            arb._pool["wifi_down"].enabled, True)
+    arb._pool["wifi_down"].on_press()
+    check("saved but not seen, page 2", arb._pool["wifi_row2"].label,
+          "Old office  saved, not seen")
+    arb._pool["wifi_up"].on_press()
+    arb._pool["wifi_row3"].on_press()                   # Phone hotspot: secured, new
+    check("picked",                 arb._wifi_selected()["ssid"], "Phone hotspot")
+    check("nothing to forget",      arb._pool["wifi_forget"].enabled, False)
+    arb._pool["wifi_connect"].on_press()
+    check("secured new → Join",     (arb._wifi_view, arb._pool["wifi_fld_ssid"].value),
+          ("join", "Phone hotspot"))
+    check("password hidden",        arb._pool["wifi_fld_pass"].secret, True)
+    arb._pool["wifi_fld_pass"].value = "wrong"
+    arb._pool["menu_ok_btn"].on_press()                 # Connect
+    check("connecting",             arb._pool["wifi_join_msg"].text,
+          "Connecting to Phone hotspot ...")
+    _wifi_settle()
+    check("wrong password said",    (arb._wifi_view, arb._pool["wifi_join_msg"].text),
+          ("join", "Wrong password?"))
+    arb._pool["wifi_show"].on_press()
+    check("Show reveals",           arb._pool["wifi_fld_pass"].secret, False)
+    arb._pool["wifi_fld_pass"].value = _wifi.FakeBackend.PASSWORD
+    arb._pool["menu_ok_btn"].on_press()
+    _wifi_settle()
+    check("joined → Status",        arb._wifi_view, "status")
+    check("says connected",         arb._pool["wifi_msg"].text, "Connected to Phone hotspot")
+    check("password not kept",      arb._wifi_password, "")
+    check("now on the hotspot",     arb._pool["wifi_line2"].text,
+          "Network  Phone hotspot  40%")
+    check("saved for next boot",    "Phone hotspot" in _fake.saved, True)
+
+    arb._pool["wifi_networks"].on_press()
+    _wifi_settle()
+    arb._pool["wifi_row1"].on_press()                   # the hotspot, now connected
+    arb._pool["wifi_forget"].on_press()
+    check("Forget asks first",      (arb._pool["wifi_forget"].label, _fake.saved.count(
+        "Phone hotspot")), ("Forget?", 1))
+    arb._pool["wifi_forget"].on_press()
+    _wifi_settle()
+    check("forgotten",              "Phone hotspot" in _fake.saved, False)
+    check("rescanned after",        _fake.calls[-1], "scan")
+
+    arb._pool["wifi_other"].on_press()
+    check("Other: Hidden on, empty name",
+          (arb._wifi_hidden, arb._pool["wifi_fld_ssid"].value), (True, ""))
+    arb._pool["menu_ok_btn"].on_press()
+    check("needs a name",           arb._pool["wifi_join_msg"].text, "Type the network name")
+    arb._pool["wifi_fld_ssid"].value = "Guest"
+    arb._pool["menu_ok_btn"].on_press()
+    arb._pool["menu_cancel_btn"].on_press()             # BACK mid-connect
+    check("BACK cancels the job",   (arb._wifi_job, arb._wifi_view), (None, "networks"))
+    arb._pool["menu_cancel_btn"].on_press()
+    _wifi_settle()
+    check("BACK → Status",          arb._wifi_view, "status")
+
+    _fake.radio = False
+    arb._pool["menu_ok_btn"].on_press()                 # Refresh
+    _wifi_settle()
+    check("radio off shown",        arb._pool["wifi_line1"].text, "Status  Wi-Fi off")
+    check("Networks off while radio off", arb._pool["wifi_networks"].enabled, False)
+    arb._pool["wifi_radio"].on_press()
+    _wifi_settle()
+    check("radio back on",          arb._pool["wifi_radio"].visible, False)
+    arb._pool["menu_cancel_btn"].on_press()
     check("BACK → Advanced",        arb._pool["adv_title"].visible, True)
     arb._render_menu()
 

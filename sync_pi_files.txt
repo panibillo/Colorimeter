@@ -70,6 +70,8 @@ src/show_plot.py
 # Menu → Advanced → Capture Image, imported at its first Capture press.
 src/capture_image.py
 src/test_image_repo.py
+# Menu → Advanced → Wifi, imported when the page first opens.
+src/wifi.py
 src/hdf5read.py
 src/hdf5write.py
 # The flat-field result the capture path screens Bayer layers with, and the

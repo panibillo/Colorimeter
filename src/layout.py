@@ -183,6 +183,35 @@ IMG_TYPE1       = Rect(  4, 168,  60,  32)    # five image-type checkboxes, pitc
 IMG_TYPE_PITCH  = 63
 IMG_STATUS      = Rect(  6, 204, 308,  34)
 
+# ── Wifi (Menu → Advanced → Wifi) ─────────────────────────────────────────────
+# Three views under the Menu's corners, never shown together.
+# Status: five lines (state, network, IP, MAC, hostname), a message line and
+# two buttons.
+WIFI_LINE1      = Rect(  8,  54, 304,  20)    # five lines, pitch 22
+WIFI_LINE_PITCH = 22
+WIFI_MSG        = Rect(  8, 164, 304,  18)
+WIFI_NETWORKS   = Rect(  8, 186, 148,  50)
+WIFI_RADIO      = Rect(164, 186, 148,  50)    # "Turn Wi-Fi on", only when off
+# Networks: a page of four rows with up/down beside it, a message line and
+# Connect / Forget / Other.
+WIFI_ROW1       = Rect(  4,  54, 268,  30)    # four rows, pitch 33
+WIFI_ROW_PITCH  = 33
+WIFI_UP         = Rect(276,  54,  40,  63)
+WIFI_DOWN       = Rect(276, 120,  40,  63)
+WIFI_LIST_MSG   = Rect(  6, 186, 308,  16)
+WIFI_CONNECT    = Rect(  4, 204, 100,  34)
+WIFI_FORGET     = Rect(110, 204, 100,  34)
+WIFI_OTHER      = Rect(216, 204, 100,  34)
+# Join: network name and password (typed on a USB keyboard), Show and Hidden
+# toggles, and a message area.
+WIFI_LBL_SSID   = Rect(  4,  58,  70,  30)
+WIFI_FLD_SSID   = Rect( 78,  58, 238,  30)
+WIFI_LBL_PASS   = Rect(  4,  96,  70,  30)
+WIFI_FLD_PASS   = Rect( 78,  96, 238,  30)
+WIFI_SHOW       = Rect(  4, 134, 100,  30)
+WIFI_HIDDEN     = Rect(110, 134, 100,  30)
+WIFI_JOIN_MSG   = Rect(  6, 172, 308,  60)
+
 # ── config editor (Menu → Config: every setting in the config table) ───────────
 # Four body-row slots on a 38 px pitch (y 52..202), then a five-button footer
 # band. The roles list and the role/browse views are never shown together, and

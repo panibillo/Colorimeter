@@ -483,7 +483,14 @@ ssh-keygen -R <host>
 ### 4d — The Wi-Fi network or its password changed
 
 The unit simply disappears. Nothing is re-run; it just has to be told the new
-credentials, which needs local access:
+credentials, which needs local access.
+
+On the instrument itself: **Menu → Advanced → Wifi → Networks**, pick the
+network, Connect, and type the password on a USB keyboard. The Wifi page then
+shows the new IP address, MAC and hostname. NetworkManager saves the network,
+so it rejoins at every boot; Forget removes it.
+
+Without the app, at the Pi's own console:
 
 ```bash
 # At the Pi's own console (keyboard + monitor):

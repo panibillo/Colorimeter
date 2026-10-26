@@ -495,6 +495,9 @@ class TextBox(Widget):
     border_color : RGB565 normal border (None = no border)
     editable     : if True, widget is focusable and accepts character input
     name         : identifier for logging
+
+    Set `secret = True` to draw one '*' per character instead of the value
+    (a password); typing still edits the real value.
     """
 
     FOCUS_BORDER = 0xFFFF   # white focus ring
@@ -525,6 +528,7 @@ class TextBox(Widget):
         self.editable     = editable
         self.editing      = False   # True while user is typing into this field
         self.focusable    = editable
+        self.secret       = False   # draw '*' per character, not the value
         self._last_drawn  = object()   # sentinel — forces first draw
 
     def invalidate(self) -> None:
@@ -556,7 +560,7 @@ class TextBox(Widget):
             self.draw(display, force=True)
 
     def draw(self, display, force: bool = False) -> None:
-        state = (self.value, self.focused, self.editing, self.enabled)
+        state = (self.value, self.focused, self.editing, self.enabled, self.secret)
         if not force and state == self._last_drawn:
             return
         self._last_drawn = state
@@ -565,7 +569,8 @@ class TextBox(Widget):
         # Fill the background first so edits/backspaces erase the old value
         # (draw_text renders glyphs only).  The border is drawn after, on top.
         display.fill_rect(self.rect, self.bg)
-        display.draw_text(self.value, self.rect,
+        shown = "*" * len(self.value) if self.secret else self.value
+        display.draw_text(shown, self.rect,
                           color=color, bg=self.bg,
                           size=self.size,
                           align=self.align, valign=self.valign,

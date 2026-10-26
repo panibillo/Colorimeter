@@ -241,6 +241,35 @@ class Pool:
         label("img_status",       L.IMG_STATUS,        "black",   "white",       13,
               align="left", valign="top")
 
+        # ── Wifi (Menu → Advanced → Wifi): status, networks and join views ─────
+        label("wifi_title",       L.MENU_TITLE,        "black",   "white",       18, text="Wifi")
+        for i in range(5):
+            r = Rect(L.WIFI_LINE1.x, L.WIFI_LINE1.y + i * L.WIFI_LINE_PITCH,
+                     L.WIFI_LINE1.w, L.WIFI_LINE1.h)
+            label(f"wifi_line{i + 1}", r, "black", "white", 14, align="left")
+        label("wifi_msg",         L.WIFI_MSG,          "black",   "white",       12, align="left")
+        button("wifi_networks",   L.WIFI_NETWORKS,     "hdr_text", "start_green", 18, text="Networks")
+        button("wifi_radio",      L.WIFI_RADIO,        "hdr_text", "slot_a_bg",   16,
+               text="Turn\nWi-Fi on")
+        for i in range(4):
+            r = Rect(L.WIFI_ROW1.x, L.WIFI_ROW1.y + i * L.WIFI_ROW_PITCH,
+                     L.WIFI_ROW1.w, L.WIFI_ROW1.h)
+            button(f"wifi_row{i + 1}", r, "black", "white", 13)
+        button("wifi_up",         L.WIFI_UP,           "btn_text", "btn_gray",    18, text="▲")
+        button("wifi_down",       L.WIFI_DOWN,         "btn_text", "btn_gray",    18, text="▼")
+        label("wifi_list_msg",    L.WIFI_LIST_MSG,     "black",   "white",       12, align="left")
+        button("wifi_connect",    L.WIFI_CONNECT,      "hdr_text", "start_green", 14, text="Connect")
+        button("wifi_forget",     L.WIFI_FORGET,       "hdr_text", "label_coral", 14, text="Forget")
+        button("wifi_other",      L.WIFI_OTHER,        "hdr_text", "btn_gray",    14, text="Other...")
+        button("wifi_lbl_ssid",   L.WIFI_LBL_SSID,     "white", "label_coral",   12, text="Network")
+        field("wifi_fld_ssid",    L.WIFI_FLD_SSID,     14, "field_blue")
+        button("wifi_lbl_pass",   L.WIFI_LBL_PASS,     "white", "label_coral",   12, text="Password")
+        field("wifi_fld_pass",    L.WIFI_FLD_PASS,     14, "field_blue")
+        button("wifi_show",       L.WIFI_SHOW,         "black", "btn_gray",      13, text="Show")
+        button("wifi_hidden",     L.WIFI_HIDDEN,       "black", "btn_gray",      13, text="Hidden")
+        label("wifi_join_msg",    L.WIFI_JOIN_MSG,     "black",   "white",       13,
+              align="left", valign="top")
+
         # ── config editor (Menu → Config): roles, one role, one parameter ──────
         # Built two ways — 8 grid buttons for the roles list, and 4 rows of a
         # name/value/action triple for the role and browse views — because the
