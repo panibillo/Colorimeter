@@ -23,9 +23,14 @@ Layout:
     /leds/<color>/led_metadata            JSON text
     /leds/<color>/capture_info            JSON text  (optional)
     /leds/<color>/jpeg_e3                 raw JPEG bytes  (optional)
+    /leds/<color>/jpeg/<label>_<kind>     raw JPEG bytes, kind 'whole' or
+                                          'bound'  (test images only)
     /leds/<color>/lit/<label>/<ch>        attrs: exposure_us, captured_dt
+    /leds/<color>/lit_whole/<label>/<ch>  the whole frame  (test images only)
     /leds/<color>/dark/<when>_<label>     soft link → /dark/<when>_<us>us
+    /leds/<color>/dark_whole/<when>_<label>  soft link → /dark_whole/…
     /dark/<when>_<us>us/<ch>              attrs: exposure_us, captured_dt
+    /dark_whole/<when>_<us>us/<ch>        the whole frame  (test images only)
     /photo                                raw JPEG bytes  (optional)
     /pre/…                                the same shape again, for the
                                           pre-image of the unreacted strip
@@ -302,6 +307,11 @@ def dark_level(reader, ch: str, section: str = "",
     raise KeyError(f"no dark frame for layer {ch!r} in section {at or '/'!r}")
 
 
+def _kind(base: str, whole: bool) -> str:
+    """'lit' -> 'lit' or 'lit_whole': where whole-frame layers sit beside crops."""
+    return f"{base}_whole" if whole else base
+
+
 class CaptureSuiteWriter:
     """
     Writes a capture-suite HDF5 archive. Use as a context manager.
@@ -350,8 +360,8 @@ class CaptureSuiteWriter:
                 "description":    description,
                 "schema_version": schema_version,
             })
-        # Exposure keys of the dark groups already written, so a dark frame
-        # shared by several LEDs is stored once.
+        # Paths of the dark groups already written, so a dark frame shared by
+        # several LEDs is stored once.
         self._dark_written: set = set()
 
     def close(self) -> None:
@@ -458,9 +468,9 @@ class CaptureSuiteWriter:
         """Return the group path holding everything for one LED color."""
         return f"{self._section}/leds/{color}"
 
-    def _lit_group(self, color: str, label: str) -> str:
+    def _lit_group(self, color: str, label: str, whole: bool = False) -> str:
         """Return the group path for one LED's lit frames at one exposure."""
-        return f"{self._section}/leds/{color}/lit/{label}"
+        return f"{self._section}/leds/{color}/{_kind('lit', whole)}/{label}"
 
     @staticmethod
     def _dark_key(exposure_us: int, when: str = "after") -> str:
@@ -481,9 +491,11 @@ class CaptureSuiteWriter:
         """
         return f"{when}_{exposure_us}us"
 
-    def _dark_group(self, exposure_us: int, when: str = "after") -> str:
+    def _dark_group(self, exposure_us: int, when: str = "after",
+                    whole: bool = False) -> str:
         """Return the group path of the shared dark frames for an exposure."""
-        return f"{self._section}/dark/{self._dark_key(exposure_us, when)}"
+        return (f"{self._section}/{_kind('dark', whole)}/"
+                f"{self._dark_key(exposure_us, when)}")
 
     # ── Per-LED content ──────────────────────────────────────────────
 
@@ -521,6 +533,22 @@ class CaptureSuiteWriter:
             attrs={"filename": filename, "format": "jpeg"},
         )
 
+    def add_rung_jpeg(self, color: str, label: str, kind: str,
+                      jpeg_bytes: bytes, attrs: dict = None) -> None:
+        """
+        Store one exposure's JPEG for a test image.
+
+        Args:
+            color:      LED color name.
+            label:      Exposure label, e.g. "r1_4".
+            kind:       "whole" (the full frame) or "bound" (the bound crop).
+            jpeg_bytes: Raw contents of the JPEG.
+            attrs:      Extra attributes, e.g. exposure_us.
+        """
+        self._w.write_bytes(
+            f"{self._led_group(color)}/jpeg", f"{label}_{kind}", jpeg_bytes,
+            attrs={"format": "jpeg", "kind": kind, **(attrs or {})})
+
     def _write_layers(self, group: str, layers: dict, exposure_us: int,
                       captured_dt: str, omit) -> None:
         """
@@ -551,7 +579,7 @@ class CaptureSuiteWriter:
 
     def add_lit(
         self, color: str, label: str, layers: dict, exposure_us: int,
-        captured_dt: str = "", omit=(),
+        captured_dt: str = "", omit=(), whole: bool = False,
     ) -> None:
         """
         Store the lit ROI crop for one LED at one exposure, all channels.
@@ -581,14 +609,17 @@ class CaptureSuiteWriter:
                          see layermodel_repo.keep_channels(). Default keeps
                          everything, so a caller that knows nothing about the
                          flat-field analysis behaves as it always did.
+            whole:       True for whole-frame layers, which go to lit_whole/
+                         beside the bound crops in lit/.  Only test images
+                         store them.
         """
-        self._write_layers(self._lit_group(color, label), layers,
+        self._write_layers(self._lit_group(color, label, whole), layers,
                            exposure_us, captured_dt, omit)
 
     # ── Shared dark frames ───────────────────────────────────────────
 
     def add_dark(self, layers: dict, exposure_us: int, when: str = "after",
-                 captured_dt: str = "", omit=()) -> bool:
+                 captured_dt: str = "", omit=(), whole: bool = False) -> bool:
         """
         Store a dark ROI crop, unless one for this (when, exposure) already
         exists.
@@ -617,22 +648,22 @@ class CaptureSuiteWriter:
                          must therefore collect the lit sweep's decisions
                          first and pass the complement here — which is why the
                          dark batch runs after the sweep, not before it.
+            whole:       True for whole-frame layers, kept in dark_whole/.
 
         Returns:
             True if the frames were written, False if an identical
             (when, exposure) was already present and this call was a no-op.
         """
-        key = self._dark_key(exposure_us, when)
-        if key in self._dark_written:
+        group = self._dark_group(exposure_us, when, whole)
+        if group in self._dark_written:
             return False
 
-        self._write_layers(self._dark_group(exposure_us, when), layers,
-                           exposure_us, captured_dt, omit)
-        self._dark_written.add(key)
+        self._write_layers(group, layers, exposure_us, captured_dt, omit)
+        self._dark_written.add(group)
         return True
 
     def link_dark(self, color: str, label: str, exposure_us: int,
-                  when: str = "after") -> bool:
+                  when: str = "after", whole: bool = False) -> bool:
         """
         Link one LED's dark slot to the shared group for its exposure.
 
@@ -644,16 +675,18 @@ class CaptureSuiteWriter:
             exposure_us: The LED's own exposure time for this label.
             when:        Which batch to link against — "before" or "after"
                          (default) — see the module docstring.
+            whole:       True to link the whole-frame darks (dark_whole/).
 
         Returns:
             True if the link was created, False if no dark group exists for
             that (when, exposure) (nothing to link to).
         """
-        if self._dark_key(exposure_us, when) not in self._dark_written:
+        group = self._dark_group(exposure_us, when, whole)
+        if group not in self._dark_written:
             return False
         self._w.link(
-            self._dark_group(exposure_us, when),
-            f"{self._section}/leds/{color}/dark/{when}_{label}",
+            group,
+            f"{self._section}/leds/{color}/{_kind('dark', whole)}/{when}_{label}",
         )
         return True
 

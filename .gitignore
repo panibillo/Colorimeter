@@ -13,6 +13,7 @@
 **.jpg
 **.npy
 **.h5
+**.h5.part
 **.sqlite
 **.sqlite.*
 image_view_check.png

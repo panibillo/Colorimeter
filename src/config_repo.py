@@ -681,6 +681,16 @@ def capture_dir() -> Path:
     return _resolve_path(str(get("capture", "directory")))
 
 
+def capture_test_image_dir() -> Path:
+    """
+    Return the directory Capture Image writes test images to.
+
+    capture.test_image_directory, resolved against the project root when
+    relative.
+    """
+    return _resolve_path(str(get("capture", "test_image_directory")))
+
+
 def capture_suite_id(when: "datetime | None" = None) -> str:
     """
     Return the identifier naming one capture set, e.g. "20260719_1343".

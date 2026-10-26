@@ -18,7 +18,7 @@
 -- scratch, run db_DDL_reset.sql first — that is the destructive one, and it is
 -- kept in a separate file precisely so it cannot be triggered by accident.
 --
--- Object inventory (8 tables):
+-- Object inventory (9 tables):
 --
 --     colorcard    colour-calibration card patch geometry
 --     config       every instrument setting — see config_repo.py
@@ -28,6 +28,7 @@
 --     layermodels  illumination correction, per LED and Bayer layer
 --     roi          regions of interest in camera stream coordinates
 --     samples      one row per test run — the main record
+--     test_image   test images taken from Menu → Advanced → Capture Image
 --
 -- `device`, `users`, `testkit`, `testlot`, `defaults` and the
 -- `default_gui_vals` view were folded into `config` (see the note there);
@@ -420,6 +421,28 @@ CREATE TABLE IF NOT EXISTS colorcard (
     h          INTEGER,
     CONSTRAINT um_colorcard_cardid_rectid UNIQUE (cardid, rectid),
     CONSTRAINT un_colorcard_cardid_x_y UNIQUE (cardid, x, y)
+);
+
+
+-- ────────────────────────────────────────────────────────────────────────────
+-- test_image — one row per test image taken from Menu → Advanced → Capture
+-- Image.  The file is capture.test_image_directory/<h5name>.
+--
+-- The row is what stops a name being used twice: the screen refuses a name
+-- that is in this table or already on disk.  Nothing in the program deletes a
+-- row, so to reuse a name, delete its row (and its file) from outside.
+-- ────────────────────────────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS test_image (
+    rowid        INTEGER PRIMARY KEY NOT NULL,
+    add_dt       TEXT,                  -- when it was saved (local time)
+    h5name       TEXT NOT NULL UNIQUE COLLATE NOCASE,  -- 'IMG0001.h5'
+    led          TEXT,                  -- the LED's color name
+    rungs        TEXT,                  -- exposure rungs taken: '0 1/4 1'
+    exposures_us TEXT,                  -- their exposures, same order: '3522 5283'
+    image_types  TEXT,                  -- what was stored: 'jpg_whole bayer_bound
+                                        --   darkframes' ...
+    description  TEXT,                  -- typed by the operator
+    remark       TEXT
 );
 
 

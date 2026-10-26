@@ -80,6 +80,8 @@ INSERT OR IGNORE INTO config (active, isdefault, editable, add_dt, role, name,
      VALUES
   (0, 1, 1, '2026-08-01 00:00:00', 'capture', 'directory', 'path', 'captures', 'seed',
    'capture archives; relative paths resolve against the project root'),
+  (0, 1, 1, '2026-10-26 00:00:00', 'capture', 'test_image_directory', 'path', 'test_image', 'seed',
+   'test images from Menu > Advanced > Capture Image; relative paths resolve against the project root'),
   (0, 1, 1, '2026-08-01 00:00:00', 'capture', 'timestamp_format', 'str', '%Y%m%d_%H%M', 'seed',
    'strftime format naming each archive, and stored as its suite_id'),
   (0, 1, 1, '2026-08-01 00:00:00', 'capture', 'extension', 'str', '.h5', 'seed',

@@ -167,6 +167,22 @@ ADV_WIFI        = Rect(164, 118, 148,  56)   # row 2 right
 LEDT_HINT       = Rect(  6,  92, 308,  18)
 LEDT_STATUS     = Rect(  6, 120, 308,  30)
 
+# ── Capture Image (Menu → Advanced → Capture Image) ───────────────────────────
+# Under the BACK / title / Capture row (the Menu's corners) and the Capture
+# page's LED bar (CAP_LED1): the rung toggles, a line naming what is chosen,
+# the file name and description, the image-type checkboxes, and a status line.
+IMG_RUNG_LBL    = Rect(  4,  88,  44,  24)    # "Rungs"
+IMG_RUNG1       = Rect( 50,  88,  31,  24)    # 0 1/4 1/3 1/2 2/3 3/4 1 All, pitch 33
+IMG_RUNG_PITCH  = 33
+IMG_INFO        = Rect(  6, 116, 308,  18)    # "green - 0 1/4 1"
+IMG_LBL_NAME    = Rect(  4, 138,  40,  26)
+IMG_FLD_NAME    = Rect( 46, 138,  84,  26)
+IMG_LBL_DESC    = Rect(134, 138,  40,  26)
+IMG_FLD_DESC    = Rect(176, 138, 140,  26)
+IMG_TYPE1       = Rect(  4, 168,  60,  32)    # five image-type checkboxes, pitch 63
+IMG_TYPE_PITCH  = 63
+IMG_STATUS      = Rect(  6, 204, 308,  34)
+
 # ── config editor (Menu → Config: every setting in the config table) ───────────
 # Four body-row slots on a 38 px pitch (y 52..202), then a five-button footer
 # band. The roles list and the role/browse views are never shown together, and

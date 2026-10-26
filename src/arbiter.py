@@ -352,6 +352,17 @@ class Arbiter:
         self._ledtest_lit: str | None = None
         self._ledtest_msg = ""
 
+        # Capture Image state (Menu → Advanced → Capture Image): what is
+        # chosen, kept between visits, and the status line.  The name is
+        # re-offered (the next free one) each time the screen opens.
+        self._img_led: str | None = None
+        self._img_rungs: set = set()
+        self._img_types: set = {"bayer_bound", "darkframes"}
+        self._img_name = ""
+        self._img_desc = ""
+        self._img_status = ""
+        self._img_saving = ""       # the name of the image being captured
+
         # Capture screen state (Menu → Advanced → Capture): which view is
         # showing and what kind of run is in flight.  A menu-launched run uses
         # self._capture with _capture_slot = None (the None marks it
@@ -1247,7 +1258,7 @@ class Arbiter:
     # ── Advanced screen (Menu → Advanced) ───────────────────────────────────────
     # The Menu's layout again, for tools an operator rarely needs.  Like the
     # Menu, nothing is staged here, so OK and CANCEL both go back to the Menu.
-    # Capture Image and Wifi are placeholders until their screens exist.
+    # Wifi is a placeholder until its screen exists.
 
     def _render_advanced(self) -> None:
         if self._pool is None:
@@ -1260,7 +1271,7 @@ class Arbiter:
         p.put("adv_capture",   "Capture",  on=self._menu_open_capture)
         p.put("adv_test_led",  "Test LED", on=self._ledtest_open_screen,
               enabled=self._ledtest_available())
-        p.put("adv_cap_image", "Capture\nImage", enabled=False)
+        p.put("adv_cap_image", "Capture\nImage", on=self._img_open)
         p.put("adv_wifi",      "Wifi",     enabled=False)
         p.render(self._disp)
         self._rebuild_focus()
@@ -1360,6 +1371,201 @@ class Arbiter:
         p.put("ledt_status", self._ledtest_status_text())
         p.render(self._disp)
         self._rebuild_focus()
+
+    # ── Capture Image (Menu → Advanced → Capture Image) ────────────────────────
+    # Photographs one LED at the chosen rungs of its stored exposures and saves
+    # the ticked image types as one test image (capture_image.py).  Capture
+    # saves as its last step, so there is no SAVE: BACK just leaves, and
+    # abandons a capture under way, which then leaves no file.
+
+    _IMG_TYPE_BUTTONS = (("jpg_whole", "jpg\nwhole"), ("jpg_bound", "jpg\nbound"),
+                         ("bayer_whole", "Bayers\nwhole"),
+                         ("bayer_bound", "Bayers\nbound"),
+                         ("darkframes", "Dark\nframes"))
+
+    def _img_open(self) -> None:
+        import config_repo
+        import test_image_repo
+        self._img_name = test_image_repo.next_name(config_repo.capture_test_image_dir())
+        self._img_status = ""
+        self._cap_view = None
+        self._img_render()
+
+    def _img_read_fields(self) -> None:
+        """Keep what the two text boxes show: they are edited by keyboard."""
+        if self._pool is None or self._cap_view != "image":
+            return
+        self._img_name = str(self._pool["img_fld_name"].value).strip()
+        self._img_desc = str(self._pool["img_fld_desc"].value)
+
+    def _img_choice(self):
+        import capture_image
+        return capture_image.ImageChoice(
+            self._img_led or "", [r for r in self._img_rung_list()],
+            [t for t in capture_image.IMAGE_TYPES if t in self._img_types],
+            self._img_name, self._img_desc)
+
+    def _img_rung_list(self) -> "list[str]":
+        import exposure_repo
+        return [r for r in exposure_repo.RUNGS if r in self._img_rungs]
+
+    def _img_problem(self, exposures) -> "str | None":
+        """Why Capture cannot run now, or None."""
+        import capture_image
+        import config_repo
+        import test_image_repo
+        if self._img_led is None:
+            return "Tap an LED color"
+        if not exposures:
+            return f"{self._img_led} has no stored exposures"
+        problem = capture_image.choice_problem(self._img_choice(), exposures)
+        return problem or test_image_repo.name_problem(
+            self._img_name, config_repo.capture_test_image_dir())
+
+    def _img_pick_led(self, led: str) -> None:
+        self._img_read_fields()
+        self._img_led = led
+        self._img_status = ""
+        self._img_render()
+
+    def _img_toggle_rung(self, rung: str) -> None:
+        import exposure_repo
+        self._img_read_fields()
+        if rung == "All":
+            stored = set(exposure_repo.rung_exposures(self._img_led or ""))
+            self._img_rungs = set() if stored <= self._img_rungs else stored
+        else:
+            self._img_rungs ^= {rung}
+        self._img_status = ""
+        self._img_render()
+
+    def _img_toggle_type(self, kind: str) -> None:
+        self._img_read_fields()
+        self._img_types ^= {kind}
+        self._img_status = ""
+        self._img_render()
+
+    def _img_render(self) -> None:
+        if self._pool is None:
+            return
+        import exposure_repo
+        from palette import color, rgb
+        from lighting_cal8 import LEDBank
+        self._img_read_fields()
+        self._cap_view = "image"
+        p = self._pool
+        p.hide_all()
+        busy = self._capture is not None
+        exposures = exposure_repo.rung_exposures(self._img_led) if self._img_led else {}
+        problem = self._img_problem(exposures)
+        idle = self._ledtest_available()
+        p.put("menu_cancel_btn", "BACK", on=self._img_back)
+        p.put("img_title", "Capture\nimage")
+        p.put("menu_ok_btn", "Capture", on=self._img_capture,
+              enabled=problem is None and idle)
+        sel, unsel = color("start_green"), color("btn_gray")
+        for i, led in enumerate(LEDBank.color_names(), 1):
+            name = f"cap_led{i}"
+            fill_rgb, text_name = _LEDPICK_SWATCH[led]
+            p.put(name, _led_initials(led), on=lambda l=led: self._img_pick_led(l),
+                  enabled=not busy)
+            w = p[name]
+            w.color = w.disabled_color = rgb(*fill_rgb)
+            w.text_color = color(text_name)
+            w.border_color = color("black") if led == self._img_led else None
+        p.put("img_rung_lbl", "Rungs")
+        for i, rung in enumerate(exposure_repo.RUNGS + ("All",), 1):
+            name = f"img_rung{i}"
+            on = (rung in self._img_rungs if rung != "All"
+                  else bool(exposures) and set(exposures) <= self._img_rungs)
+            p.put(name, rung, on=lambda r=rung: self._img_toggle_rung(r),
+                  enabled=not busy and (rung == "All" and bool(exposures)
+                                        or rung in exposures))
+            p[name].color = sel if on else unsel
+        rungs = " ".join(self._img_rung_list())
+        p.put("img_info", f"{self._img_led or '-'} - {rungs or '-'}")
+        p.put("img_lbl_name", "Name", on=lambda: self._img_hint(
+            "File name; saved as <name>.h5 in test_image"))
+        p.put("img_fld_name", self._img_name)
+        p.put("img_lbl_desc", "Desc", on=lambda: self._img_hint(
+            "Description, typed on the keyboard"))
+        p.put("img_fld_desc", self._img_desc)
+        for i, (kind, text) in enumerate(self._IMG_TYPE_BUTTONS, 1):
+            name = f"img_type{i}"
+            p.put(name, text, on=lambda k=kind: self._img_toggle_type(k),
+                  enabled=not busy)
+            ticked = kind in self._img_types
+            p[name].color = sel if ticked else unsel
+            p[name].border_color = color("black") if ticked else None
+        p.put("img_status", self._img_status or problem or "Tap Capture")
+        p.render(self._disp)
+        self._rebuild_focus()
+
+    def _img_hint(self, text: str) -> None:
+        self._img_read_fields()
+        self._img_status = text
+        self._img_render()
+
+    def _img_back(self) -> None:
+        """Back to Advanced, abandoning a capture under way (it leaves no file)."""
+        if self._cap_run_mode == "image" and self._capture is not None:
+            self._capture.cancel()
+            self._capture = None
+            self._capture_slot = None
+        self._img_read_fields()
+        self._cap_view = None
+        self._render_advanced()
+
+    def _img_capture(self) -> None:
+        """Photograph and save the test image the screen describes."""
+        import capture_image
+        from capture_runner import CaptureConfig
+        self._img_read_fields()
+        if not self._ledtest_available():
+            self._img_hint("Camera busy - try again later")
+            return
+        choice = self._img_choice()
+
+        def make_runner(cam, leds, cfg):
+            return capture_image.CaptureImageRunner(cam, leds, choice, cfg)
+
+        session = self._new_session(CaptureConfig(led_colors=[choice.led]),
+                                    runner_factory=make_runner)
+        if not session.start():
+            log.error("Arbiter: test image failed to start: %s", session.error)
+            self._img_hint(f"Camera failed: {session.error}"[:48])
+            return
+        self._capture = session
+        self._capture_slot = None
+        self._cap_run_mode = "image"
+        self._img_saving = choice.name
+        self._img_status = f"Capturing {choice.name} ..."
+        self._img_render()
+
+    def _pump_image(self, session) -> None:
+        """Drive a running test image; say where it went when it ends."""
+        import config_repo
+        import test_image_repo
+        progress = session.step()
+        if progress is not None:
+            if not getattr(progress, "transient", False):
+                self._img_status = f"{self._img_saving}: {progress.message}"[:80]
+                if self._cap_view == "image" and self._pool is not None:
+                    self._pool.set("img_status", self._img_status)
+                    self._pool.redraw(self._disp, "img_status")
+            return
+        self._capture = None
+        self._capture_slot = None
+        if session.error is not None:
+            self._img_status = f"Not saved: {session.error}"[:80]
+        else:
+            self._img_status = f"Saved {self._img_saving}"
+            self._img_name = test_image_repo.next_name(
+                config_repo.capture_test_image_dir())
+            if self._pool is not None:      # the redraw reads the box back
+                self._pool["img_fld_name"].value = self._img_name
+        if self._cap_view == "image":
+            self._img_render()
 
     # ── Phases screen (Menu → Phases) ──────────────────────────────────────────
     # Custom reagent countdowns, entered on the instrument itself.  The two
@@ -2749,6 +2955,8 @@ class Arbiter:
         """Drive a menu-launched fit or Show capture."""
         if self._cap_run_mode == "show":
             self._pump_show(session)
+        elif self._cap_run_mode == "image":
+            self._pump_image(session)
         else:
             self._pump_fit(session)
 
@@ -5277,7 +5485,6 @@ def _selftest() -> None:
     check("menu grid hidden",      arb._pool["menu_capture"].visible, False)
     for _name in ("adv_capture", "adv_test_led", "adv_cap_image", "adv_wifi"):
         check(f"{_name} shown", arb._pool[_name].visible, True)
-    check("Capture Image not built yet", arb._pool["adv_cap_image"].enabled, False)
     check("Wifi not built yet",    arb._pool["adv_wifi"].enabled, False)
     arb._pool["adv_capture"].on_press()
     check("Capture page up",       arb._cap_view, "choice")
@@ -5351,6 +5558,68 @@ def _selftest() -> None:
     check("Test LED disabled while busy", arb._pool["adv_test_led"].enabled, False)
     arb._capture = None
     arb._camera, arb._leds = _saved_cam, _saved_leds
+    arb._render_menu()
+
+    print("== Capture Image: choose, capture, saved ==")
+    import exposure_repo as _er
+    import test_image_repo as _tir
+    _img_dir = Path(_tmpdir) / "test_image"
+    config.save("capture", "test_image_directory", str(_img_dir))
+    _er.write_led_exposures("green", "5", [2000, 2500, 3200, 4000, 5000])
+    _er.write_led_exposures("green", "4", [2000, 2800, 3600, 5000])
+    arb._render_advanced()
+    check("Capture Image enabled",  arb._pool["adv_cap_image"].enabled, True)
+    arb._pool["adv_cap_image"].on_press()
+    check("Capture Image up",       arb._pool["img_title"].visible, True)
+    check("first name offered",     arb._pool["img_fld_name"].value, "IMG0001")
+    check("no SAVE: Capture in the corner", arb._pool["menu_ok_btn"].label, "Capture")
+    check("Capture waits for an LED", (arb._pool["menu_ok_btn"].enabled,
+                                       arb._pool["img_status"].text),
+          (False, "Tap an LED color"))
+    arb._pool[f"cap_led{_i_green}"].on_press()
+    check("1/3 offered (group 4)",  arb._pool["img_rung3"].enabled, True)
+    arb._pool["img_rung8"].on_press()                   # All
+    check("All picks all seven",    arb._pool["img_info"].text,
+          "green - 0 1/4 1/3 1/2 2/3 3/4 1")
+    arb._pool["img_rung8"].on_press()                   # All again: none
+    check("All again clears",       arb._pool["img_status"].text,
+          "Tap one or more exposure rungs")
+    arb._pool["img_rung1"].on_press()                   # 0
+    arb._pool["img_rung7"].on_press()                   # 1
+    check("two rungs",              arb._pool["img_info"].text, "green - 0 1")
+    check("ready by default (Bayers bound + darks)",
+          arb._pool["menu_ok_btn"].enabled, True)
+    arb._pool["img_type4"].on_press()                   # Bayers bound off
+    check("darks alone refused",    arb._pool["img_status"].text,
+          "Tick at least one image type")
+    arb._pool["img_type1"].on_press()                   # jpg whole on
+    check("darks need a Bayer form", arb._pool["img_status"].text,
+          "Darkframes needs Bayers whole or bound")
+    arb._pool["img_type5"].on_press()                   # darkframes off
+    arb._pool["img_fld_name"].value = "IMG 5"
+    arb._img_render()
+    check("bad name refused",       arb._pool["menu_ok_btn"].enabled, False)
+    arb._pool["img_fld_name"].value = "IMG0005"
+    arb._pool["img_fld_desc"].value = "first light"
+    arb._img_render()
+    check("good name accepted",     arb._pool["menu_ok_btn"].enabled, True)
+    check("choice", (arb._img_choice().rungs, arb._img_choice().types,
+                     arb._img_choice().description),
+          (["0", "1"], ["jpg_whole"], "first light"))
+    arb._pool["menu_ok_btn"].on_press()                 # Capture
+    check("capturing",              arb._cap_run_mode, "image")
+    check("LED bar locked while busy", arb._pool[f"cap_led{_i_green}"].enabled, False)
+    for _ in range(5):
+        arb.pump_capture()
+    check("camera freed",           arb.capture_available(), True)
+    check("status says saved",      arb._pool["img_status"].text, "Saved IMG0005")
+    check("next name offered",      arb._pool["img_fld_name"].value,
+          _tir.next_name(_img_dir))
+    arb._pool["img_fld_name"].value = "IMG0006"
+    arb._pool["menu_ok_btn"].on_press()
+    arb._pool["menu_cancel_btn"].on_press()             # BACK mid-capture
+    check("BACK abandons the capture", arb._capture, None)
+    check("BACK → Advanced",        arb._pool["adv_title"].visible, True)
     arb._render_menu()
 
     # Two different baselines, and the difference matters on a development

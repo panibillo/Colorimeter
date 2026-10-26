@@ -220,6 +220,27 @@ class Pool:
         label("ledt_hint",        L.LEDT_HINT,         "black",   "white",       13, align="left")
         label("ledt_status",      L.LEDT_STATUS,       "black",   "white",       18, align="left")
 
+        # ── Capture Image (Menu → Advanced → Capture Image): the LED bar is the
+        # Capture page's cap_led1..10.  The rung and image-type buttons are
+        # toggles the arbiter recolors.
+        label("img_title",        L.MENU_TITLE,        "black",   "white",       18, text="Capture\nimage")
+        label("img_rung_lbl",     L.IMG_RUNG_LBL,      "black",   "white",       12, text="Rungs")
+        for i in range(8):
+            r = Rect(L.IMG_RUNG1.x + i * L.IMG_RUNG_PITCH, L.IMG_RUNG1.y,
+                     L.IMG_RUNG1.w, L.IMG_RUNG1.h)
+            button(f"img_rung{i + 1}", r, "black", "btn_gray", 11)
+        label("img_info",         L.IMG_INFO,          "black",   "white",       12, align="left")
+        button("img_lbl_name",    L.IMG_LBL_NAME,      "white", "label_coral",   12, text="Name")
+        field("img_fld_name",     L.IMG_FLD_NAME,      13, "field_blue")
+        button("img_lbl_desc",    L.IMG_LBL_DESC,      "white", "label_coral",   12, text="Desc")
+        field("img_fld_desc",     L.IMG_FLD_DESC,      12, "field_blue")
+        for i in range(5):
+            r = Rect(L.IMG_TYPE1.x + i * L.IMG_TYPE_PITCH, L.IMG_TYPE1.y,
+                     L.IMG_TYPE1.w, L.IMG_TYPE1.h)
+            button(f"img_type{i + 1}", r, "black", "btn_gray", 11)
+        label("img_status",       L.IMG_STATUS,        "black",   "white",       13,
+              align="left", valign="top")
+
         # ── config editor (Menu → Config): roles, one role, one parameter ──────
         # Built two ways — 8 grid buttons for the roles list, and 4 rows of a
         # name/value/action triple for the role and browse views — because the

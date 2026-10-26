@@ -36,6 +36,7 @@ Public surface
 --------------
     read_exposures(led, group) -> list[int]        active exposures, one LED+group
     middle_exposure(led, group) -> int | None      middle stored rung, one LED+group
+    rung_exposures(led) -> dict[str, int]          {'0': us, '1/4': us, ...}
     read_group(group) -> dict[str, list[int]]      {led: exposures} for a group
     available_groups() -> list[str]                distinct active groups present
     write_led_exposures(led, group, microseconds, remark=None, add_dt=None) -> int
@@ -88,6 +89,39 @@ def middle_exposure(led: str, group: str) -> Optional[int]:
     if not exposures:
         return None
     return exposures[(len(exposures) - 1) // 2]
+
+
+# The seven rungs, shortest exposure first.  Each group's exposures sit at
+# its own subset of them (exposure_fit.GROUP_POSITIONS), so the rungs are
+# read back by position within the groups.
+RUNGS = ("0", "1/4", "1/3", "1/2", "2/3", "3/4", "1")
+_GROUP_RUNGS = {
+    "5": ("0", "1/4", "1/2", "3/4", "1"),
+    "4": ("0", "1/3", "2/3", "1"),
+    "3": ("0", "1/2", "1"),
+    "2": ("0", "1"),
+    "1": ("1/2",),
+}
+
+
+def rung_exposures(led: str) -> Dict[str, int]:
+    """
+    Return {rung: exposure_us} for one LED, in RUNGS order, from its stored
+    groups.
+
+    A rung is read from the largest group that has it, so a calibration with
+    every group gives all seven.  A group whose row count does not match its
+    rungs (a hand-edited table) is skipped rather than misread.  A rung no
+    stored group covers is left out.
+    """
+    found: Dict[str, int] = {}
+    for group, rungs in _GROUP_RUNGS.items():
+        exposures = read_exposures(led, group)
+        if len(exposures) != len(rungs):
+            continue
+        for rung, us in zip(rungs, exposures):
+            found.setdefault(rung, us)
+    return {r: found[r] for r in RUNGS if r in found}
 
 
 def read_group(group: str) -> Dict[str, List[int]]:
