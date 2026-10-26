@@ -149,7 +149,7 @@ class ExposureFitRunner(CaptureRunner):
         model = getattr(cam, "model", None)
         self.pad = roi.load_test_pad(cam_w, cam_h, model)
         # Checked before any LED is lit, so a missing pad costs a message.
-        em.calibration_patches(self.rois, self.pad)
+        self._check_regions()
 
         yield self._progress(
             "setup", f"Camera {cam.model_description}  pattern={self.pattern}  "
@@ -160,6 +160,10 @@ class ExposureFitRunner(CaptureRunner):
         with self.prof.time("focus"):
             focus_pos, focus_mode, _ = self._set_focus()
         yield self._progress("focus", f"Focus: {focus_pos:.2f} diopters ({focus_mode})")
+
+    def _check_regions(self) -> None:
+        """Raise ValueError unless the test pad's patches and a chip are defined."""
+        em.calibration_patches(self.rois, self.pad)
 
     def _light(self, channel: int, color: str) -> Iterator[Progress]:
         """Select the LED, switch it on, and let it warm up."""

@@ -2,9 +2,10 @@
 exposure_show.py  —  Look at the test pad's signal at chosen exposures.
 -----------------------------------------------------------------------
 Backs the Capture page's Show screen.  It lights one LED, takes a frame at
-each requested exposure, and keeps the test pad's sorted pixel signal for each
-Bayer layer asked for, so the operator can see how a bracket sits in the
-window.  Two shapes:
+each requested exposure, and keeps the whole pad's sorted pixel signal for
+each Bayer layer asked for, so the operator can see how a bracket sits in the
+window.  The pad is the sample region, the same one the capture's analysis
+reads, not the test pad's three patches.  Two shapes:
 
     one exposure, all four layers     (what each layer reads at this exposure)
     one layer, a list of exposures    (how one layer moves across the ladder)
@@ -49,6 +50,10 @@ class ExposureShowRunner(ExposureFitRunner):
         self.layer_names = tuple(layers)
         self.curves: List[Curve] = []
 
+    def _check_regions(self) -> None:
+        """Raise ValueError unless the sample region is defined."""
+        em.sample_rect(self.rois)
+
     def run(self) -> Iterator[Progress]:
         try:
             yield from self._run_show()
@@ -58,7 +63,7 @@ class ExposureShowRunner(ExposureFitRunner):
     def _run_show(self) -> Iterator[Progress]:
         self.curves = []
         yield from self._prepare()
-        patches = em.calibration_patches(self.rois, self.pad)
+        pad = em.sample_rect(self.rois)
         for channel, color in self._order:
             yield from self._light(channel, color)
             grab = self._grabber(color)
@@ -68,7 +73,7 @@ class ExposureShowRunner(ExposureFitRunner):
                 layers = grab(us)
                 for name in self.layer_names:
                     self.curves.append(Curve(
-                        us, name, em.pad_samples(layers, patches, name)))
+                        us, name, em.pad_samples(layers, pad, name)))
                 yield self._progress("calibrate", f"{color} {us} us")
             self._led_off(channel)
         yield self._progress("done", f"{len(self.curves)} curves")

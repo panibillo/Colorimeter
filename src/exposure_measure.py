@@ -96,22 +96,34 @@ def patch_levels(layers: Dict[str, np.ndarray], patches: Dict[str, Rect],
     return out
 
 
-def pad_samples(layers: Dict[str, np.ndarray], patches: Dict[str, Rect],
-                layer: str, black_dn: float = BLACK_DN) -> np.ndarray:
+def sample_rect(rois: Dict[str, Rect]) -> Rect:
     """
-    Every pixel of the test pad's patches in one Bayer layer, black level
-    removed and sorted ascending.  The curve shows the pad's brown, yellow and
-    white as steps, and how wide each one spreads.
+    The whole pad, in layer coordinates: the sample region the capture's
+    analysis reads, not the test pad's three patches.
 
     Raises:
-        ValueError: if a test-pad patch is missing from `patches`.
+        ValueError: if no sample region is defined.
     """
-    missing = [r for r in roi.TEST_PAD_ROLES if r not in patches]
-    if missing:
-        raise ValueError("test pad is missing: " + ", ".join(missing))
-    pixels = np.concatenate([layers[layer][patches[r].xyslice()].ravel()
-                             for r in roi.TEST_PAD_ROLES])
-    return np.sort(pixels.astype(float)) - black_dn
+    sample = roi.by_role(rois, roi.ROLE_SAMPLE)
+    if sample is None:
+        raise ValueError("no sample region is defined")
+    return roi.to_layer_rect(sample)
+
+
+def pad_samples(layers: Dict[str, np.ndarray], rect: Rect, layer: str,
+                black_dn: float = BLACK_DN) -> np.ndarray:
+    """
+    Every pixel of the pad (`rect`, from sample_rect) in one Bayer layer,
+    black level removed and sorted ascending.  The curve shows how the pad's
+    brightness spreads, darkest pixel to lightest.
+
+    Raises:
+        ValueError: if `rect` covers no pixels in the layer.
+    """
+    pixels = layers[layer][rect.xyslice()]
+    if pixels.size == 0:
+        raise ValueError(f"the sample region covers no pixels in layer {layer}")
+    return np.sort(pixels.astype(float).ravel()) - black_dn
 
 
 def make_measure(grab: Grab, patches: Dict[str, Rect], channels: Iterable[str],

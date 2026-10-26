@@ -82,7 +82,7 @@ This section is the procedure.
 | Bayer layer column (R, Gr, Gb, B) | Tap to add or drop a layer for the chosen LED. |
 | Calibrate suite | Fits every LED with its own layers and window. Clears the chosen LED. |
 | Calibrate color | Fits only the chosen LED (one to four layers). |
-| Show | Photographs the test pad and plots its sorted signal against the window. |
+| Show | Photographs the whole pad (the sample region, as the analysis reads it) and plots its sorted signal against the window. |
 | Pad areas | Opens the image viewer on the three test-pad patches. |
 | SAVE | Writes the settings and the fitted brackets. A single-LED fit saved this way is used in operation; a later suite run replaces it. |
 | CANCEL | Discards everything on the page. |

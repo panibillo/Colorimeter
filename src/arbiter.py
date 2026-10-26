@@ -2463,9 +2463,9 @@ class Arbiter:
         self._view_state.fit_to(Rect(x0, y0, x1 - x0, y1 - y0, name="pad"))
 
     # ── Show screen (Capture page → Show) ──────────────────────────────────────
-    # Photographs the test pad with the chosen LED and plots the pad pixels'
-    # sorted signal against the LED's window.  "One exposure" takes one frame
-    # and plots all four Bayer layers; "One layer" takes a frame at each of the
+    # Photographs the whole pad (the sample region) with the chosen LED and
+    # plots the pad pixels' sorted signal against the LED's window.  "One
+    # exposure" takes one frame and plots all four Bayer layers; "One layer" takes a frame at each of the
     # LED's stored exposures and plots that layer at each.  Nothing is stored.
 
     def _cap_show(self) -> None:

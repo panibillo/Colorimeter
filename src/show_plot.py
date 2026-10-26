@@ -1,5 +1,5 @@
 """
-show_plot.py  —  Draw the sorted test-pad signal curves for the Show screen.
+show_plot.py  —  Draw the sorted pad signal curves for the Show screen.
 ---------------------------------------------------------------------------
 Pure drawing: takes sorted signal arrays and returns a PIL image of exactly the
 requested size, so the screen's canvas can blit it as it is.
