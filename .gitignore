@@ -4,6 +4,7 @@
 .project
 .pydevproject
 .settings/
+.metadata/
 
 # ── Capture data and generated output ────────────────────────────────────
 # The capture pipeline emits these in bulk; they are data, not source.

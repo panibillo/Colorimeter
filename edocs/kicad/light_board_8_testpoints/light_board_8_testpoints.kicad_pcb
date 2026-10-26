@@ -2882,7 +2882,7 @@
 			(pintype "no_connect")
 			(uuid "9d2c691e-db00-4f0d-91a6-1696c54bb9c7")
 		)
-		(pad "3" smd roundrect
+		(pad "3 Vdd" smd roundrect
 			(at -2.475 0.635 180)
 			(size 1.95 0.6)
 			(layers "F.Cu" "F.Mask" "F.Paste")
@@ -7626,12 +7626,12 @@
 		(uuid "f588292b-95cf-4a8a-b9ce-79230fa02237")
 	)
 	(segment
-		(start 66.455 65.958)
+		(start 66.709 65.958)
 		(end 68.371 65.958)
 		(width 0.508)
 		(layer "F.Cu")
 		(net "GND")
-		(uuid "2dec2987-42b2-4658-b693-75a536f96695")
+		(uuid "24808c9d-bef8-4ee5-8741-8956e37c82f5")
 	)
 	(segment
 		(start 75.403747 67.8942)

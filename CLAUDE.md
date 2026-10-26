@@ -1,6 +1,6 @@
 # Colorimeter Project Documentation
 
-This project's guidance is organized into three focused documents:
+This project's guidance is organized into four focused documents:
 
 ## 📋 [PROJECT_OVERVIEW.md](PROJECT_OVERVIEW.md)
 **Understand the problem domain and design decisions**
@@ -24,6 +24,10 @@ This project's guidance is organized into three focused documents:
 - Testing and performance guidelines
 - Use plain English and avoid jargon.  
 - U.S. spelling.
+
+## [How_best_to_help_Bill.md](How_best_to_help_Bill.md)
+**Understand how to interact with Bill when developing analysis tools**
+- Read this when working on image and color analysis.
 
 ---
 

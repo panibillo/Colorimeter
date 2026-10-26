@@ -141,6 +141,8 @@ Bill has said this in nearly every session, and it is now in `CLAUDE.md` and
 
 ### 3.2 Rules
 
+- **Use clear English and avoid jargon** Look for and remove ambiguities
+   in language, meanings, comparisons, references.
 - **Words first, symbol second.** Define a symbol with a full sentence the
   first time it appears in each reply or document, and again when it comes
   back after a gap.
@@ -160,7 +162,7 @@ Bill has said this in nearly every session, and it is now in `CLAUDE.md` and
 
 ## 4. Words that are easy to confuse
 
-Use these exact meanings. When a document uses one of these, define it there.
+Use these exact meanings. When a document uses one of these, define it there.  
 
 | Word | Plain meaning | Direction |
 |---|---|---|
@@ -184,10 +186,9 @@ Use these exact meanings. When a document uses one of these, define it there.
 | **channel** | Use this to mean a LED + Bayer layer, for example `cyan.B`. Older code names such as `PRECELLS`, `GRAYCELLS`, `get_cell_data` and `cell_PCA` use "cell" in this sense. | |
 | **cell** | Use this to mean a LED + Bayer layer + exposure_us + pre/post-image. | |
 
-
-A pair that Bill often confuses is **absorption (absorbance)**
-and **reflectance**.  If Bill uses one where the other fits, check gently which
+If Bill uses any of these terms where an alternative fits, check gently which
 one Bill means.
+A pair that Bill often confuses is **absorption (absorbance)** and **reflectance**.  
 
 ---
 
@@ -212,6 +213,9 @@ one Bill means.
 - **Booleans that hide meaning.** `pre=True/False` instead of `sec=''/'pre'`
   (2026-09-07). Prefer values that say what they are (memory
   `feedback_orthogonal_columns`).
+- Comparisons: 
+   - Expressions of relative values need clearly defined denominators.
+   - Expressions of magnitudes need clearly defined units.
 
 ---
 

@@ -20,6 +20,8 @@
 - Avoid memory-heavy features (small Pi)
 - Use try/except defensively around network and hardware code
 - Use comments to explain hardware interactions, naming conventions, and complex algorithms
+  - Use plain English and avoid jargon.  
+  - U.S. spelling.
 - Organize code into multiple files by domain:
   - Camera operation (`colorcam.py`)
   - Analysis (`color_analysis.py`, `roi_analysis.py`, `color_map.py`)
@@ -46,6 +48,8 @@
 ### Docstrings
 
 Use triple double-quoted docstrings in **Google style** for all public functions and classes.
+Use plain English and avoid jargon.  
+U.S. spelling.
 
 **Format**:
 ```python
@@ -113,6 +117,8 @@ def send_data(data: str, ip: str, port: int) -> None:
   (e.g. `# user run on RPi command line in ssh session.`
    e.g. `# called by GUI ...`)
 - Keep line length reasonable for readability
+- Use plain English and avoid jargon.  
+- U.S. spelling.
 
 ### Markdown File Organization
 

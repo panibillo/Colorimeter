@@ -1919,6 +1919,7 @@ def run_sampno():
     # ── Nothing below depends on anything above it except that
     # ── locate_pad() must run before anything that measures the pad.
     SAMPS = [f"C{n}" for n in range(1034, 1037)] 
+    SAMPS = [f"C{1000+n}" for n in (14, 15, 16, 17, 18, 19, 21, 26, 27)]
     # SAMPS = ['C1025']
     # SAMP = SAMPS[-1]
     # SAMPS = [SAMP]
@@ -1947,14 +1948,19 @@ def run_sampno():
 
     # 4. Every cell at once, then the same thing as numbers.
     #    quantity = one of 'sig', 'R', 'R_inf', 'A', 'KS', 'KS_signed' 
-    if 0:
+    if 1:
+        
         for SAMP in SAMPS:
-            for quantity in ["R_inf"]:
-            # for quantity in [ 'R', 'R_inf', 'A', 'KS']:
-                print(f"\n=== contact_sheet({SAMP!r}) {quantity}")
-                contact_sheet(SAMP, quantity=quantity, figs=True, savefigs=True)
-                print()
-            cell_table(SAMP, roi=ROISAMPLE)
+            try:
+                for quantity in ["R_inf"]:
+                # for quantity in [ 'R', 'R_inf', 'A', 'KS']:
+                    print(f"\n=== contact_sheet({SAMP!r}) {quantity}")
+                    contact_sheet(SAMP, quantity=quantity, figs=True, savefigs=True)
+                    print()
+                cell_table(SAMP, roi=ROISAMPLE)
+            except:
+                print(f"\n=== missing ({SAMP})")
+
         return
 
     # 5. The arithmetic check: on the strip's own dry pad (the pre-image,
@@ -1981,7 +1987,8 @@ def run_sampno():
             pre_post_overlay(SAMP, "royal_blue", "B", figs=True, savefigs=False)
 
     # 7. The two-dye separation, and its figure.
-    if 1:
+    if 0:
+        """ !!! DO NOT RUN THIS UNTIL white reference is corrected !!! """
         for SAMP in SAMPS:
             print(f"\n=== cell_PCA({SAMP!r})")
             # yellow, brown = cell_PCA(SAMP, figs=True, savefigs=True)
