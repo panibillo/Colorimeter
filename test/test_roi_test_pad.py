@@ -32,7 +32,8 @@ class TestTestPad(unittest.TestCase):
         shutil.copy(_ROOT / "src" / "colorimeter.sqlite", tmp)
         self._saved_dbname = db.DBNAME
         db.DBNAME = str(tmp)
-        db.write_one("DELETE FROM roi WHERE active = 2")
+        # Pad rows of any age: a live copy may carry history from real use.
+        db.write_one("DELETE FROM roi WHERE active = 2 OR role LIKE 'pad_%'")
 
     def tearDown(self):
         db.DBNAME = self._saved_dbname
