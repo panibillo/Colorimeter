@@ -35,6 +35,7 @@ from typing import Callable, Dict, List, Optional
 
 import layout
 from palette import color
+from rect import Rect
 from widgets import Button, ImageWidget, Label, RectWidget, TextBox, Widget
 import version
 from timer import TimerWidget
@@ -283,15 +284,24 @@ class Pool:
         # Mode + N buttons act as radio groups — the arbiter recolours the
         # selected one green and the rest gray on each render.
         label("cap_title",      L.CAP_TITLE,     "black", "white",       22, text="Capture")
-        label("cap_mode_lbl",   L.CAP_MODE_LBL,  "black", "white",       18, text="Path")
-        button("cap_mode_cal",  L.CAP_MODE_CAL,  "btn_text", "btn_gray", 14, text="Calibrate")
-        button("cap_mode_norm", L.CAP_MODE_NORM, "btn_text", "btn_gray", 14, text="Normal")
-        label("cap_n_lbl",      L.CAP_N_LBL,     "black", "white",       18, text="Exposures")
-        button("cap_n1", L.CAP_N1, "btn_text", "btn_gray", 18, text="1")
-        button("cap_n2", L.CAP_N2, "btn_text", "btn_gray", 18, text="2")
-        button("cap_n3", L.CAP_N3, "btn_text", "btn_gray", 18, text="3")
-        button("cap_n4", L.CAP_N4, "btn_text", "btn_gray", 18, text="4")
-        button("cap_n5", L.CAP_N5, "btn_text", "btn_gray", 18, text="5")
+        # Choice form: ten LED swatches (recoloured by the arbiter), four
+        # window settings (tap a label for its help), and the action row.
+        for i in range(10):
+            r = Rect(L.CAP_LED1.x + i * L.CAP_LED_PITCH, L.CAP_LED1.y,
+                     L.CAP_LED1.w, L.CAP_LED1.h)
+            button(f"cap_led{i + 1}", r, "black", "btn_gray", 10)
+        for key, text in (("low_dn", "Low DN"), ("high_dn", "High DN"),
+                          ("low_pc", "Low %"), ("high_pc", "High %")):
+            button(f"cap_lbl_{key}", getattr(L, f"CAP_LBL_{key.upper()}"),
+                   "white", "label_coral", 13, text=text)
+            field(f"cap_fld_{key}", getattr(L, f"CAP_FLD_{key.upper()}"),
+                  16, "field_blue", align="center")
+        label("cap_hint", L.CAP_HINT, "black", "white", 12, align="left")
+        button("cap_suite", L.CAP_SUITE, "btn_text", "start_green", 14,
+               text="Calibrate\nsuite")
+        button("cap_color", L.CAP_COLOR, "btn_text", "btn_gray", 14,
+               text="Calibrate\ncolor")
+        button("cap_show",  L.CAP_SHOW,  "btn_text", "btn_gray", 14, text="Show")
         label("cap_progress",   L.CAP_PROGRESS,  "black", "white", 16, align="left")
         button("cap_back",  L.CAP_BACK,  "btn_text", "btn_gray",    16, text="Back")
         button("cap_start", L.CAP_START, "btn_text", "start_green", 18, text="START")

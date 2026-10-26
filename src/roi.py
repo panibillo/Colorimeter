@@ -140,6 +140,14 @@ ROLE_WHITE_BALANCE = "white_balance"
 ROLE_BLACK         = "black"
 ROLE_BOUND         = "bound"
 
+# The exposure-calibration test pad: one patch each of white, yellow and brown,
+# spanning the range of reflectance a real strip covers.  They are not part of
+# a measurement run, so they are stored with active=2 (see load_test_pad).
+ROLE_PAD_WHITE  = "pad_white"
+ROLE_PAD_YELLOW = "pad_yellow"
+ROLE_PAD_BROWN  = "pad_brown"
+TEST_PAD_ROLES  = (ROLE_PAD_WHITE, ROLE_PAD_YELLOW, ROLE_PAD_BROWN)
+
 # How many ROIs each role may have in force: (fewest, most before it is worth
 # mentioning).  None as the second means any number is fine.
 #
@@ -761,6 +769,31 @@ def load_calibration(frame_w: Optional[int] = None,
         calibration capture has been set up.
     """
     return _load("WHERE active = 2", frame_w, frame_h, model)
+
+
+def load_test_pad(frame_w: Optional[int] = None,
+                  frame_h: Optional[int] = None,
+                  model: Optional[str] = None) -> Dict[str, Rect]:
+    """
+    Return the exposure-calibration test pad's patches, keyed by role.
+
+    The pad carries a white, a yellow and a brown patch (TEST_PAD_ROLES).
+    Exposure calibration checks that every stored bracket keeps all three, and
+    the gray chips, inside the exposure window.  The patches share the
+    active=2 set with the calibration card but are picked out by role, so the
+    two cards can coexist and neither is in force during a run.
+
+    Returns:
+        {role: Rect} for the pad roles found.  Roles missing from the table
+        are simply absent; use missing_test_pad_roles() to find out which.
+    """
+    rois = load_calibration(frame_w, frame_h, model)
+    return {r.role: r for r in rois.values() if r.role in TEST_PAD_ROLES}
+
+
+def missing_test_pad_roles(pad: Dict[str, Rect]) -> Tuple[str, ...]:
+    """Return the test-pad roles absent from `pad`, so calibration can say so."""
+    return tuple(role for role in TEST_PAD_ROLES if role not in pad)
 
 
 def _insert(name: str, role: Optional[str], r: Rect,

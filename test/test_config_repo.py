@@ -112,6 +112,17 @@ class TestSeededValues(ConfigTestCase):
                          ["royal_blue", "red"])
         self.assertEqual(config.capture_preimage_rung_shift(), -2)
 
+    def test_calibration_window(self):
+        """The window is its own pair of limits, not the layer-keep ones."""
+        self.assertLess(config.calibration_window_low_dn(),
+                        config.calibration_window_high_dn())
+        self.assertLess(config.calibration_window_low_pctl(),
+                        config.calibration_window_high_pctl())
+        self.assertLess(config.calibration_min_spacing_ratio(),
+                        config.calibration_max_spacing_ratio())
+        self.assertGreater(config.calibration_max_search_iter(), 0)
+        self.assertGreater(config.calibration_max_exposure_us(), 0)
+
     def test_the_preimage_sweeps_fewer_leds_than_the_measurement(self):
         """The whole point of the path: less light on an unreacted pad."""
         self.assertLess(len(config.capture_preimage_led_order()),
@@ -427,8 +438,8 @@ class TestEditorReads(ConfigTestCase):
 
     def test_roles_are_the_screens_worth_offering(self):
         self.assertEqual(config.roles(),
-                         ["capture", "defaults", "device", "hardware",
-                          "protocol", "roi", "runtime"])
+                         ["calibration", "capture", "defaults", "device",
+                          "hardware", "protocol", "roi", "runtime"])
 
     def test_items_are_alphabetical_with_type_and_lock(self):
         names = [row[0] for row in config.items("device")]

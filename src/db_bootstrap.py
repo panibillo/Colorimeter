@@ -251,6 +251,16 @@ def _add_samples_columns(con: sqlite3.Connection) -> None:
     con.commit()
 
 
+def _add_exposure_columns(con: sqlite3.Connection) -> None:
+    """Add the columns the tested-bracket calibration records (idempotent)."""
+    existing = {row[1] for row in con.execute("PRAGMA table_info(exposure)")}
+    for name, type_ in (("low_dn", "REAL"), ("high_dn", "REAL"),
+                        ("layers", "TEXT"), ("preimage", "INTEGER DEFAULT 0")):
+        if name not in existing:
+            con.execute(f"ALTER TABLE exposure ADD COLUMN {name} {type_}")
+    con.commit()
+
+
 def _verify(con: sqlite3.Connection) -> int:
     """
     Check that every parameter in the table is usable, and count them.
@@ -404,6 +414,7 @@ def ensure(path=None) -> Result:
 
         _run_script(con, DDL_PATH)
         _add_samples_columns(con)
+        _add_exposure_columns(con)
         _run_script(con, DEFAULTS_PATH)
 
         after  = con.execute("SELECT COUNT(*) FROM config").fetchone()[0]

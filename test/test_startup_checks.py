@@ -275,6 +275,34 @@ class TestDesktopOnlyWorkOnlyWarns(ChecksTestCase):
         self.assertTrue(report.ok)
 
 
+class TestCalibrationWindowCheck(ChecksTestCase):
+    """The calibration window may not reach past what capture keeps."""
+
+    def set_value(self, name, value):
+        self.sql("UPDATE config SET value = ? WHERE role = 'calibration' "
+                 "AND name = ? AND active = 1", (value, name))
+
+    def test_the_seeded_window_is_inside_the_capture_limits(self):
+        self.assertEqual(startup_checks.check_calibration_window().status, OK)
+
+    def test_a_floor_below_the_capture_floor_warns(self):
+        self.set_value("window_low_dn", "50")
+        result = startup_checks.check_calibration_window()
+        self.assertEqual(result.status, WARN)
+        self.assertTrue(any("capture floor" in m for m in result.messages()))
+
+    def test_a_ceiling_above_the_capture_ceiling_warns(self):
+        self.set_value("window_high_dn", "900")
+        result = startup_checks.check_calibration_window()
+        self.assertEqual(result.status, WARN)
+        self.assertTrue(any("capture ceiling" in m for m in result.messages()))
+
+    def test_an_upside_down_window_warns(self):
+        self.set_value("window_low_dn", "800")
+        self.set_value("window_high_dn", "500")
+        self.assertEqual(startup_checks.check_calibration_window().status, WARN)
+
+
 class TestCaptureFolderCheck(ChecksTestCase):
     """Somewhere to write archives to — a Config-editor problem, so it fails."""
 

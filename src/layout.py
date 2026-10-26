@@ -257,15 +257,23 @@ CFG_RESTORE = Rect(  8, 184, 148,  48)   # back to the configured durations
 # progress, and the done/result. Selector rects and the wide progress rect
 # overlap in y, but the two are never shown together.
 CAP_TITLE     = Rect(  8,   6, 304,  34)
-CAP_MODE_LBL  = Rect(  8,  52,  96,  36)     # "Path"
-CAP_MODE_CAL  = Rect(106,  50, 102,  40)     # Calibrate  ┐ mutually-exclusive
-CAP_MODE_NORM = Rect(212,  50, 100,  40)     # Normal     ┘ (selected = green)
-CAP_N_LBL     = Rect(  8, 100,  96,  36)     # "Images"
-CAP_N1        = Rect(106,  98,  38,  40)     # 1..5 images per LED
-CAP_N2        = Rect(148,  98,  38,  40)
-CAP_N3        = Rect(190,  98,  38,  40)
-CAP_N4        = Rect(232,  98,  38,  40)
-CAP_N5        = Rect(274,  98,  38,  40)
+# Choice form (below the CANCEL / title / SAVE row, which reuses the menu's
+# corners): the LED bar, the four window settings, a hint line that also shows
+# the help for a tapped label, and the action row.
+CAP_LED1      = Rect(  4,  54, 28,  30)     # 10 LED swatches, pitch 31
+CAP_LED_PITCH = 31
+CAP_LBL_LOW_DN  = Rect(  8, 124, 74,  28)   # "Low DN"
+CAP_FLD_LOW_DN  = Rect( 84, 124, 56,  28)
+CAP_LBL_HIGH_DN = Rect(  8,  92, 74,  28)   # "High DN"
+CAP_FLD_HIGH_DN = Rect( 84,  92, 56,  28)
+CAP_LBL_LOW_PC  = Rect(164, 124, 74,  28)   # "Low %"
+CAP_FLD_LOW_PC  = Rect(240, 124, 56,  28)
+CAP_LBL_HIGH_PC = Rect(164,  92, 74,  28)   # "High %"
+CAP_FLD_HIGH_PC = Rect(240,  92, 56,  28)
+CAP_HINT      = Rect(  6, 156, 308,  18)
+CAP_SUITE     = Rect(  4, 178, 100,  48)    # Calibrate suite
+CAP_COLOR     = Rect(110, 178, 100,  48)    # Calibrate color
+CAP_SHOW      = Rect(216, 178, 100,  48)    # Show
 CAP_PROGRESS  = Rect(  8,  56, 304, 120)     # progress / result text
 CAP_BACK      = Rect(  8, 184, 100,  48)     # Cancel (running-capture progress view)
 CAP_START     = Rect( 84, 184, 152,  48)     # "Calibrate Exposures" (run) / done OK

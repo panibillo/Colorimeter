@@ -157,6 +157,9 @@ _CFGE_RESTORE    = "Restore Factory Defaults"
 # inactive row, never selectable, and never written into led_color_order.
 _LEDPICK_SPECIALS = ("dark", "jpg")
 
+# Capture page: the largest signal (DN, black removed) a window setting may name.
+_CAP_MAX_DN = 960
+
 # Approximate (r, g, b) swatch colour per LED name — close enough to its
 # wavelength to read at a glance — and the text colour that reads on it.
 _LEDPICK_SWATCH = {
@@ -355,8 +358,13 @@ class Arbiter:
         self._cap_view:  str | None = None    # None | "choice" | "progress" | "done"
         self._cap_progress: str = ""
         self._cap_result:   str = ""
-        # The group saved before the choice screen opened, so CANCEL can restore it.
-        self._cap_saved_on_open: str | None = None
+        # Choice form: the LED chosen on the bar, the settings fields' text, and
+        # the line of help or status under them.
+        self._cap_led: str | None = None
+        self._cap_values: dict[str, str] = {}
+        self._cap_hint_msg: str = ""
+        self._cap_running: str | None = None   # LED being calibrated now
+        self._cap_fit = None                   # finished fit, awaiting SAVE
 
         # Phases screen state (Menu → Phases): the reagent countdowns in
         # seconds, staged while the screen is open and written only by its OK.
@@ -2047,8 +2055,14 @@ class Arbiter:
     def _menu_open_capture(self) -> None:
         """Open the capture choice screen, initialising from the saved default."""
         self._cap_mode  = "normal"
-        self._cap_saved_on_open = self._initial_exposure_group()
-        self._cap_group = self._cap_saved_on_open
+        self._cap_group = self._initial_exposure_group()
+        self._cap_led = None
+        self._cap_hint_msg = ""
+        self._cap_fit = None
+        self._cap_running = None
+        self._cap_values = {
+            key: str(config.get("calibration", row))
+            for key, row, *_ in self._CAP_SETTINGS}
         self._cap_progress = ""
         self._cap_result   = ""
         self._render_capture_choice()
@@ -2075,61 +2089,212 @@ class Arbiter:
             log.exception("Arbiter: no saved exposure group")
             return "1"
 
+    # The four window settings on the choice form: field key -> (config row,
+    # kind, help).  Staged in the fields; written to the database by SAVE.
+    _CAP_SETTINGS = (
+        ("low_dn",  "window_low_dn",   int,
+         "Darkest signal a bracket may give [0 to 960]"),
+        ("high_dn", "window_high_dn",  int,
+         "Lightest signal a bracket may give [0 to 960]"),
+        ("low_pc",  "window_low_pctl", float,
+         "Percentile of a patch's pixels held to Low DN"),
+        ("high_pc", "window_high_pctl", float,
+         "Percentile of a patch's pixels held to High DN"),
+    )
+
     def _render_capture_choice(self) -> None:
         if self._pool is None:
             return
-        from palette import color
-        # A Button's fill is its .color (Labels use .bg), so a radio group is
-        # highlighted by setting the selected button's .color green.
-        sel, unsel = color("start_green"), color("btn_gray")
+        from palette import color, rgb
+        from lighting_cal8 import LEDBank
         self._cap_view = "choice"
         p = self._pool
         p.hide_all()
-        # Narrow the title so it sits between the CANCEL/OK corners (like the
-        # Menu screen) instead of painting over them.
+        # Top row: CANCEL / title / SAVE, in the Menu screen's corners.
         p["cap_title"].rect = layout.MENU_TITLE
-        p.put("cap_title", "Capture")
-        p.put("cap_mode_lbl", "Path")
-        cal = self._cap_mode == "calibration"
-        p.put("cap_mode_cal",  "Calibrate", on=lambda: self._cap_set_mode("calibration"))
-        p["cap_mode_cal"].color  = sel if cal else unsel
-        p.put("cap_mode_norm", "Normal",    on=lambda: self._cap_set_mode("normal"))
-        p["cap_mode_norm"].color = sel if not cal else unsel
-        p.put("cap_n_lbl", "Images")
-        for n in range(1, 6):
-            name = f"cap_n{n}"
-            p.put(name, str(n), on=(lambda nn=n: self._cap_set_group(nn)))
-            p[name].color = sel if self._cap_group == str(n) else unsel
-        # Top-corner chrome like the Menu screen: reuse its CANCEL/OK widgets.
         p.put("menu_cancel_btn", "CANCEL", on=self._cap_choice_cancel)
-        p.put("menu_ok_btn",     "OK",     on=self._cap_choice_ok)
-        # This button does exactly one thing — calibrate exposures — regardless
-        # of the Path radio, so its label is fixed.  (The Path radio selects the
-        # mode for a Capture run during a test sequence, handled elsewhere.)
-        p.put("cap_start", "Calibrate\nExposures", on=self._cap_start)
+        p.put("cap_title", "Capture")
+        p.put("menu_ok_btn",     "SAVE",   on=self._cap_choice_save)
+        # The LED bar: tap a swatch to choose the color for Calibrate color
+        # and Show.  The chosen one carries a border.
+        for i, led in enumerate(LEDBank.color_names(), 1):
+            name = f"cap_led{i}"
+            fill_rgb, text_name = _LEDPICK_SWATCH[led]
+            p.put(name, _led_initials(led), on=lambda l=led: self._cap_pick_led(l))
+            w = p[name]
+            w.color = w.disabled_color = rgb(*fill_rgb)
+            w.text_color = color(text_name)
+            # Black: the chosen LED, or the one being calibrated now.
+            w.border_color = (color("black")
+                              if led in (self._cap_led, self._cap_running)
+                              else None)
+        for key, _row, _kind, help_text in self._CAP_SETTINGS:
+            p.put(f"cap_lbl_{key}", p[f"cap_lbl_{key}"].label,
+                  on=lambda t=help_text: self._cap_hint(t))
+            p.put(f"cap_fld_{key}", self._cap_values[key])
+        problem = self._cap_staged_settings()
+        settings_ok = not isinstance(problem, str)
+        if not settings_ok:
+            self._cap_hint_msg = problem
+        p.put("cap_suite", "Calibrate\nsuite", on=self._cap_calibrate_suite,
+              enabled=settings_ok)
+        p.put("cap_color", "Calibrate\ncolor", on=self._cap_calibrate_color,
+              enabled=settings_ok and self._cap_led is not None)
+        p.put("cap_show",  "Show", on=self._cap_show,
+              enabled=settings_ok and self._cap_led is not None)
+        p.put("cap_hint", self._cap_hint_text())
         p.render(self._disp)
         self._rebuild_focus()
 
-    def _cap_choice_ok(self) -> None:
-        """Keep the current selection (already saved on tap) and leave to Menu."""
+    def _cap_hint_text(self) -> str:
+        if self._cap_hint_msg:
+            return self._cap_hint_msg
+        return f"LED: {self._cap_led}" if self._cap_led else "Tap an LED color"
+
+    def _cap_hint(self, text: str) -> None:
+        """Show a line of help (or status) under the settings."""
+        self._cap_hint_msg = text
+        if self._pool is not None and self._cap_view == "choice":
+            self._pool.set("cap_hint", text)
+            self._pool.redraw(self._disp, "cap_hint")
+
+    def _cap_pick_led(self, led: str) -> None:
+        self._cap_led = None if self._cap_led == led else led
+        self._cap_hint_msg = ""
+        self._cap_read_fields()
+        self._render_capture_choice()
+
+    def _cap_read_fields(self) -> None:
+        """Keep what the fields now show: they are editable by keyboard."""
+        if self._pool is None:
+            return
+        for key, *_ in self._CAP_SETTINGS:
+            field = self._pool.get(f"cap_fld_{key}")
+            if field is not None:
+                self._cap_values[key] = str(field.value).strip()
+
+    def _cap_staged_settings(self) -> "dict[str, float] | str":
+        """The fields as numbers, or a message saying what is wrong."""
+        self._cap_read_fields()
+        out = {}
+        for key, row, kind, _help in self._CAP_SETTINGS:
+            try:
+                out[row] = kind(float(self._cap_values[key]))
+            except ValueError:
+                return f"{self._pool[f'cap_lbl_{key}'].label}: not a number"
+        for row in ("window_low_dn", "window_high_dn"):
+            if not 0 <= out[row] <= _CAP_MAX_DN:
+                return f"DN must be 0 to {_CAP_MAX_DN}"
+        if not out["window_low_dn"] < out["window_high_dn"]:
+            return "Low DN must be below High DN"
+        if not 0 <= out["window_low_pctl"] < out["window_high_pctl"] <= 100:
+            return "Percentiles: 0 <= low < high <= 100"
+        return out
+
+    def _cap_choice_save(self) -> None:
+        """Write the staged settings, then leave to the Menu."""
+        staged = self._cap_staged_settings()
+        if isinstance(staged, str):
+            self._cap_hint(staged)
+            return
+        for row, value in staged.items():
+            if value != config.get("calibration", row):
+                config.save("calibration", row, value)
+        if self._cap_fit is not None:
+            rows = self._cap_fit.persist(add_dt=self.timestamp())
+            log.info("Arbiter: stored %d calibrated exposure(s)", rows)
+            self._cap_fit = None
         self._cap_view = None
         self._render_menu()
 
     def _cap_choice_cancel(self) -> None:
-        """Discard this visit's group change (restore the pre-open value), to Menu."""
-        config.save("defaults", "exposuregroup", self._cap_saved_on_open)
+        """Leave to the Menu; nothing staged on this screen is written."""
+        if self._cap_run_mode == "fit" and self._capture is not None:
+            self._capture.cancel()
+            self._capture = None
+            self._capture_slot = None
+        self._cap_fit = None
+        self._cap_running = None
         self._cap_view = None
         self._render_menu()
 
-    def _cap_set_mode(self, mode: str) -> None:
-        self._cap_mode = mode
-        self._render_capture_choice()
+    def _cap_calibrate_suite(self) -> None:
+        self._cap_start_fit(None)
 
-    def _cap_set_group(self, n) -> None:
-        self._cap_group = str(n)
-        # Persist the choice so it is preselected next time.
-        config.save("defaults", "exposuregroup", self._cap_group)
-        self._render_capture_choice()
+    def _cap_calibrate_color(self) -> None:
+        self._cap_start_fit(self._cap_led)
+
+    def _cap_start_fit(self, only: "str | None") -> None:
+        """
+        Run the exposure fit on the camera: every LED when `only` is None.
+
+        The fit uses the settings now in the fields, saved or not.  Nothing is
+        stored until SAVE.  The run happens in the background of this screen:
+        the fit repaints the LED bar and the hint line itself, as it goes.
+        """
+        import dataclasses
+        if only is None:
+            self._cap_led = None            # a suite run is not about one LED
+        staged = self._cap_staged_settings()
+        if isinstance(staged, str):
+            self._cap_hint(staged)
+            return
+        if not self.capture_available():
+            self._cap_hint("Camera busy - try again later")
+            return
+        import exposure_fit
+        import exposure_fit_runner
+        from capture_runner import CaptureConfig
+        params = dataclasses.replace(
+            exposure_fit.FitParams.from_config(),
+            low_dn=staged["window_low_dn"], high_dn=staged["window_high_dn"])
+        pctls = (staged["window_low_pctl"], staged["window_high_pctl"])
+
+        def make_runner(cam, leds, cfg):
+            return exposure_fit_runner.ExposureFitRunner(
+                cam, leds, cfg, only=only, params=params, percentiles=pctls,
+                on_status=self._cap_fit_status)
+
+        session = self._new_session(CaptureConfig(), runner_factory=make_runner)
+        if not session.start():
+            log.error("Arbiter: calibration failed to start: %s", session.error)
+            self._cap_hint(f"Camera failed: {session.error}"[:48])
+            return
+        self._capture = session
+        self._capture_slot = None
+        self._cap_run_mode = "fit"
+        self._cap_fit = None
+        self._cap_running = None
+        self._cap_hint("Starting camera ...")
+        log.info("Arbiter: calibration started (%s)", only or "suite")
+
+    def _cap_fit_status(self, led: str, text: str) -> None:
+        """A fit hook: highlight `led` in the bar and show `text` above the buttons."""
+        changed = led != self._cap_running
+        self._cap_running = led
+        if changed and self._pool is not None and self._cap_view == "choice":
+            self._render_capture_choice()
+        self._cap_hint(text)
+
+    def _pump_fit(self, session) -> None:
+        """Drive a running fit; the hooks do the repainting."""
+        if session.step() is not None:
+            return
+        self._capture = None
+        self._capture_slot = None
+        self._cap_running = None
+        runner = session.runner
+        if session.error is not None:
+            self._cap_hint(f"Calibration failed: {session.error}"[:48])
+        else:
+            self._cap_fit = runner
+            good = sum(1 for f in runner.fits.values() if f.ok)
+            self._cap_hint(f"{good} of {len(runner.fits)} fitted. SAVE to keep.")
+        if self._cap_view == "choice":
+            self._render_capture_choice()
+
+    def _cap_show(self) -> None:
+        self._cap_hint("Show: not wired yet")
 
     def _cap_start(self) -> None:
         """
@@ -2207,6 +2372,9 @@ class Arbiter:
 
     def _pump_capture_screen(self, session) -> None:
         """Drive a menu-launched capture and mirror it onto the capture screen."""
+        if self._cap_run_mode == "fit":
+            self._pump_fit(session)
+            return
         progress = session.step()
         if progress is not None:
             self._cap_progress = (getattr(progress, "message", "")
@@ -2439,7 +2607,7 @@ class Arbiter:
                  slot.name, self._cap_mode, self._cap_group)
         return True
 
-    def _new_session(self, cfg=None):
+    def _new_session(self, cfg=None, runner_factory=None):
         """
         Build a capture session (test factory if given, else the real one).
 
@@ -2464,8 +2632,9 @@ class Arbiter:
             # and exposure — invalidate any prefetch parked from an earlier
             # session (see _prefetch_epoch and request_capture()'s promotion).
             self._camera_epoch += 1
-            return CaptureSession(cfg, cam=cam, leds=leds)
-        return CaptureSession(cfg)
+            return CaptureSession(cfg, cam=cam, leds=leds,
+                                  runner_factory=runner_factory)
+        return CaptureSession(cfg, runner_factory=runner_factory)
 
     def start_analysis(self, slot: Slot) -> None:
         # Analysis engine is not implemented yet; a placeholder completes after
@@ -4578,40 +4747,92 @@ def _selftest() -> None:
     arb._menu_open_capture()
     check("choice view",          arb._cap_view, "choice")
     check("default mode normal",  arb._cap_mode, "normal")
-    check("button always Calibrate", arb._pool["cap_start"].label, "Calibrate\nExposures")
     check("group in force is 3",  arb._cap_group, "3")
+    check("no LED chosen",        arb._cap_led, None)
+    check("color/show need an LED", arb._pool["cap_color"].enabled, False)
 
-    print("== capture screen: selecting a group persists it ==")
-    arb._cap_set_group(4)
-    check("group set to 4",        arb._cap_group, "4")
-    check("persisted to config",   saved_group(), "4")
+    print("== capture screen: choosing an LED ==")
+    arb._cap_pick_led("green")
+    check("LED chosen",           arb._cap_led, "green")
+    check("color/show enabled",   arb._pool["cap_show"].enabled, True)
+    arb._cap_pick_led("green")
+    check("second tap clears",    arb._cap_led, None)
 
-    print("== capture screen: reopen restores the saved group ==")
-    exposure_repo.write_estar("amber", 30000)           # some exposures exist
+    print("== capture screen: SAVE writes the window settings ==")
+    check("fields show config",   arb._pool["cap_fld_low_dn"].value,
+          str(config.get("calibration", "window_low_dn")))
+    arb._pool["cap_fld_low_dn"].value = "120"
+    arb._pool["cap_fld_high_pc"].value = "95"
+    arb._cap_choice_save()
+    check("SAVE leaves choice",   arb._cap_view, None)
+    check("low DN saved",         config.get("calibration", "window_low_dn"), 120)
+    check("high pctl saved",      config.get("calibration", "window_high_pctl"), 95.0)
+
+    print("== capture screen: bad settings stay on the form ==")
     arb._menu_open_capture()
-    check("restored saved group 4", arb._cap_group, "4")
+    arb._pool["cap_fld_low_dn"].value = "900"           # above High DN
+    arb._cap_choice_save()
+    check("stays on choice",      arb._cap_view, "choice")
+    check("nothing written",      config.get("calibration", "window_low_dn"), 120)
+    arb._pool["cap_fld_low_dn"].value = "abc"
+    arb._cap_choice_save()
+    check("non-number refused",   arb._cap_view, "choice")
+    arb._pool["cap_fld_low_dn"].value = "100"
+    arb._pool["cap_fld_high_dn"].value = "1000"          # past the 960 ceiling
+    arb._cap_pick_led("green")                           # re-reads, re-renders
+    check("out of range: suite off", arb._pool["cap_suite"].enabled, False)
+    check("out of range: color off", arb._pool["cap_color"].enabled, False)
+    check("out of range: show off",  arb._pool["cap_show"].enabled, False)
+    arb._cap_choice_save()
+    check("out of range refused", arb._cap_view, "choice")
+    arb._pool["cap_fld_high_dn"].value = "850"
+    arb._cap_pick_led("green")
+    check("fixed: suite back on",  arb._pool["cap_suite"].enabled, True)
 
-    print("== capture screen: CANCEL restores pre-open group; OK keeps ==")
-    arb._menu_open_capture()                            # opens with saved '4'
-    arb._cap_set_group(2)                               # saves '2' on tap
+    print("== capture screen: CANCEL writes nothing ==")
+    arb._pool["cap_fld_low_dn"].value = "130"
     arb._cap_choice_cancel()
-    check("CANCEL reverted to 4", saved_group(), "4")
     check("CANCEL leaves choice", arb._cap_view, None)
-    arb._menu_open_capture()
-    arb._cap_set_group(2)
-    arb._cap_choice_ok()
-    check("OK kept 2",            saved_group(), "2")
-    check("OK leaves choice",     arb._cap_view, None)
+    check("low DN unchanged",     config.get("calibration", "window_low_dn"), 120)
 
-    print("== capture screen: saved group is honoured even without exposures ==")
-    exposure_repo.delete_led("amber")                   # no active groups remain
+    print("== capture screen: Calibrate suite shows progress, SAVE stores ==")
+    from palette import color
+    _stored = []
+    cap_fit = _FakeCapture(steps=2)
+    cap_fit.runner = SimpleNamespace(
+        fits={"green": SimpleNamespace(ok=True), "violet": SimpleNamespace(ok=False)},
+        persist=lambda add_dt=None: _stored.append(add_dt) or 7)
+    arb._capture_factory = lambda: cap_fit
     arb._menu_open_capture()
-    check("saved group 2 kept",   arb._cap_group, "2")  # was '2' from OK above
-
-    print("== capture screen: toggling a group leaves no duplicate rows ==")
-    check("one row per distinct value",
-          _db.read_val("SELECT COUNT(*) FROM config WHERE role='defaults' "
-                       "AND name='exposuregroup' AND value='4'"), 1)
+    arb._cap_pick_led("violet")
+    arb._pool["cap_suite"].on_press()
+    check("suite unselects the LED", arb._cap_led, None)
+    check("run is a fit",          arb._cap_run_mode, "fit")
+    check("still on the form",     arb._cap_view, "choice")
+    arb._cap_fit_status("green", "green warming up ...")
+    check("LED highlighted",       arb._cap_running, "green")
+    check("running LED has a border",
+          arb._pool["cap_led5"].border_color is not None, True)
+    check("status in the hint",    arb._pool["cap_hint"].text, "green warming up ...")
+    arb._cap_pick_led("violet")
+    arb._cap_fit_status("green", "green calibrating rung 2 of 15 ...")
+    check("chosen LED border black",
+          arb._pool["cap_led1"].border_color, color("black"))
+    check("running LED border black too",
+          arb._pool["cap_led5"].border_color, color("black"))
+    for _ in range(5):
+        arb.pump_capture()
+    check("camera freed",          arb.capture_available(), True)
+    check("highlight cleared",     arb._cap_running, None)
+    check("summary offers SAVE",   arb._pool["cap_hint"].text,
+          "1 of 2 fitted. SAVE to keep.")
+    arb._cap_choice_save()
+    check("SAVE persisted the fit", len(_stored), 1)
+    check("fit released",          arb._cap_fit, None)
+    arb._menu_open_capture()
+    arb._cap_fit = cap_fit.runner
+    arb._cap_choice_cancel()
+    check("CANCEL stored nothing", len(_stored), 1)
 
     print("== capture screen: Calibrate button persists e*, even with Path=Normal ==")
     _db.write_one("DELETE FROM exposure")
@@ -4619,10 +4840,7 @@ def _selftest() -> None:
     cap_cal.runner.results = [_R("amber", 30000), _R("blue", 20000)]
     arb._capture_factory = lambda: cap_cal
     arb._menu_open_capture()
-    arb._cap_set_mode("normal")             # Path = Normal — the button must ignore it
-    arb._cap_set_group(3)
-    check("Path radio is normal", arb._cap_mode, "normal")
-    check("button says Calibrate", arb._pool["cap_start"].label, "Calibrate\nExposures")
+    check("Path is normal", arb._cap_mode, "normal")
     arb._cap_start()
     check("run pinned to calibration", arb._cap_run_mode, "calibration")
     check("progress title Calibrating", arb._pool["cap_title"].text, "Calibrating")
@@ -4641,7 +4859,7 @@ def _selftest() -> None:
     print("== capture screen: Path radio survives a Calibrate run (test-seq mode) ==")
     arb._menu_open_capture()
     check("reopen resets Path to normal", arb._cap_mode, "normal")
-    arb._cap_set_mode("calibration")        # operator sets the test-sequence Path
+    arb._cap_mode = "calibration"           # test-sequence Path (set elsewhere)
     check("Path now calibration", arb._cap_mode, "calibration")
     cap_x = _FakeCapture(steps=1)
     arb._capture_factory = lambda: cap_x
@@ -4785,13 +5003,17 @@ def _selftest() -> None:
     check("roles view",        arb._cfge_view, "roles")
     check("lists every role",  arb._cfge_list[:-1], config.roles())
     check("Restore rides last", arb._cfge_list[-1], _CFGE_RESTORE)
-    check("all eight on one page", len(arb._cfge_page_rows()), _CFGE_ROLE_SLOTS)
-    check("Prior dead, one page", arb._pool["cfge_prior"].enabled, False)
-    check("Next dead, one page",  arb._pool["cfge_next"].enabled, False)
+    # Nine roles and Restore are ten entries: a full first page, then a short
+    # second page that ends with Restore.
+    check("first page is full", len(arb._cfge_page_rows()), _CFGE_ROLE_SLOTS)
+    check("Prior dead on page 1", arb._pool["cfge_prior"].enabled, False)
+    check("Next live on page 1",  arb._pool["cfge_next"].enabled, True)
     check("nothing to save",   arb._pool["cfge_save"].enabled, False)
     check("row 1 opens a role", arb._pool["cfge_row1"].label, config.roles()[0])
-    check("row 8 is Restore",
-          arb._pool["cfge_row8"].label.startswith("Restore"), True)
+    arb._pool["cfge_next"].on_press()
+    check("page 2 ends with Restore",
+          arb._cfge_page_rows()[-1], _CFGE_RESTORE)
+    arb._pool["cfge_prior"].on_press()
 
     print("== config editor: stepping back returns to the roles grid ==")
 

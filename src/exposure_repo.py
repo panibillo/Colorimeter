@@ -55,6 +55,7 @@ Public surface
     groups_from_estar(e_star_us, ratio=DEFAULT_RATIO, max_n=MAX_GROUP) -> dict
     shift_exposures(exposures_us, rungs, ratio=DEFAULT_RATIO) -> list[int]
     read_exposures(led, group) -> list[int]        active exposures, one LED+group
+    middle_exposure(led, group) -> int | None      middle stored rung, one LED+group
     read_group(group) -> dict[str, list[int]]      {led: exposures} for a group
     available_groups() -> list[str]                distinct active groups present
     write_led_exposures(led, group, microseconds, remark=None, add_dt=None) -> int
@@ -191,6 +192,21 @@ def read_exposures(led: str, group: str) -> List[int]:
     return [int(us) for (us,) in rows]
 
 
+def middle_exposure(led: str, group: str) -> Optional[int]:
+    """
+    Return the middle stored exposure (µs) for one LED and group, or None.
+
+    The preview and the pre-image each want one exposure, not a whole ladder.
+    The middle rung of the tested ladder is the stand-in for both.  For an even
+    count the lower of the two middle rungs is used, so the answer is always an
+    exposure that was actually tested.
+    """
+    exposures = read_exposures(led, group)
+    if not exposures:
+        return None
+    return exposures[(len(exposures) - 1) // 2]
+
+
 def read_group(group: str) -> Dict[str, List[int]]:
     """
     Return {LED: [exposures ascending]} for every LED with active rows in
@@ -249,7 +265,10 @@ def write_led_exposures(led: str, group: str, microseconds: List[int],
 
 def write_all_groups(led: str, groups: Dict[str, List[int]],
                      remark: Optional[str] = None,
-                     add_dt: Optional[str] = None) -> int:
+                     add_dt: Optional[str] = None,
+                     notes: Optional[Dict[int, tuple]] = None,
+                     layers: Optional[str] = None,
+                     preimage_group: Optional[str] = None) -> int:
     """
     Supersede every active exposure row for one LED with a fresh set of groups.
 
@@ -258,11 +277,20 @@ def write_all_groups(led: str, groups: Dict[str, List[int]],
     the new rows are inserted active=1 — so a re-calibration cleanly supersedes
     the previous one without losing it.  Other LEDs are untouched.
 
+    Args:
+        notes:   {exposure_us: (remark, low_dn, high_dn)} for the rungs that
+                 have something to say; the remark replaces `remark` on that
+                 exposure's rows, and low_dn / high_dn (either may be None)
+                 are stored with it.
+        layers:  The Bayer layers that had to pass, e.g. 'Gb Gr'.
+        preimage_group: The group whose rows are flagged for the pre-image.
+
     Returns the number of rows inserted.
     """
     db.write_one("UPDATE exposure SET active = 0 WHERE LED = ? AND active = 1",
                  (led,))
-    return _insert_rows(led, groups, remark, add_dt or _now_local())
+    return _insert_rows(led, groups, remark, add_dt or _now_local(),
+                        notes, layers, preimage_group)
 
 
 def write_estar(led: str, e_star_us: float, ratio: float = DEFAULT_RATIO,
@@ -284,22 +312,40 @@ def write_estar(led: str, e_star_us: float, ratio: float = DEFAULT_RATIO,
 
 
 def _insert_rows(led: str, groups: Dict[str, List[int]],
-                 remark: Optional[str], add_dt: str) -> int:
+                 remark: Optional[str], add_dt: str,
+                 notes: Optional[Dict[int, tuple]] = None,
+                 layers: Optional[str] = None,
+                 preimage_group: Optional[str] = None) -> int:
     """Insert active exposure rows for a LED (rowid auto-assigned by SQLite)."""
+    notes = notes or {}
     rows = []
     # Deterministic order: groups numerically, exposures ascending.
     for group in sorted(groups, key=lambda g: (int(g) if g.isdigit() else 1 << 30, g)):
+        flag = 1 if preimage_group is not None and str(group) == str(preimage_group) else 0
         for us in sorted(int(u) for u in groups[group]):
-            rows.append((1, add_dt, str(group), led, us, remark))
+            note_remark, low, high = notes.get(us, (None, None, None))
+            rows.append((1, add_dt, str(group), led, us,
+                         note_remark if note_remark is not None else remark,
+                         low, high, layers, flag))
     if not rows:
         return 0
     db.write_many(
         "INSERT INTO exposure "
-        "(active, add_dt, exposuregroup, LED, microseconds, remark) "
-        "VALUES (?, ?, ?, ?, ?, ?)",
+        "(active, add_dt, exposuregroup, LED, microseconds, remark, "
+        "low_dn, high_dn, layers, preimage) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         rows,
     )
     return len(rows)
+
+
+def read_preimage_exposures(led: str) -> List[int]:
+    """The LED's active exposures flagged for the pre-image, ascending."""
+    rows = db.read_all(
+        "SELECT microseconds FROM exposure "
+        "WHERE LED = ? AND active = 1 AND preimage = 1 "
+        "ORDER BY microseconds", (led,))
+    return sorted({int(r[0]) for r in rows})
 
 
 def delete_led(led: str) -> int:

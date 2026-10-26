@@ -186,7 +186,14 @@ CREATE TABLE IF NOT EXISTS exposure (
     exposuregroup   TEXT,           -- '1'..'5' = images per LED
     LED             TEXT NOT NULL,  -- matches LEDBank colour names
     microseconds    INTEGER,        -- one exposure time
-    remark          TEXT
+    remark          TEXT,           -- why this exposure: 'low DN', 'high DN',
+                                    --   'log rung 1/4', ...
+    low_dn          REAL,           -- darkest patch signal measured here; set
+                                    --   only on the rung the low limit fixed
+    high_dn         REAL,           -- brightest patch signal measured here; set
+                                    --   only on the rung the high limit fixed
+    layers          TEXT,           -- Bayer layers that had to pass: 'B', 'Gb Gr'
+    preimage        INTEGER DEFAULT 0  -- 1 = capture this exposure in the pre-image
 );
 
 

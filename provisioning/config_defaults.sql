@@ -110,6 +110,33 @@ INSERT OR IGNORE INTO config (active, isdefault, editable, add_dt, role, name,
    'LEDs the pre-image sweeps; keep it short — this light falls on an unreacted pad'),
   (0, 1, 1, '2026-08-18 00:00:00', 'capture', 'preimage_rung_shift', 'int', '-2', 'seed',
    'ladder rungs below e* the pre-image shoots at; an undyed pad clips at e*');
+-- ── calibration ─────────────────────────────────────────────────────────────
+-- The window every stored exposure bracket must fit on the test pad (white,
+-- yellow and brown patches) and the gray chips.  Placeholders for Bill to tune.
+INSERT OR IGNORE INTO config (active, isdefault, editable, add_dt, role, name,
+                              vtype, value, source, remark)
+     VALUES
+  (0, 1, 1, '2026-10-26 00:00:00', 'calibration', 'window_low_dn', 'int', '100', 'seed',
+   'a bracket is too dark when a test-pad patch''s low percentile signal falls below this (DN)'),
+  (0, 1, 1, '2026-10-26 00:00:00', 'calibration', 'window_high_dn', 'int', '850', 'seed',
+   'a bracket is too bright when a test-pad patch''s high percentile signal rises above this (DN)'),
+  (0, 1, 1, '2026-10-26 00:00:00', 'calibration', 'window_low_pctl', 'float', '10.0', 'seed',
+   'percentile of a patch''s pixels compared with the low limit'),
+  (0, 1, 1, '2026-10-26 00:00:00', 'calibration', 'window_high_pctl', 'float', '90.0', 'seed',
+   'percentile of a patch''s pixels compared with the high limit'),
+  (0, 1, 1, '2026-10-26 00:00:00', 'calibration', 'max_search_iter', 'int', '8', 'seed',
+   'most nudges allowed to bring one bracket into the window before giving up'),
+  (0, 1, 1, '2026-10-26 00:00:00', 'calibration', 'min_spacing_ratio', 'float', '1.2', 'seed',
+   'closest allowed ratio between neighboring brackets'),
+  (0, 1, 1, '2026-10-26 00:00:00', 'calibration', 'max_spacing_ratio', 'float', '2.0', 'seed',
+   'widest allowed ratio between neighboring brackets (not used by the nested rungs)'),
+  (0, 1, 1, '2026-10-26 00:00:00', 'calibration', 'max_exposure_us', 'int', '200000', 'seed',
+   'longest exposure calibration may store, in microseconds'),
+  (0, 1, 1, '2026-10-26 00:00:00', 'calibration', 'required_cells', 'str',
+   'violet.B,royal_blue.B,cyan.B,green.Gb,green.Gr,photo_red.R', 'seed',
+   'LED.channel pairs the final analysis uses; only these must fit the window (unnamed LEDs use their nearest channel)'),
+  (0, 1, 1, '2026-10-26 00:00:00', 'calibration', 'led_windows', 'str', '', 'seed',
+   'per-LED window overriding the calibration.window_* rows: led=low_dn:high_dn:low_pctl:high_pctl;led=...');
 -- ── protocol ────────────────────────────────────────────────────────────────
 -- These are the real durations.  A shorter pair used to be seeded under a
 -- 'simulation' profile so a desktop run finished quickly; that profile is

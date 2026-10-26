@@ -78,7 +78,8 @@ class CaptureSession:
 
     def __init__(self, config: "CaptureConfig | None" = None,
                  cam=None, leds=None,
-                 cam_factory=_default_cam, leds_factory=_default_leds):
+                 cam_factory=_default_cam, leds_factory=_default_leds,
+                 runner_factory=None):
         """
         Args:
             config:       Run parameters; defaults to a single-LED run.
@@ -91,10 +92,14 @@ class CaptureSession:
                           `cam` is None).
             leds_factory: Zero-arg callable returning an LED bank (used when
                           `leds` is None).
+            runner_factory: Callable(cam, leds, config) -> runner, to drive
+                          something other than a CaptureRunner (the exposure
+                          fit).  None builds a CaptureRunner.
         """
         self.config       = config or CaptureConfig()
         self._cam_factory  = cam_factory
         self._leds_factory = leds_factory
+        self._runner_factory = runner_factory or CaptureRunner
 
         self.active        = False
         self.progress       = None
@@ -147,7 +152,7 @@ class CaptureSession:
                 self._cam = self._cam_factory()
             if self._leds is None:
                 self._leds = self._leds_factory()
-            self.runner = CaptureRunner(self._cam, self._leds, self.config)
+            self.runner = self._runner_factory(self._cam, self._leds, self.config)
             self._gen = make_gen(self.runner)
             self._in_prefetch = in_prefetch
         except Exception as exc:      # hardware may be missing or in use

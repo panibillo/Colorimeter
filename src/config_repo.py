@@ -91,6 +91,11 @@ Public surface
     capture_preimage_rung_shift()
     capture_prefetch_budget_s()
     capture_layer_keep_min_dn() / capture_layer_keep_max_dn()
+    calibration_window_low_dn() / calibration_window_high_dn()
+    calibration_window_low_pctl() / calibration_window_high_pctl()
+    calibration_max_search_iter() / calibration_max_exposure_us()
+    calibration_min_spacing_ratio() / calibration_max_spacing_ratio()
+    calibration_required_cells()
     inspection_exposure_us() / default_focus_diopter()
     reagent1_secs() / analysis_secs()
     t2ref25_secs() / q10() / reagent2_secs(temp_c)
@@ -819,6 +824,82 @@ def capture_layer_keep_max_dn() -> int:
     non-linear knee is rejected rather than stored and later distrusted.
     """
     return int(get("capture", "layer_keep_max_dn"))
+
+
+# ── Exposure calibration window ─────────────────────────────────────────────
+# What "not too dark, not too bright" means for a stored exposure bracket on the
+# test pad.  Separate from the layer-keep limits above on purpose: those decide
+# what to discard at capture time, these decide what calibration may store.
+
+def calibration_window_low_dn() -> int:
+    """Signal (DN) below which a bracket is too dark on a test-pad patch."""
+    return int(get("calibration", "window_low_dn"))
+
+
+def calibration_window_high_dn() -> int:
+    """Signal (DN) above which a bracket is too bright on a test-pad patch."""
+    return int(get("calibration", "window_high_dn"))
+
+
+def calibration_window_low_pctl() -> float:
+    """Percentile of a patch's pixels compared with the low limit."""
+    return float(get("calibration", "window_low_pctl"))
+
+
+def calibration_window_high_pctl() -> float:
+    """Percentile of a patch's pixels compared with the high limit."""
+    return float(get("calibration", "window_high_pctl"))
+
+
+def calibration_max_search_iter() -> int:
+    """Most nudges allowed to bring one bracket into the window."""
+    return int(get("calibration", "max_search_iter"))
+
+
+def calibration_min_spacing_ratio() -> float:
+    """Closest allowed ratio between neighboring brackets."""
+    return float(get("calibration", "min_spacing_ratio"))
+
+
+def calibration_max_spacing_ratio() -> float:
+    """Widest allowed ratio between neighboring brackets."""
+    return float(get("calibration", "max_spacing_ratio"))
+
+
+def calibration_max_exposure_us() -> int:
+    """Longest exposure (µs) calibration may store."""
+    return int(get("calibration", "max_exposure_us"))
+
+
+def calibration_required_cells() -> list:
+    """
+    The (led, layer) pairs the final analysis uses, as a list of tuples.
+
+    Only these pairs must fit the calibration window.  Seeded with the six
+    cells every strip shares; see required_cells.required_channels() for what
+    an unnamed LED falls back to.
+    """
+    import required_cells
+    return required_cells.parse_cells(str(get("calibration", "required_cells")))
+
+
+def calibration_led_windows() -> dict:
+    """{led: LedWindow} for the LEDs that override the global window."""
+    import required_cells
+    return required_cells.parse_windows(str(get("calibration", "led_windows")))
+
+
+def calibration_window_for(led: str):
+    """
+    The window in force for one LED: its own override, else the global rows.
+
+    Returns a required_cells.LedWindow.
+    """
+    import required_cells
+    own = calibration_led_windows().get(led)
+    return own or required_cells.LedWindow(
+        calibration_window_low_dn(), calibration_window_high_dn(),
+        calibration_window_low_pctl(), calibration_window_high_pctl())
 
 
 def capture_photo_enabled() -> bool:

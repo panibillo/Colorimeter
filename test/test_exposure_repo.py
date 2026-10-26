@@ -22,6 +22,7 @@ from pathlib import Path
 _ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(_ROOT / "src"))
 
+import db_bootstrap
 import db_manager as db
 import exposure_repo as er
 
@@ -79,6 +80,7 @@ class TestExposureTable(unittest.TestCase):
         shutil.copy(live, tmp)
         self._saved_dbname = db.DBNAME
         db.DBNAME = str(tmp)
+        db_bootstrap.ensure(tmp)        # a live copy may predate new columns
         db.write_one("DELETE FROM exposure")
 
     def tearDown(self):
@@ -92,10 +94,46 @@ class TestExposureTable(unittest.TestCase):
         self.assertEqual(er.read_exposures("white", "3"),
                          [26_667, 40_000, 60_000])
 
+    def test_notes_layers_and_preimage_flag_round_trip(self):
+        er.write_all_groups(
+            "green", {"1": [20_000], "2": [10_000, 40_000]}, remark="r",
+            notes={10_000: ("low DN (pad_brown.Gb)", 101.5, None),
+                   40_000: ("high DN (pad_white.Gb)", None, 840.0)},
+            layers="Gb Gr", preimage_group="1")
+        rows = db.read_all(
+            "SELECT exposuregroup, microseconds, remark, low_dn, high_dn, "
+            "layers, preimage FROM exposure WHERE LED = 'green' "
+            "ORDER BY exposuregroup, microseconds")
+        self.assertEqual(rows, [
+            ("1", 20_000, "r", None, None, "Gb Gr", 1),
+            ("2", 10_000, "low DN (pad_brown.Gb)", 101.5, None, "Gb Gr", 0),
+            ("2", 40_000, "high DN (pad_white.Gb)", None, 840.0, "Gb Gr", 0)])
+        self.assertEqual(er.read_preimage_exposures("green"), [20_000])
+
+    def test_no_preimage_flag_means_none_for_the_preimage(self):
+        er.write_all_groups("green", {"1": [20_000]})
+        self.assertEqual(er.read_preimage_exposures("green"), [])
+
     def test_read_missing_returns_empty(self):
         self.assertEqual(er.read_exposures("white", "1"), [])
         self.assertEqual(er.read_group("1"), {})
         self.assertEqual(er.available_groups(), [])
+
+    def test_write_all_groups_stores_explicit_lists(self):
+        # Tested brackets need not follow any ratio; they are stored as given.
+        er.write_all_groups("red", {"1": [4_100], "3": [2_500, 4_100, 7_300]})
+        self.assertEqual(er.read_exposures("red", "3"), [2_500, 4_100, 7_300])
+
+    def test_middle_exposure(self):
+        er.write_all_groups("red", {"1": [4_100], "3": [2_500, 4_100, 7_300],
+                                    "4": [2_000, 3_000, 5_000, 8_000]})
+        self.assertEqual(er.middle_exposure("red", "1"), 4_100)
+        self.assertEqual(er.middle_exposure("red", "3"), 4_100)
+        # Even count: the lower middle rung, always one that was tested.
+        self.assertEqual(er.middle_exposure("red", "4"), 3_000)
+
+    def test_middle_exposure_missing_is_none(self):
+        self.assertIsNone(er.middle_exposure("red", "3"))
 
     def test_read_group_maps_leds(self):
         er.write_all_groups("white", er.groups_from_estar(40_000))

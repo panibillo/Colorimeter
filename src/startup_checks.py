@@ -349,6 +349,33 @@ def check_exposures(**_) -> CheckResult:
     return CheckResult(name, OK, detail=f"groups: {', '.join(groups)}")
 
 
+def check_calibration_window(**_) -> CheckResult:
+    """
+    The exposure-calibration window must sit inside the capture-time limits.
+
+    Capture drops a Bayer layer whose p10 is under capture.layer_keep_min_dn or
+    whose p90 is over layer_keep_max_dn.  A bracket that passes a wider
+    calibration window could therefore still lose a required layer at capture.
+    A warning, never a failure: the operator can fix it in the Config editor.
+    """
+    import config_repo as config
+
+    name = "Cal window"
+    low, high = config.calibration_window_low_dn(), config.calibration_window_high_dn()
+    keep_lo, keep_hi = (config.capture_layer_keep_min_dn(),
+                        config.capture_layer_keep_max_dn())
+    problems = []
+    if low >= high:
+        problems.append(f"low {low} is not below high {high}")
+    if low < keep_lo:
+        problems.append(f"low {low} is under the capture floor {keep_lo}")
+    if high > keep_hi:
+        problems.append(f"high {high} is over the capture ceiling {keep_hi}")
+    if problems:
+        return CheckResult(name, WARN, "; ".join(problems))
+    return CheckResult(name, OK, detail=f"{low}-{high} DN")
+
+
 def check_layermodels(**_) -> CheckResult:
     """
     Flat-field models.
@@ -533,6 +560,7 @@ CHECKS = (
     check_rois,
     check_capture_dir,
     check_exposures,
+    check_calibration_window,
     check_layermodels,
     check_buses,
     check_groups,
