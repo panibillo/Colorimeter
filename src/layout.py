@@ -117,6 +117,13 @@ MANUAL_LBL  = Rect(  8, 128, 176, 28)   # "Manually read color:" prompt
 READ_FLD    = Rect(190, 128, 122, 28)   # manual colour reading entry
 READ_LBL    = Rect(  8, 158, 304, 28)   # capture instruction (single line)
 
+# ── vent reminder (VentPhase): a plain red screen between entry 2 and the
+# reagents.  The backdrop fills the whole screen; the text sits above the
+# centred OK button.
+VENT_BG     = Rect(  0,   0, 320, 240)
+VENT_TEXT   = Rect(  0,   0, 320, 180)
+VENT_OK     = Rect(110, 186, 100,  48)
+
 # ── modal overlay ──────────────────────────────────────────────────────────────
 MODAL_PANEL = Rect( 20,  50, 280, 140)
 MODAL_MSG   = Rect( 32,  62, 256,  56)

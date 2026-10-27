@@ -63,7 +63,8 @@ import layout
 from widgets import Button, TextBox
 from pool import Pool
 from slot import Slot
-from phases import (build_phases, EntryPhase, Entry2Phase, ReagentWeights,
+from phases import (build_phases, EntryPhase, Entry2Phase, ReadPhase,
+                    ReagentWeights,
                     _mmss, _to_float)
 
 log = logging.getLogger(__name__)
@@ -1120,23 +1121,33 @@ class Arbiter:
 
     def _flush_entry(self, slot: Slot) -> None:
         """
-        Write screen-1 identity edits to the claimed row before the view leaves it.
+        Write typed edits to the claimed row before the view leaves the screen.
 
-        Those three fields are editable only once the row exists, and keystrokes
+        Screen 1's three identity fields are editable only once the row
+        exists, and keystrokes
         land in the record rather than the database (write_one opens its own
         connection, far too costly per character).  So the record is flushed at
         the moments the operator navigates away, which is every way out of the
         screen bar losing power.  samp_no is deliberately absent: it is claimed,
         and the screen locks it.
 
+        The read screen's manual reading is flushed the same way.  It is also
+        written when CAPTURE is pressed, but for a lab standard the amount is
+        typed in ahead — often while previewing the read screen during the
+        reagent 2 countdown — and must reach samples.manual_read even if the
+        operator leaves the screen first.
+
         Gated on the *viewed* phase, so edits made while previewing screen 1 from
-        entry2 are flushed too.
+        entry2, or the read screen from reagent 2, are flushed too.
         """
-        if slot.phase != "entry" or slot.record.get("db_rowid") is None:
+        if slot.record.get("db_rowid") is None:
             return
         r = slot.record
-        self.persist(slot, user=r["user"], test_kit=r["test_kit"],
-                     test_lot=r["test_lot"])
+        if slot.phase == "entry":
+            self.persist(slot, user=r["user"], test_kit=r["test_kit"],
+                         test_lot=r["test_lot"])
+        elif slot.phase == "read":
+            self.persist(slot, manual_read=r["manual_read"])
 
     # ── Phase contract: navigation / render ────────────────────────────────────
 
@@ -5444,7 +5455,8 @@ class Arbiter:
             return
 
         fields = {"entry":  EntryPhase.FIELDS,
-                  "entry2": Entry2Phase.FIELDS}.get(slot.phase)
+                  "entry2": Entry2Phase.FIELDS,
+                  "read":   ReadPhase.FIELDS}.get(slot.phase)
         if not fields:
             return
         key = fields.get(textbox.name)
@@ -6727,6 +6739,26 @@ def _selftest() -> None:
     check("and it reached the row",
           _db.read_val("SELECT user FROM samples WHERE rowid = ?",
                        (A.record["db_rowid"],)), "R. Feynman")
+
+    print("== manual reading: typed ahead, survives a redraw, reaches the row ==")
+    # A lab standard's amount is known before the strip is read, so it is
+    # typed in while previewing the read screen from reagent 2.  It used to
+    # live only in the widget and was wiped by the next render.
+    A.phase = A.active_phase = "reagent2"
+    arb.render(A)
+    arb.view(A, "read")
+    _fld = arb._pool["color_fld"]
+    _fld.set_value("12.5")
+    arb._writethrough(_fld)
+    check("lands in the record",       A.record["manual_read"], "12.5")
+    arb.resume(A)                                   # back to reagent 2: flushed
+    check("reached the row on leaving",
+          _db.read_val("SELECT manual_read FROM samples WHERE rowid = ?",
+                       (A.record["db_rowid"],)), "12.5")
+    arb.toggle_slot(); arb.toggle_slot()            # A/B and back: a redraw
+    arb.goto(A, "read")                             # reagent 2 expires
+    check("still shown on the live read screen", arb._pool["color_fld"].value,
+          "12.5")
     A.clear_run(); B.clear_run()
 
     print("== config editor: Restore Factory Defaults undoes all of it ==")

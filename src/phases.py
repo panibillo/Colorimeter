@@ -75,7 +75,7 @@ log = logging.getLogger(__name__)
 # relative to where the run actually is (slot.active_phase).  "preimage" is in
 # the sequence whether or not the chain includes it: it only has to sort in the
 # right place for the chips, and an id that never comes up costs nothing.
-_STEP_SEQUENCE = ("entry", "entry2", "preimage",
+_STEP_SEQUENCE = ("entry", "entry2", "vent", "preimage",
                   "reagent1", "reagent2", "read", "analysis")
 _STEP_POS = {pid: i for i, pid in enumerate(_STEP_SEQUENCE)}
 
@@ -477,6 +477,9 @@ class Entry2Phase(Phase):
     # instance.  The class value is the no-pre-image protocol.
     next     = "reagent1"
     title    = ""                 # header shows the sample id
+    # Continue goes through the vent reminder, which NEXT does not preview:
+    # it is a prompt to act on once, not a step anyone needs to look ahead at.
+    proceed_to = "vent"
 
     FIELDS = {"temp_fld": "samp_degC", "weight_fld": "samp_grams",
               "collectdt_fld": "collect_dt", "remark_fld": "remark"}
@@ -585,7 +588,32 @@ class Entry2Phase(Phase):
                     samp_degC=_to_float(r.get("samp_degC")),
                     samp_grams=_to_float(r.get("samp_grams")),
                     remark=r.get("remark"))
-        arb.goto(slot, self.next)
+        arb.goto(slot, self.proceed_to)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Vent reminder  (a plain red screen before any reagent is handled)
+# ─────────────────────────────────────────────────────────────────────────────
+
+class VentPhase(Phase):
+    """
+    "Start Vent Hood", full screen in red, with one OK button.
+
+    Reagent 2 evolves arsine, so the hood has to be running before the first
+    packet is opened.  The screen carries nothing else — no header, no footer,
+    no PRIOR/NEXT — so the only way on is to acknowledge it.  It sits in the
+    chain whether or not the pre-image is, because the hood is about the
+    reagents, not the camera; build_phases() sets where OK leads.
+    """
+
+    phase_id   = "vent"
+    prior      = None
+    next       = None
+    next_phase = "reagent1"         # set per build — see build_phases()
+
+    def enter(self, pool, slot, arb) -> None:
+        pool.show("vent_bg_rect", "vent_text")
+        pool.put("vent_ok", "OK", on=lambda: arb.goto(slot, self.next_phase))
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -848,6 +876,12 @@ class ReadPhase(Phase):
     prior    = "reagent2"
     next     = None            # advance happens on capture completion
 
+    # The manual reading writes through to the record on each keystroke, like
+    # the entry screens, so a redraw (A/B switch, Menu, arriving here after
+    # typing it during a NEXT preview) shows it again rather than erasing it.
+    # For a lab standard this is the known amount, entered well ahead of time.
+    FIELDS = {"color_fld": "manual_read"}
+
     def activate(self, arb, slot) -> None:
         slot.timer   = TimerState.up(arb.now())
         slot.running = True
@@ -1054,15 +1088,22 @@ def build_phases(reagent1_secs: int = 120, preimage: bool = True) -> dict:
     place here — the phases either side take their neighbour from this
     function, not from their own class attributes.
 
+    The vent reminder (VentPhase) always follows entry 2's Continue, and its
+    OK leads to whichever step entry 2's NEXT names — the pre-image or
+    reagent 1.
+
     Args:
         reagent1_secs: Countdown for reagent step 1, in seconds.
         preimage:      Whether the protocol includes the pre-image step.
     """
     entry2 = Entry2Phase()
     entry2.next = "preimage" if preimage else "reagent1"
+    vent = VentPhase()
+    vent.next_phase = entry2.next
     phases = [
         EntryPhase(),
         entry2,
+        vent,
         ReagentPhase("reagent1", reagent1_secs, "reagent2",
                      prior="preimage" if preimage else "entry2",
                      armed="Weigh the reagent 1 packet",
@@ -1469,16 +1510,29 @@ if __name__ == "__main__":
     check("failed read marked",    A.record["samp_degC"], "err")
     arb.temp_c = 21.7
 
-    print("== entry2: collect stamp + Continue persists -> preimage ==")
+    print("== entry2: collect stamp + Continue persists -> vent reminder ==")
     A.record["samp_degC"] = "21.5"; A.record["samp_grams"] = "3.2"   # writethrough sim
     A.record["remark"] = "cloudy sample"                             # writethrough sim
     press(pool, "collectdt_lbl")                   # Collect label stamps the datetime
     check("collect stamped",  bool(A.record["collect_dt"]), True)
     press(pool, "main_btn")                        # Continue
-    check("phase preimage",   A.phase, "preimage")
     check("degC persisted (float)",  A.record["samp_degC"], 21.5)
     check("grams persisted (float)", A.record["samp_grams"], 3.2)
     check("remark persisted",        A.record["remark"], "cloudy sample")
+
+    print("== vent reminder: a plain red screen; OK goes on to preimage ==")
+    check("phase vent",       A.phase, "vent")
+    check("live phase vent",  A.active_phase, "vent")
+    check("red backdrop",     pool["vent_bg_rect"].visible, True)
+    check("vent text",        pool["vent_text"].text, "Start\nVent\nHood")
+    check("OK shown",         pool["vent_ok"].visible, True)
+    check("no header button", pool["main_btn"].visible, False)
+    check("no PRIOR",         pool["prior_btn"].visible, False)
+    check("no NEXT",          pool["next_btn"].visible, False)
+    check("no MENU",          pool["menu_btn"].visible, False)
+    check("NEXT on entry2 skips it", arb.phases["entry2"].next, "preimage")
+    press(pool, "vent_ok")
+    check("phase preimage",   A.phase, "preimage")
     check("run_btn label",    pool["run_btn"].label, "Pre-image\nA")
     check("instr1",           pool["instr1"].text,
           "Insert new strip, weigh reagent 1")
@@ -1592,6 +1646,8 @@ if __name__ == "__main__":
     check("no preimage phase",  "preimage" in plain, False)
     check("entry2 -> reagent1", plain["entry2"].next, "reagent1")
     check("reagent1 <- entry2", plain["reagent1"].prior, "entry2")
+    check("vent still in it",   plain["vent"].next_phase, "reagent1")
+    check("with it, vent -> preimage", arb.phases["vent"].next_phase, "preimage")
     check("with it, entry2 -> preimage", arb.phases["entry2"].next, "preimage")
     check("with it, reagent1 <- preimage",
           arb.phases["reagent1"].prior, "preimage")
@@ -1726,7 +1782,8 @@ if __name__ == "__main__":
     B = Slot("B"); arb.slots = [B]
     arb.goto(B, "entry"); press(pool, "main_btn")  # Begin -> claims, stays on entry
     press(pool, "main_btn")                         # Continue -> entry2
-    press(pool, "main_btn")                         # Continue -> reagent1
+    press(pool, "main_btn")                         # Continue -> vent
+    press(pool, "vent_ok")                          # OK -> preimage
     press(pool, "main_btn")                         # CANCEL -> cancel modal
     check("cancel modal",      B.phase, "cancel")
     check("cancel msg: slot + samp_no",

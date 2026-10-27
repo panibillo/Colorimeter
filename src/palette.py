@@ -63,6 +63,9 @@ PALETTE: dict[str, int] = {
     # Visible alarm button: a backgrounded slot's timer expired unattended.
     "alarm_bg":    0xF800,   # red
     "alarm_text":  0xFFE0,   # yellow
+    # Vent reminder screen (VentPhase): the whole screen, so it cannot be
+    # mistaken for an ordinary step.
+    "vent_bg":     0xF800,   # red
     # Reagent weight grid: how the weighed amount sits against target.  Named
     # for the state, not the hue, so the same five rules can be read off any
     # frontend: "missing" is a weight the run still owes, "alarm" is short of

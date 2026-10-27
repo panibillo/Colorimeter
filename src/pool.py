@@ -177,6 +177,13 @@ class Pool:
         label("result_lbl", L.BODY_LBL3, "white", "label_coral", 13, text="Result")
         field("result_fld", L.BODY_FLD3, 18, "field_blue", editable=False)
 
+        # ── body: vent reminder (VentPhase) — a red backdrop over the whole
+        # screen, built first so the text and OK land on top of it.
+        rect("vent_bg_rect", L.VENT_BG, "vent_bg")
+        label("vent_text", L.VENT_TEXT, "white", "vent_bg", 44,
+              text="Start\nVent\nHood")
+        button("vent_ok", L.VENT_OK, "black", "white", 24, text="OK")
+
         # ── header ─────────────────────────────────────────────────────────────
         label("title", L.TITLE, "black", "white", 22, align="left")
         button("main_btn", L.MAIN_BTN, "btn_text", "start_green", 14)
