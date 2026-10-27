@@ -154,12 +154,14 @@ MENU_POWER      = Rect(164, 182, 148,  56)   # row 3 right
 # ── advanced screen (Menu → Advanced) ─────────────────────────────────────────
 # The Menu's grid and corners again, for the tools an operator rarely needs.
 #
-#       Capture       | Test LED
-#       Capture Image | Wifi
+#       Capture            | Test LED
+#       Capture Image      | Wifi
+#       Calibrate Touchpad |
 ADV_CAPTURE     = Rect(  8,  54, 148,  56)   # row 1 left: capture choice screen
 ADV_TEST_LED    = Rect(164,  54, 148,  56)   # row 1 right: LED test
 ADV_CAP_IMAGE   = Rect(  8, 118, 148,  56)   # row 2 left
 ADV_WIFI        = Rect(164, 118, 148,  56)   # row 2 right
+ADV_TOUCH_CAL   = Rect(  8, 182, 148,  56)   # row 3 left
 
 # ── LED test (Menu → Advanced → Test LED) ─────────────────────────────────────
 # Under the CANCEL / title / SAVE row: the Capture page's LED bar (CAP_LED1),
@@ -211,6 +213,19 @@ WIFI_FLD_PASS   = Rect( 78,  96, 238,  30)
 WIFI_SHOW       = Rect(  4, 134, 100,  30)
 WIFI_HIDDEN     = Rect(110, 134, 100,  30)
 WIFI_JOIN_MSG   = Rect(  6, 172, 308,  60)
+
+# ── Calibrate Touchpad (Menu → Advanced → Calibrate Touchpad) ─────────────────
+# Home: four lines (what is in use, the file, backups, the last check error),
+# a two-line message and two buttons.  The corner and test views hide all of
+# that and show only a centered prompt (and the message, in the test view), so
+# the crosshairs at CAL_MARGIN from each corner and the test marks have the
+# screen to themselves.
+TCAL_LINE1      = Rect(  8,  54, 304,  20)    # four lines, pitch 22
+TCAL_LINE_PITCH = 22
+TCAL_MSG        = Rect(  8, 144, 304,  38)
+TCAL_CALIBRATE  = Rect(  8, 186, 148,  50)
+TCAL_TEST       = Rect(164, 186, 148,  50)
+TCAL_PROMPT     = Rect( 50,  80, 220,  60)
 
 # ── config editor (Menu → Config: every setting in the config table) ───────────
 # Four body-row slots on a 38 px pitch (y 52..202), then a five-button footer

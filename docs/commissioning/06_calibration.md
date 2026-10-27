@@ -21,15 +21,39 @@ Maps raw TSC2007 touch coordinates to display pixels. **Device-specific** — it
 must be run on each unit and is never synced between units (`sync_pi_files.txt`
 deliberately excludes `config/touch_cal.json`).
 
+**In the app:** Menu → Advanced → **Calibrate Touchpad**.
+
+1. Tap **Calibrate** and tap each of the four crosshairs with a stylus. Esc on
+   the keyboard stops at any point without changing anything.
+2. If the fourth (check) corner lands more than 10 px from where the first
+   three predict, the result is refused and nothing changes.
+3. A good result is used **on trial only**, for 30 seconds. Tap **Test** and
+   touch around the screen: a red + marks where each touch lands.
+4. Tap **SAVE** to keep it. BACK, Esc, or letting the 30 seconds run out puts
+   the old calibration back. Until SAVE, the file is never written.
+
+**From a shell** (when the touchscreen is too far off to reach the Menu):
+
 ```bash
 # On the Pi:
 cd ~/pi/Colorimeter
 .venv/bin/python3 src/calibrate_screen.py
 ```
 
-Follow the on-screen targets. The result is written to
-`config/touch_cal.json` on the Pi, which the app reads at startup. Re-run it if
-touches land off-target or after replacing the display.
+Follow the on-screen targets.
+
+Either way, the result is written to `config/touch_cal.json` on the Pi, which
+the app reads at startup. Re-run it if touches land off-target or after
+replacing the display. Before writing, the old file is **copied** to
+`config/touch_cal.bakN.json` (the next unused N). The new file then replaces
+the old one in a single step, so a failure or power cut leaves either the old
+file or the new one, never a half-written one. Backups are never deleted. To
+go back to an earlier calibration, copy a backup over `touch_cal.json` and
+restart the app.
+
+An old file may also hold a `threshold` value. It is ignored: a touch counts
+when the controller's touch signal is asserted and its pressure reading is
+above a fixed minimum (`_Z1_MIN` in `tsc2007.py`).
 
 ---
 
@@ -156,7 +180,7 @@ yet designed.
 
 | Calibration | Artifact | State |
 |---|---|---|
-| Touchscreen | `config/touch_cal.json` (on Pi) | ✅ run `calibrate_screen.py` |
+| Touchscreen | `config/touch_cal.json` (on Pi) | ✅ Advanced → Calibrate Touchpad, or `calibrate_screen.py` |
 | Camera focus | `config/focus_cal.json` (on Pi, IMX708) | 🟡 via bench tooling |
 | Exposure brackets | `exposure` table | 🟡 working; needs the physical test pad and tuned window |
 | Color/measurement | analysis output | 🚧 engine not implemented |

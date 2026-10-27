@@ -213,6 +213,8 @@ class Pool:
         button("adv_test_led",    L.ADV_TEST_LED,      "hdr_text", "slot_a_bg",   18, text="Test LED")
         button("adv_cap_image",   L.ADV_CAP_IMAGE,     "hdr_text", "btn_gray",    18, text="Capture\nImage")
         button("adv_wifi",        L.ADV_WIFI,          "hdr_text", "btn_gray",    18, text="Wifi")
+        button("adv_touch_cal",   L.ADV_TOUCH_CAL,     "hdr_text", "slot_b_bg",   16,
+               text="Calibrate\nTouchpad")
 
         # ── LED test (Menu → Advanced → Test LED): the LED bar is the Capture
         # page's cap_led1..10, so only the title and two text lines are new.
@@ -269,6 +271,22 @@ class Pool:
         button("wifi_hidden",     L.WIFI_HIDDEN,       "black", "btn_gray",      13, text="Hidden")
         label("wifi_join_msg",    L.WIFI_JOIN_MSG,     "black",   "white",       13,
               align="left", valign="top")
+
+        # ── Calibrate Touchpad (Menu → Advanced → Calibrate Touchpad) ──────────
+        # The crosshairs and test marks are drawn straight onto the display
+        # over these, by the arbiter.
+        label("tcal_title",       L.MENU_TITLE,        "black",   "white",       18,
+              text="Touchpad")
+        for i in range(4):
+            r = Rect(L.TCAL_LINE1.x, L.TCAL_LINE1.y + i * L.TCAL_LINE_PITCH,
+                     L.TCAL_LINE1.w, L.TCAL_LINE1.h)
+            label(f"tcal_line{i + 1}", r, "black", "white", 13, align="left")
+        label("tcal_msg",         L.TCAL_MSG,          "black",   "white",       12,
+              align="left", valign="top")
+        button("tcal_calibrate",  L.TCAL_CALIBRATE,    "hdr_text", "start_green", 18,
+               text="Calibrate")
+        button("tcal_test",       L.TCAL_TEST,         "hdr_text", "slot_a_bg",   18, text="Test")
+        label("tcal_prompt",      L.TCAL_PROMPT,       "black",   "white",       14)
 
         # ── config editor (Menu → Config): roles, one role, one parameter ──────
         # Built two ways — 8 grid buttons for the roles list, and 4 rows of a

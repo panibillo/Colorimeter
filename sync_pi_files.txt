@@ -89,6 +89,7 @@ src/DS18B20.py
 src/ili9341.py
 src/kb_reader.py
 src/tsc2007.py
+src/touch_cal_store.py
 
 # ── Support ──────────────────────────────────────────────────────────────
 src/config_repo.py
@@ -141,7 +142,9 @@ system_requirements.txt
 # config/touch_cal.json
 #     Genuinely device-specific: it corrects the alignment of one panel as
 #     assembled, so no two units share a value. Written on the Pi by
-#     calibrate_screen.py and read from ~/pi/Colorimeter/config/touch_cal.json.
+#     Menu → Advanced → Calibrate Touchpad or calibrate_screen.py (both keep
+#     a touch_cal.bakN.json copy of the old one) and read from
+#     ~/pi/Colorimeter/config/touch_cal.json.
 #     Sending the desktop copy would overwrite the Pi's own calibration with a
 #     stale one.
 #

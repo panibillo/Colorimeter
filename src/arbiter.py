@@ -383,6 +383,20 @@ class Arbiter:
         self._wifi_password = ""
         self._wifi_show = False
         self._wifi_hidden = False
+
+        # Calibrate Touchpad state (Menu → Advanced → Calibrate Touchpad).
+        # While a new calibration is on trial, _tcal_old holds the values it
+        # replaced in memory, so a revert never needs the file.
+        self._tcal_view: str | None = None      # 'home' | 'corners' | 'test'
+        self._tcal_raw: dict = {}               # corner label → (rx, ry)
+        self._tcal_step_t0 = 0.0                # when the current corner was shown
+        self._tcal_note = ""                    # a corner-view complaint
+        self._tcal_old: dict | None = None      # the values in use before the trial
+        self._tcal_new: dict | None = None      # the values on trial
+        self._tcal_trial_end = 0.0
+        self._tcal_err: tuple | None = None     # last BR check (err_x, err_y)
+        self._tcal_test_t = 0.0                 # last touch in the test view
+        self._tcal_msg = ""
         self._wifi_connecting = ""
 
         # Capture screen state (Menu → Advanced → Capture): which view is
@@ -1294,6 +1308,7 @@ class Arbiter:
               enabled=self._ledtest_available())
         p.put("adv_cap_image", "Capture\nImage", on=self._img_open)
         p.put("adv_wifi",      "Wifi",     on=self._wifi_open)
+        p.put("adv_touch_cal", "Calibrate\nTouchpad", on=self._tcal_open)
         p.render(self._disp)
         self._rebuild_focus()
 
@@ -1896,6 +1911,251 @@ class Arbiter:
         p.put("wifi_join_msg", self._wifi_msg or
               "Type on the keyboard: tap a box, type, Enter.\n"
               "Hidden: the network does not announce its name.")
+
+    # ── Calibrate Touchpad (Menu → Advanced → Calibrate Touchpad) ───────────────
+    # Four corner taps give a new touch calibration (tsc2007.solve_affine).
+    # The present one is never put at risk:
+    #   - while the corners are tapped, raw readings are collected and the
+    #     transform in use is not touched;
+    #   - a fit whose BR check misses by more than CAL_MAX_ERR_PX is refused;
+    #   - a good fit is tried in memory only, for _TCAL_TRIAL_S seconds.  SAVE
+    #     keeps it; BACK, Esc or the countdown running out puts the old values
+    #     back, from memory, so the file is never read or written to revert;
+    #   - SAVE goes through touch_cal_store.save(): the old file is copied to
+    #     touch_cal.bakN.json, then replaced in one step.  If that fails the
+    #     old values go back into use.
+    # The corner view takes over the main loop's touch handling (_run), since
+    # a raw reading is wanted there, not a position.
+
+    _TCAL_TRIAL_S = 30      # a new calibration's trial, before it reverts
+    _TCAL_STEP_S = 20       # a corner with no tap for this long stops the run
+    _TCAL_TEST_S = 15       # the test view closes after this long untouched
+    _TCAL_HELP = ("Calibrate: tap 4 crosshairs with a stylus.\n"
+                  "Test: touch anywhere to see where it lands.")
+
+    def _tcal_on_trial(self) -> bool:
+        return self._tcal_new is not None
+
+    def _tcal_open(self) -> None:
+        self._tcal_view = "home"
+        self._tcal_err = None
+        self._tcal_msg = ""
+        self._tcal_render()
+
+    def _tcal_back(self) -> None:
+        """Test → home → Advanced.  Leaving the screen ends a trial unsaved."""
+        if self._tcal_view == "test":
+            self._tcal_view = "home"
+            self._tcal_render()
+            return
+        if self._tcal_on_trial():
+            self._tcal_revert("Not saved.")
+        self._tcal_view = None
+        self._render_advanced()
+
+    def _tcal_start_corners(self) -> None:
+        if self._tcal_on_trial():
+            self._tcal_revert("")
+        self._tcal_raw = {}
+        self._tcal_note = ""
+        self._tcal_err = None
+        self._tcal_view = "corners"
+        self._tcal_step_t0 = time.monotonic()
+        self._tcal_render()
+
+    def _tcal_targets(self):
+        import tsc2007
+        return tsc2007.corner_targets(layout.SCREEN_W, layout.SCREEN_H)
+
+    def _tcal_pump_corner(self) -> None:
+        """
+        One main-loop pass of the corner view, in place of the usual touch
+        handling: gather a tap's raw readings, or stop if none comes.
+        """
+        import tsc2007
+        t = self._touch
+        if not t.is_touched:                                    # type: ignore
+            if time.monotonic() - self._tcal_step_t0 > self._TCAL_STEP_S:
+                self._tcal_finish(f"No tap for {self._TCAL_STEP_S} s; stopped. "
+                                  "Nothing was changed.")
+            return
+        time.sleep(0.05)                                        # debounce
+        readings = []
+        deadline = time.monotonic() + 0.8
+        while time.monotonic() < deadline and t.is_touched:     # type: ignore
+            readings.append(t.read_raw())                       # type: ignore
+            time.sleep(0.02)
+        if not readings:
+            readings = [t.read_raw()]                           # type: ignore
+        deadline = time.monotonic() + 3.0                       # wait for the lift
+        while t.is_touched and time.monotonic() < deadline:     # type: ignore
+            if _SIMULATION_MODE and hasattr(self._disp, "process_events"):
+                self._disp.process_events()                     # type: ignore
+            time.sleep(0.02)
+        self._tcal_corner_tapped(tsc2007.average_raw(readings))
+
+    def _tcal_corner_tapped(self, raw) -> None:
+        """Record one corner's raw (rx, ry), or None for no steady reading."""
+        import tsc2007
+        self._tcal_step_t0 = time.monotonic()
+        if raw is None:
+            self._tcal_note = "No steady reading. Press a little firmer."
+            self._tcal_render()
+            return
+        targets = self._tcal_targets()
+        self._tcal_raw[targets[len(self._tcal_raw)][0]] = raw
+        self._tcal_note = ""
+        if len(self._tcal_raw) < len(targets):
+            self._tcal_render()
+            return
+        try:
+            cal, ex, ey = tsc2007.solve_affine(self._tcal_raw,
+                                               layout.SCREEN_W, layout.SCREEN_H)
+        except ValueError:
+            self._tcal_finish("The taps were in a line, so they give no "
+                              "calibration. Nothing was changed.")
+            return
+        self._tcal_err = (ex, ey)
+        log.info("touch calibration: raw %s  BR error (%+.1f, %+.1f) px",
+                 self._tcal_raw, ex, ey)
+        if max(abs(ex), abs(ey)) > tsc2007.CAL_MAX_ERR_PX:
+            self._tcal_finish(f"The check corner missed by more than "
+                              f"{tsc2007.CAL_MAX_ERR_PX} px. Not used; "
+                              "nothing was changed. Try again.")
+            return
+        self._tcal_old = self._touch.cal                        # type: ignore
+        self._tcal_new = cal
+        self._touch.apply_cal(cal)                              # type: ignore
+        self._tcal_trial_end = time.monotonic() + self._TCAL_TRIAL_S
+        self._tcal_finish("")
+
+    def _tcal_finish(self, msg: str) -> None:
+        """Leave the corner view for home, with `msg`."""
+        self._tcal_msg = msg
+        self._tcal_view = "home"
+        self._tcal_render()
+
+    def _tcal_revert(self, msg: str) -> None:
+        """Put the values from before the trial back into use (memory only)."""
+        if self._tcal_old is not None:
+            self._touch.apply_cal(self._tcal_old)               # type: ignore
+        self._tcal_old = self._tcal_new = None
+        self._tcal_msg = (msg + " The old calibration is back in use.").strip()
+        log.info("touch calibration trial ended unsaved")
+
+    def _tcal_save(self) -> None:
+        import touch_cal_store
+        if not self._tcal_on_trial():
+            return
+        old, new = self._tcal_old, self._tcal_new
+        try:
+            bak = self._touch.save_cal()                        # type: ignore
+        except (touch_cal_store.CalWriteError, OSError, ValueError) as e:
+            log.error("touch calibration not saved: %s", e)
+            self._tcal_revert(f"Not saved: {e}."[:120])
+            self._tcal_view = "home"
+            self._tcal_render()
+            return
+        log.info("touch calibration saved to %s; old %s; new %s; backup %s",
+                 self._touch.cal_path, old, new, bak)           # type: ignore
+        self._tcal_old = self._tcal_new = None
+        self._tcal_msg = (f"Saved. The old values are kept in {bak.name}."
+                          if bak else "Saved.")
+        self._tcal_view = "home"
+        self._tcal_render()
+
+    def _tcal_start_test(self) -> None:
+        self._tcal_view = "test"
+        self._tcal_test_t = time.monotonic()
+        self._tcal_render()
+
+    def _tcal_mark(self, px: int, py: int) -> None:
+        """Draw a + where a touch landed, in the test view."""
+        from palette import color
+        self._tcal_test_t = time.monotonic()
+        self._tcal_cross(px, py, 6, color("alert_text"))
+
+    def _tcal_cross(self, x: int, y: int, size: int, c) -> None:
+        """A 2-pixel-wide + at (x, y), from rectangles every display can fill."""
+        from geometry import Rect
+        self._disp.fill_rect(Rect(x - size, y - 1, 2 * size + 1, 2), c)
+        self._disp.fill_rect(Rect(x - 1, y - size, 2, 2 * size + 1), c)
+
+    def _tcal_tick(self) -> None:
+        """Once a second: count the trial down, and close an idle test view."""
+        now = time.monotonic()
+        if self._tcal_on_trial() and now >= self._tcal_trial_end:
+            self._tcal_revert(f"No SAVE in {self._TCAL_TRIAL_S} s.")
+            if self._tcal_view is not None:
+                self._tcal_view = "home"
+                self._tcal_render()
+            return
+        if self._tcal_view == "test" and now - self._tcal_test_t > self._TCAL_TEST_S:
+            self._tcal_view = "home"
+            self._tcal_render()
+            return
+        if self._tcal_on_trial() and self._tcal_view in ("home", "test"):
+            self._pool.set("tcal_msg", self._tcal_trial_text())     # type: ignore
+            self._pool.redraw(self._disp, "tcal_msg")               # type: ignore
+
+    def _tcal_trial_text(self) -> str:
+        left = max(0, round(self._tcal_trial_end - time.monotonic()))
+        return (f"Trying the new calibration. SAVE keeps it;\n"
+                f"it goes back to the old one in {left} s.")
+
+    def _tcal_file_lines(self) -> "list[str]":
+        """What is in use, the file and its backups, the last check."""
+        path = Path(self._touch.cal_path)                       # type: ignore
+        if self._tcal_on_trial():
+            in_use = "In use  NEW, on trial (not saved)"
+        elif self._touch.calibrated:                            # type: ignore
+            in_use = "In use  the saved calibration"
+        else:
+            in_use = "In use  built-in defaults (no usable file)"
+        try:
+            when = datetime.datetime.fromtimestamp(path.stat().st_mtime)
+            file_line = f"File  {path.name}  {when:%Y-%m-%d %H:%M}"
+        except OSError:
+            file_line = f"File  {path.name}  (none)"
+        baks = len(list(path.parent.glob(f"{path.stem}.bak*{path.suffix}")))
+        err = (f"Check corner  off by ({self._tcal_err[0]:+.1f}, "
+               f"{self._tcal_err[1]:+.1f}) px" if self._tcal_err else "")
+        return [in_use, file_line, f"Backups  {baks}", err]
+
+    def _tcal_render(self) -> None:
+        if self._pool is None or self._tcal_view is None:
+            return
+        from palette import color
+        p = self._pool
+        p.hide_all()
+        view = self._tcal_view
+        if view == "corners":
+            n = len(self._tcal_raw)
+            label, x, y = self._tcal_targets()[n]
+            p.put("tcal_prompt", self._tcal_note or
+                  f"Tap the X with a stylus\n{n + 1} of 4    Esc stops")
+            p.render(self._disp)
+            self._rebuild_focus()
+            self._tcal_cross(x, y, 15, color("black"))
+            from geometry import Rect
+            self._disp.fill_rect(Rect(x - 3, y - 3, 7, 7), color("alert_text"))
+            return
+        p.put("menu_cancel_btn", "BACK", on=self._tcal_back)
+        p.put("menu_ok_btn", "SAVE", on=self._tcal_save, enabled=self._tcal_on_trial())
+        msg = self._tcal_trial_text() if self._tcal_on_trial() else self._tcal_msg
+        if view == "test":
+            p.put("tcal_title", "Test")
+            p.put("tcal_prompt", "Touch anywhere:\na + marks where it lands")
+            p.put("tcal_msg", msg)
+        else:
+            p.put("tcal_title", "Touchpad")
+            for i, text in enumerate(self._tcal_file_lines(), 1):
+                p.put(f"tcal_line{i}", text)
+            p.put("tcal_msg", msg or self._TCAL_HELP)
+            p.put("tcal_calibrate", "Calibrate", on=self._tcal_start_corners)
+            p.put("tcal_test", "Test", on=self._tcal_start_test)
+        p.render(self._disp)
+        self._rebuild_focus()
 
     # ── Phases screen (Menu → Phases) ──────────────────────────────────────────
     # Custom reagent countdowns, entered on the instrument itself.  The two
@@ -5101,6 +5361,13 @@ class Arbiter:
         self._focusables[self._focus_idx].set_focused(True, self._disp)
 
     def on_key(self, key: str) -> None:
+        if key == "escape" and self._tcal_view == "corners":
+            self._tcal_finish("Stopped. Nothing was changed.")
+            return
+        if key == "escape" and self._tcal_on_trial():
+            self._tcal_revert("Not saved.")
+            self._tcal_render()
+            return
         if not self._focusables:
             return
         if key in ("tab", "shift-tab"):
@@ -5138,6 +5405,10 @@ class Arbiter:
 
     def on_touch(self, px: int, py: int) -> None:
         if self._pool is None:
+            return
+        if self._tcal_view == "test":
+            if not self._pool.handle_touch(px, py, self._disp):
+                self._tcal_mark(px, py)
             return
         if self._pool.handle_touch(px, py, self._disp):
             # A touch may have started editing a TextBox — sync keyboard focus.
@@ -5244,7 +5515,9 @@ class Arbiter:
             if key:
                 self.on_key(key)
 
-            if self._touch.is_touched:            # type: ignore
+            if self._tcal_view == "corners":
+                self._tcal_pump_corner()
+            elif self._touch.is_touched:          # type: ignore
                 pos = self._touch.position()      # type: ignore
                 if pos:
                     self.on_touch(*pos)
@@ -5265,6 +5538,7 @@ class Arbiter:
             return
         self._pool.set("clock", datetime.datetime.now().strftime("%b %d %H:%M:%S"))
         self._pool.redraw(self._disp, "clock")
+        self._tcal_tick()
         if self._focused is None:
             return
         tw = self._pool.get("timer")
@@ -5814,7 +6088,8 @@ def _selftest() -> None:
     arb._pool["menu_capture"].on_press()
     check("Advanced is up",        arb._pool["adv_title"].visible, True)
     check("menu grid hidden",      arb._pool["menu_capture"].visible, False)
-    for _name in ("adv_capture", "adv_test_led", "adv_cap_image", "adv_wifi"):
+    for _name in ("adv_capture", "adv_test_led", "adv_cap_image", "adv_wifi",
+                  "adv_touch_cal"):
         check(f"{_name} shown", arb._pool[_name].visible, True)
     arb._pool["adv_capture"].on_press()
     check("Capture page up",       arb._cap_view, "choice")
@@ -6045,6 +6320,97 @@ def _selftest() -> None:
     check("radio back on",          arb._pool["wifi_radio"].visible, False)
     arb._pool["menu_cancel_btn"].on_press()
     check("BACK → Advanced",        arb._pool["adv_title"].visible, True)
+    arb._render_menu()
+
+    print("== Calibrate Touchpad: try, revert, refuse, save with a backup ==")
+    import tempfile as _tempfile
+    import touch_cal_store as _tcs
+    from mock.tsc2007_mock import TSC2007 as _MockTouch
+    _tdir = _tempfile.TemporaryDirectory()
+    _touch = arb._touch = _MockTouch()
+    _touch._cal_path = str(Path(_tdir.name) / "touch_cal.json")
+    _ident = _touch.cal
+    _tgts = arb._tcal_targets()
+
+    def _tcal_taps(scale=2, br_off=0, raws=None):
+        """Tap all four corners; the raw reading is `scale` x the pixel."""
+        arb._pool["tcal_calibrate"].on_press()
+        for i, (_lbl, _x, _y) in enumerate(_tgts):
+            off = br_off if _lbl == "BR" else 0
+            arb._tcal_corner_tapped(raws[i] if raws else
+                                    (scale * (_x + off), scale * _y))
+
+    arb._render_advanced()
+    check("Calibrate Touchpad shown", arb._pool["adv_touch_cal"].visible, True)
+    arb._pool["adv_touch_cal"].on_press()
+    check("home view",              arb._tcal_view, "home")
+    check("in use: saved",          arb._pool["tcal_line1"].text,
+          "In use  the saved calibration")
+    check("no file yet",            arb._pool["tcal_line2"].text,
+          "File  touch_cal.json  (none)")
+    check("SAVE off without a trial", arb._pool["menu_ok_btn"].enabled, False)
+
+    arb._pool["tcal_calibrate"].on_press()
+    check("corner view",            (arb._tcal_view, arb._pool["tcal_prompt"].text),
+          ("corners", "Tap the X with a stylus\n1 of 4    Esc stops"))
+    check("no buttons in the way",  arb._pool["menu_cancel_btn"].visible, False)
+    arb._tcal_corner_tapped(None)
+    check("no reading: asks firmer", arb._pool["tcal_prompt"].text,
+          "No steady reading. Press a little firmer.")
+    arb.on_key("escape")
+    check("Esc stops, nothing changed", (arb._tcal_view, _touch.cal),
+          ("home", _ident))
+
+    _tcal_taps(scale=2)
+    check("good fit on trial",      arb._tcal_on_trial(), True)
+    check("trial values in use",    round(_touch.cal["a"], 6), 0.5)
+    check("SAVE on during trial",   arb._pool["menu_ok_btn"].enabled, True)
+    check("in use: on trial",       arb._pool["tcal_line1"].text,
+          "In use  NEW, on trial (not saved)")
+    check("file not written",       Path(_touch.cal_path).exists(), False)
+    arb._tcal_trial_end = time.monotonic() - 1
+    arb._tcal_tick()
+    check("countdown reverts",      (arb._tcal_on_trial(), _touch.cal), (False, _ident))
+    check("says so",                arb._pool["tcal_msg"].text,
+          "No SAVE in 30 s. The old calibration is back in use.")
+
+    _tcal_taps(scale=2, br_off=15)
+    check("bad check corner refused", (arb._tcal_on_trial(), _touch.cal), (False, _ident))
+    check("names the miss",         "missed by more than 10 px" in arb._pool["tcal_msg"].text,
+          True)
+    _tcal_taps(raws=[(100, 100)] * 4)
+    check("taps in a line refused", "in a line" in arb._pool["tcal_msg"].text, True)
+
+    _tcal_taps(scale=2)
+    arb._pool["menu_ok_btn"].on_press()                 # SAVE
+    check("saved, first time no backup", arb._pool["tcal_msg"].text, "Saved.")
+    check("file holds the new values", round(_tcs.load(_touch.cal_path)["a"], 6), 0.5)
+    check("SAVE off again",         arb._pool["menu_ok_btn"].enabled, False)
+    _tcal_taps(scale=4)
+    arb._pool["menu_ok_btn"].on_press()
+    check("second save names its backup", arb._pool["tcal_msg"].text,
+          "Saved. The old values are kept in touch_cal.bak1.json.")
+    check("backup holds the old values",
+          round(_tcs.load(Path(_tdir.name) / "touch_cal.bak1.json")["a"], 6), 0.5)
+    check("backup counted",         arb._pool["tcal_line3"].text, "Backups  1")
+
+    _saved = _touch.cal
+    _tcal_taps(scale=2)
+    arb._pool["tcal_test"].on_press()
+    check("test view",              (arb._tcal_view, arb._pool["tcal_title"].text),
+          ("test", "Test"))
+    arb._tcal_test_t = 0.0
+    arb.on_touch(160, 200)                              # not a button: a mark
+    check("a touch marks, view stays", (arb._tcal_view, arb._tcal_test_t > 0), ("test", True))
+    arb._tcal_test_t = time.monotonic() - 60
+    arb._tcal_tick()
+    check("idle test closes",       arb._tcal_view, "home")
+    check("trial survives the test", arb._tcal_on_trial(), True)
+    arb._pool["menu_cancel_btn"].on_press()             # BACK on trial
+    check("BACK reverts to the saved", (_touch.cal, arb._tcal_view), (_saved, None))
+    check("BACK → Advanced",        arb._pool["adv_title"].visible, True)
+    check("file untouched by the trial", _tcs.load(_touch.cal_path), _saved)
+    _tdir.cleanup()
     arb._render_menu()
 
     # Two different baselines, and the difference matters on a development

@@ -2,9 +2,13 @@
 """
 calibrate_screen.py  —  Touch-screen calibration runner.
 
-Runs the two-phase TSC2007 calibration routine (pressure threshold + affine
-corner taps), validates the BR residual, backs up any existing calibration
-file, and writes the new one.
+Runs the TSC2007 corner-tap calibration, validates the BR residual, and
+saves the result through touch_cal_store: the existing file is copied to
+touch_cal.bakN.json first, and the new one replaces it in one step, so the
+old values are never lost.
+
+The app has the same calibration, with a trial before saving, at
+Menu → Advanced → Calibrate Touchpad.
 
 Exit codes
 ----------
@@ -24,58 +28,22 @@ Usage
 from __future__ import annotations
 
 import argparse
-import json
 import logging
-import os
 import pathlib
-import shutil
 import sys
 
 sys.path.insert(0, str(pathlib.Path(__file__).parent))
 
-from tsc2007 import TSC2007, _DEFAULT_CAL_PATH
+import touch_cal_store
+from tsc2007 import CAL_MAX_ERR_PX, TSC2007, _DEFAULT_CAL_PATH
 
 _LOG_FORMAT = "%(levelname)-8s %(name)s:%(lineno)d  %(message)s"
 
 # Default maximum acceptable BR residual in display pixels.
 # Taps that land further than this from the true corner indicate a poor fit.
-_DEFAULT_MAX_ERROR = 10.0
+_DEFAULT_MAX_ERROR = float(CAL_MAX_ERR_PX)
 
 log = logging.getLogger(__name__)
-
-
-# ── Helpers ───────────────────────────────────────────────────────────────────
-
-def _backup_existing(cal_path: str) -> str | None:
-    """
-    Rename the existing calibration file to an unused backup name.
-    Pattern: touch_cal.bak1.json, touch_cal.bak2.json, …
-
-    Returns the backup path on success, or None if no file existed.
-    Raises OSError if the rename fails.
-    """
-    p = pathlib.Path(cal_path)
-    if not p.exists():
-        return None
-
-    parent, stem, suffix = p.parent, p.stem, p.suffix
-    n = 1
-    while True:
-        bak = parent / f"{stem}.bak{n}{suffix}"
-        if not bak.exists():
-            break
-        n += 1
-
-    shutil.move(str(p), str(bak))
-    log.info("backed up %s → %s", p.name, bak.name)
-    return str(bak)
-
-
-def _write_cal(cal: dict, cal_path: str) -> None:
-    """Write calibration dict to JSON, creating parent directories as needed."""
-    os.makedirs(os.path.dirname(os.path.abspath(cal_path)), exist_ok=True)
-    with open(cal_path, "w") as f:
-        json.dump(cal, f, indent=2)
 
 
 def _parse_args() -> argparse.Namespace:
@@ -130,7 +98,8 @@ def main() -> None:
     # ── Validate ──────────────────────────────────────────────────────────────
     if result is None:
         print(
-            "\nCalibration aborted — touch points were collinear or coincident.\n"
+            "\nCalibration aborted — a corner had no steady reading, or the\n"
+            "touch points were collinear or coincident.\n"
             "Please retry, tapping each crosshair as precisely as possible.",
             file=sys.stderr,
         )
@@ -149,25 +118,16 @@ def main() -> None:
         )
         sys.exit(2)
 
-    # ── Back up existing file, then write new one ─────────────────────────────
+    # ── Back up the existing file, then replace it ────────────────────────────
     try:
-        bak = _backup_existing(args.cal_path)
-    except OSError as exc:
-        print(f"ERROR: could not back up existing calibration: {exc}", file=sys.stderr)
+        bak = touch_cal_store.save(cal, args.cal_path)
+    except touch_cal_store.CalWriteError as exc:
+        print(f"ERROR: {exc}",
+              file=sys.stderr)
         sys.exit(3)
 
     if bak:
         print(f"Previous calibration backed up to: {bak}")
-
-    try:
-        _write_cal(cal, args.cal_path)
-    except OSError as exc:
-        print(f"ERROR: could not write calibration file: {exc}", file=sys.stderr)
-        # If the backup succeeded, the original is now gone — warn the user.
-        if bak:
-            print(f"WARNING: original was already moved to {bak}", file=sys.stderr)
-        sys.exit(3)
-
     print(f"Calibration saved to: {args.cal_path}")
     log.info("calibration complete")
 
