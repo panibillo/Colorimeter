@@ -98,6 +98,7 @@ Public surface
     inspection_exposure_us() / default_focus_diopter()
     reagent1_secs() / analysis_secs()
     t2ref25_secs() / q10() / reagent2_secs(temp_c)
+    test_variant_enabled()
     reagent1_empty_packet_wt() / reagent2_empty_packet_wt()
     reagent1_100ml_wt() / reagent2_100ml_wt() / reagent_wt_tolerance()
     main_loop_poll_s() / shutdown_timeout_s()
@@ -1117,6 +1118,17 @@ def reagent_wt_tolerance() -> float:
 def reagent1_stir_seconds() -> int:
     """Stir duration in seconds before sub-alarm in reagent 1 countdown."""
     return int(get("protocol", "reagent1_stir_seconds"))
+
+
+def test_variant_enabled() -> bool:
+    """
+    True when runs are development test variants (protocol.test_variant = 1).
+
+    A test-variant run shows the test-variant screen after Entry 2 and records
+    its choices in the treatments table.  Off (0) is a production run: the
+    screen is skipped and every variable keeps its default.
+    """
+    return bool(int(get("protocol", "test_variant")))
 
 
 def reagent2_stir_seconds() -> int:

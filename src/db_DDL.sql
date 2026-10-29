@@ -171,6 +171,46 @@ CREATE TABLE IF NOT EXISTS samples (
 
 
 -- ────────────────────────────────────────────────────────────────────────────
+-- treatments — one row per test-variant sample: the deliberate variations a
+-- development run was made with.  Joined to samples by samp_no.
+--
+-- A row exists only for a sample run with protocol.test_variant = 1, so the
+-- row's presence is itself the record that a sample was a test variant; a
+-- production run has none, and every variable then had its default (one image
+-- set, every factor 1.0).
+--
+-- test_equip is stored by value ('B 250 Ehrl, unprotected'), not as a rowid
+-- into test_equip, for the same reason samples keeps provenance as text: the
+-- pick list can be edited later without changing what an old sample says.
+-- ────────────────────────────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS treatments (
+    rowid          INTEGER PRIMARY KEY
+                           NOT NULL,
+    samp_no        TEXT UNIQUE NOT NULL COLLATE NOCASE,  -- samples.samp_no
+    test_equip     TEXT,       -- code + description, e.g. 'B 250 Ehrl, unprotected'
+    image_reps     INTEGER,    -- image sets taken at each imaging step (1..5)
+    R1_wt_factor   REAL,       -- reagent 1 target weight multiplier
+    R1_time_factor REAL,       -- reagent 1 countdown multiplier
+    R2_wt_factor   REAL,       -- reagent 2 target weight multiplier
+    R2_time_factor REAL        -- reagent 2 countdown multiplier
+);
+
+
+-- ────────────────────────────────────────────────────────────────────────────
+-- test_equip — the pick list for the test-variant screen's Equip row.
+-- Seeded by provisioning/config_defaults.sql.  `active` = 0 takes an item off
+-- the list without losing it.
+-- ────────────────────────────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS test_equip (
+    rowid       INTEGER PRIMARY KEY
+                        NOT NULL,
+    code        TEXT UNIQUE NOT NULL COLLATE NOCASE,  -- 'A', 'B', ...
+    description TEXT NOT NULL,                       -- '250 Ehrl, unprotected'
+    active      INTEGER NOT NULL DEFAULT 1           -- 1 = offered on the screen
+);
+
+
+-- ────────────────────────────────────────────────────────────────────────────
 -- exposure — calibrated exposure ladders.  One row per (LED, group, exposure).
 --
 -- `active` is the current-vs-history switch: a recalibration flips the old

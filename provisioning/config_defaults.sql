@@ -174,7 +174,21 @@ INSERT OR IGNORE INTO config (active, isdefault, editable, add_dt, role, name,
   (0, 1, 1, '2026-08-19 00:00:00', 'protocol', 'reagent1_stir_seconds', 'int', '25', 'seed',
    'stir duration in seconds before sub-alarm beep in reagent 1 countdown'),
   (0, 1, 1, '2026-08-19 00:00:00', 'protocol', 'reagent2_stir_seconds', 'int', '0', 'seed',
-   'stir duration in seconds at 25 C reference; 0 = stir continuously, no sub-alarm');
+   'stir duration in seconds at 25 C reference; 0 = stir continuously, no sub-alarm'),
+  (0, 1, 1, '2026-10-29 00:00:00', 'protocol', 'test_variant', 'int', '0', 'seed',
+   '1 = show the test-variant screen and record a treatments row; 0 = production run');
+
+-- ── test_equip ──────────────────────────────────────────────────────────────
+-- The test-variant screen's equipment pick list.  code is UNIQUE, so a re-run
+-- skips every row already present and an edited description is kept.
+INSERT OR IGNORE INTO test_equip (code, description)
+     VALUES
+  ('A', 'Original bottle'),
+  ('B', '250 Ehrl, unprotected'),
+  ('C', '250 Ehrl, protected'),
+  ('D', '250 Ehrl, 2mm dot, 0g'),
+  ('E', '250 Ehrl, 2mm dot, 20g'),
+  ('F', '250 Ehrl, casset 01');
 
 -- ── runtime ─────────────────────────────────────────────────────────────────
 INSERT OR IGNORE INTO config (active, isdefault, editable, add_dt, role, name,

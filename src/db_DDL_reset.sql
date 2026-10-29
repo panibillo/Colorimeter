@@ -34,6 +34,8 @@ DROP INDEX IF EXISTS ix_roi_name_active;
 DROP INDEX IF EXISTS ix_layermodels_led_layer_active;
 
 DROP TABLE IF EXISTS data;
+DROP TABLE IF EXISTS treatments;
+DROP TABLE IF EXISTS test_equip;
 DROP TABLE IF EXISTS colorcard;
 DROP TABLE IF EXISTS layermodels;
 DROP TABLE IF EXISTS roi;

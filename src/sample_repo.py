@@ -15,6 +15,11 @@ Public surface
     update_sample(rowid, **cols) -> int           write columns as the run proceeds
     delete_sample(rowid)    -> int                discard a reserved row
 
+    equipment_list()        -> list[str]          the test-variant Equip choices
+    save_treatment(samp_no, **cols) -> int        write a test-variant row
+    latest_treatment()      -> dict | None        the newest row, for carry-over
+    delete_treatment(samp_no) -> int              discard a sample's row
+
 Sample-number rule (from defaults.samp_no_template, e.g. 'ZZ1000')
 ------------------------------------------------------------------
 - prefix  = the template up to and including its last alphabetic character.
@@ -242,6 +247,78 @@ def delete_sample(rowid: int) -> int:
     return db.write_one("DELETE FROM samples WHERE rowid = ?", (rowid,))
 
 
+# ── Test-variant treatments ───────────────────────────────────────────────────
+# A treatments row exists only for a sample run with protocol.test_variant on,
+# so its presence is the record that the sample was a test variant.  Joined to
+# samples by samp_no rather than rowid, because samp_no is the name the
+# operator and the archive files both use.
+
+# The treatment columns, in table order.  Also the whitelist save_treatment
+# writes through, which keeps caller-supplied names out of the SQL text.
+TREATMENT_COLS = ("test_equip", "image_reps",
+                  "R1_wt_factor", "R1_time_factor",
+                  "R2_wt_factor", "R2_time_factor")
+
+
+def equipment_list() -> list:
+    """
+    The test-variant screen's equipment choices, as display labels.
+
+    Each label is the code and description together — 'B 250 Ehrl,
+    unprotected' — which is also exactly what a treatments row stores, so the
+    sample keeps the words the operator picked even if the list is edited.
+
+    Returns:
+        The active test_equip rows as labels, ordered by code.  Empty if the
+        table is empty.
+    """
+    rows = db.read_all("SELECT code, description FROM test_equip "
+                       "WHERE active = 1 ORDER BY code")
+    return [f"{code} {desc}" for code, desc in rows]
+
+
+def save_treatment(samp_no: str, **cols) -> int:
+    """
+    Write one sample's treatment, replacing any row it already has.
+
+    Args:
+        samp_no: The sample the treatment belongs to.
+        **cols:  Any of TREATMENT_COLS.  Unknown names are ignored.
+
+    Returns:
+        The number of rows written (1), or 0 when samp_no is empty.
+    """
+    if not samp_no:
+        return 0
+    cols = {k: v for k, v in cols.items() if k in TREATMENT_COLS}
+    keys = ["samp_no"] + list(cols)
+    marks = ", ".join("?" for _ in keys)
+    updates = ", ".join(f"{k} = excluded.{k}" for k in cols) or "samp_no = samp_no"
+    return db.write_one(
+        f"INSERT INTO treatments ({', '.join(keys)}) VALUES ({marks}) "
+        f"ON CONFLICT(samp_no) DO UPDATE SET {updates}",
+        (samp_no,) + tuple(cols.values()))
+
+
+def latest_treatment() -> Optional[dict]:
+    """
+    The most recently started sample's treatment, or None if there is none.
+
+    The test-variant screen starts a new sample from this, because development
+    runs come in series and most of a series repeats the last settings.
+    """
+    row = db.read_one(f"SELECT {', '.join(TREATMENT_COLS)} FROM treatments "
+                      f"ORDER BY rowid DESC LIMIT 1")
+    return dict(zip(TREATMENT_COLS, row)) if row else None
+
+
+def delete_treatment(samp_no: str) -> int:
+    """Delete a sample's treatment row (when its sample row is discarded)."""
+    if not samp_no:
+        return 0
+    return db.write_one("DELETE FROM treatments WHERE samp_no = ?", (samp_no,))
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Self-test — numbering rules run in-memory; CRUD runs on a throwaway copy of
 # the real DB so the live colorimeter.sqlite is never touched.
@@ -381,6 +458,35 @@ if __name__ == "__main__":
     db.write_one("DELETE FROM config WHERE role='defaults' AND name='user'")
     config.load(reload=True)
     check("None, not a crash", load_defaults(), None)
+
+    print("== test_equip is seeded A..F, labelled code + description ==")
+    equip = equipment_list()
+    check("six choices",         len(equip), 6)
+    check("first label",         equip[0], "A Original bottle")
+    check("last label",          equip[-1], "F 250 Ehrl, casset 01")
+
+    print("== treatments: save, replace, latest, delete ==")
+    db.write_one("DELETE FROM treatments")
+    check("none yet",            latest_treatment(), None)
+    save_treatment("ZZ2001", test_equip=equip[1], image_reps=2,
+                   R1_wt_factor=1.0, R1_time_factor=1.5,
+                   R2_wt_factor=0.5, R2_time_factor=1.0, bogus="ignored")
+    check("row written", latest_treatment(),
+          {"test_equip": "B 250 Ehrl, unprotected", "image_reps": 2,
+           "R1_wt_factor": 1.0, "R1_time_factor": 1.5,
+           "R2_wt_factor": 0.5, "R2_time_factor": 1.0})
+    save_treatment("zz2001", image_reps=3)        # same sample, any case
+    check("one row per sample",
+          db.read_val("SELECT COUNT(*) FROM treatments"), 1)
+    check("replaced in place",   latest_treatment()["image_reps"], 3)
+    check("other columns kept",  latest_treatment()["R1_time_factor"], 1.5)
+    save_treatment("ZZ2002", test_equip=equip[0], image_reps=1)
+    check("latest is the newest sample", latest_treatment()["test_equip"],
+          "A Original bottle")
+    delete_treatment("ZZ2002")
+    check("deleted; the one before is latest again",
+          latest_treatment()["image_reps"], 3)
+    check("empty samp_no writes nothing", save_treatment("", image_reps=1), 0)
 
     shutil.rmtree(tmpdir, ignore_errors=True)
     print("\n== all sample_repo self-tests passed ==")
