@@ -64,7 +64,7 @@ from widgets import Button, TextBox
 from pool import Pool
 from slot import Slot
 from phases import (build_phases, EntryPhase, Entry2Phase, ReadPhase,
-                    ReagentWeights,
+                    VariantPhase, ReagentWeights,
                     _mmss, _to_float)
 
 log = logging.getLogger(__name__)
@@ -721,7 +721,8 @@ class Arbiter:
         # and Reagent2Phase asks reagent2_plan() for it when it needs one.
         self._phases = build_phases(
             reagent1_secs=config.reagent1_secs(),
-            preimage=config.capture_preimage_enabled())
+            preimage=config.capture_preimage_enabled(),
+            test_variant=config.test_variant_enabled())
         self._slots = {"A": Slot("A"), "B": Slot("B")}
         self._load_defaults()
 
@@ -1118,6 +1119,40 @@ class Arbiter:
         except sqlite3.Error:
             log.exception("Arbiter: persist failed for slot %s (rowid=%s)",
                           slot.name, rowid)
+
+    # ── Phase contract: test-variant treatment ─────────────────────────────────
+
+    def equipment_list(self) -> list:
+        """The test-variant screen's Equip choices; [] if they cannot be read."""
+        try:
+            return sample_repo.equipment_list()
+        except sqlite3.Error:
+            log.exception("Arbiter: equipment list unavailable")
+            return []
+
+    def latest_treatment(self):
+        """The newest treatments row as a dict, or None (also on a read error)."""
+        try:
+            return sample_repo.latest_treatment()
+        except sqlite3.Error:
+            log.exception("Arbiter: latest treatment unavailable")
+            return None
+
+    def save_treatment(self, slot: Slot) -> None:
+        """
+        Write the slot's test-variant choices as its treatments row.
+
+        The factors are stored as numbers; VariantPhase only lets Continue
+        through once each one parses, so the conversion cannot fail here.
+        """
+        r = slot.record
+        try:
+            sample_repo.save_treatment(
+                r.get("samp_no"), test_equip=r.get("test_equip"),
+                image_reps=int(r.get("image_reps") or 1),
+                **{k: _to_float(r.get(k)) for k in VariantPhase.FIELDS.values()})
+        except sqlite3.Error:
+            log.exception("Arbiter: save_treatment failed for slot %s", slot.name)
 
     def _flush_entry(self, slot: Slot) -> None:
         """
@@ -2305,7 +2340,8 @@ class Arbiter:
         """
         r1 = config.reagent1_secs()
         self._phases = build_phases(reagent1_secs=r1,
-                                    preimage=config.capture_preimage_enabled())
+                                    preimage=config.capture_preimage_enabled(),
+                                    test_variant=config.test_variant_enabled())
         log.info("Arbiter: reagent 1 countdown set to %ds; reagent 2 reference "
                  "%ds @%.0f °C, Q10 %.2f",
                  r1, config.t2ref25_secs(), config.REF_TEMP_C, config.q10())
@@ -3585,7 +3621,7 @@ class Arbiter:
         must not change out from under a slot that has already read it, so
         every editor screen gates its editable state on this.
         """
-        return any(s.active_phase not in ("entry", "entry2")
+        return any(s.active_phase not in ("entry", "entry2", "variant")
                    for s in self._slots.values())
 
     @property
@@ -3799,6 +3835,8 @@ class Arbiter:
             if rowid is not None:
                 try:
                     sample_repo.delete_sample(rowid)
+                    # A test variant's treatment goes with its sample.
+                    sample_repo.delete_treatment(slot.record.get("samp_no"))
                 except sqlite3.Error:
                     log.exception("Arbiter: delete_sample failed (rowid=%s)", rowid)
         slot.clear_run()
@@ -5384,9 +5422,9 @@ class Arbiter:
         if key in ("tab", "shift-tab"):
             cw = self._focused_widget()
             was_editing = isinstance(cw, TextBox) and cw.editing
-            # Commit weight field if tab away while editing
-            if was_editing and str(cw.name) in WT_FIELD_KEYS:
-                self._weight_field_commit(cw)
+            # Commit the field if tabbing away while editing
+            if was_editing:
+                self._field_commit(cw)
             self._move_focus(self._focus_idx + (1 if key == "tab" else -1))
             nw = self._focused_widget()
             if was_editing and isinstance(nw, TextBox) and nw.editable:
@@ -5402,9 +5440,9 @@ class Arbiter:
             if isinstance(w, TextBox) and w.editable:
                 was_editing = w.editing
                 w.toggle_editing(self._disp)
-                # Commit weight field if editing just turned off
-                if was_editing and str(w.name) in WT_FIELD_KEYS:
-                    self._weight_field_commit(w)
+                # Commit the field if editing just turned off
+                if was_editing:
+                    self._field_commit(w)
             elif isinstance(w, Button) and callable(w.on_press):
                 w.on_press()
             return
@@ -5454,9 +5492,10 @@ class Arbiter:
             slot.record[wt_key] = textbox.value
             return
 
-        fields = {"entry":  EntryPhase.FIELDS,
-                  "entry2": Entry2Phase.FIELDS,
-                  "read":   ReadPhase.FIELDS}.get(slot.phase)
+        fields = {"entry":   EntryPhase.FIELDS,
+                  "entry2":  Entry2Phase.FIELDS,
+                  "variant": VariantPhase.FIELDS,
+                  "read":    ReadPhase.FIELDS}.get(slot.phase)
         if not fields:
             return
         key = fields.get(textbox.name)
@@ -5472,6 +5511,24 @@ class Arbiter:
             if begin.enabled != want:
                 begin.enabled = want
                 begin.draw(self._disp)
+        # Likewise a factor box decides whether Continue is available.
+        if slot.phase == "variant" and slot.active_phase == "variant":
+            cont = self._pool["main_btn"]
+            want = self._phases["variant"].ready(slot)
+            if cont.enabled != want:
+                cont.enabled = want
+                cont.draw(self._disp)
+
+    def _field_commit(self, textbox) -> None:
+        """
+        A box just stopped being edited.  The weight grid and the test-variant
+        factors both colour cells by what was typed, so each repaints here.
+        """
+        if str(textbox.name) in WT_FIELD_KEYS:
+            self._weight_field_commit(textbox)
+        elif (str(textbox.name) in VariantPhase.FIELDS
+              and self._focused is not None):
+            self.render(self._focused)
 
     def _weight_field_commit(self, textbox) -> None:
         """
@@ -6759,6 +6816,40 @@ def _selftest() -> None:
     arb.goto(A, "read")                             # reagent 2 expires
     check("still shown on the live read screen", arb._pool["color_fld"].value,
           "12.5")
+
+    print("== test variant: typed factors, saved treatment, carry-over ==")
+    _saved_phases = arb._phases
+    arb._phases = build_phases(test_variant=True)
+    A.record["test_equip"] = ""                     # a fresh run's first view
+    A.phase = A.active_phase = "variant"
+    arb.render(A)
+    check("starts on the first equipment", A.record["test_equip"],
+          sample_repo.equipment_list()[0])
+    _fld = arb._pool["var_r2_time_fld"]
+    _fld.set_value("x")
+    arb._writethrough(_fld)
+    check("a bad factor reaches the record", A.record["R2_time_factor"], "x")
+    check("and holds Continue back", arb._pool["main_btn"].enabled, False)
+    _fld.set_value("1.25")
+    arb._writethrough(_fld)
+    check("a good one releases it",  arb._pool["main_btn"].enabled, True)
+    arb._pool["var_reps_btn"].on_press()            # 1 -> 2
+    arb._pool["main_btn"].on_press()                # Continue
+    check("on to the vent reminder", A.phase, "vent")
+    _row = _db.read_one("SELECT test_equip, image_reps, R2_time_factor "
+                        "FROM treatments WHERE samp_no = ?", (A.record["samp_no"],))
+    check("treatment row written",
+          _row, (sample_repo.equipment_list()[0], 2, 1.25))
+    check("and is what the next run starts from",
+          arb.latest_treatment()["R2_time_factor"], 1.25)
+
+    print("== test variant: Delete row takes the treatment with it ==")
+    _samp = A.record["samp_no"]
+    arb.cancel_test(A, delete=True)
+    check("treatment gone",
+          _db.read_val("SELECT COUNT(*) FROM treatments WHERE samp_no = ?",
+                       (_samp,)), 0)
+    arb._phases = _saved_phases
     A.clear_run(); B.clear_run()
 
     print("== config editor: Restore Factory Defaults undoes all of it ==")

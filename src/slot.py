@@ -56,6 +56,15 @@ def _new_record() -> dict:
         # ── stir sub-alarm epoch timestamps -> samples.* ──────────────────
         "reagent1_stir_end": None,  # samples.reagent1_stir_end (when sub-alarm fired)
         "reagent2_stir_end": None,  # samples.reagent2_stir_end (when sub-alarm fired)
+        # ── test-variant treatment -> treatments.* (test_variant runs only) ──
+        # A production run keeps these defaults and writes no treatments row.
+        # The factors are text, exactly as typed on the test-variant screen.
+        "test_equip":     "",    # var_equip_btn  — code + description
+        "image_reps":     1,     # var_reps_btn   — image sets per imaging step
+        "R1_wt_factor":   "1.0", # var_r1_wt_fld
+        "R1_time_factor": "1.0", # var_r1_time_fld
+        "R2_wt_factor":   "1.0", # var_r2_wt_fld
+        "R2_time_factor": "1.0", # var_r2_time_fld
         # ── results ─────────────────────────────────────────────────────────
         "txt_result":    "",   # samples.txt_result
         "num_result":    None, # samples.num_result

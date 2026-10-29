@@ -53,6 +53,9 @@ Arbiter contract (what phases call; arbiter.py implements it)
     arb.open_modal(slot, modal_id)  push a modal, remembering the return phase
     arb.close_modal(slot)           pop back to the remembered phase
     arb.cancel_test(slot)           abandon this run
+    arb.equipment_list()->list      the test-variant Equip choices (labels)
+    arb.latest_treatment()          the newest treatments row as a dict, or None
+    arb.save_treatment(slot)        write the slot's treatments row
     arb.reset_timer(slot)           clear the countdown, back to armed
     arb.retry_capture(slot)         re-attempt a capture after 'no sample'
     arb.start_analysis(slot)        begin analysis of the captured images
@@ -75,7 +78,7 @@ log = logging.getLogger(__name__)
 # relative to where the run actually is (slot.active_phase).  "preimage" is in
 # the sequence whether or not the chain includes it: it only has to sort in the
 # right place for the chips, and an id that never comes up costs nothing.
-_STEP_SEQUENCE = ("entry", "entry2", "vent", "preimage",
+_STEP_SEQUENCE = ("entry", "entry2", "variant", "vent", "preimage",
                   "reagent1", "reagent2", "read", "analysis")
 _STEP_POS = {pid: i for i, pid in enumerate(_STEP_SEQUENCE)}
 
@@ -592,6 +595,153 @@ class Entry2Phase(Phase):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Test variant  (development runs only: protocol.test_variant = 1)
+# ─────────────────────────────────────────────────────────────────────────────
+
+_MAX_IMAGE_REPS = 5
+
+# The four factor boxes: (row label button, wt box, time box, reagent number).
+_VAR_FACTOR_ROWS = (
+    ("var_r1_lbl", "var_r1_wt_fld", "var_r1_time_fld", 1),
+    ("var_r2_lbl", "var_r2_wt_fld", "var_r2_time_fld", 2),
+)
+_VAR_CAPTIONS = ("var_r1_wt_cap", "var_r1_time_cap",
+                 "var_r2_wt_cap", "var_r2_time_cap")
+
+
+def _factor_text(v) -> str:
+    """A stored factor as box text: 1.5 -> '1.5', missing -> '1.0'."""
+    return "1.0" if v is None or v == "" else str(v)
+
+
+def _factor_ok(s) -> bool:
+    """A factor box holds a usable multiplier: a number greater than zero."""
+    v = _to_float(s)
+    return v is not None and v > 0
+
+
+class VariantPhase(Phase):
+    """
+    The deliberate variations a development run is made with: which test
+    equipment, how many image sets to take, and multipliers on each reagent's
+    target weight and countdown.
+
+    In the chain only when protocol.test_variant is on (see build_phases());
+    a production run never sees it and keeps every default.  Continue writes
+    the choices to the treatments table and goes on to the vent reminder.
+
+    A new run starts from the previous sample's treatment, because development
+    runs come in series that mostly repeat the last settings.  The values are
+    editable only while the run is actually here: once the reagents have used
+    the factors, a look back from a later step must not change them.
+    """
+
+    phase_id   = "variant"
+    prior      = "entry2"
+    next       = "reagent1"         # set per build — the step after vent
+    title      = ""                 # header shows the sample id
+    proceed_to = "vent"
+
+    FIELDS = {"var_r1_wt_fld": "R1_wt_factor", "var_r1_time_fld": "R1_time_factor",
+              "var_r2_wt_fld": "R2_wt_factor", "var_r2_time_fld": "R2_time_factor"}
+
+    def enter(self, pool, slot, arb) -> None:
+        r = slot.record
+        if not r.get("test_equip"):
+            self.carry_over(arb, slot)      # first view of this run
+        live = slot.active_phase == self.phase_id
+
+        self._row(pool, "var_equip_lbl", "Equip", "var_equip_btn",
+                  r.get("test_equip") or "",
+                  on=lambda: self.reset_equip(arb, slot), enabled=live)
+        pool.on("var_equip_btn",
+                (lambda: self.step_equip(arb, slot)) if live else None)
+        self._row(pool, "var_reps_lbl", "Image\nreps", "var_reps_btn",
+                  str(r.get("image_reps") or 1),
+                  on=lambda: self.reset_reps(arb, slot), enabled=live)
+        pool.on("var_reps_btn",
+                (lambda: self.step_reps(arb, slot)) if live else None)
+
+        for lbl, wt_fld, time_fld, n in _VAR_FACTOR_ROWS:
+            pool.put(lbl, f"Reagent {n}", enabled=live)
+            pool.on(lbl, (lambda n=n: self.reset_factors(arb, slot, n))
+                    if live else None)
+            for fld in (wt_fld, time_fld):
+                value = r.get(self.FIELDS[fld], "")
+                pool.put(fld, value, enabled=live)
+                # Yellow marks a box that is holding Continue back.
+                pool.recolor(fld, bg="white" if _factor_ok(value)
+                             else "wt_missing")
+        pool.show(*_VAR_CAPTIONS)
+        pool.show("div1", "div2", "div3")
+        self._chrome(pool, slot, arb, "Continue",
+                     main_on=lambda: self.proceed(arb, slot),
+                     main_enabled=self.ready(slot))
+
+    def ready(self, slot) -> bool:
+        """Every factor box holds a number greater than zero."""
+        return all(_factor_ok(slot.record.get(k)) for k in self.FIELDS.values())
+
+    # ── filling and stepping ────────────────────────────────────────────────────
+
+    def carry_over(self, arb, slot) -> None:
+        """
+        Start this run's choices from the previous treatment, or from the
+        defaults when there is none: the first equipment, one image set, every
+        factor 1.0.
+        """
+        r = slot.record
+        equip = arb.equipment_list()
+        t = arb.latest_treatment() or {}
+        r["test_equip"] = t.get("test_equip") or (equip[0] if equip else "")
+        try:
+            reps = int(t.get("image_reps") or 1)
+        except (TypeError, ValueError):
+            reps = 1
+        r["image_reps"] = min(max(reps, 1), _MAX_IMAGE_REPS)
+        for key in self.FIELDS.values():
+            r[key] = _factor_text(t.get(key))
+
+    def step_equip(self, arb, slot) -> None:
+        """A tap on the value: the next equipment on the list, wrapping."""
+        equip = arb.equipment_list()
+        if not equip:
+            return
+        cur = slot.record.get("test_equip")
+        i = equip.index(cur) if cur in equip else -1
+        slot.record["test_equip"] = equip[(i + 1) % len(equip)]
+        arb.render(slot)
+
+    def reset_equip(self, arb, slot) -> None:
+        equip = arb.equipment_list()
+        if equip:
+            slot.record["test_equip"] = equip[0]
+            arb.render(slot)
+
+    def step_reps(self, arb, slot) -> None:
+        """A tap on the value: 1 -> 2 -> ... -> 5 -> 1."""
+        reps = int(slot.record.get("image_reps") or 1)
+        slot.record["image_reps"] = reps % _MAX_IMAGE_REPS + 1
+        arb.render(slot)
+
+    def reset_reps(self, arb, slot) -> None:
+        slot.record["image_reps"] = 1
+        arb.render(slot)
+
+    def reset_factors(self, arb, slot, n: int) -> None:
+        """A reagent's row label: both its factors back to 1.0."""
+        slot.record[f"R{n}_wt_factor"] = "1.0"
+        slot.record[f"R{n}_time_factor"] = "1.0"
+        arb.render(slot)
+
+    def proceed(self, arb, slot) -> None:
+        if not self.ready(slot):
+            return
+        arb.save_treatment(slot)
+        arb.goto(slot, self.proceed_to)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Vent reminder  (a plain red screen before any reagent is handled)
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -1065,7 +1215,8 @@ def _renumber(arb, slot) -> None:
 # Registry
 # ─────────────────────────────────────────────────────────────────────────────
 
-def build_phases(reagent1_secs: int = 120, preimage: bool = True) -> dict:
+def build_phases(reagent1_secs: int = 120, preimage: bool = True,
+                 test_variant: bool = False) -> dict:
     """
     Return {phase_id: Phase}, the whole protocol.
 
@@ -1088,24 +1239,31 @@ def build_phases(reagent1_secs: int = 120, preimage: bool = True) -> dict:
     place here — the phases either side take their neighbour from this
     function, not from their own class attributes.
 
-    The vent reminder (VentPhase) always follows entry 2's Continue, and its
-    OK leads to whichever step entry 2's NEXT names — the pre-image or
-    reagent 1.
+    The vent reminder (VentPhase) always comes before the first reagent-side
+    step, and its OK leads to the pre-image or to reagent 1.
+
+    `test_variant` (config_repo.test_variant_enabled) inserts VariantPhase
+    between entry 2 and the vent reminder, for development runs.  Off, the
+    chain is exactly the production protocol.
 
     Args:
         reagent1_secs: Countdown for reagent step 1, in seconds.
         preimage:      Whether the protocol includes the pre-image step.
+        test_variant:  Whether runs show the test-variant screen.
     """
+    first = "preimage" if preimage else "reagent1"   # first reagent-side step
+    before = "variant" if test_variant else "entry2"  # the data screen before it
     entry2 = Entry2Phase()
-    entry2.next = "preimage" if preimage else "reagent1"
+    entry2.next = "variant" if test_variant else first
+    entry2.proceed_to = "variant" if test_variant else "vent"
     vent = VentPhase()
-    vent.next_phase = entry2.next
+    vent.next_phase = first
     phases = [
         EntryPhase(),
         entry2,
         vent,
         ReagentPhase("reagent1", reagent1_secs, "reagent2",
-                     prior="preimage" if preimage else "entry2",
+                     prior="preimage" if preimage else before,
                      armed="Weigh the reagent 1 packet",
                      start_label="START\n1"),
         # secs=0 is never read: Reagent2Phase.duration() overrides it outright.
@@ -1131,8 +1289,14 @@ def build_phases(reagent1_secs: int = 120, preimage: bool = True) -> dict:
         ModalPhase("dup", "Sample number already in use",
                    [("New number", _renumber), ("Edit", None)]),
     ]
+    if test_variant:
+        variant = VariantPhase()
+        variant.next = first
+        phases.append(variant)
     if preimage:
-        phases.append(PreImagePhase())
+        pre = PreImagePhase()
+        pre.prior = before
+        phases.append(pre)
     return {p.phase_id: p for p in phases}
 
 
@@ -1399,6 +1563,23 @@ if __name__ == "__main__":
         def retry_capture(self, slot):
             self.close_modal(slot)
         def post_results(self, slot): self.calls.append("post")
+
+        # test-variant treatments.  Modelled, like the numbering: the carry-
+        # over a new run starts from is the last row saved here.
+        EQUIP = ["A Original bottle", "B 250 Ehrl, unprotected",
+                 "C 250 Ehrl, protected"]
+        treatments = {}
+        def equipment_list(self):  return list(self.EQUIP)
+        def latest_treatment(self):
+            return (list(self.treatments.values())[-1] if self.treatments
+                    else None)
+        def save_treatment(self, slot):
+            r = slot.record
+            self.treatments.pop(r["samp_no"], None)   # re-saving moves it last
+            self.treatments[r["samp_no"]] = {
+                "test_equip": r["test_equip"], "image_reps": r["image_reps"],
+                **{k: _to_float(r[k]) for k in VariantPhase.FIELDS.values()}}
+
         def next_sample(self, slot):
             self.calls.append("next_sample"); slot.clear_run(); self.goto(slot, "entry")
 
@@ -1820,5 +2001,94 @@ if __name__ == "__main__":
     check("back to entry",       C.phase, "entry")
     check("number moved on",     C.record["samp_no"] != was, True)
     check("still unclaimed",     C.record["db_rowid"], None)
+
+    print("== test variant: the chain gains a screen between entry2 and vent ==")
+    tv = build_phases(test_variant=True)
+    check("entry2 Continue -> variant", tv["entry2"].proceed_to, "variant")
+    check("entry2 NEXT previews it",    tv["entry2"].next, "variant")
+    check("variant Continue -> vent",   tv["variant"].proceed_to, "vent")
+    check("variant NEXT skips vent",    tv["variant"].next, "preimage")
+    check("preimage <- variant",        tv["preimage"].prior, "variant")
+    plain_tv = build_phases(preimage=False, test_variant=True)
+    check("no pre-image: reagent1 <- variant", plain_tv["reagent1"].prior, "variant")
+    check("off: no variant phase",      "variant" in build_phases(), False)
+    check("off: preimage <- entry2",    build_phases()["preimage"].prior, "entry2")
+
+    print("== test variant: a first run starts from the defaults ==")
+    arb.phases = tv
+    arb.fail_begin = False
+    D = Slot("D"); arb.slots = [D]
+    arb.goto(D, "entry"); press(pool, "main_btn")  # Begin
+    press(pool, "main_btn")                         # Continue -> entry2
+    D.record["samp_grams"] = "100"                  # writethrough sim
+    press(pool, "main_btn")                         # Continue -> variant
+    check("phase variant",       D.phase, "variant")
+    check("first equipment",     pool["var_equip_btn"].label, "A Original bottle")
+    check("one image set",       pool["var_reps_btn"].label, "1")
+    check("factor boxes at 1.0", [pool[f].value for f in VariantPhase.FIELDS],
+          ["1.0"] * 4)
+    check("Continue live",       pool["main_btn"].enabled, True)
+    check("footer like entry2",  (pool["prior_btn"].visible,
+                                  pool["next_btn"].visible,
+                                  pool["menu_btn"].visible), (True, True, True))
+
+    print("== test variant: taps step the choices; labels reset them ==")
+    press(pool, "var_equip_btn"); press(pool, "var_equip_btn")
+    check("equipment stepped",   D.record["test_equip"], "C 250 Ehrl, protected")
+    press(pool, "var_equip_btn")
+    check("and wraps",           D.record["test_equip"], "A Original bottle")
+    press(pool, "var_equip_btn")                    # leave it on B
+    for _ in range(5):
+        press(pool, "var_reps_btn")
+    check("reps 1 -> 5 -> 1",    D.record["image_reps"], 1)
+    press(pool, "var_reps_btn")
+    check("reps stepped",        D.record["image_reps"], 2)
+    press(pool, "var_reps_lbl")
+    check("label resets reps",   D.record["image_reps"], 1)
+    press(pool, "var_reps_btn")                     # leave it at 2
+
+    print("== test variant: a bad factor holds Continue back ==")
+    D.record["R1_time_factor"] = "abc"; arb.render(D)   # writethrough sim
+    check("Continue held",       pool["main_btn"].enabled, False)
+    from palette import color as _color
+    check("bad box is yellow",   pool["var_r1_time_fld"].bg, _color("wt_missing"))
+    check("good box is white",   pool["var_r1_wt_fld"].bg, _color("white"))
+    D.record["R1_time_factor"] = "0"; arb.render(D)
+    check("zero is refused too", pool["main_btn"].enabled, False)
+    press(pool, "var_r1_lbl")
+    check("label puts 1.0 back", (D.record["R1_wt_factor"], D.record["R1_time_factor"]),
+          ("1.0", "1.0"))
+    D.record["R1_time_factor"] = "1.5"; D.record["R2_wt_factor"] = "0.5"
+    arb.render(D)
+    check("Continue live again", pool["main_btn"].enabled, True)
+
+    print("== test variant: Continue saves the treatment and goes to vent ==")
+    press(pool, "main_btn")
+    check("phase vent",          D.phase, "vent")
+    check("treatment saved", arb.treatments[D.record["samp_no"]],
+          {"test_equip": "B 250 Ehrl, unprotected", "image_reps": 2,
+           "R1_wt_factor": 1.0, "R1_time_factor": 1.5,
+           "R2_wt_factor": 0.5, "R2_time_factor": 1.0})
+    press(pool, "vent_ok")
+    check("then preimage",       D.phase, "preimage")
+
+    print("== test variant: a look back from a later step cannot edit ==")
+    press(pool, "prior_btn")                        # preview variant
+    check("previewing variant",  D.phase, "variant")
+    check("factors locked",      pool["var_r1_wt_fld"].enabled, False)
+    check("equipment locked",    pool["var_equip_btn"].enabled, False)
+    check("header offers Resume", pool["main_btn"].label, "Resume")
+    press(pool, "main_btn")                         # Resume
+    check("back on preimage",    D.phase, "preimage")
+
+    print("== test variant: the next run carries the last treatment over ==")
+    E = Slot("E"); arb.slots = [E]
+    arb.goto(E, "entry"); press(pool, "main_btn"); press(pool, "main_btn")
+    press(pool, "main_btn")                         # -> variant
+    check("equipment carried",   E.record["test_equip"], "B 250 Ehrl, unprotected")
+    check("reps carried",        E.record["image_reps"], 2)
+    check("factors carried",     [E.record[k] for k in VariantPhase.FIELDS.values()],
+          ["1.0", "1.5", "0.5", "1.0"])
+    arb.phases = build_phases()
 
     print("\n== all phase self-tests passed ==")

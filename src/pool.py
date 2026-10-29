@@ -177,6 +177,26 @@ class Pool:
         label("result_lbl", L.BODY_LBL3, "white", "label_coral", 13, text="Result")
         field("result_fld", L.BODY_FLD3, 18, "field_blue", editable=False)
 
+        # ── body: test-variant screen (VariantPhase) ─────────────────────────────
+        # Row labels are Buttons, as on the entry screens: pressing one puts
+        # that row back to its default.  The Equip and Reps values are Buttons
+        # too — each tap steps to the next choice — and the four factors are
+        # TextBoxes typed from the keyboard.
+        button("var_equip_lbl", L.BODY_LBL1,  "white", "label_coral", 13, text="Equip")
+        button("var_equip_btn", L.BODY_FLD1,  "black", "btn_gray", 15)
+        button("var_reps_lbl",  L.BODY_LBL2,  "white", "label_coral", 13, text="Image\nreps")
+        button("var_reps_btn",  L.BODY_FLD2s, "black", "btn_gray", 20)
+        button("var_r1_lbl",    L.BODY_LBL3,  "white", "label_coral", 13, text="Reagent 1")
+        label("var_r1_wt_cap",  L.VAR_WT_CAP3,   "black", "white", 13, text="wt")
+        field("var_r1_wt_fld",  L.VAR_WT_FLD3,   18, "field_blue", align="center")
+        label("var_r1_time_cap", L.VAR_TIME_CAP3, "black", "white", 13, text="time")
+        field("var_r1_time_fld", L.VAR_TIME_FLD3, 18, "field_blue", align="center")
+        button("var_r2_lbl",    L.BODY_LBL4,  "white", "label_coral", 13, text="Reagent 2")
+        label("var_r2_wt_cap",  L.VAR_WT_CAP4,   "black", "white", 13, text="wt")
+        field("var_r2_wt_fld",  L.VAR_WT_FLD4,   18, "field_blue", align="center")
+        label("var_r2_time_cap", L.VAR_TIME_CAP4, "black", "white", 13, text="time")
+        field("var_r2_time_fld", L.VAR_TIME_FLD4, 18, "field_blue", align="center")
+
         # ── body: vent reminder (VentPhase) — a red backdrop over the whole
         # screen, built first so the text and OK land on top of it.
         rect("vent_bg_rect", L.VENT_BG, "vent_bg")

@@ -117,6 +117,16 @@ MANUAL_LBL  = Rect(  8, 128, 176, 28)   # "Manually read color:" prompt
 READ_FLD    = Rect(190, 128, 122, 28)   # manual colour reading entry
 READ_LBL    = Rect(  8, 158, 304, 28)   # capture instruction (single line)
 
+# ── body: test-variant screen (VariantPhase) ───────────────────────────────────
+# Rows 1-2 reuse the generic label/field rows (Equip and Reps, whose values are
+# tap-to-step buttons).  Rows 3-4 split the field span into two captioned
+# factor boxes per reagent:
+#     [Reagent 1]  wt [ 1.0 ]  time [ 1.0 ]
+VAR_WT_CAP3   = Rect( 82, 135,  26, 35); VAR_WT_FLD3   = Rect(110, 133,  76, 39)
+VAR_TIME_CAP3 = Rect(190, 135,  38, 35); VAR_TIME_FLD3 = Rect(230, 133,  82, 39)
+VAR_WT_CAP4   = Rect( 82, 175,  26, 35); VAR_WT_FLD4   = Rect(110, 173,  76, 39)
+VAR_TIME_CAP4 = Rect(190, 175,  38, 35); VAR_TIME_FLD4 = Rect(230, 173,  82, 39)
+
 # ── vent reminder (VentPhase): a plain red screen between entry 2 and the
 # reagents.  The backdrop fills the whole screen; the text sits above the
 # centred OK button.
