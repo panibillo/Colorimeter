@@ -94,6 +94,11 @@ class Slot:
     stir_deadline    : monotonic deadline for the next stir sub-alarm, or None
     stir_role        : "reagent1" | "reagent2" | None — which countdown armed the sub-alarm
     stir_fired       : True once the sub-alarm has fired, used to update instr text
+    pre_rep      : pre-image sets finished this run (0 until the first lands)
+    cap_rep      : measurement sets finished this run
+    rep_files    : {rep number: archive path} for this run's image sets.  Set 1
+                   is the sample's own file (also samples.h5file); set k >= 2
+                   goes in its own "{samp_no}rep{k}.h5"
     """
 
     name:         str
@@ -109,6 +114,9 @@ class Slot:
     stir_deadline:      Optional[float] = None
     stir_role:          Optional[str]   = None
     stir_fired:         bool            = False
+    pre_rep:      int                  = 0
+    cap_rep:      int                  = 0
+    rep_files:    dict                 = field(default_factory=dict)
 
     def ready_to_begin(self) -> bool:
         """
@@ -135,3 +143,6 @@ class Slot:
         self.stir_deadline      = None
         self.stir_role          = None
         self.stir_fired         = False
+        self.pre_rep   = 0
+        self.cap_rep   = 0
+        self.rep_files = {}

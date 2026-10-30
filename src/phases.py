@@ -38,6 +38,7 @@ Arbiter contract (what phases call; arbiter.py implements it)
     arb.reagent_weigh_plan(slot, n) ReagentWeights(initial, final, net, target,
                                     overage, tol) for the weight grid's row n
     arb.reagent_finals_complete(slot) -> bool  both final weighings entered
+    arb.image_reps(slot)            image sets taken at each imaging step (1..5)
     arb.reagent_time_factor(slot, n) multiplier on reagent `n`'s countdown
                                     (1.0 unless a test variant says otherwise)
     arb.reagent1_stir_seconds()     fixed stir duration for reagent 1
@@ -611,6 +612,15 @@ _VAR_CAPTIONS = ("var_r1_wt_cap", "var_r1_time_cap",
                  "var_r2_wt_cap", "var_r2_time_cap")
 
 
+def _image_reps(v) -> int:
+    """A stored image_reps as a usable count, 1.._MAX_IMAGE_REPS (1 if unset)."""
+    try:
+        n = int(v)
+    except (TypeError, ValueError):
+        return 1
+    return min(max(n, 1), _MAX_IMAGE_REPS)
+
+
 def _factor_text(v) -> str:
     """A stored factor as box text: 1.5 -> '1.5', missing -> '1.0'."""
     return "1.0" if v is None or v == "" else str(v)
@@ -733,7 +743,7 @@ class VariantPhase(Phase):
 
     def step_reps(self, arb, slot) -> None:
         """A tap on the value: 1 -> 2 -> ... -> 5 -> 1."""
-        reps = int(slot.record.get("image_reps") or 1)
+        reps = _image_reps(slot.record.get("image_reps"))
         slot.record["image_reps"] = reps % _MAX_IMAGE_REPS + 1
         arb.render(slot)
 
@@ -803,6 +813,11 @@ class PreImagePhase(Phase):
     The images go into the sample's archive under /pre; the measurement sweep
     later adds to the same file.  This step is what creates it, so h5file is
     stamped here.
+
+    A test-variant run may ask for more than one image set (image_reps).  Each
+    set after the first goes in its own "{samp_no}rep{k}.h5", and between sets
+    the run stays here and asks for the cassette to be removed and replaced;
+    only the last set moves the run on to reagent 1.
     """
 
     phase_id = "preimage"
@@ -825,11 +840,18 @@ class PreImagePhase(Phase):
             pool["run_btn"].size = _RUN_BTN_SIZE_2LINE
             _line(pool, "instr1", "Imaging - DO NOT TOUCH")
         else:
-            pool.put("run_btn", f"Pre-image\n{slot.name}",
+            reps = arb.image_reps(slot)
+            between = is_live and 0 < slot.pre_rep < reps
+            label = (f"Pre-image\n{min(slot.pre_rep + 1, reps)} of {reps}"
+                     if reps > 1 else f"Pre-image\n{slot.name}")
+            pool.put("run_btn", label,
                      on=lambda: self.capture(arb, slot),
                      enabled=is_live and arb.capture_available())
             pool["run_btn"].size = _RUN_BTN_SIZE_2LINE
-            _line(pool, "instr1", "Insert new strip, weigh reagent 1")
+            if between:
+                _line(pool, "instr1", "Remove & replace cassette", yellow=True)
+            else:
+                _line(pool, "instr1", "Insert new strip, weigh reagent 1")
 
         # The grid is on screen from here to the end of the run: reagent 1 is
         # weighed during this step, and reagent 2's row shows what is still owed.
@@ -1035,6 +1057,11 @@ class ReadPhase(Phase):
     analysed.  If the capture finishes with either final weight missing, the run
     stops here instead of advancing: the weight grid comes back in place of the
     colour-reading row, and ANALYZE lights only once both finals are entered.
+
+    A test-variant run may take several image sets (image_reps).  Between sets
+    the run stays here, the cassette is removed and replaced, and CAPTURE
+    reads "Capture k of n".  capture_end is stamped only after the last set,
+    so the weights gate above waits for it without a flag of its own.
     """
 
     phase_id = "read"
@@ -1113,6 +1140,7 @@ class ReadPhase(Phase):
         # entry field — its text never changes, so a bare show() suffices.
         pool.show("manual_lbl")
         pool.put("color_fld", slot.record.get("manual_read", ""))
+        pool.recolor("color_lbl", bg="white")     # yellow only between sets
         if is_live and slot.capturing:
             pool.put("run_btn", "RUNNING", enabled=False)
             pool["run_btn"].size = _RUN_BTN_SIZE_2LINE
@@ -1121,13 +1149,22 @@ class ReadPhase(Phase):
             # Reflect what a press will actually do — the Menu -> Advanced ->
             # Capture screen's Path selection governs this capture too, so a
             # stale "CAPTURE" label can no longer hide a full calibration sweep.
-            label = ("Calibrate\nExposures" if arb.cap_mode == "calibration"
-                     else f"Capture\n{slot.name}")
+            reps = arb.image_reps(slot)
+            between = is_live and 0 < slot.cap_rep < reps
+            if arb.cap_mode == "calibration":
+                label = "Calibrate\nExposures"
+            elif reps > 1:
+                label = f"Capture\n{min(slot.cap_rep + 1, reps)} of {reps}"
+            else:
+                label = f"Capture\n{slot.name}"
             pool.put("run_btn", label,
                      on=lambda: self.capture(arb, slot, pool),
                      enabled=is_live and arb.capture_available())
             pool["run_btn"].size = _RUN_BTN_SIZE_2LINE
-            pool.put("color_lbl", "Insert strip & press Capture")
+            pool.put("color_lbl", "Remove & replace cassette" if between
+                     else "Insert strip & press Capture")
+            if between:
+                pool.recolor("color_lbl", bg="field_yellow")
         self._show_steps(pool, slot)
         self._show_collect(pool, slot)
         # A capture in flight does NOT lock nav either: it is arbiter-owned and
@@ -1504,18 +1541,28 @@ if __name__ == "__main__":
 
         # capture / analysis
         def capture_available(self):    return self.capturing_slot is None
+        def image_reps(self, slot):
+            return _image_reps(slot.record.get("image_reps"))
         def request_capture(self, slot):
             if self.capturing_slot is None:
                 self.capturing_slot = slot
-                self.persist(slot, capture_start=self.epoch(),
-                             manual_read=slot.record.get("manual_read", ""))
+                if slot.cap_rep == 0:             # the first set starts the clock
+                    self.persist(slot, capture_start=self.epoch())
+                self.persist(slot, manual_read=slot.record.get("manual_read", ""))
                 return True
             return False
         def complete_capture(self, slot):        # driven by the loop in real life
-            slot.timer.stop(self.now())
             slot.capturing = False
             self.capturing_slot = None
-            self.persist(slot, capture_end=self.epoch(), h5file="fake.h5")
+            slot.cap_rep += 1
+            k = slot.cap_rep
+            slot.rep_files.setdefault(k, "fake.h5" if k == 1 else f"fakerep{k}.h5")
+            if k < self.image_reps(slot):         # another set to come
+                slot.progress = f"Set {k} of {self.image_reps(slot)} stored"
+                self.render(slot)
+                return
+            slot.timer.stop(self.now())
+            self.persist(slot, capture_end=self.epoch(), h5file=slot.rep_files[1])
             # Mirrors the real arbiter: analysis waits on both final weighings.
             if self.reagent_finals_complete(slot):
                 self.goto(slot, "analysis")
@@ -1534,7 +1581,15 @@ if __name__ == "__main__":
         def complete_preimage(self, slot):
             slot.capturing = False
             self.capturing_slot = None
-            self.persist(slot, h5file="fake.h5")
+            slot.pre_rep += 1
+            k = slot.pre_rep
+            slot.rep_files[k] = "fake.h5" if k == 1 else f"fakerep{k}.h5"
+            if k == 1:
+                self.persist(slot, h5file="fake.h5")
+            if k < self.image_reps(slot):         # stay for the next set
+                slot.progress = f"Pre-image {k} of {self.image_reps(slot)} stored"
+                self.render(slot)
+                return
             self.goto(slot, "reagent1")
         def start_analysis(self, slot):  self.calls.append("start_analysis")
         def analysis_done(self, slot, text):
@@ -2131,5 +2186,57 @@ if __name__ == "__main__":
           round(arb.reagent_weigh_plan(P, 2).target, 3), 1.3)
     check("production: countdown as before", tv["reagent1"].duration(P, arb), 120)
     arb.phases = build_phases()
+
+    print("== image reps: each set is pre-imaged, with a cassette swap between ==")
+    R = Slot("R"); arb.slots = [R]
+    R.record.update(samp_no="ZP2000", image_reps=2)
+    arb.goto(R, "preimage")
+    check("button counts sets",  pool["run_btn"].label, "Pre-image\n1 of 2")
+    check("first set: insert",   pool["instr1"].text, "Insert new strip, weigh reagent 1")
+    press(pool, "run_btn")
+    check("set 1 running",       R.capturing, True)
+    arb.complete_preimage(R)
+    check("stays on preimage",   R.phase, "preimage")
+    check("set 1 is the h5file", R.record["h5file"], "fake.h5")
+    check("button offers set 2", pool["run_btn"].label, "Pre-image\n2 of 2")
+    check("asks for a swap",     pool["instr1"].text, "Remove & replace cassette")
+    check("in yellow",           pool["instr1"].bg, _color("field_yellow"))
+    press(pool, "run_btn"); arb.complete_preimage(R)
+    check("last set moves on",   R.phase, "reagent1")
+    check("each set its own file", R.rep_files, {1: "fake.h5", 2: "fakerep2.h5"})
+    check("h5file still set 1",  R.record["h5file"], "fake.h5")
+
+    print("== image reps: each set is measured, the reading ends after the last ==")
+    arb.goto(R, "read")
+    check("button counts sets",  pool["run_btn"].label, "Capture\n1 of 2")
+    check("first set: insert",   pool["color_lbl"].text, "Insert strip & press Capture")
+    press(pool, "run_btn")
+    _start = R.record["capture_start"]
+    check("set 1 starts the clock", _start, arb.epoch_s)
+    arb.complete_capture(R)
+    check("stays on read",       R.phase, "read")
+    check("no capture_end yet",  R.record["capture_end"], None)
+    check("button offers set 2", pool["run_btn"].label, "Capture\n2 of 2")
+    check("asks for a swap",     pool["color_lbl"].text, "Remove & replace cassette")
+    check("in yellow",           pool["color_lbl"].bg, _color("field_yellow"))
+    check("manual read row kept", pool["color_fld"].visible, True)
+    arb.epoch_s += 60
+    press(pool, "run_btn")
+    check("set 2 leaves capture_start", R.record["capture_start"], _start)
+    arb.complete_capture(R)
+    check("capture_end after the last", R.record["capture_end"], arb.epoch_s)
+    check("h5file is set 1's",   R.record["h5file"], "fake.h5")
+    check("on to the weights gate", pool["run_btn"].label, "ANALYZE")
+    arb.epoch_s -= 60
+    R.clear_run()
+    check("a new run starts over", (R.pre_rep, R.cap_rep, R.rep_files), (0, 0, {}))
+
+    print("== image reps: one set reads as before ==")
+    S = Slot("S"); arb.slots = [S]
+    arb.goto(S, "preimage")
+    check("pre-image names the slot", pool["run_btn"].label, "Pre-image\nS")
+    arb.goto(S, "read")
+    check("capture names the slot",   pool["run_btn"].label, "Capture\nS")
+    check("reading prompt in white",  pool["color_lbl"].bg, _color("white"))
 
     print("\n== all phase self-tests passed ==")

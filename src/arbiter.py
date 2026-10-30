@@ -65,7 +65,7 @@ from pool import Pool
 from slot import Slot
 from phases import (build_phases, EntryPhase, Entry2Phase, ReadPhase,
                     VariantPhase, ReagentWeights,
-                    _factor_value, _mmss, _to_float)
+                    _factor_value, _image_reps, _mmss, _to_float)
 
 log = logging.getLogger(__name__)
 
@@ -3643,6 +3643,24 @@ class Arbiter:
         """Current Menu -> Advanced -> Capture path: 'calibration' | 'normal'."""
         return self._cap_mode
 
+    def image_reps(self, slot: Slot) -> int:
+        """
+        Image sets this run takes at each imaging step: the test-variant
+        screen's choice, 1 on a production run.
+        """
+        return _image_reps(slot.record.get("image_reps"))
+
+    def _rep_archive(self, slot: Slot, k: int) -> Path:
+        """
+        A new archive for image set `k` >= 2: "{samp_no}rep{k}.h5".
+
+        Set 1 is the sample's own file, named by the capture runner.  Later
+        sets each get a file of their own so that one set's pre-image and
+        measurement stay together and never mix with another set's.
+        """
+        stem = f"{slot.record.get('samp_no') or 'sample'}rep{k}"
+        return config.capture_archive_path(config.capture_dir(), stem)
+
     def _measurement_config(self, slot: Slot):
         """
         Build the CaptureConfig for `slot`'s measurement sweep.
@@ -3662,11 +3680,17 @@ class Arbiter:
         cost the pre-image, never the reading.
         """
         from capture_runner import CaptureConfig
-        pre = str(slot.record.get("h5file") or "")
+        k = slot.cap_rep + 1
+        pre = (str(slot.record.get("h5file") or "") if k == 1
+               else str(slot.rep_files.get(k) or ""))
         archive = Path(pre) if pre and Path(pre).exists() else None
         if pre and archive is None:
             log.warning("Arbiter: slot %s pre-image archive %s is gone — "
                         "the measurement opens a new one", slot.name, pre)
+        if k >= 2 and archive is None:
+            # No pre-image for this set (pre-imaging off, or its file gone):
+            # the set still gets its own file rather than joining set 1's.
+            archive = self._rep_archive(slot, k)
         return CaptureConfig(mode=self._cap_mode, exposure_group=self._cap_group,
                              sample_rowid=slot.record.get("db_rowid"),
                              archive_path=archive)
@@ -3685,9 +3709,14 @@ class Arbiter:
         not reacted yet.
         """
         from capture_runner import CaptureConfig, MODE_PRE
+        k = slot.pre_rep + 1
+        # Set 1 lets the runner name the file after the sample; set k >= 2
+        # opens its own "{samp_no}rep{k}.h5" (see _rep_archive).
         return CaptureConfig(mode=MODE_PRE, exposure_group="1",
                              led_colors=config.capture_preimage_led_order(),
-                             sample_rowid=slot.record.get("db_rowid"))
+                             sample_rowid=slot.record.get("db_rowid"),
+                             archive_path=(self._rep_archive(slot, k)
+                                           if k >= 2 else None))
 
     def request_preimage(self, slot: Slot) -> bool:
         """
@@ -3736,7 +3765,8 @@ class Arbiter:
                      self._capture_slot.name if self._capture_slot else "?")
             return False
 
-        if self._prefetch is not None and self._prefetch_slot is slot:
+        if (self._prefetch is not None and self._prefetch_slot is slot
+                and slot.cap_rep == 0):
             # A prefetch already exists for exactly this slot — resume it if
             # it finished and nothing else has touched the shared camera
             # since; otherwise (still running, or stale) abandon it and fall
@@ -3777,10 +3807,13 @@ class Arbiter:
         slot.progress = "Starting camera..."
         self._cap_progress_kind = None
         self._cap_progress_n = 0
-        self.persist(slot, capture_start=self.epoch(),
-                     manual_read=slot.record.get("manual_read", ""))
-        log.info("Arbiter: capture started for slot %s (mode=%s, group=%s)",
-                 slot.name, self._cap_mode, self._cap_group)
+        # The reading's clock starts with its first image set, not a later one.
+        if slot.cap_rep == 0:
+            self.persist(slot, capture_start=self.epoch())
+        self.persist(slot, manual_read=slot.record.get("manual_read", ""))
+        log.info("Arbiter: capture started for slot %s (mode=%s, group=%s, "
+                 "set %d of %d)", slot.name, self._cap_mode, self._cap_group,
+                 slot.cap_rep + 1, self.image_reps(slot))
         return True
 
     def _new_session(self, cfg=None, runner_factory=None):
@@ -4019,17 +4052,45 @@ class Arbiter:
             # holding this sample's images, and this run is what created it —
             # but not capture_end, which belongs to the measurement. Nothing
             # is analysed yet, so the run simply moves on to reagent 1.
+            #
+            # A run taking several image sets stays here until the last one:
+            # each set after the first has its own file, and only set 1's is
+            # the sample's h5file.
             owner.capturing = False
-            self.persist(owner, h5file=str(session.out_path)
-                                       if session.out_path else "")
+            owner.pre_rep += 1
+            k, reps = owner.pre_rep, self.image_reps(owner)
+            if session.out_path:
+                owner.rep_files[k] = Path(session.out_path)
+            if k == 1:
+                self.persist(owner, h5file=str(session.out_path)
+                                           if session.out_path else "")
+            if k < reps:
+                owner.progress = f"Pre-image {k} of {reps} stored"
+                self.render(owner)
+                return
             owner.progress = "Pre-image stored"
             self.goto(owner, "reagent1")
             return
+        owner.capturing = False
+        owner.cap_rep += 1
+        k, reps = owner.cap_rep, self.image_reps(owner)
+        if session.out_path:
+            owner.rep_files[k] = Path(session.out_path)
+        if k < reps:
+            # More image sets to come: the reading is not over, so no
+            # capture_end yet, and the elapsed timer keeps running.  The read
+            # phase asks for the cassette to be replaced and offers the next.
+            owner.progress = f"Set {k} of {reps} stored"
+            self.render(owner)
+            if (self._focused is not None and self._focused is not owner
+                    and self._focused.phase == "read"):
+                self.render(self._focused)
+            return
         if owner.timer is not None:
             owner.timer.stop(self.now())     # freeze the final elapsed time
-        owner.capturing = False
+        first = owner.rep_files.get(1) or session.out_path
         self.persist(owner, capture_end=self.epoch(),
-                     h5file=str(session.out_path) if session.out_path else "")
+                     h5file=str(first) if first else "")
         # The archive was written with a copy of the sample record taken
         # before the first photograph, so it is missing everything decided
         # since — including the capture_end and h5file persisted on the line
@@ -4038,8 +4099,10 @@ class Arbiter:
         # sample. See capture_meta.update_archive_sample().
         import capture_meta          # imported here, like the other capture
                                      # modules, to keep it off the startup path
-        capture_meta.update_archive_sample(session.out_path,
-                                           owner.record.get("db_rowid"))
+        # Every image set's file gets the finished record, not only set 1's.
+        for path in sorted({str(f) for f in owner.rep_files.values()}):
+            capture_meta.update_archive_sample(path,
+                                               owner.record.get("db_rowid"))
         # Analysis divides by how much reagent the sample actually received, so
         # a run whose packets were never re-weighed has nothing to divide by.
         # Rather than analyse a sample we cannot describe, hold on the read
@@ -4156,9 +4219,13 @@ class Arbiter:
         # the archive's copy of it again here — the refresh done when the
         # capture ended happened before this existed. Same call, second time;
         # see capture_meta.update_archive_sample().
+        # Every image set's file, as in pump_capture.
         import capture_meta          # as in pump_capture — kept off startup
-        capture_meta.update_archive_sample(slot.record.get("h5file"),
-                                           slot.record.get("db_rowid"))
+        files = ({str(f) for f in slot.rep_files.values()}
+                 or {slot.record.get("h5file")})
+        for path in sorted(files, key=str):
+            capture_meta.update_archive_sample(path,
+                                               slot.record.get("db_rowid"))
         log.info("Arbiter: analysis done for slot %s", slot.name)
         self.render(slot)
 
@@ -5831,6 +5898,7 @@ def _selftest() -> None:
     check("fresh run completes", arb.capture_available(), True)
 
     print("== fresh prefetch: promoted (not restarted) at CAPTURE ==")
+    A.cap_rep = 0          # a new reading: only a first image set is prefetched
     A.active_phase = "reagent2"
     A.timer = TimerState.down(budget - 1, arb.now())
     arb._maybe_start_prefetch()
@@ -5924,6 +5992,7 @@ def _selftest() -> None:
     A.record["db_rowid"] = 7
     A.record["h5file"] = ""
     A.record["capture_end"] = None
+    A.pre_rep = A.cap_rep = 0; A.rep_files = {}     # a new run, as clear_run
     A.active_phase = A.phase = "preimage"
     cap_pre = _FakeCapture(mode="pre")
     arb._capture_factory = lambda: cap_pre
@@ -5946,6 +6015,85 @@ def _selftest() -> None:
         cfg = arb._measurement_config(A)
         check("joins the file that is there", str(cfg.archive_path), fh.name)
     A.record["h5file"] = ""
+    arb._capture_factory = _FakeCapture
+
+    print("== image reps: each set after the first has its own archive ==")
+    # No db_rowid, so nothing here reaches the samples table, and the archive
+    # refresh is caught rather than run: the fakes write no real files.
+    import capture_meta as _cm
+    _saved_a = (dict(A.record), A.phase, A.active_phase, A.timer, A.running)
+    _capdir = Path(_tf.mkdtemp())
+    _real_capdir, _real_refresh = config.capture_dir, _cm.update_archive_sample
+    _refreshed = []
+    config.capture_dir = lambda: _capdir
+    _cm.update_archive_sample = lambda p, rowid: _refreshed.append(str(p)) or True
+    _rep2 = _capdir / f"ZP9001rep2{config.get('capture', 'extension')}"
+    A.record.update(db_rowid=None, samp_no="ZP9001", image_reps=2,
+                    h5file="", capture_start=None, capture_end=None)
+    A.pre_rep = A.cap_rep = 0; A.rep_files = {}
+    A.active_phase = A.phase = "preimage"
+    check("set 1 pre-image: the runner names it",
+          arb._preimage_config(A).archive_path, None)
+    cap_pre = _FakeCapture(mode="pre")
+    arb._capture_factory = lambda: cap_pre
+    arb.request_preimage(A); A.capturing = True
+    for _ in range(5):
+        arb.pump_capture()
+    check("stays on preimage",   A.phase, "preimage")
+    check("set 1 is the h5file", A.record["h5file"], "fake.h5")
+    arb.focus(A)
+    check("button offers set 2", arb._pool["run_btn"].label, "Pre-image\n2 of 2")
+    check("set 2 pre-image: its own file",
+          arb._preimage_config(A).archive_path, _rep2)
+    cap_pre2 = _FakeCapture(mode="pre"); cap_pre2.out_path = _rep2
+    _rep2.touch()                                   # as the run would leave it
+    arb._capture_factory = lambda: cap_pre2
+    arb.request_preimage(A); A.capturing = True
+    for _ in range(5):
+        arb.pump_capture()
+    check("last set moves on",   A.phase, "reagent1")
+    check("both sets remembered", A.rep_files, {1: Path("fake.h5"), 2: _rep2})
+    check("h5file still set 1",  A.record["h5file"], "fake.h5")
+
+    print("== image reps: each measurement joins its own set's file ==")
+    A.cap_rep = 1
+    check("set 2 joins set 2's pre-image",
+          arb._measurement_config(A).archive_path, _rep2)
+    _rep2.unlink()
+    check("with no pre-image, set 2 still gets its own file",
+          arb._measurement_config(A).archive_path, _rep2)
+    _rep2.touch()
+    A.cap_rep = 0
+    arb.goto(A, "read")
+    cap_m1 = _FakeCapture()
+    arb._capture_factory = lambda: cap_m1
+    check("set 1 granted",       arb.request_capture(A), True)
+    A.capturing = True
+    for _ in range(5):
+        arb.pump_capture()
+    check("stays on read",       A.phase, "read")
+    check("no capture_end yet",  A.record["capture_end"], None)
+    check("button offers set 2", arb._pool["run_btn"].label, "Capture\n2 of 2")
+    check("asks for a swap",     arb._pool["color_lbl"].text,
+          "Remove & replace cassette")
+    check("no archive refreshed yet", _refreshed, [])
+    A.record["capture_start"] = 123                 # marks set 1's stamp
+    cap_m2 = _FakeCapture(); cap_m2.out_path = _rep2
+    arb._capture_factory = lambda: cap_m2
+    check("set 2 granted",       arb.request_capture(A), True)
+    check("set 2 leaves capture_start", A.record["capture_start"], 123)
+    A.capturing = True
+    for _ in range(5):
+        arb.pump_capture()
+    check("capture_end after the last", bool(A.record["capture_end"]), True)
+    check("h5file is set 1's",   A.record["h5file"], "fake.h5")
+    check("every set's archive refreshed",
+          sorted(_refreshed), sorted(["fake.h5", str(_rep2)]))
+    config.capture_dir, _cm.update_archive_sample = _real_capdir, _real_refresh
+    A.clear_run()
+    (A.record, A.phase, A.active_phase, A.timer, A.running) = _saved_a
+    import shutil as _sh
+    _sh.rmtree(_capdir)
     arb._capture_factory = _FakeCapture
 
     # ── Capture screen (Menu → Advanced → Capture) ───────────────────────────
