@@ -330,7 +330,7 @@ class TestProblemList(SplashTestCase):
 
         lines = _problem_lines([("fail", "Database: broken")] + many)
 
-        self.assertEqual(lines[0], ("fail", "Database: broken"))
+        self.assertEqual(lines[0], ("fail", "> Database: broken"))
 
 
 class TestNeverRaises(unittest.TestCase):

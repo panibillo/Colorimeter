@@ -145,7 +145,7 @@ def _problem_lines(found) -> list:
 
     Example:
         >>> _problem_lines([("warn", "a")])
-        [('warn', 'a')]
+        [('warn', '> a')]
     """
     rows = []
     for i, (status, text) in enumerate(found):
@@ -840,8 +840,8 @@ if __name__ == "__main__":
     check("the failure is shown",   "missing table roi" in shown, True)
     check("the warning too",        "no device detected" in shown, True)
     check("the steps are gone",     "Configuration" in shown, False)
-    check("failure drawn in red",   d.colors()[0], color("edited_text"))
-    check("warning drawn in amber", d.colors()[-1], color("step_running"))
+    check("failure drawn in red",   d.colors()[0], color("fail_text"))
+    check("warning drawn as a warning", d.colors()[-1], color("warning_text"))
 
     print("== and survives a repaint ==")
     d.texts.clear()
@@ -865,7 +865,7 @@ if __name__ == "__main__":
     check("fits the region", len(lines) <= PROBLEM_LINES, True)
     check("says how many were dropped", "more" in lines[-1][1], True)
     check("a failure is never the one dropped",
-          _problem_lines([("fail", "first")] + many)[0][1], "first")
+          _problem_lines([("fail", "first")] + many)[0][1], "> first")
 
     print("== a broken display still yields a choice, never raises ==")
     class _BrokenDisplay:
