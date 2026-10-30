@@ -5704,6 +5704,22 @@ def _selftest() -> None:
     logging.basicConfig(level=logging.WARNING,
                         format="%(levelname)-8s [%(name)s] %(message)s")
 
+    # Every database write this test makes goes to a throwaway copy, never to
+    # the live database: switched before anything else touches it, bootstrap
+    # included.  sqlite's backup API rather than a file copy, so the snapshot
+    # is consistent even if the app has the live file open.
+    import shutil
+    import tempfile
+    import db_manager as _db
+    _tmpdir = tempfile.mkdtemp()
+    _tmpdb = Path(_tmpdir) / "arbiter_selftest.sqlite"
+    with sqlite3.connect(_db.DBNAME) as _live, sqlite3.connect(_tmpdb) as _copy:
+        _live.backup(_copy)
+    _live.close(); _copy.close()
+    _db.DBNAME = str(_tmpdb)
+    # Settings are rows in the database, so the cache must come from the copy.
+    config.load(reload=True)
+
     # The same guarantee main.py gives the real Arbiter: every parameter this
     # test reads has an active row before anything reads it.  Without it the
     # test runs against whatever the developer's database happens to hold, so
@@ -6097,19 +6113,8 @@ def _selftest() -> None:
     arb._capture_factory = _FakeCapture
 
     # ── Capture screen (Menu → Advanced → Capture) ───────────────────────────
-    # Runs against a throwaway copy of the DB so the exposure table and the
-    # saved default group are exercised for real without touching live data.
-    import shutil
-    import tempfile
-    import db_manager as _db
-    _tmpdir = tempfile.mkdtemp()
-    _tmpdb = Path(_tmpdir) / "arbiter_selftest.sqlite"
-    shutil.copy(Path(_db.DBNAME), _tmpdb)     # _db.DBNAME is the live DB
-    _db.DBNAME = str(_tmpdb)
-    # Settings are rows in that database now, so the copy also isolates the
-    # Config screen's writes below — but the cache was filled from the live DB
-    # during construction, so it has to be refilled from the copy.
-    config.load(reload=True)
+    # Like everything here, against the throwaway copy made at the top, so the
+    # exposure table and the saved default group are exercised for real.
     _db.write_one("DELETE FROM exposure")
 
     def saved_group():
