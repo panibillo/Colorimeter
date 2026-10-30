@@ -38,6 +38,8 @@ Arbiter contract (what phases call; arbiter.py implements it)
     arb.reagent_weigh_plan(slot, n) ReagentWeights(initial, final, net, target,
                                     overage, tol) for the weight grid's row n
     arb.reagent_finals_complete(slot) -> bool  both final weighings entered
+    arb.reagent_time_factor(slot, n) multiplier on reagent `n`'s countdown
+                                    (1.0 unless a test variant says otherwise)
     arb.reagent1_stir_seconds()     fixed stir duration for reagent 1
     arb.reagent2_stir_plan(slot)    temperature-compensated stir duration
                                     for reagent 2
@@ -620,6 +622,17 @@ def _factor_ok(s) -> bool:
     return v is not None and v > 0
 
 
+def _factor_value(s) -> float:
+    """
+    A stored factor as the multiplier to apply: 1.0 unless it is usable.
+
+    The variant screen will not let a run past it with a bad factor, so the
+    1.0 fallback only answers for a production run (defaults) or a record that
+    never went through the screen.
+    """
+    return _to_float(s) if _factor_ok(s) else 1.0
+
+
 class VariantPhase(Phase):
     """
     The deliberate variations a development run is made with: which test
@@ -871,10 +884,11 @@ class ReagentPhase(Phase):
 
         Fixed here, and read fresh on every render and every START rather than
         cached, so a duration edited in Menu takes effect on the next run
-        without a rebuild.  Overridden by Reagent2Phase, whose answer depends on
-        the sample.
+        without a rebuild.  Scaled by the run's time factor (1.0 outside a
+        test-variant run).  Overridden by Reagent2Phase, whose base answer
+        depends on the sample.
         """
-        return self.secs
+        return max(1, round(self.secs * arb.reagent_time_factor(slot, 1)))
 
     def stir_secs(self, slot, arb) -> int:
         """
@@ -986,7 +1000,8 @@ class Reagent2Phase(ReagentPhase):
     """
 
     def duration(self, slot, arb) -> int:
-        return arb.reagent2_plan(slot)[0]
+        return max(1, round(arb.reagent2_plan(slot)[0]
+                            * arb.reagent_time_factor(slot, 2)))
 
     def stir_secs(self, slot, arb) -> int:
         """Stir sub-alarm duration for reagent 2 (temperature-compensated)."""
@@ -1390,11 +1405,15 @@ if __name__ == "__main__":
             else:
                 net = initial - final
 
-            target = None if sample_wt is None else sample_wt / 100.0 * ratio
+            target = (None if sample_wt is None else sample_wt / 100.0 * ratio
+                      * _factor_value(slot.record.get(f"R{n}_wt_factor")))
             overage = None if (net is None or target is None) else net - target
 
             return ReagentWeights(initial=initial, final=final, net=net,
                                    target=target, overage=overage, tol=tol)
+
+        def reagent_time_factor(self, slot, n):
+            return _factor_value(slot.record.get(f"R{n}_time_factor"))
 
         def reagent_finals_complete(self, slot):
             return all(str(slot.record.get(f"reagent{n}_final_wt", "")).strip()
@@ -2089,6 +2108,28 @@ if __name__ == "__main__":
     check("reps carried",        E.record["image_reps"], 2)
     check("factors carried",     [E.record[k] for k in VariantPhase.FIELDS.values()],
           ["1.0", "1.5", "0.5", "1.0"])
+
+    print("== test variant: the factors scale targets and countdowns ==")
+    # D: 100 g sample, R1 time x1.5, R2 weight x0.5 (saved above).
+    check("R1 target unscaled",  round(arb.reagent_weigh_plan(D, 1).target, 3), 2.9)
+    check("R2 target halved",    round(arb.reagent_weigh_plan(D, 2).target, 3), 0.65)
+    arb.goto(D, "reagent1")
+    check("Target cell shows it", pool["wt2_targ_lbl"].text, "0.650")
+    D.record["reagent2_initial_wt"] = "1.190"        # 1.190 - 0.540 = 0.650
+    check("Over follows the scaled target",
+          round(arb.reagent_weigh_plan(D, 2).overage, 3), 0.0)
+    check("R1 countdown x1.5",   tv["reagent1"].duration(D, arb), 180)
+    _r2 = arb.reagent2_plan(D)[0]
+    check("R2 countdown x1.0",   tv["reagent2"].duration(D, arb), _r2)
+    D.record["R2_time_factor"] = "2"
+    check("R2 countdown x2",     tv["reagent2"].duration(D, arb), 2 * _r2)
+    check("stir unchanged",      tv["reagent1"].stir_secs(D, arb), 25)
+    D.record["R1_time_factor"] = "0.001"
+    check("never below 1 s",     tv["reagent1"].duration(D, arb), 1)
+    P = Slot("P"); P.record["samp_grams"] = "100"
+    check("production: target as before",
+          round(arb.reagent_weigh_plan(P, 2).target, 3), 1.3)
+    check("production: countdown as before", tv["reagent1"].duration(P, arb), 120)
     arb.phases = build_phases()
 
     print("\n== all phase self-tests passed ==")

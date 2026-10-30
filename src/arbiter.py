@@ -65,7 +65,7 @@ from pool import Pool
 from slot import Slot
 from phases import (build_phases, EntryPhase, Entry2Phase, ReadPhase,
                     VariantPhase, ReagentWeights,
-                    _mmss, _to_float)
+                    _factor_value, _mmss, _to_float)
 
 log = logging.getLogger(__name__)
 
@@ -966,6 +966,10 @@ class Arbiter:
         overage computable at all, so gating it on the initial weight would
         leave the grid blank exactly when the operator is deciding what to do.
 
+        On a test-variant run `target` is also scaled by the run's weight
+        factor (R1_wt_factor / R2_wt_factor), so Over, the START gate and the
+        "Add x g" instruction all follow the varied amount.
+
         Any of `initial`, `final`, `net`, `target` and `overage` may be None —
         an unentered or unparseable weight is absent, not zero.
 
@@ -994,11 +998,21 @@ class Arbiter:
         else:
             net = initial - final
 
-        target = None if sample_wt is None else sample_wt / 100.0 * ratio
+        target = (None if sample_wt is None else sample_wt / 100.0 * ratio
+                  * _factor_value(slot.record.get(f"R{n}_wt_factor")))
         overage = None if (net is None or target is None) else net - target
 
         return ReagentWeights(initial=initial, final=final, net=net,
                               target=target, overage=overage, tol=tol)
+
+    def reagent_time_factor(self, slot: Slot, n: int) -> float:
+        """
+        Multiplier on reagent `n`'s countdown: the run's R{n}_time_factor.
+
+        1.0 on a production run.  Only the countdown is scaled; the stir
+        sub-alarm keeps its configured length.
+        """
+        return _factor_value(slot.record.get(f"R{n}_time_factor"))
 
     def reagent_finals_complete(self, slot: Slot) -> bool:
         """
@@ -6540,7 +6554,9 @@ def _selftest() -> None:
     # whatever else the instrument has been set to, which is not this test's
     # business.
     check("no reagent overrides left behind",
-          [p for p in config.overrides() if p[0] == "protocol"], [])
+          [p for p in config.overrides()
+           if p in (("protocol", "reagent1_secs"), ("protocol", "t2ref25_secs"))],
+          [])
 
     # ── Config editor (Menu → Config) ────────────────────────────────────────
     # Also against the throwaway copy.  It ends with Restore Factory Defaults,
@@ -6842,6 +6858,23 @@ def _selftest() -> None:
           _row, (sample_repo.equipment_list()[0], 2, 1.25))
     check("and is what the next run starts from",
           arb.latest_treatment()["R2_time_factor"], 1.25)
+
+    print("== test variant: the factors reach the targets and countdowns ==")
+    _grams_was = A.record.get("samp_grams")
+    A.record["samp_grams"] = "100"
+    _plain_t1 = 100 / 100.0 * config.reagent1_100ml_wt()
+    A.record["R1_wt_factor"] = "1.2"
+    check("reagent 1 target scaled",
+          round(arb.reagent_weigh_plan(A, 1).target, 6), round(_plain_t1 * 1.2, 6))
+    check("reagent 2 time factor read", arb.reagent_time_factor(A, 2), 1.25)
+    check("reagent 2 countdown scaled",
+          arb._phases["reagent2"].duration(A, arb),
+          max(1, round(arb.reagent2_plan(A)[0] * 1.25)))
+    check("reagent 1 countdown as configured",
+          arb._phases["reagent1"].duration(A, arb), config.reagent1_secs())
+    check("stir keeps its configured length",
+          arb._phases["reagent1"].stir_secs(A, arb), config.reagent1_stir_seconds())
+    A.record["samp_grams"] = _grams_was
 
     print("== test variant: Delete row takes the treatment with it ==")
     _samp = A.record["samp_no"]
