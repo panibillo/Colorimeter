@@ -35,6 +35,9 @@ devdesk/flatfield/**
 !sync_pi_files.txt
 !provisioning/reference/*.txt
 
+# ── User secrets ─────────────────────────────────────────────────────────
+**/secrets*.*
+
 # ── Per-instrument operator settings ──────────────────────────────────────
 # Written by the Menu -> Config screen; belongs to one instrument, not the
 # project. Deleting it restores the config/instrument.yaml values.

@@ -133,6 +133,15 @@ provisioning/deploy/commissioning_status.sh
 # ── Tools run on the Pi ──────────────────────────────────────────────────
 src/calibrate_screen.py
 
+# ── BARO-UDP: tool-development signals to lenore's pressure logger ──────
+# Temporary; delete this whole section when removing it (see src/baro_signal.py).
+# The JSON names the laptop; with no JSON on the Pi, no signals are sent.
+# secrets_net.py holds the addresses and ports.  It is git-ignored and goes to
+# the Pi only over this ssh copy; keep it out of every commit.
+src/baro_signal.py
+config/baro_udp.json
+config/secrets_net.py
+
 # ── Provisioning reference ───────────────────────────────────────────────
 requirements-frozen.txt
 system_requirements.txt

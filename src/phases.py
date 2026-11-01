@@ -73,6 +73,7 @@ import logging
 from typing import Optional
 
 from timer import TimerState
+import baro_signal  # BARO-UDP
 
 log = logging.getLogger(__name__)
 
@@ -470,6 +471,7 @@ class EntryPhase(Phase):
 
     def proceed(self, arb, slot) -> None:
         """Leave for screen 2; goto() flushes any identity edits on the way out."""
+        baro_signal.send("NEWRUN", slot.record["samp_no"])  # BARO-UDP
         arb.goto(slot, self.next)
 
 
@@ -1040,6 +1042,16 @@ class Reagent2Phase(ReagentPhase):
         return (f"Stir {_mmss(stir)} and VENTILATE!" if stir > 0
                 else "Stir continuously and VENTILATE")
 
+    # BARO-UDP begin: tool-dev hooks, see src/baro_signal.py
+    def start(self, arb, slot) -> None:
+        super().start(arb, slot)
+        baro_signal.send("START", slot.record["samp_no"], "Reagent2")
+
+    def on_expire(self, arb, slot) -> None:
+        baro_signal.send("MARK", slot.record["samp_no"], "EndReagent2")
+        super().on_expire(arb, slot)
+    # BARO-UDP end
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Read strip  (count-up; CAPTURE)
@@ -1176,6 +1188,8 @@ class ReadPhase(Phase):
     def capture(self, arb, slot, pool) -> None:
         slot.record["manual_read"] = pool["color_fld"].value
         if arb.request_capture(slot):
+            if slot.cap_rep == 0:  # BARO-UDP
+                baro_signal.send("STOP", slot.record["samp_no"])  # BARO-UDP
             slot.capturing = True
             arb.render(slot)
         # If denied (camera busy), the arbiter leaves the button as-is; the

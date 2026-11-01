@@ -60,6 +60,7 @@ import version
 import sample_repo
 import exposure_repo
 import layout
+import baro_signal  # BARO-UDP
 from widgets import Button, TextBox
 from pool import Pool
 from slot import Slot
@@ -527,6 +528,7 @@ class Arbiter:
         self._init_logging()
         if _SIMULATION_MODE:
             log.info("SIMULATION MODE: mock hardware")
+        baro_signal.enable()  # BARO-UDP
 
         self._boot = boot or splash_screen.BootLog()
         with self._boot.step("Display"):
