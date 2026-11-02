@@ -35,7 +35,7 @@ Calibrating one LED or all of them uses the same code:
 Public surface
 --------------
     FitParams(...)  / FitParams.from_config()
-    quantize_us(us, params) -> int
+    round_us(us, params) -> int
     check_levels(levels, params) -> (too_dark, too_bright)
     usable_range(levels, exposure_us, params) -> UsableRange
     fit_led(led, measure, seed_us, params) -> LedFit
@@ -57,7 +57,6 @@ Measure = Callable[[int], Levels]
 
 MIN_EXPOSURE_US = 1000        # floor, matching exposure_repo and the runner
 MAX_GROUP       = 5           # largest exposure group (images per LED)
-QUANTUM_RATIO   = 2 ** (1 / 8)  # exposures snap to an eighth-of-a-stop grid
 # Where each group's brackets sit along the usable range, as a fraction of its
 # length on a log axis: 0 is the shortest usable exposure, 1 the longest.  The
 # groups share positions, so seven exposures serve all five groups.
@@ -71,6 +70,7 @@ GROUP_POSITIONS = {
 EDGE_MARGIN     = 0.03        # keep planned brackets this far inside the limits
 NO_SIGNAL_STEP  = 4.0         # lengthen by this when a patch shows nothing
 CONVERGED       = 0.05        # a re-aim this small counts as already centered
+NUDGE_STEP      = 1.01        # smallest nudge, when a computed one rounds to nothing
 
 
 @dataclass(frozen=True)
@@ -84,7 +84,6 @@ class FitParams:
     max_us: int = 200_000
     min_us: int = MIN_EXPOSURE_US
     max_group: int = MAX_GROUP
-    quantum_ratio: float = QUANTUM_RATIO
 
     @classmethod
     def from_config(cls) -> "FitParams":
@@ -204,17 +203,18 @@ def _clamp(us: float, params: FitParams) -> float:
     return min(float(params.max_us), max(float(params.min_us), us))
 
 
-def quantize_us(us: float, params: FitParams) -> int:
+def round_us(us: float, params: FitParams) -> int:
     """
-    Snap an exposure to the grid, so near-identical values become identical.
+    Round an exposure to whole microseconds, inside the allowed limits.
 
-    The grid is geometric, anchored at the minimum exposure, so it is the same
-    for every LED.  Identical exposures mean the dark frames taken at them are
-    identical too, and need to be stored only once.  Snapping is idempotent.
+    Exposures used to be snapped to a shared eighth-of-a-stop grid (steps of
+    x1.09) so that LEDs landing near the same exposure shared one dark frame.
+    A run now takes two dark frames whatever its exposures are (see
+    capture_runner.DARK_SHORT_US), so nothing needs exposures to coincide, and
+    the grid only got in the way: two brackets closer than one step snapped
+    to the same value.
     """
-    us = _clamp(us, params)
-    step = round(math.log(us / params.min_us) / math.log(params.quantum_ratio))
-    return int(_clamp(round(params.min_us * params.quantum_ratio ** step), params))
+    return int(round(_clamp(us, params)))
 
 
 def check_levels(levels: Levels, params: FitParams) -> Tuple[List[str], List[str]]:
@@ -320,7 +320,7 @@ def _fit_rung(measure: _Counted, exposure: int, params: FitParams,
 
     Returns (exposure, "", levels) on success, or (None, reason, {}).
     """
-    exposure = quantize_us(exposure, params)
+    exposure = round_us(exposure, params)
     for _ in range(params.max_iter):
         levels = measure(exposure)
         too_dark, too_bright = check_levels(levels, params)
@@ -340,13 +340,13 @@ def _fit_rung(measure: _Counted, exposure: int, params: FitParams,
             factor = max(params.low_dn / levels[n][0] if levels[n][0] > 0
                          else NO_SIGNAL_STEP for n in too_dark)
             factor *= 1 + EDGE_MARGIN
-        nxt = quantize_us(exposure * factor, params)
-        if nxt == exposure:                       # stuck on the grid, or a limit
+        nxt = round_us(exposure * factor, params)
+        if nxt == exposure:                       # held at a limit
             at_limit = exposure in (params.min_us, params.max_us)
             if at_limit:
                 return None, f"{exposure} us: at the exposure limit and still failing", {}
-            nxt = quantize_us(exposure * (params.quantum_ratio ** (
-                -1 if too_bright else 1)) * 1.001, params)
+            nxt = round_us(exposure * (1 / NUDGE_STEP if too_bright
+                                       else NUDGE_STEP), params)
         exposure = nxt
     return None, (f"{exposure} us: still outside the window after "
                   f"{params.max_iter} tries"), {}

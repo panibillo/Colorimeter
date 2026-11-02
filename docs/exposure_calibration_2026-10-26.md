@@ -46,9 +46,12 @@ them pass white and brown at once. Between them, exposure is placed **log-spaced
 | 5 | 0, 1/4, 1/2, 3/4, 1 |
 
 The groups share positions, so seven exposures (0, 1/4, 1/3, 1/2, 2/3, 3/4, 1)
-serve all five. Each is measured and nudged until it passes, then snapped to a
-shared eighth-of-a-stop grid so that dark frames taken at identical exposures
-can be stored once. A group is dropped if the range is too narrow to keep
+serve all five. Each is measured and nudged until it passes, and kept in whole
+microseconds. (Until 2026-11-02 they were snapped to a shared eighth-of-a-stop
+grid, x1.09 steps, so LEDs at near-identical exposures could share a dark frame.
+A run now takes two dark frames whatever its exposures, so the grid was
+dropped: it made brackets closer than one step collide.) A group is dropped if
+the range is too narrow to keep
 neighbors at least 1.2× apart (5 brackets need a usable range of about 2.1×).
 The log names the limiting patch.
 

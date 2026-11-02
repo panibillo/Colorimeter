@@ -53,19 +53,16 @@ P = ef.FitParams()
 
 class TestHelpers(unittest.TestCase):
 
-    def test_quantize_is_idempotent_and_on_a_shared_grid(self):
+    def test_round_keeps_whole_microseconds(self):
+        """No grid: near values stay distinct, only the fraction goes."""
         for us in (1000, 1234, 4567, 88_000, 199_999):
-            q = ef.quantize_us(us, P)
-            self.assertEqual(ef.quantize_us(q, P), q)
+            self.assertEqual(ef.round_us(us, P), us)
+        self.assertEqual(ef.round_us(10_150.4, P), 10_150)
+        self.assertNotEqual(ef.round_us(10_000, P), ef.round_us(10_150, P))
 
-    def test_quantize_snaps_near_values_together(self):
-        self.assertEqual(ef.quantize_us(10_000, P), ef.quantize_us(10_150, P))
-
-    def test_quantize_respects_the_limits(self):
-        self.assertEqual(ef.quantize_us(10, P), P.min_us)
-        top = ef.quantize_us(10_000_000, P)
-        self.assertLessEqual(top, P.max_us)
-        self.assertGreater(top, P.max_us / P.quantum_ratio)
+    def test_round_respects_the_limits(self):
+        self.assertEqual(ef.round_us(10, P), P.min_us)
+        self.assertEqual(ef.round_us(10_000_000, P), P.max_us)
 
     def test_check_levels(self):
         levels = {"a": (50, 400), "b": (200, 900), "c": (200, 400)}
@@ -146,6 +143,26 @@ class TestFitLed(unittest.TestCase):
         self.assertNotIn("5", fit.groups)
         self.assertIn("too narrow", fit.failed["5"])
         self.assert_every_bracket_passes(fit, 0.05, PAD_DARK_BROWN)
+
+    def test_close_brackets_stay_distinct_without_a_grid(self):
+        """
+        A very narrow range, with a fine minimum spacing, holds all five.
+
+        With brown at 0.17 the usable range is only about x1.24, so five
+        brackets sit about x1.055 apart.  The old eighth-stop grid (x1.09
+        steps) snapped neighbors onto the same value and failed groups 4 and 5
+        as "collided"; rounding to whole microseconds keeps them apart.
+        """
+        pad = dict(PAD, pad_brown=0.17)
+        fine = ef.FitParams(min_ratio=1.02)
+        fit = ef.fit_led("blue", Sensor(0.05, pad), 10_000, fine)
+        for n in ("3", "4", "5"):
+            self.assertIn(n, fit.groups, fit.failed)
+        five = fit.groups["5"]
+        self.assertEqual(len(set(five)), 5)
+        for lo, hi in zip(five, five[1:]):
+            self.assertGreaterEqual(hi / lo, fine.min_ratio)
+        self.assert_every_bracket_passes(fit, 0.05, pad)
 
     def test_the_short_reason_names_the_two_patches_that_disagree(self):
         fit = ef.LedFit("violet", failed={"1": "x"},
