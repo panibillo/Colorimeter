@@ -1227,24 +1227,42 @@ class TestDarkPairAndWhite(CalibratedExposures):
         self.assertTrue(a["gains_confirmed"])
         self.assertEqual(a["gain_frames"], 3)       # 2 frames late, kept the 3rd
         self.assertAlmostEqual(a["reported_gain_r"], want[0])
-        self.assertTrue(a["restore_confirmed"])
-        self.assertEqual(a["restore_frames"], 3)
+        self.assertNotIn("restore_frames", a)
 
     def test_first_frame_is_used_when_gains_apply_at_once(self):
         self.cam.gain_lag = 0
         runner = self.make_runner()
         self.run_to_completion(runner)
-        a = self.photo_attrs(runner)
-        self.assertEqual((a["gain_frames"], a["restore_frames"]), (1, 1))
+        self.assertEqual(self.photo_attrs(runner)["gain_frames"], 1)
 
-    def test_restore_is_checked_with_every_led_off(self):
+    def test_no_frame_is_spent_putting_neutral_back(self):
+        """Neutral is requested as white goes out; the white frame is the last."""
         runner = self.make_runner()
         self.run_to_completion(runner)
-        restore = [fr for fr in self.cam.frames
-                   if not fr[1] and fr[2] == (1.0, 1.0)][-1:]
-        self.assertTrue(restore)
-        self.assertEqual(self.cam.frames[-1][1], frozenset())
-        self.assertEqual(self.cam.frames[-1][2], (1.0, 1.0))
+        white = capture_runner.WHITE_LED_CH
+        self.assertIn(white, self.cam.frames[-1][1])
+        self.assertEqual(self.cam.rendering[-1], ("objective", None))
+
+    def test_the_next_runs_first_frame_waits_for_neutral(self):
+        self.cam.gain_lag = 2
+        self.run_to_completion(self.make_runner())
+        # The neutral gains were requested but no frame has shown them yet.
+        before = len(self.cam.frames)
+        runner = self.make_runner()
+        self.run_to_completion(runner)
+        meta = self.led_metadata(runner, "amber")
+        self.assertEqual(meta["render_evidence"],
+                         {"neutral_frames": 3, "neutral_confirmed": True})
+        amber = [fr[2] for fr in self.cam.frames[before:] if 1 in fr[1]]
+        self.assertEqual(amber[:2], [self.GAINS, self.GAINS])  # discarded
+        self.assertEqual(set(amber[2:]), {(1.0, 1.0)})         # every kept one
+
+    def test_neutral_is_checked_once_and_costs_nothing_when_in_force(self):
+        runner = self.make_runner()
+        self.run_to_completion(runner)
+        self.assertEqual(self.led_metadata(runner, "amber")["render_evidence"],
+                         {"neutral_frames": 1, "neutral_confirmed": True})
+        self.assertNotIn("render_evidence", self.led_metadata(runner, "blue"))
 
     def test_gains_that_never_arrive_are_recorded_not_fatal(self):
         self.cam.gain_lag = 10_000
@@ -1256,6 +1274,23 @@ class TestDarkPairAndWhite(CalibratedExposures):
         self.assertEqual(a["gain_frames"], capture_runner.MAX_SETTLE_FRAMES)
         with self.archive(runner) as f:
             self.assertIn("/leds/white/lit/e0", f)
+
+
+    # ── status counts ──────────────────────────────────────────────
+
+    def test_each_stored_image_says_which_of_its_kind_it_is(self):
+        """'Capturing amber 2 of 3': counted per LED, and the darks apart."""
+        runner = self.make_runner()
+        stored = [(p.color if p.step != "dark" else "dark",
+                   p.image_index, p.image_total)
+                  for p in self.run_to_completion(runner) if p.image_total]
+        lit = {r.color: len(r.exposures_us) for r in runner.results}
+        want = [(c, k, lit[c]) for c in ("amber", "blue")
+                for k in range(1, lit[c] + 1)]
+        n_dark = len(runner._dark_us)
+        want += [("dark", k, n_dark) for k in range(1, n_dark + 1)]
+        want += [("white", 1, 1)]
+        self.assertEqual(stored, want)
 
 
 # ---------------------------------------------------------------------------
