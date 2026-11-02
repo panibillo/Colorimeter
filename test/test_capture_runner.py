@@ -769,6 +769,48 @@ class TestNormalMode(CalibratedExposures):
             self.assertIn("/leds/amber/lit/e0/B", f)
             self.assertNotIn("/leds/amber/lit/e1", f)
 
+    def _drop_group(self, led, group):
+        self._db.write_one(
+            "DELETE FROM exposure WHERE LED = ? AND exposuregroup = ?", (led, group))
+
+    def test_missing_group_steps_down_to_the_next_smaller(self):
+        """A group calibration could not fit for one LED gives way to the
+        largest smaller group it did fit, not to the single default exposure."""
+        self._drop_group("amber", "3")
+        runner = self.make_runner(mode="normal", exposure_group="3")
+        self.run_to_completion(runner)
+        meta = self.led_metadata(runner, "amber")
+        self.assertEqual(meta["exposure_source"], "exposure_table")
+        self.assertEqual(meta["exposure_group"], "2")
+        self.assertEqual(meta["exposure_group_requested"], "3")
+        self.assertEqual(runner.results[0].exposures_us,
+                         self._er.read_exposures("amber", "2"))
+
+    def test_step_down_skips_every_missing_group(self):
+        for g in ("3", "2"):
+            self._drop_group("amber", g)
+        runner = self.make_runner(mode="normal", exposure_group="3")
+        self.run_to_completion(runner)
+        meta = self.led_metadata(runner, "amber")
+        self.assertEqual(meta["exposure_group"], "1")
+        self.assertEqual(len(meta["exposures_us"]), 1)
+
+    def test_step_down_is_per_led(self):
+        """Only the LED missing the group steps down; the other keeps it."""
+        self._drop_group("amber", "3")
+        runner = self.make_runner(mode="normal", exposure_group="3",
+                                  led_colors=["amber", "blue"])
+        self.run_to_completion(runner)
+        self.assertEqual(self.led_metadata(runner, "amber")["exposure_group"], "2")
+        self.assertEqual(self.led_metadata(runner, "blue")["exposure_group"], "3")
+
+    def test_group_in_force_is_recorded_when_present(self):
+        runner = self.make_runner(mode="normal", exposure_group="3")
+        self.run_to_completion(runner)
+        meta = self.led_metadata(runner, "amber")
+        self.assertEqual(meta["exposure_group"], "3")
+        self.assertEqual(meta["exposure_group_requested"], "3")
+
     def test_all_leds_off_at_end(self):
         runner = self.make_runner(mode="normal", exposure_group="2",
                                   led_colors=["amber", "blue"])

@@ -687,6 +687,7 @@ class CaptureRunner:
         self._color_exposures: "dict[str, list[int]]" = {}
         self._color_labels: "dict[str, list[str]]" = {}
         self._color_fallback: "dict[str, bool]" = {}
+        self._color_group:    "dict[str, str]"  = {}   # group each LED actually used
         self._distinct_dark_us: "list[int]" = []
         # {exposure_us: channels some lit frame at that exposure kept}, filled
         # in during the sweep and read by the dark batch that follows it.
@@ -1517,21 +1518,38 @@ class CaptureRunner:
     # "before" batch is gone. The schema still names the batch ("after_<us>us")
     # and readers still prefer it, so archives holding both remain readable.
 
-    def _stored_exposures(self, color: str, group: str) -> "list[int]":
+    def _stored_exposures(self, color: str, group: str) -> "tuple[list[int], str]":
         """
-        The exposures to shoot for one LED.
+        The exposures to shoot for one LED, and the group they came from.
 
         A pre-image takes the ones flagged for it; if none are flagged, the
-        middle of group 1.  Any other run takes the whole stored group.
-        Empty when the LED has no usable calibration.
+        middle of group 1.  Any other run takes the whole stored group, or,
+        when calibration could not fit that group for this LED (its usable
+        range too narrow for that many brackets), the largest smaller group
+        that it did fit: 3 -> 2 -> 1.  A narrow LED then still gets as many
+        exposures as it can hold, rather than dropping straight to the one
+        default exposure.  Empty when the LED has no usable calibration at all.
+
+        Returns:
+            (exposures_us ascending, group used).  The group is `group`
+            itself for a pre-image and when nothing was found.
         """
         if self._is_pre():
             flagged = exposure_repo.read_preimage_exposures(color)
             if flagged:
-                return flagged
+                return flagged, group
             middle = exposure_repo.middle_exposure(color, "1")
-            return [middle] if middle else []
-        return exposure_repo.read_exposures(color, group)
+            return ([middle] if middle else []), group
+        tries = ([str(g) for g in range(int(group), 0, -1)]
+                 if str(group).isdigit() else [str(group)])
+        for g in tries:
+            exposures = exposure_repo.read_exposures(color, g)
+            if exposures:
+                if g != str(group):
+                    log.warning("LED %s has no exposures for group %s — "
+                                "using group %s", color, group, g)
+                return exposures, g
+        return [], group
 
     def run_prefetch(self) -> Iterator[Progress]:
         """
@@ -1593,15 +1611,18 @@ class CaptureRunner:
             self._color_exposures = {}
             self._color_labels    = {}
             self._color_fallback  = {}
+            self._color_group     = {}
             distinct_us: set = set()
 
             for color in self._color_order:
-                exposures_us = self._stored_exposures(color, group)
+                exposures_us, used_group = self._stored_exposures(color, group)
                 used_fallback = not exposures_us
                 if used_fallback:
                     exposures_us = [cfg.initial_us]
-                    log.warning("LED %s has no exposures for group %s — "
-                                "falling back to %d µs", color, group, cfg.initial_us)
+                    log.warning("LED %s has no exposures for group %s or any "
+                                "smaller group — falling back to %d µs",
+                                color, group, cfg.initial_us)
+                self._color_group[color] = used_group
                 self._color_exposures[color] = exposures_us
                 self._color_labels[color]    = [f"e{i}" for i in range(len(exposures_us))]
                 self._color_fallback[color]  = used_fallback
@@ -1659,13 +1680,20 @@ class CaptureRunner:
                 exposures_us  = self._color_exposures[color]
                 labels        = self._color_labels[color]
                 used_fallback = self._color_fallback[color]
+                used_group    = self._color_group[color]
                 self._captures_per_led = max(1, len(exposures_us))
                 led = leds.channel_of(color)
 
-                log.info(f"=== LED {led}: {color} ({self._group} exposure(s)"
+                log.info(f"=== LED {led}: {color} (group {used_group}"
+                         f"{f' for {self._group}' if used_group != self._group else ''}"
                          f"{', fallback' if used_fallback else ''}) ===")
 
-                note = "  [no calibration — fallback]" if used_fallback else ""
+                if used_fallback:
+                    note = "  [no calibration — fallback]"
+                elif used_group != self._group:
+                    note = f"  [group {used_group}: {self._group} not calibrated]"
+                else:
+                    note = ""
                 yield self._progress("capture", f"--- {leds.label(led)} ---{note}")
 
                 self._led_on(led)
@@ -1732,7 +1760,11 @@ class CaptureRunner:
                     # record is assembled after the LED has been put out.
                     "led_on_dt":  self._led_on_dt,
                     "led_off_dt": self._led_off_dt,
-                    "exposure_group": self._group,
+                    # The group this LED was shot with, and the one the run
+                    # asked for: they differ when calibration could not fit
+                    # the asked-for group for this LED (_stored_exposures).
+                    "exposure_group": used_group,
+                    "exposure_group_requested": self._group,
                     "exposure_source": "fallback" if used_fallback else "exposure_table",
                     "exposures_us": {lbl: int(us) for lbl, us in zip(labels, exposures_us)},
                     "applied_exposures_us": applied_us,
