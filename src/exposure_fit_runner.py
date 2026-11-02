@@ -23,6 +23,12 @@ and exposure settling.  Run it like the capture run:
 
 Nothing is saved until persist() is called, so a caller can look at runner.fits
 first.  The LED is switched off when the run ends, however it ends.
+
+The white LED is treated differently.  A capture takes it once (the photo and
+the white measurement are the same frame), so it is fitted for group 1 only:
+one exposure, in the middle of its usable range.  At that exposure one more
+frame measures the colour gains that make the gray chips gray, and persist()
+stores them as capture.photo_wb_gains along with the exposure.
 """
 
 from __future__ import annotations
@@ -50,6 +56,15 @@ SEED_GROUPS = ("3", "1")
 # The group whose exposures are flagged for the pre-image: one image, at the
 # middle of the usable range.
 PREIMAGE_GROUP = "1"
+
+# The LED the photo is taken under, and so the one whose colour gains are
+# measured.  A capture uses its group-1 exposure only.
+WHITE_LED = "white"
+
+# Gray chips whose gains disagree by more than this (as max/min - 1) are
+# reported, though the gains are still offered: either chip may be off-gray,
+# and the operator is the one who can look.
+GAIN_SPREAD_WARN = 0.02
 
 # Called after each frame with (color, exposure_us, frames_so_far).  A fit takes
 # many frames and the run yields only between LEDs, so a caller that must keep
@@ -100,6 +115,9 @@ class ExposureFitRunner(CaptureRunner):
         self.fits: Dict[str, ef.LedFit] = {}
         # {color: 'Gb Gr'}: the Bayer layers that had to pass for each LED.
         self.layers: Dict[str, str] = {}
+        # The white LED's colour gains, measured at its fitted exposure; None
+        # until white has been fitted (or when this run did not include it).
+        self.white_balance: Optional[em.WhiteBalance] = None
         self._order: "list[tuple[int, str]]" = []
         self._frames = 0
         # Progress counts whole LEDs: a fit's frame count is not known ahead.
@@ -200,6 +218,8 @@ class ExposureFitRunner(CaptureRunner):
             led = self.settings_for(color)
             led_params = dataclasses.replace(
                 params, low_dn=led.window.low_dn, high_dn=led.window.high_dn)
+            if color == WHITE_LED:
+                led_params = dataclasses.replace(led_params, max_group=1)
             measure = em.measure_for_led(
                 color, grab, self.rois, pad,
                 (led.window.low_pctl, led.window.high_pctl), led.layers)
@@ -211,12 +231,54 @@ class ExposureFitRunner(CaptureRunner):
                              on_rung)
             self.fits[color] = fit
             self.layers[color] = " ".join(led.layers)
+            if color == WHITE_LED and "1" in fit.groups:
+                self._measure_white_balance(grab, fit.groups["1"][0], led)
 
             self._led_off(channel)
             self._captures_done = 1
             yield self._progress("calibrate", self._summary(fit))
 
         yield self._progress("done", self._overall_summary())
+
+    def _measure_white_balance(self, grab, exposure_us: int,
+                               led: LedSettings) -> None:
+        """
+        Take one frame at white's fitted exposure and measure the gains there.
+
+        A frame of its own rather than one left over from the fit, because the
+        fit measures only the required layers at percentiles, and the gains
+        need every layer's median on the chips at the exposure a capture uses.
+        """
+        self._status(WHITE_LED, f"{WHITE_LED} measuring colour gains ...")
+        wb = em.white_balance(grab(exposure_us), em.gray_chips(self.rois),
+                              led.window.high_dn, led.window.high_pctl)
+        self.white_balance = wb
+        if wb.ok:
+            log.info("exposure fit: white gains red %.3f blue %.3f at %d us "
+                     "(chips %s, spread %.1f%%)", wb.red, wb.blue, exposure_us,
+                     {n: (round(r, 3), round(b, 3)) for n, (r, b) in wb.chips.items()},
+                     100 * wb.spread)
+        else:
+            log.warning("exposure fit: white gains not measured: %s", wb.problem)
+        self._status(WHITE_LED, f"{WHITE_LED} {exposure_us} us, "
+                                f"{self.white_balance_note()}")
+
+    def white_balance_note(self) -> str:
+        """
+        A few words on the measured gains for the screen's one-line hint, or
+        '' when white was not measured: 'gains 1.66,2.43', with ' (3% off)'
+        added when the chips disagree by more than GAIN_SPREAD_WARN, or
+        'no gains: gray1.B too dark'.
+        """
+        wb = self.white_balance
+        if wb is None:
+            return ""
+        if not wb.ok:
+            return f"no gains: {wb.problem}"
+        note = f"gains {wb.red:.2f},{wb.blue:.2f}"
+        if wb.spread > GAIN_SPREAD_WARN:
+            note += f" ({100 * wb.spread:.0f}% off)"
+        return note
 
     def settings_for(self, color: str) -> LedSettings:
         """The layers and window `color` is held to: given, else from config."""
@@ -265,6 +327,9 @@ class ExposureFitRunner(CaptureRunner):
         active afterward: a group that could not be fitted is not kept from
         the old calibration, because its brackets were never tested.
 
+        The white LED's colour gains are stored as capture.photo_wb_gains when
+        they were measured; otherwise the gains in force are left alone.
+
         Returns:
             The number of exposure rows written.
         """
@@ -281,4 +346,9 @@ class ExposureFitRunner(CaptureRunner):
             rows += exposure_repo.write_all_groups(
                 color, fit.groups, remark=remark, add_dt=add_dt, notes=notes,
                 layers=self.layers.get(color), preimage_group=PREIMAGE_GROUP)
+        wb = self.white_balance
+        if wb is not None and wb.ok:
+            import config_repo as config
+            config.save("capture", "photo_wb_gains", f"{wb.red:.3f},{wb.blue:.3f}",
+                        remark=f"{remark} {add_dt}: gray chips under white")
         return rows

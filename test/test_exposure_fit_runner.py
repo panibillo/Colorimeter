@@ -47,13 +47,19 @@ PAD_REFLECTANCE = {roi.ROLE_PAD_WHITE: 0.90, roi.ROLE_PAD_YELLOW: 0.55,
 CHIP_REFLECTANCE = 0.30
 
 # Signal per microsecond at reflectance 1, for each LED (channel number).
-GAINS = {1: 0.05, 2: 0.02, 3: 0.08}
+GAINS = {1: 0.05, 2: 0.02, 3: 0.08, 10: 0.05}
+
+# The white LED's response in red, green and blue, relative to the gain above:
+# the sensor sees it greenish, as the real one does (C1038's gray chips gave
+# red and blue gains of about 1.66 and 2.43).  Other LEDs read the same in
+# every layer.
+WHITE_TINT = (0.6, 1.0, 0.41)
 
 
 class FakeLeds:
     """Three LEDs.  Records switching, and knows which one is lit."""
 
-    _COLORS = {1: "photo_red", 2: "green", 3: "violet"}
+    _COLORS = {1: "photo_red", 2: "green", 3: "violet", 10: "white"}
 
     def __init__(self):
         self.state, self.history = {}, []
@@ -87,6 +93,7 @@ class SceneCam:
 
     def __init__(self, leds, chips, gains=GAINS):
         self.leds, self.gains = leds, dict(gains)
+        self.tints = {10: WHITE_TINT}
         self.config_size = None
         self.exposures_captured = []
         self._exposure_us = 0
@@ -105,10 +112,10 @@ class SceneCam:
     def focus(self, force=False, leds=None):
         return 3.0
 
-    def signal_at(self, reflectance, exposure_us):
+    def signal_at(self, reflectance, exposure_us, tint=1.0):
         lit = self.leds.lit_channels()
         gain = self.gains[next(iter(lit))] if lit else 0.0
-        return min(CEILING - em.BLACK_DN, gain * reflectance * exposure_us)
+        return min(CEILING - em.BLACK_DN, gain * tint * reflectance * exposure_us)
 
     def capture_frame(self):
         self.exposures_captured.append(self._exposure_us)
@@ -116,9 +123,19 @@ class SceneCam:
                 and len(self.exposures_captured) > self.fail_after):
             raise RuntimeError("camera fell over")
         bayer = np.full((FRAME_H, FRAME_W), em.BLACK_DN)
+        lit = self.leds.lit_channels()
+        tint = self.tints.get(next(iter(lit)), None) if lit else None
         for (x, y, w, h), refl in self._regions:
-            bayer[y:y + h, x:x + w] = (
-                em.BLACK_DN + self.signal_at(refl, self._exposure_us))
+            if tint is None:
+                bayer[y:y + h, x:x + w] = (
+                    em.BLACK_DN + self.signal_at(refl, self._exposure_us))
+                continue
+            # RGGB: R at (even row, even col), Gr and Gb beside it, B diagonal.
+            block = bayer[y:y + h, x:x + w]
+            for (row, col), t in (((0, 0), tint[0]), ((0, 1), tint[1]),
+                                  ((1, 0), tint[1]), ((1, 1), tint[2])):
+                block[(row - y) % 2::2, (col - x) % 2::2] = (
+                    em.BLACK_DN + self.signal_at(refl, self._exposure_us, t))
         meta = {"ExposureTime": self._exposure_us}
         return None, bayer.astype(np.uint16), meta
 
@@ -343,6 +360,76 @@ class TestPersist(FitRunnerTestCase):
         list(runner.run())
         runner.persist()
         self.assertEqual(exposure_repo.read_exposures("violet", "1"), [4_321])
+
+
+class TestWhiteLed(FitRunnerTestCase):
+    """White gets one exposure and the photo's colour gains."""
+
+    def run_white(self, **kwargs):
+        runner = self.make_runner(only="white", **kwargs)
+        list(runner.run())
+        return runner
+
+    def test_white_is_fitted_for_one_exposure_only(self):
+        runner = self.run_white()
+        fit = runner.fits["white"]
+        self.assertTrue(fit.ok, fit.failed)
+        self.assertEqual(list(fit.groups), ["1"])
+        self.assertEqual(len(fit.groups["1"]), 1)
+
+    def test_gains_make_the_gray_chips_gray(self):
+        runner = self.run_white()
+        wb = runner.white_balance
+        self.assertTrue(wb.ok, wb.problem)
+        # Within 1%: the synthetic frame is whole DN, as the sensor's is.
+        self.assertAlmostEqual(wb.red * WHITE_TINT[0], 1.0, delta=0.01)
+        self.assertAlmostEqual(wb.blue * WHITE_TINT[2], 1.0, delta=0.01)
+
+    def test_gains_are_measured_at_the_fitted_exposure(self):
+        runner = self.run_white()
+        self.assertEqual(self.cam.exposures_captured[-1],
+                         runner.fits["white"].groups["1"][0])
+
+    def test_status_reports_the_exposure_and_the_gains(self):
+        seen = []
+        runner = self.run_white(on_status=lambda c, t: seen.append(t))
+        us = runner.fits["white"].groups["1"][0]
+        wb = runner.white_balance
+        self.assertEqual(seen[-1], f"white {us} us, gains {wb.red:.2f},{wb.blue:.2f}")
+
+    def test_save_stores_the_gains_and_the_one_exposure(self):
+        exposure_repo.write_all_groups("white", {"1": [9_000],
+                                                 "3": [6_000, 9_000, 13_000]})
+        runner = self.run_white()
+        runner.persist(add_dt="2026-11-02 12:00:00")
+        wb = runner.white_balance
+        self.assertEqual(config.capture_photo_wb_gains(),
+                         (round(wb.red, 3), round(wb.blue, 3)))
+        self.assertEqual(exposure_repo.read_exposures("white", "1"),
+                         runner.fits["white"].groups["1"])
+        self.assertEqual(exposure_repo.read_exposures("white", "3"), [])
+
+    def test_a_chip_past_the_window_top_gives_no_gains(self):
+        self.cam.tints[10] = (6.0, 1.0, 0.41)   # red far brighter than green
+        runner = self.run_white()
+        self.assertTrue(runner.fits["white"].ok)
+        self.assertFalse(runner.white_balance.ok)
+        self.assertRegex(runner.white_balance_note(), r"^no gains: .*\.R too bright$")
+        runner.persist()
+        self.assertEqual(config.capture_photo_wb_gains(), (1.0, 1.0))
+        self.assertTrue(exposure_repo.read_exposures("white", "1"))
+
+    def test_chips_that_disagree_are_flagged(self):
+        runner = self.make_runner()
+        runner.white_balance = em.WhiteBalance(1.66, 2.43, spread=0.03)
+        self.assertEqual(runner.white_balance_note(), "gains 1.66,2.43 (3% off)")
+
+    def test_a_run_without_white_leaves_the_gains_alone(self):
+        runner = self.make_runner(only="green")
+        list(runner.run())
+        runner.persist()
+        self.assertEqual(runner.white_balance_note(), "")
+        self.assertEqual(config.capture_photo_wb_gains(), (1.0, 1.0))
 
 
 if __name__ == "__main__":

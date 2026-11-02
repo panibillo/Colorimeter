@@ -113,6 +113,61 @@ class TestPatchLevels(unittest.TestCase):
             em.patch_levels(layers_at(1000, 0.1), patches, ("B",), 10, 90)
 
 
+class TestWhiteBalance(unittest.TestCase):
+    """Gains from the gray chips: green over red, green over blue."""
+
+    CHIP2 = Rect(500, 100, 40, 40, name="chip2")
+
+    def scene(self, rgb=(200.0, 340.0, 140.0), chip2=None, gr_over_gb=1.0):
+        """Layers with chip1 (and chip2) at the given R, G, B signals."""
+        layers = {ch: np.full(FRAME, em.BLACK_DN, dtype=float)
+                  for ch in ("R", "Gr", "Gb", "B")}
+        for rect, (r, g, b) in ((CHIP, rgb), (self.CHIP2, chip2 or rgb)):
+            s = roi.to_layer_rect(rect).xyslice()
+            layers["R"][s] += r
+            layers["Gr"][s] += g * gr_over_gb
+            layers["Gb"][s] += g
+            layers["B"][s] += b
+        return layers
+
+    def chips(self):
+        self.CHIP2.role = roi.ROLE_WHITE_BALANCE
+        return em.gray_chips({"chip1": CHIP, "chip2": self.CHIP2})
+
+    def test_gains_are_green_over_red_and_green_over_blue(self):
+        wb = em.white_balance(self.scene(), self.chips(), 850, 90)
+        self.assertTrue(wb.ok, wb.problem)
+        self.assertAlmostEqual(wb.red, 340 / 200)
+        self.assertAlmostEqual(wb.blue, 340 / 140)
+        self.assertAlmostEqual(wb.spread, 0.0)
+
+    def test_green_is_the_mean_of_both_green_layers(self):
+        wb = em.white_balance(self.scene(gr_over_gb=1.1), self.chips(), 850, 90)
+        self.assertAlmostEqual(wb.red, 340 * 1.05 / 200)
+
+    def test_chips_are_averaged_and_their_disagreement_reported(self):
+        wb = em.white_balance(self.scene(chip2=(200.0, 346.8, 140.0)),
+                              self.chips(), 850, 90)
+        self.assertAlmostEqual(wb.red, (1.7 + 1.734) / 2)
+        self.assertAlmostEqual(wb.spread, 0.02)
+        self.assertEqual(sorted(wb.chips), ["chip1", "chip2"])
+
+    def test_a_dark_channel_is_refused_by_name(self):
+        wb = em.white_balance(self.scene(rgb=(200.0, 340.0, 30.0)),
+                              self.chips(), 850, 90)
+        self.assertFalse(wb.ok)
+        self.assertEqual(wb.problem, "chip1.B too dark")
+
+    def test_a_channel_past_the_window_top_is_refused(self):
+        wb = em.white_balance(self.scene(rgb=(900.0, 340.0, 140.0)),
+                              self.chips(), 850, 90)
+        self.assertEqual(wb.problem, "chip1.R too bright")
+
+    def test_no_gray_chip_is_refused(self):
+        with self.assertRaisesRegex(ValueError, "gray chip"):
+            em.gray_chips({})
+
+
 class TestMakeMeasure(unittest.TestCase):
 
     def test_grabs_a_frame_at_the_requested_exposure(self):

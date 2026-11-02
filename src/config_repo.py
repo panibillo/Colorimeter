@@ -951,10 +951,11 @@ def capture_photo_wb_gains() -> tuple:
     Fixed gains rather than libcamera's AWB because the light is known: the
     photo is always taken under the white LED, so what a general-purpose AWB
     algorithm would spend several frames converging towards can simply be
-    written down once per unit and applied instantly.  Commission them by
-    photographing a neutral card and dividing its green mean by its red and
-    blue means; the seeded 1.0,1.0 is the uncorrected sensor response, which
-    looks the same as today's objective capture until somebody measures it.
+    written down once per unit and applied instantly.  Calibrating the white
+    LED (Capture screen, suite or white alone) measures them from the gray
+    chips and SAVE stores them here: green over red and green over blue,
+    about 1.66,2.43 on the first unit.  The seeded 1.0,1.0 is the uncorrected
+    sensor response, which renders the photo green.
 
     Returns:
         (red_gain, blue_gain).  Falls back to (1.0, 1.0) if the stored text

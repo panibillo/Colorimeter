@@ -22,14 +22,18 @@ stream-space rectangle halved (roi.to_layer_rect).
 Public surface
 --------------
     calibration_patches(rois, pad) -> dict[name, Rect]   layer-space patches
+    gray_chips(rois) -> dict[name, Rect]                 just the gray chips
     patch_levels(layers, patches, channels, low_pctl, high_pctl, black_dn)
+    white_balance(layers, chips, high_dn, high_pctl) -> WhiteBalance
+                                                         colour gains for the photo
     make_measure(grab, patches, channels, low_pctl, high_pctl, black_dn)
     measure_for_led(led, grab, rois, pad) -> Measure     everything from config
 """
 
 from __future__ import annotations
 
-from typing import Callable, Dict, Iterable
+from dataclasses import dataclass, field
+from typing import Callable, Dict, Iterable, Tuple
 
 import numpy as np
 
@@ -41,6 +45,12 @@ from rect import Rect
 # dark frames (see the comment above capture_h5.dark_level).  Subtracting it
 # leaves the signal the window limits are written in.
 BLACK_DN = 64.0
+
+# The least signal (DN above black) a gray chip channel must show for a colour
+# gain to be measured from it.  The chips read 140-350 DN under the white LED
+# at its calibrated exposure (C1038), so this only refuses a frame that is
+# badly underexposed in some channel.
+GAIN_MIN_SIGNAL_DN = 50.0
 
 Grab = Callable[[int], Dict[str, np.ndarray]]
 
@@ -63,12 +73,9 @@ def calibration_patches(rois: Dict[str, Rect], pad: Dict[str, Rect]) -> Dict[str
     missing = roi.missing_test_pad_roles(pad)
     if missing:
         raise ValueError("test pad is missing: " + ", ".join(missing))
-    chips = roi.all_by_role(rois, roi.ROLE_WHITE_BALANCE)
-    if not chips:
-        raise ValueError("no gray chip (white_balance) region is defined")
+    chips = gray_chips(rois)
     patches = {role: roi.to_layer_rect(pad[role]) for role in roi.TEST_PAD_ROLES}
-    for chip in chips:
-        patches[chip.name] = roi.to_layer_rect(chip)
+    patches.update(chips)
     return patches
 
 
@@ -124,6 +131,88 @@ def pad_samples(layers: Dict[str, np.ndarray], rect: Rect, layer: str,
     if pixels.size == 0:
         raise ValueError(f"the sample region covers no pixels in layer {layer}")
     return np.sort(pixels.astype(float).ravel()) - black_dn
+
+
+def gray_chips(rois: Dict[str, Rect]) -> Dict[str, Rect]:
+    """
+    Every gray chip (white_balance region), keyed by name, in layer coordinates.
+
+    Raises:
+        ValueError: if no gray chip is defined.
+    """
+    chips = roi.all_by_role(rois, roi.ROLE_WHITE_BALANCE)
+    if not chips:
+        raise ValueError("no gray chip (white_balance) region is defined")
+    return {chip.name: roi.to_layer_rect(chip) for chip in chips}
+
+
+@dataclass(frozen=True)
+class WhiteBalance:
+    """
+    Colour gains (red, blue) that make the gray chips gray under the white LED.
+
+    `red` is green over red and `blue` is green over blue, black level removed
+    and green being the mean of Gr and Gb: the gains the camera's image
+    processor multiplies red and blue by (BayerCam.set_color_rendering).
+    `chips` holds each chip's own pair; `red` and `blue` are their mean.
+    `spread` is how far the chips disagree, as the larger of the two gains'
+    max/min - 1.  `problem` is empty when the gains can be used, and otherwise
+    says why not (a chip too dark or too bright to measure), in which case
+    `red` and `blue` are 0.
+    """
+    red: float
+    blue: float
+    chips: Dict[str, Tuple[float, float]] = field(default_factory=dict)
+    spread: float = 0.0
+    problem: str = ""
+
+    @property
+    def ok(self) -> bool:
+        return not self.problem
+
+
+def white_balance(layers: Dict[str, np.ndarray], chips: Dict[str, Rect],
+                  high_dn: float, high_pctl: float,
+                  black_dn: float = BLACK_DN) -> WhiteBalance:
+    """
+    Measure the colour gains from the gray chips in one white-LED frame.
+
+    Each chip's channel median, black level removed, is the signal.  A gain is
+    a ratio of two medians, so a chip channel must be far enough above black
+    for the ratio to mean something (GAIN_MIN_SIGNAL_DN) and must not reach
+    the window's top at its `high_pctl` percentile, where the sensor stops
+    being linear.
+
+    Args:
+        layers:    The frame's Bayer layers, {'R', 'Gr', 'Gb', 'B'}.
+        chips:     {name: layer-space Rect}, as gray_chips() returns.
+        high_dn:   The white LED's window top, black level removed.
+        high_pctl: The percentile held to `high_dn`.
+        black_dn:  The black level to remove.
+
+    Returns:
+        WhiteBalance.  Check `.ok`.
+    """
+    per_chip: Dict[str, Tuple[float, float]] = {}
+    for name, rect in chips.items():
+        median = {}
+        for ch in ("R", "Gr", "Gb", "B"):
+            pixels = layers[ch][rect.xyslice()]
+            if pixels.size == 0:
+                return WhiteBalance(0.0, 0.0, problem=f"{name} covers no pixels")
+            med, top = np.percentile(pixels, (50.0, high_pctl)) - black_dn
+            if med < GAIN_MIN_SIGNAL_DN:
+                return WhiteBalance(0.0, 0.0, problem=f"{name}.{ch} too dark")
+            if top > high_dn:
+                return WhiteBalance(0.0, 0.0, problem=f"{name}.{ch} too bright")
+            median[ch] = float(med)
+        green = (median["Gr"] + median["Gb"]) / 2.0
+        per_chip[name] = (green / median["R"], green / median["B"])
+    reds = [r for r, _ in per_chip.values()]
+    blues = [b for _, b in per_chip.values()]
+    spread = max(max(reds) / min(reds), max(blues) / min(blues)) - 1.0
+    return WhiteBalance(float(np.mean(reds)), float(np.mean(blues)),
+                        per_chip, spread)
 
 
 def make_measure(grab: Grab, patches: Dict[str, Rect], channels: Iterable[str],

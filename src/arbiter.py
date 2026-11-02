@@ -3450,7 +3450,13 @@ class Arbiter:
             if bad is None:
                 spread = sum(1 for f in runner.fits.values() if f.spread)
                 note = f" {spread} spread." if spread else ""
-                self._cap_hint(f"{good} of {len(runner.fits)} fitted.{note} SAVE to keep.")
+                wb = runner.white_balance_note()
+                if wb:                      # the hint is one line: gains win
+                    self._cap_hint(f"{good}/{len(runner.fits)} fitted. "
+                                   f"{wb[0].upper()}{wb[1:]}. SAVE.")
+                else:
+                    self._cap_hint(f"{good} of {len(runner.fits)} fitted.{note} "
+                                   "SAVE to keep.")
             else:
                 self._cap_hint(bad.short_reason()[:60])
         if self._cap_view == "choice":

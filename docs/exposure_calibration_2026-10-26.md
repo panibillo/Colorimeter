@@ -77,6 +77,25 @@ position 1 for darkness). Every stored remark of a spread ladder ends in
 A group is still dropped if the band between the two limits is too narrow to
 keep neighbors the minimum spacing apart, and a patch with no signal at all still fails.
 
+## The white LED: one exposure and the photo's colour gains (2026-11-02)
+
+A capture photographs white once, last, and that frame is both the white
+measurement and the colour photo. So white is fitted for **group 1 only**: one
+exposure, in the middle of its usable range, using white's required layers
+(Gr unless changed on the screen). Its other groups are no longer stored.
+
+At that exposure one more frame is taken, and each gray chip's median per layer
+(black level removed) gives the colour gains `red = G / R` and `blue = G / B`,
+with G the mean of Gr and Gb. The chips' gains are averaged. The hint line
+shows them (`gains 1.66,2.43`), adding `(3% off)` when two chips disagree by
+more than 2%. SAVE stores them as `capture.photo_wb_gains`, the gains the
+camera applies to the photo (and, later, to the LCD preview).
+
+No gains are stored, and the old ones stay in force, if a chip channel is
+under 50 DN or reaches the window top at its high percentile. The hint names
+the chip and layer, e.g. `no gains: gray1.B too dark`. On C1038 and its four
+repeats the chips gave 1.66–1.68 and 2.41–2.45.
+
 ## What is stored (`exposure` table)
 
 One row per LED, group and exposure, with `active` marking the set in force
