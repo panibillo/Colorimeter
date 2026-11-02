@@ -6,10 +6,10 @@ Desktop-only developer tool (matplotlib dependency). Not synced to the Pi
 
 Four focused modes, more compact than Hdf5Reader.summary():
 
-  -s / --summary       Compact table: color_name, e#, exposure_us,
-                        jpegsize, roi_shape (one row per lit exposure
-                        label present, plus a synthesized row for a jpeg
-                        that exists without a matching lit label).
+  -s / --summary       Inventory table: color_name, e#, exposure_us,
+                        roi_shape, layers, dark_us, jpegsize -- one row per
+                        exposure label stored for each LED. "-" means that
+                        piece was not stored (the table says so first).
   -j / --jpeg_extract   Extract each color's embedded jpeg_e3 blob to
                         <captures_dir>/<file_stem>/<color>.jpg, or
                         <file_stem>/<section>/<color>.jpg with --pre.
@@ -74,6 +74,7 @@ Examples:
 """
 
 import argparse
+import re
 import sqlite3
 import sys
 from datetime import datetime
@@ -437,53 +438,87 @@ def find_dark_link(reader: "Hdf5Reader | SectionView", color: str, label: str) -
 
 # ── Mode 1: summary ─────────────────────────────────────────────────
 
+def jpeg_label(reader: "Hdf5Reader | SectionView", color: str) -> str:
+    """
+    Return the exposure label a color's embedded JPEG was made from.
+
+    The dataset is always named jpeg_e3, whatever exposure it came from; its
+    `filename` attr (e.g. "camtest8_white_e0.jpg") says which one it was.
+    Archives without that attr get "e3", the name the dataset claims.
+    """
+    try:
+        name = reader.attrs(f"/leds/{color}/jpeg_e3").get("filename", "")
+    except KeyError:
+        return "e3"
+    found = re.search(r"_(e\d+)\.jpg$", str(name))
+    return found.group(1) if found else "e3"
+
+
+def dark_exposure_us(reader: "Hdf5Reader | SectionView", color: str, label: str):
+    """Return the exposure_us of one LED's dark frame for a label, or None."""
+    link = find_dark_link(reader, color, label)
+    if link is None:
+        return None
+    for ch in BAYER_CHANNELS:
+        try:
+            return int(reader.attrs(f"/leds/{color}/dark/{link}/{ch}")["exposure_us"])
+        except KeyError:
+            continue
+    return None
+
+
 def summary_rows(reader: "Hdf5Reader | SectionView", color: str) -> list:
     """
-    Build (color, label, exposure_us, jpeg_bytes, shape) rows for one color.
+    Build one inventory row per exposure label for one color.
 
-    The row set is the union of lit labels present and {"e3"} if a jpeg
-    exists, since jpeg_e3 can exist even when lit/e3 itself was never
-    captured (seen in real partial-run archives). Missing pieces render
-    as "-".
+    Labels are the union of the lit labels, the dark-frame labels, and the
+    label the JPEG was made from, so a piece that exists without its partners
+    still shows up.  Every cell is filled on every row; "-" means that piece
+    was not stored for that label.
+
+    Returns:
+        Tuples of strings: (color, label, exposure_us, roi_shape, layers,
+        dark_us, jpegsize).  A color with nothing stored gets one all-"-" row.
     """
     lit_labels = set(list_lit_labels(reader, color))
+    try:
+        dark_children = reader.list_children(f"/leds/{color}/dark")
+    except KeyError:
+        dark_children = []
+    dark_labels = {c.rsplit("_", 1)[-1] for c in dark_children}
     jpeg_present = has_jpeg(reader, color)
-    labels = set(lit_labels)
-    if jpeg_present:
-        labels.add("e3")
+    jpeg_lab = jpeg_label(reader, color) if jpeg_present else None
+
+    labels = lit_labels | dark_labels | ({jpeg_lab} if jpeg_present else set())
     if not labels:
-        return [(color, "-", "-", "-", "-", "-")]
+        return [(color, "-", "-", "-", "-", "-", "-")]
 
     jpeg_bytes = (
-        len(reader.read_bytes(f"/leds/{color}/jpeg_e3"))
-        if jpeg_present else None
+        len(reader.read_bytes(f"/leds/{color}/jpeg_e3")) if jpeg_present else 0
     )
 
     rows = []
     for label in sorted(labels, key=lambda lab: int(lab[1:])):
-        is_lit = label in lit_labels
-        if is_lit:
+        exp = shape_s = layers_s = "-"
+        if label in lit_labels:
             exp = str(lit_exposure_us(reader, color, label))
-            shape = lit_channel_shape(reader, color, label)
-            shape_s = f"{shape[0]}x{shape[1]}"
-            # Which layers hold pixels. An archive from before capture_h5
-            # schema 3 always holds all four, so this reads as "R Gr Gb B"
-            # there and needs no version test.
+            rows_px, cols_px = lit_channel_shape(reader, color, label)
+            shape_s = f"{rows_px}x{cols_px}"
+            # Which layers hold pixels.  Older archives always hold all four.
             kept = lit_stored_channels(reader, color, label)
             layers_s = "+".join(kept) if kept else "(none)"
-        else:
-            exp = "-"
-            shape_s = "-"
-            layers_s = "-"
-        jpeg_s = str(jpeg_bytes) if (jpeg_present and label == "e3") else "-"
-        rows.append((color, label, exp, jpeg_s, shape_s, layers_s))
+        dark_us = dark_exposure_us(reader, color, label)
+        dark_s = str(dark_us) if dark_us is not None else "-"
+        jpeg_s = str(jpeg_bytes) if (jpeg_present and label == jpeg_lab) else "-"
+        rows.append((color, label, exp, shape_s, layers_s, dark_s, jpeg_s))
     return rows
 
 
 def cmd_summary(reader: "Hdf5Reader | SectionView", h5_path: Path) -> None:
-    """Print a compact table: color_name, e#, exposure_us, jpegsize, roi_shape."""
+    """Print the inventory table: one row per LED and stored exposure."""
     colors = list_led_colors(reader)
     print(f"Summary: {archive_label(h5_path, reader)}")
+    print("'-' means not stored in this archive.")
     if not colors:
         print("  (no /leds group found)")
         return
@@ -495,13 +530,17 @@ def cmd_summary(reader: "Hdf5Reader | SectionView", h5_path: Path) -> None:
     col_w = max(len("color_name"), max(len(r[0]) for r in all_rows)) + 1
     header = (
         f"{'color_name':<{col_w}}{'e#':<4}{'exposure_us':>12}  "
-        f"{'jpegsize':>10}  {'roi_shape':>10}  {'layers':<12}"
+        f"{'roi_shape':>10}  {'layers':<10}  {'dark_us':>9}  {'jpegsize':>9}"
     )
     print(header)
     print("-" * len(header))
-    for color, label, exp, jpeg, shape, layers in all_rows:
-        print(f"{color:<{col_w}}{label:<4}{exp:>12}  {jpeg:>10}  "
-              f"{shape:>10}  {layers:<12}")
+    for color, label, exp, shape, layers, dark, jpeg in all_rows:
+        print(f"{color:<{col_w}}{label:<4}{exp:>12}  {shape:>10}  "
+              f"{layers:<10}  {dark:>9}  {jpeg:>9}")
+
+    lit = sum(1 for r in all_rows if r[2] != "-")
+    print(f"\n{len(colors)} LEDs, {lit} lit exposures "
+          f"({lit / len(colors):g} per LED on average).")
 
 
 # ── Mode 2: jpeg extraction ──────────────────────────────────────────
