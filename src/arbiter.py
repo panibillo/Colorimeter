@@ -43,6 +43,13 @@ import sys
 import time
 from pathlib import Path
 
+# The headless self-test never drives real hardware, so it always runs on the
+# mock drivers (src/mock/), on the Pi as well as on a desktop without gpiozero.
+# It has to be set here, before anything reads the flag: this module reads it
+# just below, and lighting_cal8 reads it when the capture menu first imports it.
+if __name__ == "__main__" and "--selftest" in sys.argv:
+    os.environ["COLORIMETER_SIMULATION"] = "1"
+
 _SIMULATION_MODE = os.environ.get("COLORIMETER_SIMULATION", "0") == "1"
 
 # Hardware drivers are imported lazily in _init_hardware() so this module (and
@@ -7171,6 +7178,9 @@ def _selftest() -> None:
           "12.5")
 
     print("== test variant: typed factors, saved treatment, carry-over ==")
+    # The database is a copy of the live one, which may already hold real
+    # treatments; a first run is only a first run with none to carry over.
+    _db.write_tx([("DELETE FROM treatments", ())])
     _saved_phases = arb._phases
     arb._phases = build_phases(test_variant=True)
     A.record["test_equip"] = ""                     # a fresh run's first view
