@@ -91,6 +91,14 @@ shows them (`gains 1.66,2.43`), adding `(3% off)` when two chips disagree by
 more than 2%. SAVE stores them as `capture.photo_wb_gains`, the gains the
 camera applies to the photo and to the image viewer's lit preview.
 
+The gains do not depend on exposure, so if a chip channel is out of range at
+the fitted exposure, the exposure is rescaled from the chips (brightest chip
+channel to 70% of the window top) and the gains measured again, up to three
+frames in all. This matters when white is **spread** — for example with all
+four layers required and a brown patch dark in blue — because a spread
+ladder's middle exposure need not keep any patch in the window, and the chips
+can clip there. The photo keeps the fitted exposure.
+
 No gains are stored, and the old ones stay in force, if a chip channel is
 under 50 DN or reaches the window top at its high percentile. The hint names
 the chip and layer, e.g. `no gains: gray1.B too dark`. On C1038 and its four

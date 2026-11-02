@@ -409,15 +409,35 @@ class TestWhiteLed(FitRunnerTestCase):
                          runner.fits["white"].groups["1"])
         self.assertEqual(exposure_repo.read_exposures("white", "3"), [])
 
-    def test_a_chip_past_the_window_top_gives_no_gains(self):
-        self.cam.tints[10] = (6.0, 1.0, 0.41)   # red far brighter than green
+    def test_chips_unreadable_at_any_exposure_give_no_gains(self):
+        self.cam.tints[10] = (6.0, 1.0, 0.41)   # red 15x brighter than blue
         runner = self.run_white()
         self.assertTrue(runner.fits["white"].ok)
         self.assertFalse(runner.white_balance.ok)
-        self.assertRegex(runner.white_balance_note(), r"^no gains: .*\.R too bright$")
+        self.assertRegex(runner.white_balance_note(), r"^no gains: ")
         runner.persist()
         self.assertEqual(config.capture_photo_wb_gains(), (1.0, 1.0))
         self.assertTrue(exposure_repo.read_exposures("white", "1"))
+
+    def test_chips_clipped_by_a_spread_fit_are_remeasured_shorter(self):
+        """
+        All four layers on a pad too contrasty for one exposure: white is
+        spread, its middle exposure clips the (bright) chips, and the gains
+        come from a shorter exposure instead.  The photo keeps the fitted one.
+        """
+        pads = set(PAD_RECTS.values())
+        self.cam._regions = [(r, refl if r in pads else 0.8)
+                             for r, refl in self.cam._regions]
+        every = efr.LedSettings(("R", "Gr", "Gb", "B"),
+                                efr.required_cells.LedWindow(300, 850, 10.0, 90.0))
+        runner = self.run_white(settings={"white": every})
+        fit = runner.fits["white"]
+        self.assertTrue(fit.spread)
+        wb = runner.white_balance
+        self.assertTrue(wb.ok, wb.problem)
+        self.assertLess(runner.white_balance_us, fit.groups["1"][0])
+        self.assertAlmostEqual(wb.red * WHITE_TINT[0], 1.0, delta=0.01)
+        self.assertAlmostEqual(wb.blue * WHITE_TINT[2], 1.0, delta=0.01)
 
     def test_chips_that_disagree_are_flagged(self):
         runner = self.make_runner()

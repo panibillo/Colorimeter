@@ -3445,9 +3445,11 @@ class Arbiter:
                 spread = sum(1 for f in runner.fits.values() if f.spread)
                 note = f" {spread} spread." if spread else ""
                 wb = runner.white_balance_note()
-                if wb:                      # the hint is one line: gains win
-                    self._cap_hint(f"{good}/{len(runner.fits)} fitted. "
-                                   f"{wb[0].upper()}{wb[1:]}. SAVE.")
+                if wb:                      # one line: short words make room
+                    spread_note = f", {spread} spread" if spread else ""
+                    save = ". SAVE." if runner.white_balance.ok else ""
+                    self._cap_hint(f"{good}/{len(runner.fits)} fit{spread_note}. "
+                                   f"{wb[0].upper()}{wb[1:]}{save}")
                 else:
                     self._cap_hint(f"{good} of {len(runner.fits)} fitted.{note} "
                                    "SAVE to keep.")

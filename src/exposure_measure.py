@@ -26,6 +26,8 @@ Public surface
     patch_levels(layers, patches, channels, low_pctl, high_pctl, black_dn)
     white_balance(layers, chips, high_dn, high_pctl) -> WhiteBalance
                                                          colour gains for the photo
+    gain_exposure(layers, chips, exposure_us, high_dn, high_pctl) -> float
+                                                         where the chips read best
     make_measure(grab, patches, channels, low_pctl, high_pctl, black_dn)
     measure_for_led(led, grab, rois, pad) -> Measure     everything from config
 """
@@ -51,6 +53,12 @@ BLACK_DN = 64.0
 # at its calibrated exposure (C1038), so this only refuses a frame that is
 # badly underexposed in some channel.
 GAIN_MIN_SIGNAL_DN = 50.0
+
+# Where gain_exposure() aims the brightest gray-chip channel, as a fraction of
+# the window top: well inside it, so the dimmest channel (blue, about 2.4x
+# darker than green under the white LED) stays well clear of
+# GAIN_MIN_SIGNAL_DN.
+GAIN_TARGET_FRACTION = 0.7
 
 Grab = Callable[[int], Dict[str, np.ndarray]]
 
@@ -213,6 +221,30 @@ def white_balance(layers: Dict[str, np.ndarray], chips: Dict[str, Rect],
     spread = max(max(reds) / min(reds), max(blues) / min(blues)) - 1.0
     return WhiteBalance(float(np.mean(reds)), float(np.mean(blues)),
                         per_chip, spread)
+
+
+def gain_exposure(layers: Dict[str, np.ndarray], chips: Dict[str, Rect],
+                  exposure_us: float, high_dn: float, high_pctl: float,
+                  black_dn: float = BLACK_DN) -> float:
+    """
+    The exposure that would put the gray chips where white_balance() can read
+    them, scaled from a frame taken at `exposure_us`.
+
+    The sensor is linear, so the brightest chip channel's `high_pctl`
+    percentile is scaled to GAIN_TARGET_FRACTION of `high_dn`.  A clipped
+    channel reads low, so one rescale may land short of the target; it still
+    lands inside the window, which is all the gains need.
+
+    Gains are a ratio of channels and do not depend on exposure, which is why
+    they may be measured at an exposure of their own: the photo's exposure
+    suits the pad, and in a spread fit it can clip the chips.
+    """
+    brightest = max(float(np.percentile(layers[ch][rect.xyslice()], high_pctl))
+                    - black_dn
+                    for rect in chips.values() for ch in ("R", "Gr", "Gb", "B"))
+    if brightest <= 0:
+        return exposure_us * 4.0
+    return exposure_us * GAIN_TARGET_FRACTION * high_dn / brightest
 
 
 def make_measure(grab: Grab, patches: Dict[str, Rect], channels: Iterable[str],

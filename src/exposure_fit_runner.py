@@ -26,9 +26,10 @@ first.  The LED is switched off when the run ends, however it ends.
 
 The white LED is treated differently.  A capture takes it once (the photo and
 the white measurement are the same frame), so it is fitted for group 1 only:
-one exposure, in the middle of its usable range.  At that exposure one more
-frame measures the colour gains that make the gray chips gray, and persist()
-stores them as capture.photo_wb_gains along with the exposure.
+one exposure, in the middle of its usable range.  Then one more frame (two
+or three if the chips were out of range there) measures the colour gains that
+make the gray chips gray, and persist() stores them as capture.photo_wb_gains
+along with the exposure.
 """
 
 from __future__ import annotations
@@ -65,6 +66,10 @@ WHITE_LED = "white"
 # reported, though the gains are still offered: either chip may be off-gray,
 # and the operator is the one who can look.
 GAIN_SPREAD_WARN = 0.02
+
+# Frames the gains may take: the first at white's fitted exposure, and the
+# rest at an exposure rescaled from the chips when they were out of range.
+GAIN_MAX_FRAMES = 3
 
 # Called after each frame with (color, exposure_us, frames_so_far).  A fit takes
 # many frames and the run yields only between LEDs, so a caller that must keep
@@ -118,6 +123,9 @@ class ExposureFitRunner(CaptureRunner):
         # The white LED's colour gains, measured at its fitted exposure; None
         # until white has been fitted (or when this run did not include it).
         self.white_balance: Optional[em.WhiteBalance] = None
+        # The exposure the gains were measured at: white's fitted exposure,
+        # unless the chips needed another (_measure_white_balance).
+        self.white_balance_us: Optional[int] = None
         self._order: "list[tuple[int, str]]" = []
         self._frames = 0
         # Progress counts whole LEDs: a fit's frame count is not known ahead.
@@ -232,7 +240,8 @@ class ExposureFitRunner(CaptureRunner):
             self.fits[color] = fit
             self.layers[color] = " ".join(led.layers)
             if color == WHITE_LED and "1" in fit.groups:
-                self._measure_white_balance(grab, fit.groups["1"][0], led)
+                self._measure_white_balance(grab, fit.groups["1"][0], led,
+                                            led_params)
 
             self._led_off(channel)
             self._captures_done = 1
@@ -241,25 +250,47 @@ class ExposureFitRunner(CaptureRunner):
         yield self._progress("done", self._overall_summary())
 
     def _measure_white_balance(self, grab, exposure_us: int,
-                               led: LedSettings) -> None:
+                               led: LedSettings, params: ef.FitParams) -> None:
         """
-        Take one frame at white's fitted exposure and measure the gains there.
+        Measure the colour gains from the gray chips, starting at white's
+        fitted exposure.
 
-        A frame of its own rather than one left over from the fit, because the
-        fit measures only the required layers at percentiles, and the gains
-        need every layer's median on the chips at the exposure a capture uses.
+        Frames of their own rather than ones left over from the fit, because
+        the fit measures only the required layers at percentiles, and the
+        gains need every layer's median on the chips.  The first frame is at
+        the fitted exposure.  If a chip channel is too dark or too bright
+        there — as it can be when the fit was spread, whose middle exposure
+        need not keep any patch in the window — the exposure is rescaled from
+        the chips (em.gain_exposure) and the gains measured again, up to
+        GAIN_MAX_FRAMES frames.  Gains do not depend on exposure, so the
+        photo keeps its own.
         """
         self._status(WHITE_LED, f"{WHITE_LED} measuring colour gains ...")
-        wb = em.white_balance(grab(exposure_us), em.gray_chips(self.rois),
-                              led.window.high_dn, led.window.high_pctl)
+        chips = em.gray_chips(self.rois)
+        high_dn, high_pctl = led.window.high_dn, led.window.high_pctl
+        us = exposure_us
+        for frame in range(1, GAIN_MAX_FRAMES + 1):
+            layers = grab(us)
+            wb = em.white_balance(layers, chips, high_dn, high_pctl)
+            if wb.ok or frame == GAIN_MAX_FRAMES:
+                break
+            nxt = ef.round_us(em.gain_exposure(layers, chips, us, high_dn,
+                                               high_pctl), params)
+            log.info("exposure fit: white gains at %d us: %s — retrying at %d us",
+                     us, wb.problem, nxt)
+            if nxt == us:                         # held at a limit
+                break
+            us = nxt
         self.white_balance = wb
+        self.white_balance_us = us
         if wb.ok:
             log.info("exposure fit: white gains red %.3f blue %.3f at %d us "
-                     "(chips %s, spread %.1f%%)", wb.red, wb.blue, exposure_us,
+                     "(chips %s, spread %.1f%%)", wb.red, wb.blue, us,
                      {n: (round(r, 3), round(b, 3)) for n, (r, b) in wb.chips.items()},
                      100 * wb.spread)
         else:
-            log.warning("exposure fit: white gains not measured: %s", wb.problem)
+            log.warning("exposure fit: white gains not measured at %d us: %s",
+                        us, wb.problem)
         self._status(WHITE_LED, f"{WHITE_LED} {exposure_us} us, "
                                 f"{self.white_balance_note()}")
 
@@ -350,5 +381,6 @@ class ExposureFitRunner(CaptureRunner):
         if wb is not None and wb.ok:
             import config_repo as config
             config.save("capture", "photo_wb_gains", f"{wb.red:.3f},{wb.blue:.3f}",
-                        remark=f"{remark} {add_dt}: gray chips under white")
+                        remark=f"{remark} {add_dt}: gray chips under white "
+                               f"at {self.white_balance_us} us")
         return rows

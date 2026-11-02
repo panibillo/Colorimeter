@@ -167,6 +167,11 @@ class TestWhiteBalance(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "gray chip"):
             em.gray_chips({})
 
+    def test_gain_exposure_puts_the_brightest_chip_channel_at_the_target(self):
+        layers = self.scene(rgb=(200.0, 425.0, 140.0))
+        us = em.gain_exposure(layers, self.chips(), 1000, 850, 90)
+        self.assertAlmostEqual(us, 1000 * em.GAIN_TARGET_FRACTION * 850 / 425)
+
 
 class TestMakeMeasure(unittest.TestCase):
 
