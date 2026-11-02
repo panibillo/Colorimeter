@@ -89,7 +89,7 @@ At that exposure one more frame is taken, and each gray chip's median per layer
 with G the mean of Gr and Gb. The chips' gains are averaged. The hint line
 shows them (`gains 1.66,2.43`), adding `(3% off)` when two chips disagree by
 more than 2%. SAVE stores them as `capture.photo_wb_gains`, the gains the
-camera applies to the photo (and, later, to the LCD preview).
+camera applies to the photo and to the image viewer's lit preview.
 
 No gains are stored, and the old ones stay in force, if a chip channel is
 under 50 DN or reaches the window top at its high percentile. The hint names

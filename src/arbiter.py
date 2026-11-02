@@ -467,6 +467,7 @@ class Arbiter:
         self._view_open      = False
         self._view_frame     = None    # the whole captured frame, numpy BGR
         self._view_bayer     = None    # that frame's raw mosaic, for recap saves
+        self._view_gains     = (1.0, 1.0)  # colour gains that frame was rendered with
         self._view_state     = None    # image_view.ViewState over that frame
         self._view_pad:   bool = False   # editing the test pad, not the measurement ROIs
         self._view_rois:  dict = {}    # name -> rect.Rect, in image space
@@ -4466,7 +4467,19 @@ class Arbiter:
         Take a briefly-lit, metered frame for the image viewer.
 
         The white LED is switched on, given a short settle, the exposure is
-        metered (see `_auto_expose`), and the LED goes off again.  The LED
+        metered (see `_auto_expose`), and the LED goes off again.
+
+        The lit frame is rendered with the white LED's colour gains
+        (capture.photo_wb_gains, measured by calibrating white), so the screen
+        shows the scene's real colours rather than the sensor's green cast.
+        The gains are requested as the LED goes on, so the image processor
+        adopts them during the LED settle and the metering frames that are
+        spent anyway, and metering accepts a frame only once it reports them.
+        They are put back to neutral as the LED goes off, without waiting for
+        a frame: nothing reads the colour image until the next capture, which
+        is many frames away.  The raw Bayer data is not affected either way.
+
+        The LED
         settle is deliberately far shorter than a capture run's
         LED_ON_WARMUP_S: this frame is for looking at, and for judging where
         the ROI rectangles fall, so colour accuracy is not required and the
@@ -4516,17 +4529,22 @@ class Arbiter:
                 return None, "No image"
             self._view_exposure_us = int(meta.get("ExposureTime") or us)
             self._view_bayer = bayer
+            self._view_gains = (1.0, 1.0)     # neutral: no LED to balance for
             log.info("Arbiter: dark preview frame %dx%d at %d us",
                      rgb.shape[1], rgb.shape[0], self._view_exposure_us)
             return rgb, ""
 
         led_on = False
+        gains = config.capture_photo_wb_gains()
         try:
             if leds is not None:
                 leds.set_channel(_PREVIEW_LED_CH, True)
                 led_on = True
+            cam.set_color_rendering(gains)
+            self._view_gains = tuple(gains)
+            if led_on:
                 time.sleep(_PREVIEW_SETTLE_S)
-            rgb, exposure_us = self._auto_expose(cam, region=region)
+            rgb, exposure_us = self._auto_expose(cam, region=region, gains=gains)
         except Exception:
             log.exception("Arbiter: preview capture failed")
             return None, "Preview failed"
@@ -4536,6 +4554,10 @@ class Arbiter:
                     leds.set_channel(_PREVIEW_LED_CH, False)
                 except Exception:
                     log.exception("Arbiter: could not switch the preview LED off")
+            try:
+                cam.set_objective_rendering()
+            except Exception:
+                log.exception("Arbiter: could not restore neutral rendering")
 
         if rgb is None or getattr(rgb, "ndim", 0) != 3:
             return None, "No image"
@@ -4543,7 +4565,7 @@ class Arbiter:
                  rgb.shape[1], rgb.shape[0], exposure_us)
         return rgb, ""
 
-    def _auto_expose(self, cam, region: str = "sample"):
+    def _auto_expose(self, cam, region: str = "sample", gains=None):
         """
         Capture the preview, metering the exposure on the sample ROI or the
         whole frame.
@@ -4577,6 +4599,11 @@ class Arbiter:
             cam:    The shared camera, already started.
             region: "sample" (default, meters the sample ROI alone) or "whole"
                     (meters the entire frame).
+            gains:  The (red, blue) colour gains just requested, or None.  A
+                    frame counts as settled only once it reports them, so the
+                    colours shown are the ones asked for.  Not a frame more is
+                    expected: gains are applied by the image processor, sooner
+                    than the sensor adopts a new exposure.
 
         Returns:
             (rgb, exposure_us) — the BGR frame and the exposure it was actually
@@ -4588,8 +4615,15 @@ class Arbiter:
         us = self._start_exposure_us()
         rgb, applied = None, us
         for i in range(_PREVIEW_AE_MAX_FRAMES):
-            rgb, bayer, meta = capture_runner._set_and_settle(
-                cam, us, max_frames=_PREVIEW_SETTLE_FRAMES)
+            rgb, bayer, meta, frames, gains_ok = capture_runner._settle_frames(
+                cam, us, max_frames=_PREVIEW_SETTLE_FRAMES, want_gains=gains)
+            if gains_ok is False:
+                log.warning("Arbiter: preview frame still reports gains %s, "
+                            "not %s", meta.get("ColourGains"), tuple(gains))
+            elif gains is not None:
+                log.info("Arbiter: preview gains %s %s after %d frame(s)",
+                         tuple(gains),
+                         "confirmed" if gains_ok else "not reported", frames)
             applied = int(meta.get("ExposureTime") or us)
             level = (self._meter_sample_level(bayer, cam) if region == "sample"
                      else self._meter_whole_frame_level(bayer, cam))
@@ -5044,7 +5078,8 @@ class Arbiter:
             with Hdf5Writer(path) as w:
                 w.set_attrs("/", {"suite_id": stamp})
                 w.write_bytes("/", "jpeg", capture_runner._encode_jpeg(rgb_out),
-                              attrs={"format": "jpeg"})
+                              attrs={"format": "jpeg",
+                                     "colour_gains": list(self._view_gains)})
                 for ch, arr in layers.items():
                     w.write_array("/bayer", ch, arr)
             log.info("Arbiter: recapture — saved %s", path)
@@ -7278,7 +7313,15 @@ def _selftest() -> None:
             self.exposures = []
             self.frames = 0
             self.exposure_us = 0
+            self.gains = (1.0, 1.0)                   # colour gains in force
+            self.renderings = []                      # every rendering request
         def setup_camera(self): pass
+        def set_color_rendering(self, gains):
+            self.gains = tuple(gains)
+            self.renderings.append(("colour", tuple(gains)))
+        def set_objective_rendering(self):
+            self.gains = (1.0, 1.0)
+            self.renderings.append(("objective",))
         def set_exposure(self, us):
             self.exposure_us = int(us); self.exposures.append(int(us))
         def sample_level(self):
@@ -7295,7 +7338,8 @@ def _selftest() -> None:
             f[y0:y1, x0:x1] = (0, 200, 250)           # BGR: the sample, orange
             bayer = _np.zeros((1296, 2304), _np.uint16)
             bayer[y0:y1, x0:x1] = self.sample_level()
-            return f, bayer, {"ExposureTime": self.exposure_us}
+            return f, bayer, {"ExposureTime": self.exposure_us,
+                              "ColourGains": self.gains}
         def stop(self): self.stopped = True
 
     class _PreviewLeds:
@@ -7329,6 +7373,11 @@ def _selftest() -> None:
     check("metering is bounded",    pcam.frames <= _PREVIEW_AE_MAX_FRAMES, True)
     check("white LED on then off",  pleds.history[-2:],
           [(_PREVIEW_LED_CH, True), (_PREVIEW_LED_CH, False)])
+    _wb = tuple(config.capture_photo_wb_gains())
+    check("preview asks for the white LED's colour gains",
+          pcam.renderings[0], ("colour", _wb))
+    check("and puts neutral rendering back", pcam.renderings[-1], ("objective",))
+    check("the frame shown was rendered with those gains", arb._view_gains, _wb)
     # Bound from roles, never spelled out: the operator renames ROIs from the
     # instrument (black1/black2 are already chip1/chip2), and a literal list
     # here would fail on their machine while passing on a freshly seeded one.
