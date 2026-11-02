@@ -589,13 +589,21 @@ class Entry2Phase(Phase):
 
 
     def proceed(self, arb, slot) -> None:
+        """
+        Write the screen's fields to the row and go on to the vent reminder.
+
+        The temperature also becomes the configured default, so the next run's
+        Temp button (on a unit with no probe) offers what was used last.
+        """
         r = slot.record
         if not r.get("collect_dt"):
             r["collect_dt"] = arb.timestamp()
+        temp_c = _to_float(r.get("samp_degC"))
         arb.persist(slot, collect_dt=r["collect_dt"],
-                    samp_degC=_to_float(r.get("samp_degC")),
+                    samp_degC=temp_c,
                     samp_grams=_to_float(r.get("samp_grams")),
                     remark=r.get("remark"))
+        arb.remember_temperature(temp_c)
         arb.goto(slot, self.proceed_to)
 
 
@@ -1384,6 +1392,7 @@ if __name__ == "__main__":
         def draw_rect(self, rect, color, **kw): pass
         def draw_text(self, text, rect, **kw): pass
 
+    import dataclasses
     import version
     from sample_repo import Defaults
 
@@ -1417,6 +1426,9 @@ if __name__ == "__main__":
             # protocol.t2ref25_secs / protocol.q10, canned like the defaults.
             self.t2ref25 = 720
             self.q10 = 2.0
+            # The loaded defaults.  Held per instance, not read from DEFAULTS,
+            # because Entry 2's Continue writes the temperature back into them.
+            self.defaults_now = DEFAULTS
 
         # clock / stamps
         def now(self):        return self.clock
@@ -1425,6 +1437,10 @@ if __name__ == "__main__":
         def read_temperature(self):
             return self.temp_c if self.temp_probe else None
         def temperature_attached(self):  return self.temp_probe
+        def remember_temperature(self, temp_c):
+            if temp_c is not None:
+                self.defaults_now = dataclasses.replace(
+                    self.defaults_now, default_temperature=round(float(temp_c), 1))
 
         # reagent 2's temperature-compensated countdown.  Mirrors the real
         # arbiter: the sample's own temperature when it has one, otherwise the
@@ -1434,7 +1450,7 @@ if __name__ == "__main__":
             t = _to_float(slot.record.get("samp_degC"))
             measured = t is not None
             if not measured:
-                t = DEFAULTS.default_temperature
+                t = self.defaults_now.default_temperature
             secs = round(self.t2ref25 * self.q10 ** ((25.0 - t) / 10.0))
             return max(1, min(3600, secs)), t, measured
 
@@ -1477,7 +1493,7 @@ if __name__ == "__main__":
             # Temperature-compensated stir duration, 0 if disabled
             t = _to_float(slot.record.get("samp_degC"))
             if t is None:
-                t = DEFAULTS.default_temperature
+                t = self.defaults_now.default_temperature
             base_stir = 0  # canned: reagent 2 has no stir by default
             if base_stir == 0:
                 return 0
@@ -1487,7 +1503,7 @@ if __name__ == "__main__":
         # database / sample lifecycle.  The numbering is modelled rather than
         # canned, because which number a slot ends up holding is exactly what
         # the entry screen's behaviour turns on.
-        def defaults(self):        return DEFAULTS
+        def defaults(self):        return self.defaults_now
 
         @staticmethod
         def _one_past(taken):
@@ -1788,6 +1804,8 @@ if __name__ == "__main__":
     check("degC persisted (float)",  A.record["samp_degC"], 21.5)
     check("grams persisted (float)", A.record["samp_grams"], 3.2)
     check("remark persisted",        A.record["remark"], "cloudy sample")
+    check("entered temp is the new default",
+          arb.defaults().default_temperature, 21.5)
 
     print("== vent reminder: a plain red screen; OK goes on to preimage ==")
     check("phase vent",       A.phase, "vent")
@@ -1971,7 +1989,7 @@ if __name__ == "__main__":
     print("== with no temperature at all, the stand-in is used and bracketed ==")
     A.record["samp_degC"] = None; arb.render(A)
     _secs, _t, _measured = arb.reagent2_plan(A)
-    check("falls back to the default", _t, DEFAULTS.default_temperature)
+    check("falls back to the last entered temperature", _t, 21.5)
     check("flagged as not measured",   _measured, False)
     A.record["reagent2_initial_wt"] = "1.650"
     arb.render(A)

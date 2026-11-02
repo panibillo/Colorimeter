@@ -901,6 +901,34 @@ class Arbiter:
         """
         return bool(getattr(self._temp, "connected", False))
 
+    def remember_temperature(self, temp_c) -> None:
+        """
+        Make a sample's temperature the new defaults.default_temperature.
+
+        Called when Entry 2's Continue is pressed, so the next run's stand-in
+        (the bracketed Temp button and reagent 2's fallback) is the temperature
+        the operator last worked at rather than a fixed factory value.  Written
+        with config.save, which puts the value in force but does not commission
+        it, so the config editor's Restore still goes back to the commissioned
+        value.  A value the parameter already holds writes nothing.
+
+        Args:
+            temp_c: The sample temperature in °C, or None when the field was
+                left empty or did not parse — in which case nothing changes.
+        """
+        if temp_c is None:
+            return
+        text = f"{float(temp_c):.1f}"
+        current = getattr(self._defaults, "default_temperature", None)
+        if current is not None and f"{current:.1f}" == text:
+            return
+        try:
+            config.save("defaults", "default_temperature", text)
+        except sqlite3.Error:
+            log.exception("Arbiter: could not save default temperature %s", text)
+            return
+        self._load_defaults()
+
     # ── Phase contract: reagent 2's temperature-compensated countdown ──────────
 
     def t2ref25_secs(self) -> int:
@@ -7075,6 +7103,22 @@ def _selftest() -> None:
     arb._cfge_cancel()
     check("roles → menu",      arb._cfge_view, None)
     check("the Menu is up",    arb._pool["menu_capture"].visible, True)
+
+    print("== Entry 2's temperature becomes the default temperature ==")
+    _t0 = config.get("defaults", "default_temperature")
+    _t_new = round(_t0 + 3.4, 1)
+    arb.remember_temperature(_t_new)
+    check("saved to config", config.get("defaults", "default_temperature"), _t_new)
+    check("defaults reloaded", arb.defaults().default_temperature, _t_new)
+    _hist = len(config.history("defaults", "default_temperature"))
+    arb.remember_temperature(_t_new)
+    check("the same value adds no history",
+          len(config.history("defaults", "default_temperature")), _hist)
+    arb.remember_temperature(None)
+    check("an empty field changes nothing",
+          config.get("defaults", "default_temperature"), _t_new)
+    config.save("defaults", "default_temperature", _t0)
+    arb._load_defaults()
 
     print("== config editor: a saved default reaches the next sample claimed ==")
     # Nothing is pushed back into the slots any more.  An unclaimed slot holds
