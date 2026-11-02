@@ -7,9 +7,11 @@ Desktop-only developer tool (matplotlib dependency). Not synced to the Pi
 Four focused modes, more compact than Hdf5Reader.summary():
 
   -s / --summary       Inventory table: color_name, e#, exposure_us,
-                        roi_shape, layers, dark_us, jpegsize -- one row per
+                        roi_shape, layers, jpegsize -- one row per
                         exposure label stored for each LED. "-" means that
                         piece was not stored (the table says so first).
+                        Then the sweep's dark frames: exposure, whether
+                        pixels or statistics only were kept, mean per layer.
   -j / --jpeg_extract   Extract each color's embedded jpeg_e3 blob to
                         <captures_dir>/<file_stem>/<color>.jpg, or
                         <file_stem>/<section>/<color>.jpg with --pre.
@@ -454,44 +456,26 @@ def jpeg_label(reader: "Hdf5Reader | SectionView", color: str) -> str:
     return found.group(1) if found else "e3"
 
 
-def dark_exposure_us(reader: "Hdf5Reader | SectionView", color: str, label: str):
-    """Return the exposure_us of one LED's dark frame for a label, or None."""
-    link = find_dark_link(reader, color, label)
-    if link is None:
-        return None
-    for ch in BAYER_CHANNELS:
-        try:
-            return int(reader.attrs(f"/leds/{color}/dark/{link}/{ch}")["exposure_us"])
-        except KeyError:
-            continue
-    return None
-
-
 def summary_rows(reader: "Hdf5Reader | SectionView", color: str) -> list:
     """
     Build one inventory row per exposure label for one color.
 
-    Labels are the union of the lit labels, the dark-frame labels, and the
-    label the JPEG was made from, so a piece that exists without its partners
-    still shows up.  Every cell is filled on every row; "-" means that piece
-    was not stored for that label.
+    Labels are the union of the lit labels and the label the JPEG was made
+    from, so a JPEG without its lit frame still shows up.  Every cell is
+    filled on every row; "-" means that piece was not stored for that label.
+    Dark frames belong to the sweep, not to an LED: see dark_rows().
 
     Returns:
         Tuples of strings: (color, label, exposure_us, roi_shape, layers,
-        dark_us, jpegsize).  A color with nothing stored gets one all-"-" row.
+        jpegsize).  A color with nothing stored gets one all-"-" row.
     """
     lit_labels = set(list_lit_labels(reader, color))
-    try:
-        dark_children = reader.list_children(f"/leds/{color}/dark")
-    except KeyError:
-        dark_children = []
-    dark_labels = {c.rsplit("_", 1)[-1] for c in dark_children}
     jpeg_present = has_jpeg(reader, color)
     jpeg_lab = jpeg_label(reader, color) if jpeg_present else None
 
-    labels = lit_labels | dark_labels | ({jpeg_lab} if jpeg_present else set())
+    labels = lit_labels | ({jpeg_lab} if jpeg_present else set())
     if not labels:
-        return [(color, "-", "-", "-", "-", "-", "-")]
+        return [(color, "-", "-", "-", "-", "-")]
 
     jpeg_bytes = (
         len(reader.read_bytes(f"/leds/{color}/jpeg_e3")) if jpeg_present else 0
@@ -507,11 +491,49 @@ def summary_rows(reader: "Hdf5Reader | SectionView", color: str) -> list:
             # Which layers hold pixels.  Older archives always hold all four.
             kept = lit_stored_channels(reader, color, label)
             layers_s = "+".join(kept) if kept else "(none)"
-        dark_us = dark_exposure_us(reader, color, label)
-        dark_s = str(dark_us) if dark_us is not None else "-"
         jpeg_s = str(jpeg_bytes) if (jpeg_present and label == jpeg_lab) else "-"
-        rows.append((color, label, exp, shape_s, layers_s, dark_s, jpeg_s))
+        rows.append((color, label, exp, shape_s, layers_s, jpeg_s))
     return rows
+
+
+def dark_rows(reader: "Hdf5Reader | SectionView") -> list:
+    """
+    Build one row per dark frame the sweep stored under /dark.
+
+    A dark frame is stored either with its pixels or, from capture schema
+    with dark statistics, as statistics only (an omitted placeholder carrying
+    raw_min/raw_mean/raw_max).  Either way its mean per layer is shown.
+
+    Returns:
+        Tuples of strings: (name, exposure_us, stored, mean R, Gr, Gb, B),
+        where stored is "pixels", "stats" or "-".
+    """
+    try:
+        names = reader.list_children("/dark")
+    except KeyError:
+        return []
+    rows = []
+    for name in names:
+        exp, kinds, means = "-", set(), []
+        for ch in BAYER_CHANNELS:
+            path = f"/dark/{name}/{ch}"
+            try:
+                a = reader.attrs(path)
+            except KeyError:
+                means.append("-")
+                continue
+            exp = str(a.get("exposure_us", exp))
+            if capture_h5.is_omitted(a):
+                kinds.add("stats")
+                m = a.get("raw_mean")
+                means.append(f"{float(m):.2f}" if m is not None else "-")
+            else:
+                kinds.add("pixels")
+                means.append(f"{float(reader.read_array(path).mean()):.2f}")
+        stored = "+".join(sorted(kinds)) if kinds else "-"
+        rows.append((name, exp, stored, *means))
+    return sorted(rows, key=lambda r: (r[0].split("_")[0],
+                                       int(r[1]) if r[1].isdigit() else 0))
 
 
 def cmd_summary(reader: "Hdf5Reader | SectionView", h5_path: Path) -> None:
@@ -530,17 +552,30 @@ def cmd_summary(reader: "Hdf5Reader | SectionView", h5_path: Path) -> None:
     col_w = max(len("color_name"), max(len(r[0]) for r in all_rows)) + 1
     header = (
         f"{'color_name':<{col_w}}{'e#':<4}{'exposure_us':>12}  "
-        f"{'roi_shape':>10}  {'layers':<10}  {'dark_us':>9}  {'jpegsize':>9}"
+        f"{'roi_shape':>10}  {'layers':<10}  {'jpegsize':>9}"
     )
     print(header)
     print("-" * len(header))
-    for color, label, exp, shape, layers, dark, jpeg in all_rows:
+    for color, label, exp, shape, layers, jpeg in all_rows:
         print(f"{color:<{col_w}}{label:<4}{exp:>12}  {shape:>10}  "
-              f"{layers:<10}  {dark:>9}  {jpeg:>9}")
+              f"{layers:<10}  {jpeg:>9}")
 
     lit = sum(1 for r in all_rows if r[2] != "-")
     print(f"\n{len(colors)} LEDs, {lit} lit exposures "
           f"({lit / len(colors):g} per LED on average).")
+
+    darks = dark_rows(reader)
+    print(f"\nDark frames ({len(darks)}), mean DN per layer:")
+    if not darks:
+        print("  (none)")
+        return
+    dhead = (f"{'name':<18}{'exposure_us':>12}  {'stored':<12}"
+             + "".join(f"{ch:>8}" for ch in BAYER_CHANNELS))
+    print(dhead)
+    print("-" * len(dhead))
+    for name, exp, stored, *means in darks:
+        print(f"{name:<18}{exp:>12}  {stored:<12}"
+              + "".join(f"{m:>8}" for m in means))
 
 
 # ── Mode 2: jpeg extraction ──────────────────────────────────────────
@@ -1079,14 +1114,14 @@ def cmd_write_db(reader: "Hdf5Reader | SectionView", h5_path: Path, db_path: Pat
         written = skipped = 0
         for color in colors:
             for label in list_lit_labels(reader, color):
+                # The per-LED link is only the fallback for archives with no
+                # shared /dark (camtest8 conversions); newer archives have no
+                # per-LED links at all, and dark_level reads /dark directly.
                 dark_link = find_dark_link(reader, color, label)
-                if dark_link is None:
-                    print(f"  skip {color}/{label}: no matching dark frame")
-                    skipped += 1
-                    continue
+                dark_group = (f"/leds/{color}/dark/{dark_link}"
+                              if dark_link is not None else None)
 
                 exposure_us = int(lit_exposure_us(reader, color, label))
-                dark_group = f"/leds/{color}/dark/{dark_link}"
                 stored = lit_stored_channels(reader, color, label)
                 if len(stored) < len(BAYER_CHANNELS):
                     gone = [c for c in BAYER_CHANNELS if c not in stored]
@@ -1101,7 +1136,9 @@ def cmd_write_db(reader: "Hdf5Reader | SectionView", h5_path: Path, db_path: Pat
                     # per-pixel 'dark_sub' rows.
                     try:
                         dark = capture_h5.dark_level(
-                            reader, ch, "", fallback=f"{dark_group}/{ch}")[0]
+                            reader, ch, "",
+                            fallback=(f"{dark_group}/{ch}"
+                                      if dark_group else None))[0]
                     except KeyError:
                         print(f"  skip {color}/{label}/{ch}: dark not stored")
                         skipped += 1

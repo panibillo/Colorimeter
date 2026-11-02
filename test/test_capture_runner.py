@@ -33,6 +33,7 @@ _ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(_ROOT / "src"))
 sys.path.insert(0, str(_ROOT / "dev"))
 
+import capture_h5
 import capture_runner
 import config_repo
 import db_bootstrap
@@ -93,15 +94,33 @@ class FakeCam:
         # None) — so a test can check the objective rendering the Bayer data
         # depends on is put back after the closing photograph.
         self.rendering: list = []
+        # Colour gains reach a frame `gain_lag` frames after they are set, and
+        # every frame reports the gains it was rendered with — as libcamera's
+        # ColourGains metadata does.  A test sets gain_lag to model a slow (or,
+        # with a huge value, a stuck) pipeline.
+        self.gain_lag = 1
+        self._gains = (1.0, 1.0)
+        self._pending = None
+        self._pending_in = 0
+        # Optional FakeLeds: when set, every frame records which LEDs were lit,
+        # as (exposure_us, lit channels, reported gains).
+        self.leds = None
+        self.frames: list = []
 
     def set_exposure(self, exposure_us: int) -> None:
         self._exposure_us = int(exposure_us)
 
+    def _set_gains(self, gains) -> None:
+        self._pending = tuple(float(g) for g in gains)
+        self._pending_in = self.gain_lag
+
     def set_color_rendering(self, wb_gains) -> None:
         self.rendering.append(("color", tuple(float(g) for g in wb_gains)))
+        self._set_gains(wb_gains)
 
     def set_objective_rendering(self) -> None:
         self.rendering.append(("objective", None))
+        self._set_gains((1.0, 1.0))
 
     def setup_camera(self) -> None:
         self.config_size = (FRAME_W, FRAME_H)
@@ -109,6 +128,14 @@ class FakeCam:
 
     def capture_frame(self):
         self.exposures_captured.append(self._exposure_us)
+        if self._pending is not None:
+            if self._pending_in <= 0:
+                self._gains, self._pending = self._pending, None
+            else:
+                self._pending_in -= 1
+        if self.leds is not None:
+            self.frames.append((self._exposure_us,
+                                frozenset(self.leds.lit_channels()), self._gains))
         bayer = np.clip(self._gain * self._exposure_us * _SCALE,
                         0, 1023).astype(np.uint16)
         rgb = np.zeros((FRAME_H, FRAME_W, 3), dtype=np.uint8)
@@ -117,7 +144,7 @@ class FakeCam:
         # hardware, since that is what the archive has to represent.
         meta = {
             "ExposureTime": self._exposure_us,
-            "ColourGains":  (1.0, 1.0),
+            "ColourGains":  self._gains,
             "SensorBlackLevels": (4096, 4096, 4096, 4096),
         }
         return rgb, bayer, meta
@@ -174,6 +201,7 @@ class RunnerTestCase(unittest.TestCase):
         self.out_root = Path(self._tmp.name)
         self.cam  = FakeCam()
         self.leds = FakeLeds()
+        self.cam.leds = self.leds
 
         # The real 2 s LED waits would dominate the test runtime.
         self._real_on_warmup  = capture_runner.LED_ON_WARMUP_S
@@ -701,16 +729,17 @@ class TestNormalMode(CalibratedExposures):
         self.assertEqual(len(want), 3)
         self.assertEqual(runner.results[0].exposures_us, want)
 
-    def test_archive_holds_e0_to_eN_lit_and_dark(self):
+    def test_archive_holds_e0_to_eN_lit(self):
         runner = self.make_runner(mode="normal", exposure_group="2")
         self.run_to_completion(runner)
         with self.archive(runner) as f:
             for label in ("e0", "e1"):
                 for ch in ("B", "Gb", "Gr", "R"):
                     self.assertIn(f"/leds/amber/lit/{label}/{ch}", f)
-                    self.assertIn(f"/leds/amber/dark/after_{label}/{ch}", f)
             # group "2" -> exactly two exposures, no e2.
             self.assertNotIn("/leds/amber/lit/e2", f)
+            # The dark frames are the run's, not an LED's: no per-LED links.
+            self.assertNotIn("/leds/amber/dark", f)
 
     def test_reaches_done(self):
         runner = self.make_runner(mode="normal", exposure_group="1",
@@ -1014,18 +1043,16 @@ class TestNormalModePrefetchSplit(CalibratedExposures):
             self.assertNotIn("/dark", f)
             self.assertNotIn("/leds", f)
 
-    def test_capture_produces_one_dark_batch_after_the_sweep(self):
+    def test_capture_produces_one_dark_pair_after_the_sweep(self):
         runner = self.make_runner(mode="normal", exposure_group="1")
         list(runner.run_prefetch())
         list(runner.run_capture())
+        longest = max(us for r in runner.results for us in r.exposures_us)
         with self.archive(runner) as f:
-            dark_groups = sorted(f["/dark"])
-            self.assertTrue(dark_groups)
-            self.assertFalse([k for k in dark_groups if k.startswith("before_")])
-            self.assertTrue(all(k.startswith("after_") for k in dark_groups))
-            for color in ("amber", "blue"):
-                self.assertIn(f"/leds/{color}/dark/after_e0", f)
-                self.assertNotIn(f"/leds/{color}/dark/before_e0", f)
+            self.assertEqual(
+                sorted(f["/dark"]),
+                sorted({f"after_{capture_runner.DARK_SHORT_US}us",
+                        f"after_{longest}us"}))
 
     def test_run_chains_prefetch_and_capture_for_fallback_path(self):
         """run() (no split) must still produce the one dark batch."""
@@ -1057,6 +1084,178 @@ class TestNormalModePrefetchSplit(CalibratedExposures):
                                   led_colors=["blue", "amber"])
         self.run_to_completion(runner)
         self.assertEqual([r.color for r in runner.results], ["blue", "amber"])
+
+
+# ---------------------------------------------------------------------------
+# Normal path: two dark frames as statistics, white once and last
+# ---------------------------------------------------------------------------
+
+class TestDarkPairAndWhite(CalibratedExposures):
+    """
+    A sweep keeps two dark frames, as statistics only, and takes the white LED
+    once, last — after the darks, because its phosphor can glow on — in a
+    frame that is both its measurement and the colour photograph.  Changing the
+    colour rendering is checked frame by frame, going in and coming out.
+    """
+
+    # Gains distinct from the neutral (1.0, 1.0), so a frame that still
+    # reports the old rendering can be told from one that reports the new.
+    GAINS = (1.8, 1.4)
+
+    def setUp(self):
+        super().setUp()
+        patcher = unittest.mock.patch.object(
+            capture_runner.config, "capture_photo_wb_gains", return_value=self.GAINS)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def make_runner(self, **kwargs):
+        kwargs.setdefault("led_colors", ["amber", "blue", "white"])
+        kwargs.setdefault("mode", "normal")
+        kwargs.setdefault("exposure_group", "3")
+        return super().make_runner(**kwargs)
+
+    def dark_frames(self):
+        """Frames taken with every LED off, after the sweep began."""
+        return [f for f in self.cam.frames if not f[1]]
+
+    # ── darks ────────────────────────────────────────────────────────
+
+    def test_darks_are_statistics_only(self):
+        runner = self.make_runner()
+        self.run_to_completion(runner)
+        with self.archive(runner) as f:
+            for group in f["/dark"]:
+                for ch in ("R", "Gr", "Gb", "B"):
+                    attrs = dict(f[f"/dark/{group}/{ch}"].attrs)
+                    self.assertTrue(capture_h5.is_omitted(attrs), (group, ch))
+                    self.assertEqual(f[f"/dark/{group}/{ch}"].size, 0)
+                    for key in ("raw_min", "raw_mean", "raw_max"):
+                        self.assertIn(key, attrs)
+                    self.assertLessEqual(attrs["raw_min"], attrs["raw_mean"])
+                    self.assertLessEqual(attrs["raw_mean"], attrs["raw_max"])
+
+    def test_darks_are_the_shortest_tested_and_the_longest_lit(self):
+        runner = self.make_runner()
+        self.run_to_completion(runner)
+        longest = max(us for r in runner.results for us in r.exposures_us)
+        self.assertEqual(runner._dark_us,
+                         sorted({capture_runner.DARK_SHORT_US, longest}))
+
+    def test_dark_level_reads_the_statistics(self):
+        """The analysis's one reader of the dark keeps working unchanged."""
+        from hdf5read import Hdf5Reader
+        runner = self.make_runner()
+        self.run_to_completion(runner)
+        with Hdf5Reader(str(runner.out_path)) as r:
+            level, us = capture_h5.dark_level(r, "B")
+        self.assertEqual(us, capture_runner.DARK_SHORT_US)
+        self.assertGreater(level, 0)
+
+    def test_darks_come_after_the_coloured_leds_and_before_white(self):
+        runner = self.make_runner()
+        self.run_to_completion(runner)
+        white = capture_runner.WHITE_LED_CH
+        on = [ch for ch, state in self.leds.history if state]
+        self.assertEqual(on[-1], white, "white must be the last LED lit")
+        self.assertEqual(on.count(white), 1, "white must be lit exactly once")
+        # Index of the first frame lit by white, and of the dark frames.
+        first_white = next(i for i, fr in enumerate(self.cam.frames) if white in fr[1])
+        last_coloured = max(i for i, fr in enumerate(self.cam.frames)
+                            if fr[1] and white not in fr[1])
+        dark_idx = [i for i, fr in enumerate(self.cam.frames)
+                    if not fr[1] and last_coloured < i < first_white]
+        took = {self.cam.frames[i][0] for i in dark_idx}
+        self.assertTrue(set(runner._dark_us) <= took, (runner._dark_us, took))
+
+    def test_preimage_takes_its_darks_before_its_first_led(self):
+        runner = self.make_runner(mode=capture_runner.MODE_PRE,
+                                  exposure_group="1", led_colors=["amber"])
+        self.run_to_completion(runner)
+        first_lit = next(i for i, fr in enumerate(self.cam.frames) if fr[1])
+        before = {fr[0] for fr in self.cam.frames[:first_lit]}
+        self.assertTrue(set(runner._dark_us) <= before)
+        with self.archive(runner) as f:
+            self.assertTrue(all(g.startswith("before_") for g in f["/pre/dark"]))
+            self.assertNotIn("/pre/photo", f)
+            self.assertNotIn("/photo", f)
+
+    # ── white ────────────────────────────────────────────────────────
+
+    def test_white_is_one_frame_at_group_1(self):
+        runner = self.make_runner()
+        self.run_to_completion(runner)
+        with self.archive(runner) as f:
+            self.assertEqual(sorted(f["/leds/white/lit"]), ["e0"])
+            self.assertIn("/photo", f)
+        meta = self.led_metadata(runner, "white")
+        self.assertEqual(meta["exposure_group"], "1")
+        self.assertEqual(meta["exposure_group_requested"], "3")
+        self.assertEqual(meta["rendering"], "colour-balanced")
+        self.assertEqual([r.color for r in runner.results],
+                         ["amber", "blue", "white"])
+
+    def test_white_left_out_of_the_list_is_not_measured_but_photographed(self):
+        runner = self.make_runner(led_colors=["amber"])
+        self.run_to_completion(runner)
+        with self.archive(runner) as f:
+            self.assertNotIn("/leds/white", f)
+            self.assertIn("/photo", f)
+
+    def test_white_measured_without_photo_stays_objective(self):
+        with unittest.mock.patch.object(
+                capture_runner.config, "capture_photo_enabled", return_value=False):
+            runner = self.make_runner()
+            self.run_to_completion(runner)
+        with self.archive(runner) as f:
+            self.assertIn("/leds/white/lit/e0", f)
+            self.assertNotIn("/photo", f)
+        self.assertEqual(self.cam.rendering, [])
+
+    # ── first-frame evidence, going in and coming out ───────────────
+
+    def photo_attrs(self, runner):
+        with self.archive(runner) as f:
+            return dict(f["/photo"].attrs)
+
+    def test_gains_are_waited_for_and_recorded(self):
+        self.cam.gain_lag = 2
+        runner = self.make_runner()
+        self.run_to_completion(runner)
+        a = self.photo_attrs(runner)
+        want = self.GAINS
+        self.assertTrue(a["gains_confirmed"])
+        self.assertEqual(a["gain_frames"], 3)       # 2 frames late, kept the 3rd
+        self.assertAlmostEqual(a["reported_gain_r"], want[0])
+        self.assertTrue(a["restore_confirmed"])
+        self.assertEqual(a["restore_frames"], 3)
+
+    def test_first_frame_is_used_when_gains_apply_at_once(self):
+        self.cam.gain_lag = 0
+        runner = self.make_runner()
+        self.run_to_completion(runner)
+        a = self.photo_attrs(runner)
+        self.assertEqual((a["gain_frames"], a["restore_frames"]), (1, 1))
+
+    def test_restore_is_checked_with_every_led_off(self):
+        runner = self.make_runner()
+        self.run_to_completion(runner)
+        restore = [fr for fr in self.cam.frames
+                   if not fr[1] and fr[2] == (1.0, 1.0)][-1:]
+        self.assertTrue(restore)
+        self.assertEqual(self.cam.frames[-1][1], frozenset())
+        self.assertEqual(self.cam.frames[-1][2], (1.0, 1.0))
+
+    def test_gains_that_never_arrive_are_recorded_not_fatal(self):
+        self.cam.gain_lag = 10_000
+        runner = self.make_runner()
+        progress = self.run_to_completion(runner)
+        self.assertEqual(progress[-1].phase, "done")
+        a = self.photo_attrs(runner)
+        self.assertFalse(a["gains_confirmed"])
+        self.assertEqual(a["gain_frames"], capture_runner.MAX_SETTLE_FRAMES)
+        with self.archive(runner) as f:
+            self.assertIn("/leds/white/lit/e0", f)
 
 
 # ---------------------------------------------------------------------------

@@ -95,6 +95,21 @@ LED_OFF_SETTLE_S     = 2.0          # seconds after LED off, before dark capture
 
 MAX_SETTLE_FRAMES    = 15           # max captures while waiting for exposure to settle
 SETTLE_TOLERANCE     = 0.05         # 5 % tolerance for exposure-settle check
+
+# Colour gains take effect in the ISP some frames after they are set, and the
+# frame's own metadata says which gains it was rendered with.  So a change of
+# rendering is confirmed the way an exposure change is: by capturing until a
+# frame reports the gains asked for.  Few frames are expected; the budget only
+# stops a pipeline that never reports them from stalling the run.
+MAX_RENDER_FRAMES    = 8            # max captures while waiting for gains to apply
+GAIN_TOLERANCE       = 0.01         # 1 % tolerance for the gains check
+
+# The dark correction is one number per Bayer layer per sweep (see the comment
+# above capture_h5.dark_level), so a run keeps two dark frames, as statistics
+# only: at the shortest exposure the dark analysis tested, and at the run's
+# longest lit exposure, so that any dark current growing with exposure would
+# show up as a difference between the two.
+DARK_SHORT_US        = 1000
 WAIT_TICK_S          = 0.05         # pump interval while waiting out a warmup
 
 OUT_STEM = "camtest8"
@@ -570,6 +585,43 @@ def _set_and_settle(cam, exposure_us: int,
                      because there a slow screen is worse than a frame taken
                      slightly off the requested exposure.
     """
+    rgb, bayer, meta, _n, _ok = _settle_frames(cam, exposure_us, prof, max_frames)
+    return rgb, bayer, meta
+
+
+def _gains_match(meta: dict, want) -> "bool | None":
+    """
+    Whether one frame was rendered with the colour gains `want`.
+
+    Returns None when the frame does not report its gains at all, so a caller
+    can tell "could not check" from "checked, and they differ".
+    """
+    got = meta.get("ColourGains")
+    if got is None:
+        return None
+    return all(abs(float(g) - float(w)) <= GAIN_TOLERANCE * max(abs(float(w)), 1e-6)
+               for g, w in zip(got, want))
+
+
+def _settle_frames(cam, exposure_us: int,
+                   prof: "CaptureProfiler | None" = None,
+                   max_frames: int = MAX_SETTLE_FRAMES,
+                   want_gains=None,
+                   ) -> "tuple[np.ndarray, np.ndarray, dict, int, bool | None]":
+    """
+    _set_and_settle(), also waiting for colour gains, and saying how it went.
+
+    With `want_gains`, a frame is accepted only when its exposure has settled
+    AND its metadata reports those gains.  That is how the first frame after a
+    rendering change is checked rather than assumed: the frames it takes are
+    the evidence, and the caller records them.
+
+    Returns:
+        (rgb, bayer, meta, frames_captured, gains_confirmed).
+        gains_confirmed is True when the kept frame reports `want_gains`,
+        False when the budget ran out first, None when no gains were asked
+        for or the camera does not report them.
+    """
     cam.set_exposure(exposure_us)
     if prof is not None:
         prof.count("camera.settle")
@@ -584,18 +636,24 @@ def _set_and_settle(cam, exposure_us: int,
             rgb, bayer, meta = cam.capture_frame()
         applied = int(meta.get("ExposureTime", 0))
         last = (rgb, bayer, meta)
+        gains_ok = None if want_gains is None else _gains_match(meta, want_gains)
         if applied > 0:
             delta = abs(applied - exposure_us) / max(exposure_us, 1)
-            if delta <= SETTLE_TOLERANCE:
+            if delta <= SETTLE_TOLERANCE and gains_ok is not False:
                 log.debug(f"    settled: {applied}µs ≈ {exposure_us}µs "
                           f"after {frame_num + 1} frame(s)")
-                return rgb, bayer, meta
+                return rgb, bayer, meta, frame_num + 1, gains_ok
         log.debug(f"    settling [{frame_num + 1}/{max_frames}]: "
-                  f"requested={exposure_us}µs  applied={applied}µs")
+                  f"requested={exposure_us}µs  applied={applied}µs"
+                  f"{'' if gains_ok is not False else '  gains not yet applied'}")
     applied = int(last[2].get("ExposureTime", 0))  # type: ignore[index]
-    log.warning(f"    exposure did not settle after {max_frames} frames; "
-                f"last applied={applied}µs  requested={exposure_us}µs")
-    return last  # type: ignore[return-value]
+    gains_ok = None if want_gains is None else _gains_match(last[2], want_gains)
+    gains_note = ("" if want_gains is None else
+                  f"  gains reported={last[2].get('ColourGains')} "
+                  f"requested={tuple(want_gains)}")
+    log.warning(f"    frame did not settle after {max_frames} frames; "
+                f"last applied={applied}µs  requested={exposure_us}µs{gains_note}")
+    return (*last, max_frames, gains_ok)  # type: ignore[misc]
 
 
 def _set_manual_lens(cam, diopters: float) -> None:
@@ -688,10 +746,16 @@ class CaptureRunner:
         self._color_labels: "dict[str, list[str]]" = {}
         self._color_fallback: "dict[str, bool]" = {}
         self._color_group:    "dict[str, str]"  = {}   # group each LED actually used
-        self._distinct_dark_us: "list[int]" = []
-        # {exposure_us: channels some lit frame at that exposure kept}, filled
-        # in during the sweep and read by the dark batch that follows it.
-        self._dark_keep: "dict[int, set]" = {}
+        # Normal/pre path: the run's two dark exposures (DARK_SHORT_US and the
+        # longest lit exposure), and the white LED's one frame — see
+        # run_prefetch().  _white_us is None when no white frame is taken.
+        self._dark_us: "list[int]" = []
+        self._white_us: "int | None" = None
+        self._white_measure: bool = False
+        self._white_source: str = ""
+        # time.monotonic() when the last LED went out, so the dark frames can
+        # wait out only what is left of LED_OFF_SETTLE_S.
+        self._dark_since: float = 0.0
         # {(color, exposure_us): channels to keep}, so a repeated exposure does
         # not re-query the database.
         self._keep_cache: dict = {}
@@ -951,87 +1015,133 @@ class CaptureRunner:
 
     # ── Final colour photograph ──────────────────────────────────────
 
-    def _capture_photo(self, exposure_us: int) -> Iterator[Progress]:
+    def _photo_wanted(self) -> bool:
         """
-        Photograph the sample under the white LED, colour-balanced, last of all.
+        Whether this run takes the colour photograph.
 
-        Every frame before this one is deliberately colour-neutral, because
-        the measurement is the Bayer data and a prettier RGB stream would only
-        misrepresent it.  This frame is the exception: it exists for a person
-        to look at, so the ISP is briefly told to render the main stream with
-        the white LED's commissioned colour gains and told to stop again
-        immediately afterwards.
-
-        The raw stream is untouched throughout — libcamera taps it off
-        upstream of every control involved, see BayerCam.set_color_rendering()
-        — so this cannot change the objective data, and the camera is handed
-        back to the next run rendering exactly as it expects.
-
-        Only the ROLE_BOUND crop is stored, which is both the region the
-        archived Bayer layers cover and a small fraction of the frame: the
-        photograph therefore shows precisely what was measured, and cropping
-        before the encode means the discarded pixels are never compressed at
-        all — the part of this that costs real time on a Zero 2 W.
-
-        Skipped when config's capture.photo_enabled is off, and always on a
-        pre-image: the white LED is broadband, so this one frame would put
-        more blue on an unreacted pad than the whole rest of that path, and
-        there is nothing to look at yet anyway.  Any other failure is logged
-        and swallowed rather than raised: the run's measurements are complete
-        and written by the time this is reached, and losing them to a
-        photograph would be absurd.
-
-        Args:
-            exposure_us: Exposure to photograph at.  A white-LED exposure the
-                         run already established, not a fresh search — this
-                         step is meant to be quick.
+        Never on a pre-image: the white LED is broadband, so this one frame
+        would put more blue on an unreacted pad than the whole rest of that
+        path, and there is nothing to look at yet anyway.  Otherwise as config's
+        capture.photo_enabled says, provided there is a ROLE_BOUND crop to
+        store.  Reading config can fail on an instrument whose config predates
+        the photo; that costs the photo, never the run.
         """
-        w = self._writer
-        if w is None or self._is_pre():
-            return
-        # Deciding whether to photograph reads the database, so it can fail on
-        # an instrument whose config predates this feature. Guarded like the
-        # capture itself: a missing row costs the photo, never the run.
+        if self._is_pre():
+            return False
         try:
             if not config.capture_photo_enabled():
-                return
+                return False
             bound = roi.by_role(self.rois, roi.ROLE_BOUND)
         except Exception:                                  # noqa: BLE001
             log.exception("photo: cannot tell whether to photograph — skipping")
-            return
+            return False
         if bound is None:
             log.warning("photo: no active ROLE_BOUND ROI — skipping the photo")
-            return
+            return False
+        return True
 
-        self.prof.set_section("photo")
-        yield self._progress("capture", "Photo: colour-balanced, white LED",
-                             color="white", step="photo")
+    def _white_frame(self, exposure_us: int, gains) -> Iterator[Progress]:
+        """
+        Light the white LED once and take one frame; return it with the evidence.
+
+        With `gains`, the frame is rendered colour-balanced for the photograph.
+        The raw Bayer stream is tapped off upstream of every control involved
+        (BayerCam.set_color_rendering), so the same frame also serves as the
+        white LED's measurement — one exposure of the pad, not two.
+
+        Neither change of rendering is assumed to take effect at once.  Going
+        in, frames are captured until one reports the gains asked for
+        (_settle_frames).  Coming out, the LED is put out first — the next
+        frames need no light — then the neutral rendering is restored and
+        frames are captured until one reports it, so the next run's RGB stream
+        is never tinted.  How many frames each took is returned, so the archive
+        records whether the first frame would have been good enough.
+
+        Use as `frame, evidence = yield from self._white_frame(...)`.
+
+        Returns:
+            ((rgb, bayer, meta), evidence) where evidence holds
+            gain_frames / gains_confirmed and, when gains were applied,
+            restore_frames / restore_confirmed.
+        """
+        evidence: dict = {}
         self._led_on(WHITE_LED_CH)
+        applied = False
         try:
             yield from self._wait(LED_ON_WARMUP_S, "White LED on, warming up")
+            if gains is not None:
+                self._cam.set_color_rendering(gains)
+                applied = True
+            rgb, bayer, meta, n, ok = _settle_frames(
+                self._cam, exposure_us, self.prof, want_gains=gains)
+            self._frame_captured_dt = capture_meta.timestamp_ms()
+            evidence["gain_frames"] = n
+            evidence["gains_confirmed"] = ok
+            if gains is not None and ok is False:
+                log.warning("white: colour gains %s not reported after %d frames "
+                            "— photo may be untinted", tuple(gains), n)
+        finally:
+            self._led_off(WHITE_LED_CH)
+            if applied:
+                evidence.update(self._restore_objective())
+        return (rgb, bayer, meta), evidence
 
-            gains = config.capture_photo_wb_gains()
-            self._cam.set_color_rendering(gains)
-            try:
-                rgb, _, meta = self._settle(exposure_us)
-                with self.prof.time("io.jpeg"):
-                    jpeg = _encode_jpeg(BayerCam.crop_rgb(rgb, bound))
-            finally:
-                # Restored even if the capture or encode failed, so a failed
-                # photograph cannot leave the next run's RGB stream tinted.
-                self._cam.set_objective_rendering()
+    def _restore_objective(self) -> dict:
+        """
+        Put the neutral rendering back and confirm a frame reports it.
 
+        Called with every LED off.  Never raises: the frame it would protect
+        belongs to a later run, and setup_camera() re-asserts the neutral
+        rendering anyway — but with the camera kept open between runs that may
+        not be called, which is why this checks rather than trusts.
+        """
+        want = BayerCam.OBJECTIVE_RENDERING["ColourGains"]
+        try:
+            self._cam.set_objective_rendering()
+            n, ok = 0, None
+            for n in range(1, MAX_RENDER_FRAMES + 1):
+                _, _, meta = self._cam.capture_frame()
+                ok = _gains_match(meta, want)
+                if ok is not False:
+                    break
+            if ok is False:
+                log.warning("white: neutral rendering not reported after %d "
+                            "frames", n)
+            return {"restore_frames": n, "restore_confirmed": ok}
+        except Exception:                                  # noqa: BLE001
+            log.exception("white: restoring the neutral rendering failed")
+            return {"restore_frames": 0, "restore_confirmed": False}
+
+    def _store_photo(self, rgb, exposure_us: int, meta: dict, gains,
+                     evidence: dict) -> Iterator[Progress]:
+        """Encode the colour-balanced frame's ROLE_BOUND crop into /photo."""
+        w = self._writer
+        bound = roi.by_role(self.rois, roi.ROLE_BOUND)
+        try:
+            with self.prof.time("io.jpeg"):
+                jpeg = _encode_jpeg(BayerCam.crop_rgb(rgb, bound))
+            attrs = {
+                "exposure_us":   int(meta.get("ExposureTime", exposure_us)),
+                "led_color":     "white",
+                "colour_gain_r": float(gains[0]),
+                "colour_gain_b": float(gains[1]),
+                "captured_dt":   self._frame_captured_dt,
+            }
+            # The first-frame evidence: how many frames it took for the gains
+            # to reach a frame, and to leave again.  None ("could not tell")
+            # is left out rather than written as an HDF5 attribute.
+            attrs.update({k: (int(v) if isinstance(v, int) and not isinstance(v, bool)
+                              else bool(v))
+                          for k, v in evidence.items() if v is not None})
+            reported = meta.get("ColourGains")
+            if reported is not None:
+                attrs["reported_gain_r"] = float(reported[0])
+                attrs["reported_gain_b"] = float(reported[1])
             with self.prof.time("io.hdf5"):
-                w.add_photo(
-                    jpeg, filename=f"{OUT_STEM}_photo.jpg", crop=bound,
-                    attrs={
-                        "exposure_us":   int(meta.get("ExposureTime", exposure_us)),
-                        "led_color":     "white",
-                        "colour_gain_r": float(gains[0]),
-                        "colour_gain_b": float(gains[1]),
-                        "captured_dt":   self._frame_captured_dt,
-                    })
-            log.info("photo: stored %d bytes, cropped to %s", len(jpeg), bound.xywh())
+                w.add_photo(jpeg, filename=f"{OUT_STEM}_photo.jpg", crop=bound,
+                            attrs=attrs)
+            log.info("photo: stored %d bytes, cropped to %s  (%s)",
+                     len(jpeg), bound.xywh(), evidence)
             yield self._progress(
                 "capture", f"    stored photo ({len(jpeg) // 1024} kB)",
                 color="white", step="photo")
@@ -1039,8 +1149,37 @@ class CaptureRunner:
             log.exception("photo: failed — the run's measurements are unaffected")
             yield self._progress("capture", "    photo failed (measurements intact)",
                                  color="white", step="photo")
-        finally:
-            self._led_off(WHITE_LED_CH)
+
+    def _capture_photo(self, exposure_us: int) -> Iterator[Progress]:
+        """
+        Calibration path: photograph the sample under the white LED, last of all.
+
+        Every frame before this one is deliberately colour-neutral, because the
+        measurement is the Bayer data.  This frame exists for a person to look
+        at, so it is rendered with the white LED's commissioned colour gains.
+        Only the ROLE_BOUND crop is stored.  Any failure is logged and
+        swallowed: the run's measurements are already written.
+
+        The normal path takes its photograph in _capture_white() instead, from
+        the same frame as its white measurement.
+
+        Args:
+            exposure_us: A white-LED exposure the run already established.
+        """
+        if self._writer is None or not self._photo_wanted():
+            return
+        self.prof.set_section("photo")
+        yield self._progress("capture", "Photo: colour-balanced, white LED",
+                             color="white", step="photo")
+        try:
+            gains = config.capture_photo_wb_gains()
+            (rgb, _, meta), evidence = yield from self._white_frame(exposure_us, gains)
+        except Exception:                                  # noqa: BLE001
+            log.exception("photo: failed — the run's measurements are unaffected")
+            yield self._progress("capture", "    photo failed (measurements intact)",
+                                 color="white", step="photo")
+            return
+        yield from self._store_photo(rgb, exposure_us, meta, gains, evidence)
 
     # ── Run ──────────────────────────────────────────────────────────
 
@@ -1139,6 +1278,7 @@ class CaptureRunner:
         """
         self._leds.set_channel(channel, False)
         self._led_off_dt = capture_meta.timestamp_ms()
+        self._dark_since = time.monotonic()
         self._lit_on_channel = None
 
     def _run(self) -> Iterator[Progress]:
@@ -1509,14 +1649,15 @@ class CaptureRunner:
     # (camera contention, a short debug timer) loses only the overlap: run()
     # chains the two back-to-back for MODE_NORMAL.
     #
-    # Dark frames are all taken in ONE batch, after the LED sweep ends. They
-    # used to be taken twice, "before" (here) and "after" (at the end of
-    # run_capture()), so a reader could measure the sensor's drift across the
-    # run by differencing them; devdesk/roi_darkdiff.py is that reader, and it
-    # did its job — the drift is not what limits this instrument. Paying for it
-    # every run cost 30 settled captures and 5.3 MB per archive, so the
-    # "before" batch is gone. The schema still names the batch ("after_<us>us")
-    # and readers still prefer it, so archives holding both remain readable.
+    # Dark frames: two per sweep, statistics only (see _take_darks). Once a
+    # whole ladder of them was kept, one per distinct lit exposure, with every
+    # LED linked to its own; the dark analysis (comment above
+    # capture_h5.dark_level) found the level the same at every exposure and a
+    # dark frame's pixels to be fresh noise, so the analysis subtracts one mean
+    # per layer and nothing else needs the ladder. A pre-image takes its pair
+    # "before" its first LED; a measurement takes its pair "after" its last
+    # coloured LED and before the white one. The per-LED dark links are gone
+    # with the ladder: dark_level reads the section's /dark directly.
 
     def _stored_exposures(self, color: str, group: str) -> "tuple[list[int], str]":
         """
@@ -1551,6 +1692,141 @@ class CaptureRunner:
                 return exposures, g
         return [], group
 
+    def _white_exposure(self) -> "tuple[int, str]":
+        """
+        The one exposure the white LED is taken at, and where it came from.
+
+        Group 1's exposure: the one calibration centred in the range that keeps
+        the test pad and the gray chips inside the window.  The run's default
+        when white has no calibration.
+        """
+        us = exposure_repo.middle_exposure("white", "1")
+        if us:
+            return int(us), "exposure_table group 1"
+        log.warning("white LED has no group-1 exposure — falling back to %d µs",
+                    self.config.initial_us)
+        return int(self.config.initial_us), "fallback"
+
+    def _take_darks(self, when: str) -> Iterator[Progress]:
+        """
+        Take the run's dark frames and store their statistics only.
+
+        Waits out whatever is left of LED_OFF_SETTLE_S since the last LED (or
+        the autofocus light) went out, then takes one frame at each of
+        self._dark_us.  Each layer is stored as an empty placeholder carrying
+        its statistics (capture_h5's _omitted_attrs: min, mean, max and two
+        percentiles): one number per layer is what the analysis subtracts
+        (capture_h5.dark_level reads the mean), and a dark frame's pixels are
+        fresh noise.
+
+        Args:
+            when: "before" (a pre-image, ahead of its first LED) or "after"
+                  (a measurement, after its last coloured LED).
+        """
+        w = self._writer
+        left = LED_OFF_SETTLE_S - (time.monotonic() - self._dark_since)
+        if left > 0:
+            yield from self._wait(left, "LEDs off, settling before dark frames")
+        self.prof.set_section("dark")
+        log.info(f"=== Dark frames ({when}): {self._dark_us} µs, statistics only ===")
+        yield self._progress("capture", f"Dark frames: {len(self._dark_us)} exposure(s)")
+        for exp_us in self._dark_us:
+            _, bayer, _ = self._settle(exp_us)
+            layers_out = self._bound_layers(bayer, self._pattern)
+            with self.prof.time("io.hdf5"):
+                w.add_dark(layers_out, exposure_us=exp_us, when=when,
+                           captured_dt=self._frame_captured_dt,
+                           omit=list(layers_out))
+            yield self._progress(
+                "capture", f"    stored dark statistics ({exp_us}µs)", step="dark")
+
+    def _capture_white(self) -> Iterator[Progress]:
+        """
+        Normal path: the white LED's one frame — measurement and photograph.
+
+        Taken last, after the dark frames (see run_prefetch).  The raw layers
+        are stored as /leds/white/lit/e0 when white is in the sweep list; the
+        same frame, colour-balanced, is the photograph when that is enabled.
+        """
+        w = self._writer
+        photo = self._photo_wanted()
+        if self._white_us is None or not (self._white_measure or photo):
+            return
+        exp_us = self._white_us
+        led = WHITE_LED_CH
+        if self._white_measure:
+            self._led_index += 1
+            self._captures_done = 0
+            self._captures_per_led = 1
+        self._current_color = "white"
+        self.prof.set_section("white")
+        yield self._progress(
+            "capture", f"--- {self._leds.label(led)} --- one frame"
+                       f"{' + photo' if photo else ''}", color="white")
+
+        gains = None
+        if photo:
+            try:
+                gains = config.capture_photo_wb_gains()
+            except Exception:                              # noqa: BLE001
+                log.exception("photo: no colour gains — skipping the photo")
+                photo = False
+                if not self._white_measure:
+                    return
+        (rgb, bayer, meta), evidence = yield from self._white_frame(exp_us, gains)
+
+        if self._white_measure:
+            layers_out = self._bound_layers(bayer, self._pattern)
+            keep = self._keep_channels("white", exp_us, layers_out)
+            omit = [ch for ch in layers_out if ch not in keep]
+            with self.prof.time("io.hdf5"):
+                w.add_lit("white", "e0", layers_out, exposure_us=exp_us,
+                          captured_dt=self._frame_captured_dt, omit=omit)
+            self._captures_done = 1
+            meta_json = {
+                "mode": str(self.config.mode).lower(),
+                "timestamp": self.suite_id,
+                "led_channel": led,
+                "led_color": "white",
+                "led_label": self._leds.label(led),
+                "camera_model": self._cam.model_description,
+                "bayer_pattern": self._pattern,
+                "config_size": [self._cam_w, self._cam_h],
+                "focus_diopters": self._focus_pos,
+                "focus_mode": self._focus_mode,
+                "autofocus_raw_diopters": self._raw_af_pos,
+                "led_on_dt":  self._led_on_dt,
+                "led_off_dt": self._led_off_dt,
+                # White always takes group 1's one exposure, whatever the run
+                # asked for: it is a single frame by design, not a bracket.
+                "exposure_group": "1",
+                "exposure_group_requested": self._group,
+                "exposure_source": self._white_source,
+                "exposures_us": {"e0": int(exp_us)},
+                "applied_exposures_us": {"e0": int(meta.get("ExposureTime", 0))},
+                "layers_kept": {"e0": list(keep)},
+                "layers_omitted": {"e0": omit},
+                # The frame was rendered colour-balanced when it is also the
+                # photograph; the raw layers above are unaffected by that.
+                "rendering": "colour-balanced" if gains is not None else "objective",
+                "render_evidence": evidence,
+            }
+            info = _build_capture_info(rgb, bayer, meta,
+                                       lens_position=self._cam.lens_position)
+            with self.prof.time("io.hdf5"):
+                w.add_led("white", meta_json, led_channel=led)
+                w.add_capture_info("white", info)
+            dropped = f", dropped {'+'.join(omit)}" if omit else ""
+            yield self._progress(
+                "capture", f"    stored lit e0 ({exp_us // 1000}ms){dropped}",
+                step="e0")
+            self.results.append(LedResult(
+                color="white", led_channel=led, target_channel="",
+                exposures_us=[exp_us], metadata=meta_json))
+
+        if photo:
+            yield from self._store_photo(rgb, exp_us, meta, gains, evidence)
+
     def run_prefetch(self) -> Iterator[Progress]:
         """
         Normal-path stage 1: camera init, focus, and opening the archive.
@@ -1572,7 +1848,6 @@ class CaptureRunner:
 
             self._choose_out_path()
             self.results = []
-            self._dark_keep = {}
             self._keep_cache = {}
 
             # ── Camera init ──────────────────────────────────────────
@@ -1600,6 +1875,9 @@ class CaptureRunner:
             yield self._progress("focus", "Phase 1: focus")
             with self.prof.time("focus"):
                 self._focus_pos, self._focus_mode, self._raw_af_pos = self._set_focus()
+            # Autofocus lights an LED of its own; a pre-image's dark frames,
+            # taken next, wait out its afterglow from here.
+            self._dark_since = time.monotonic()
             yield self._progress(
                 "focus", f"Focus: {self._focus_pos:.2f} diopters ({self._focus_mode})")
 
@@ -1608,11 +1886,21 @@ class CaptureRunner:
             # so an unknown name fails here rather than mid-capture.
             self._color_order = [c for _, c in
                                  _resolve_color_order(self._leds, cfg.led_colors)]
+            # White is never part of a measurement's sweep: it is taken once,
+            # last, after the dark frames — its phosphor can keep glowing after
+            # the LED is put out, so nothing that needs the dark may follow it —
+            # and that one frame is also the colour photograph.
+            self._white_measure = (not self._is_pre()
+                                   and "white" in self._color_order)
+            if self._white_measure:
+                self._color_order.remove("white")
+            self._white_us = None
+            if self._white_measure or self._photo_wanted():
+                self._white_us, self._white_source = self._white_exposure()
             self._color_exposures = {}
             self._color_labels    = {}
             self._color_fallback  = {}
             self._color_group     = {}
-            distinct_us: set = set()
 
             for color in self._color_order:
                 exposures_us, used_group = self._stored_exposures(color, group)
@@ -1626,9 +1914,13 @@ class CaptureRunner:
                 self._color_exposures[color] = exposures_us
                 self._color_labels[color]    = [f"e{i}" for i in range(len(exposures_us))]
                 self._color_fallback[color]  = used_fallback
-                distinct_us.update(exposures_us)
 
-            self._distinct_dark_us = sorted(distinct_us)
+            lit_us = [us for c in self._color_order for us in self._color_exposures[c]]
+            if self._white_measure:
+                lit_us.append(self._white_us)
+            # A set: when the longest lit exposure is DARK_SHORT_US itself,
+            # one frame serves as both.
+            self._dark_us = sorted({DARK_SHORT_US, max(lit_us, default=DARK_SHORT_US)})
 
             # Open the archive and write /meta now, before any photograph.
             # The ROI geometry is what makes the stored arrays locatable, so a
@@ -1636,9 +1928,8 @@ class CaptureRunner:
             w = self._open_writer()
             self._write_metadata(w)
 
-            log.info(f"=== Prefetch done: {len(self._distinct_dark_us)} "
-                     f"distinct dark exposure(s) to take at the end — "
-                     f"{self._distinct_dark_us} µs ===")
+            log.info(f"=== Prefetch done: dark frames at {self._dark_us} µs, "
+                     f"white {self._white_us} µs ({self._white_source}) ===")
             yield self._progress(
                 "capture", "Ready — press CAPTURE to begin the LED sweep.",
                 step="prefetch-done")
@@ -1650,7 +1941,7 @@ class CaptureRunner:
 
     def run_capture(self) -> Iterator[Progress]:
         """
-        Normal-path stage 2: the lit-LED sweep, then the dark batch.
+        Normal-path stage 2: the lit-LED sweep, the dark frames, then white.
 
         Assumes run_prefetch() already ran on this same instance — the
         archive is open, the camera is set up and focused, and the color
@@ -1659,9 +1950,9 @@ class CaptureRunner:
         abandonment, or failure — unlike run_prefetch(), there is no pause
         left to preserve after this.
 
-        Every dark frame in the archive is taken here, at the end, with the
-        LED bank off — one settle wait for the whole run instead of one per
-        LED, and one batch instead of the two this used to take.
+        The two dark frames are taken here too: first, on a pre-image; after
+        the coloured LEDs and before white, on a measurement.  White is one
+        frame, last, which is also the colour photograph (_capture_white).
         """
         leds = self._leds
         w    = self._writer
@@ -1670,6 +1961,12 @@ class CaptureRunner:
                 "capture",
                 f"{'Pre-image' if self._is_pre() else 'Normal capture'} — "
                 f"exposure group {self._group}")
+
+            # A pre-image takes its dark frames first, before any LED of its
+            # own has lit; a measurement takes them after its last coloured
+            # LED and before white (see _capture_white).
+            if self._is_pre():
+                yield from self._take_darks("before")
 
             for color in self._color_order:
                 self._led_index    += 1
@@ -1717,11 +2014,6 @@ class CaptureRunner:
                     omit = [ch for ch in layers_out if ch not in keep]
                     kept_layers[label] = list(keep)
                     omitted_layers[label] = omit
-                    # Remember what this exposure's darks will be needed for.
-                    # The same exposure can be reached by more than one LED, so
-                    # union rather than assign: a dark layer is worth storing
-                    # if ANY lit frame at that exposure kept it.
-                    self._dark_keep.setdefault(exp_us, set()).update(keep)
 
                     with self.prof.time("io.hdf5"):
                         w.add_lit(color, label, layers_out, exposure_us=exp_us,
@@ -1736,7 +2028,7 @@ class CaptureRunner:
                         f"    stored lit {label} ({exp_us // 1000}ms){dropped}",
                         step=label)
 
-                # Darks are all taken in one batch at the end of the sweep —
+                # The dark frames come once, at the start or end of the run —
                 # no per-LED settle wait needed here.
                 self._led_off(led)
 
@@ -1798,52 +2090,9 @@ class CaptureRunner:
                     metadata=meta_json,
                 ))
 
-            # ── Dark batch — LED stays off throughout ─────────────────
-            # One settle wait for the whole run. It was not needed while the
-            # "before" batch existed, because that one ran with the bank never
-            # yet lit; now that this is the only batch, the last LED's
-            # afterglow is the only thing between the sweep and every dark
-            # frame the archive will hold, so it is waited out explicitly
-            # rather than left to however long the last JPEG took to encode.
-            yield from self._wait(LED_OFF_SETTLE_S,
-                                  "LEDs off, settling before dark frames")
-
-            log.info(f"=== Dark batch: {len(self._distinct_dark_us)} "
-                     f"distinct exposure(s) — {self._distinct_dark_us} µs ===")
-            yield self._progress(
-                "capture",
-                f"Dark frames: {len(self._distinct_dark_us)} exposure(s)")
-            for exp_us in self._distinct_dark_us:
-                _, bayer, _ = self._settle(exp_us)
-                layers_out = self._bound_layers(bayer, self._pattern)
-                # A dark layer is only ever used to be subtracted from a lit
-                # one, so store exactly the channels some lit frame at this
-                # exposure kept. The sweep has finished, so that is known.
-                needed = self._dark_keep.get(exp_us, set(layers_out))
-                omit = [ch for ch in layers_out if ch not in needed]
-                with self.prof.time("io.hdf5"):
-                    stored = w.add_dark(layers_out, exposure_us=exp_us, when="after",
-                                        captured_dt=self._frame_captured_dt,
-                                        omit=omit)
-                dropped = f", dropped {'+'.join(omit)}" if omit else ""
-                yield self._progress(
-                    "capture",
-                    f"    {'stored' if stored else 'reused'} dark "
-                    f"({exp_us}µs){dropped}", step="dark")
-
-            for color in self._color_order:
-                for label, exp_us in zip(self._color_labels[color],
-                                         self._color_exposures[color]):
-                    w.link_dark(color, label, exposure_us=exp_us, when="after")
-
-            # After the darks, not before: they need every LED off, and this
-            # needs the white one on. The exposure comes from what calibration
-            # stored for white — the middle of its group, as elsewhere on this
-            # path — falling back to the run's default if white was not swept.
-            white_us = self._color_exposures.get("white") or []
-            yield from self._capture_photo(
-                white_us[len(white_us) // 2] if white_us
-                else self.config.initial_us)
+            if not self._is_pre():
+                yield from self._take_darks("after")
+                yield from self._capture_white()
 
             self._current_color = ""
             yield Progress(
