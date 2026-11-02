@@ -3682,6 +3682,11 @@ class Arbiter:
         cost the pre-image, never the reading.
         """
         from capture_runner import CaptureConfig
+        # The saved group is read here, every run, not trusted from
+        # self._cap_group: that is only loaded when the Capture screen opens,
+        # so a sample run after a restart used to take group 1 whatever the
+        # operator had saved (C1037, C1038).
+        self._cap_group = self._initial_exposure_group()
         k = slot.cap_rep + 1
         pre = (str(slot.record.get("h5file") or "") if k == 1
                else str(slot.rep_files.get(k) or ""))
@@ -6129,6 +6134,14 @@ def _selftest() -> None:
 
     print("== capture screen: opens on the group in force ==")
     config.save("defaults", "exposuregroup", "3")
+
+    print("== sample capture: uses the saved group without the Capture screen ==")
+    arb._cap_group = "1"            # as after a restart: screen never opened
+    check("measurement takes saved group 3",
+          arb._measurement_config(A).exposure_group, "3")
+    check("pre-image stays on group 1",
+          arb._preimage_config(A).exposure_group, "1")
+
     arb.open_menu(A)
     check("menu open (no slot focus)", arb._focused is None, True)
     arb._menu_open_capture()
