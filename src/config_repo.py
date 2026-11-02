@@ -96,6 +96,7 @@ Public surface
     calibration_min_spacing_ratio() / calibration_max_spacing_ratio()
     calibration_required_cells()
     inspection_exposure_us() / default_focus_diopter()
+    capture_preview_target_90th_dn()
     reagent1_secs() / analysis_secs()
     t2ref25_secs() / q10() / reagent2_secs(temp_c)
     test_variant_enabled()
@@ -766,6 +767,20 @@ def inspection_exposure_us() -> int:
 def default_focus_diopter() -> float:
     """Operator-saved focus diopter from the viewer's Img recapture dialog."""
     return float(get("capture", "default_focus_diopter"))
+
+
+def capture_preview_target_90th_dn() -> int:
+    """
+    Where the image viewer meters its preview, in DN above black.
+
+    The preview's exposure is scaled until the 90th percentile of the sample
+    region's brightest Bayer layer reads this.  A lower value darkens the
+    picture on the screen; nothing that is measured reads it.  Seeded 400,
+    about 13% darker on an even white pad than the median-at-half-scale
+    metering it replaced, which left the white pad looking washed out under
+    the photo's colour gains.
+    """
+    return int(get("capture", "preview_target_90th_dn"))
 
 
 def capture_led_color_order() -> list:

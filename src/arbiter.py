@@ -107,11 +107,18 @@ _PREVIEW_FALLBACK_US = 10_000   # first guess when nothing better is known
 # patch beside it is far brighter, so metering over the frame (or over `white`,
 # which is what the stored calibration exposures are for) leaves the sample a
 # dark smudge — or, when the stored exposure was calibrated against a dimmer
-# scene, blows it out.  Target and tolerance follow the capture path's e3
-# convention: the median of the brightest Bayer channel at half of the
-# sensor's 10-bit full scale.  See _meter_sample_level().
-_PREVIEW_TARGET        = 512    # half of 1023 — capture_runner.HALF_SAT
-_PREVIEW_AE_TOLERANCE  = 0.20   # accept a median within ±20 % of the target
+# scene, blows it out.  What is metered is the 90th percentile of the
+# sample's brightest Bayer layer, black level removed (_meter_sample_level),
+# and its target is the config row capture.preview_target_90th_dn.  The 90th
+# percentile rather than the median so a two-tone sample — the calibration
+# card's yellow and brown halves — is exposed for its lighter part rather
+# than pushed into clipping by its darker one; on an even pad the two differ
+# by a few percent.  _PREVIEW_PCTL is that percentile; the target's default
+# is used only when the config row cannot be read.
+_PREVIEW_PCTL          = 90.0
+_PREVIEW_TARGET_DEFAULT = 400   # DN above black; see preview_target_90th_dn
+_PREVIEW_TARGET_LIMITS = (20, 950)  # a target outside these is clamped
+_PREVIEW_AE_TOLERANCE  = 0.20   # accept a level within ±20 % of the target
 _PREVIEW_AE_MAX_FRAMES = 3      # metered frames per preview, at most
 # Frames the preview will spend waiting for the sensor to adopt a requested
 # exposure, well under the capture path's MAX_SETTLE_FRAMES: a frame taken
@@ -4552,11 +4559,15 @@ class Arbiter:
         (`capture_runner._set_and_settle` — without that wait the frame read
         back still carries the *previous* exposure, which is the older bug this
         replaces), then measures the chosen region. The measurement is the
-        median of the brightest raw Bayer channel, and the next exposure is
-        the linear scaling that would put that median on `_PREVIEW_TARGET`.
+        90th percentile of the brightest raw Bayer channel, black level
+        removed, and the next exposure is the linear scaling that would put
+        it on the target (`_preview_target()`, the config row
+        capture.preview_target_90th_dn).
         Raw, not the ISP's 8-bit output, because only the raw values are
         linear in exposure — scaling against gamma-encoded pixels
-        under-corrects and would need many more frames to converge.
+        under-corrects and would need many more frames to converge.  And
+        with the black level removed, because the signal above black is what
+        grows in proportion to exposure.
 
         At most `_PREVIEW_AE_MAX_FRAMES` frames are taken, so a scene that
         cannot be brought into range (the LED failed, the cuvette is opaque)
@@ -4590,6 +4601,7 @@ class Arbiter:
         """
         import capture_runner
 
+        target = self._preview_target()
         us = self._start_exposure_us()
         rgb, applied = None, us
         for i in range(_PREVIEW_AE_MAX_FRAMES):
@@ -4612,12 +4624,12 @@ class Arbiter:
                 self._view_bayer = bayer
                 return rgb, applied
 
-            error = abs(level - _PREVIEW_TARGET) / _PREVIEW_TARGET
-            wanted = _clamp_us(applied * _PREVIEW_TARGET / max(level, 1.0))
-            log.info("Arbiter: preview AE [%d/%d] %d us -> sample median %.0f "
-                     "of %d (%+.0f%%)%s", i + 1, _PREVIEW_AE_MAX_FRAMES,
-                     applied, level, _PREVIEW_TARGET,
-                     100.0 * (level - _PREVIEW_TARGET) / _PREVIEW_TARGET,
+            error = abs(level - target) / target
+            wanted = _clamp_us(applied * target / max(level, 1.0))
+            log.info("Arbiter: preview AE [%d/%d] %d us -> %s 90th percentile "
+                     "%.0f DN of %d (%+.0f%%)%s", i + 1, _PREVIEW_AE_MAX_FRAMES,
+                     applied, region, level, target,
+                     100.0 * (level - target) / target,
                      "" if error <= _PREVIEW_AE_TOLERANCE
                      else f" -> retry at {wanted} us")
             if error <= _PREVIEW_AE_TOLERANCE or wanted == us:
@@ -4634,6 +4646,28 @@ class Arbiter:
         self._view_exposure_us = us
         self._view_bayer = bayer
         return rgb, applied
+
+    def _preview_target(self) -> int:
+        """
+        The preview's metering target: capture.preview_target_90th_dn.
+
+        DN above black for the 90th percentile of the metered region's
+        brightest Bayer layer.  Lower darkens the screen image; it changes
+        nothing that is measured.  Clamped to _PREVIEW_TARGET_LIMITS, and the
+        default when the row cannot be read, since a preview is never worth
+        failing a screen over.
+        """
+        try:
+            target = int(config.capture_preview_target_90th_dn())
+        except Exception:
+            log.exception("Arbiter: no preview target in config — using %d",
+                          _PREVIEW_TARGET_DEFAULT)
+            return _PREVIEW_TARGET_DEFAULT
+        lo, hi = _PREVIEW_TARGET_LIMITS
+        if not lo <= target <= hi:
+            log.warning("Arbiter: preview target %d DN outside %d-%d — clamped",
+                        target, lo, hi)
+        return min(max(target, lo), hi)
 
     def _start_exposure_us(self) -> int:
         """
@@ -4659,7 +4693,8 @@ class Arbiter:
 
     def _meter_sample_level(self, bayer, cam) -> "float | None":
         """
-        Measure the sample ROI: the median of its brightest raw Bayer channel.
+        Measure the sample ROI: the 90th percentile of its brightest raw Bayer
+        channel, black level removed.
 
         The brightest channel rather than the mean of all four, for the same
         reason the capture path picks a target channel — a coloured sample
@@ -4670,11 +4705,14 @@ class Arbiter:
             bayer: The raw (H, W) uint16 mosaic from the same capture.
             cam:   The camera, for its Bayer pattern.
 
+        The 90th percentile rather than the median: see the comment above
+        _PREVIEW_PCTL.
+
         Returns:
-            The median in 10-bit counts, or None when the sample cannot be
-            measured (no sample ROI loaded, no raw stream, a rectangle that
-            does not lie inside the mosaic) — the caller then keeps the
-            exposure it has rather than guessing.
+            DN above black, or None when the sample cannot be measured (no
+            sample ROI loaded, no raw stream, a rectangle that does not lie
+            inside the mosaic) — the caller then keeps the exposure it has
+            rather than guessing.
         """
         import roi as _roi
         r = _roi.by_role(self._view_rois, _roi.ROLE_SAMPLE)
@@ -4695,27 +4733,29 @@ class Arbiter:
                             "Bayer layers — preview not metered",
                             r.xywh(), lw, lh)
                 return None
-            return max(float(np.median(layer[lr.xyslice()]))
-                       for layer in layers.values())
+            from exposure_measure import BLACK_DN
+            return max(float(np.percentile(layer[lr.xyslice()], _PREVIEW_PCTL))
+                       for layer in layers.values()) - BLACK_DN
         except Exception:
             log.exception("Arbiter: could not meter the sample ROI")
             return None
 
     def _meter_whole_frame_level(self, bayer, cam) -> "float | None":
         """
-        Measure the whole frame: the median of its brightest raw Bayer channel.
+        Measure the whole frame: the 90th percentile of its brightest raw
+        Bayer channel, black level removed.
 
-        Same brightest-channel rationale as `_meter_sample_level`, just
-        without cropping to any ROI — used when the operator asks the
-        recapture dialog to meter on the whole image instead of the sample.
+        Same statistic as `_meter_sample_level`, so the one target serves
+        both, just without cropping to any ROI — used when the operator asks
+        the recapture dialog to meter on the whole image instead of the
+        sample.
 
         Args:
             bayer: The raw (H, W) uint16 mosaic from the same capture.
             cam:   The camera, for its Bayer pattern.
 
         Returns:
-            The median in 10-bit counts, or None when there is no raw stream
-            to measure.
+            DN above black, or None when there is no raw stream to measure.
         """
         if bayer is None or getattr(bayer, "ndim", 0) != 2:
             return None
@@ -4725,7 +4765,9 @@ class Arbiter:
 
             layers = BayerCam.extract_bayer_layers(
                 bayer, getattr(cam, "bayer_pattern", "BGGR"))
-            return max(float(np.median(layer)) for layer in layers.values())
+            from exposure_measure import BLACK_DN
+            return max(float(np.percentile(layer, _PREVIEW_PCTL))
+                       for layer in layers.values()) - BLACK_DN
         except Exception:
             log.exception("Arbiter: could not meter the whole frame")
             return None
@@ -7436,20 +7478,35 @@ def _selftest() -> None:
     check("tap on empty space deselects", arb._view_selected, None)
 
     print("== image viewer: the preview is metered on the sample ROI ==")
-    # The sample's median must land within tolerance of the target, and the
-    # exposure that achieved it is remembered for the next preview.
-    _lvl = pcam.sample_level()
+    # The sample's 90th percentile, above black, must land within tolerance
+    # of the configured target, and the exposure that achieved it is
+    # remembered for the next preview.
+    import exposure_measure as _em
+    _target = arb._preview_target()
+    check("target is the config row",
+          _target, config.capture_preview_target_90th_dn())
+    _lvl = pcam.sample_level() - _em.BLACK_DN
     # Printed before the checks, so a convergence failure says what it reached.
     print(f"     converged to {pcam.exposure_us} us in {pcam.frames} frame(s), "
-          f"sample median {_lvl} of {_PREVIEW_TARGET}")
-    check("sample median is on target",
-          abs(_lvl - _PREVIEW_TARGET) <= _PREVIEW_AE_TOLERANCE * _PREVIEW_TARGET,
-          True)
+          f"sample 90th percentile {_lvl:.0f} DN of {_target}")
+    check("sample 90th percentile is on target",
+          abs(_lvl - _target) <= _PREVIEW_AE_TOLERANCE * _target, True)
     check("exposure inside the allowed range",
           _PREVIEW_MIN_US <= pcam.exposure_us <= _PREVIEW_MAX_US, True)
     check("and it is remembered",   arb._view_exposure_us, pcam.exposure_us)
-    print(f"     converged to {pcam.exposure_us} us in {pcam.frames} frame(s), "
-          f"sample median {_lvl} of {_PREVIEW_TARGET}")
+    # A two-tone sample (the calibration card's yellow and brown halves) is
+    # metered on its lighter half, where a median would sit in between.
+    _y0, _y1, _x0, _x1 = pcam.sample_rect()
+    _two = _np.zeros((1296, 2304), _np.uint16)
+    _two[_y0:_y1, _x0:_x1] = 264                       # 200 above black
+    _two[_y0:(_y0 + _y1) // 2, _x0:_x1] = 864          # 800 above black
+    check("two-tone sample metered on its lighter half",
+          arb._meter_sample_level(_two, pcam), 800.0)
+    _saved_target = config.capture_preview_target_90th_dn
+    config.capture_preview_target_90th_dn = lambda: 5000
+    check("a target out of range is clamped",
+          arb._preview_target(), _PREVIEW_TARGET_LIMITS[1])
+    config.capture_preview_target_90th_dn = _saved_target
     # Metering reads only the sample: a ROI outside the mosaic is refused
     # rather than silently metered on something else.
     _saved_sample = arb._view_rois[_SAMPLE]
