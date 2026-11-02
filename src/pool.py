@@ -404,7 +404,8 @@ class Pool:
                      L.CAP_LAYER1.w, L.CAP_LAYER1.h)
             button(f"cap_layer{i + 1}", r, "black", "btn_gray", 11, text=layer)
         for key, text in (("low_dn", "Low DN"), ("high_dn", "High DN"),
-                          ("low_pc", "Low %"), ("high_pc", "High %")):
+                          ("low_pc", "Low %"), ("high_pc", "High %"),
+                          ("spacing", "Spacing")):
             button(f"cap_lbl_{key}", getattr(L, f"CAP_LBL_{key.upper()}"),
                    "white", "label_coral", 13, text=text)
             field(f"cap_fld_{key}", getattr(L, f"CAP_FLD_{key.upper()}"),

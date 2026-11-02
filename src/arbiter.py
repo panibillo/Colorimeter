@@ -416,6 +416,7 @@ class Arbiter:
         self._cap_led: str | None = None
         self._cap_values: dict[str, str] = {}    # the boxes' text, for the chosen LED
         self._cap_global: dict[str, str] = {}    # the global window's text
+        self._cap_spacing: str = ""              # the Spacing box's text (global only)
         self._cap_over: dict[str, dict] = {}     # LEDs with a window of their own
         self._cap_layers: dict[str, list] = {}   # required Bayer layers per LED
         self._cap_layers0: dict[str, list] = {}  # ... as stored, to spot changes
@@ -3094,6 +3095,11 @@ class Arbiter:
          "Percentile of a patch's pixels held to High DN"),
     )
 
+    # The bracket spacing is a setting of the whole calibration, not of one LED's
+    # window, so it is staged on its own (self._cap_spacing) rather than in
+    # _CAP_SETTINGS, whose values can be overridden per LED.
+    _CAP_SPACING_HELP = "Least ratio between two brackets [over 1]"
+
     # The Bayer layer swatches' colors, and the text color that reads on each.
     _CAP_LAYER_SWATCH = {"R": ((213, 0, 0), "white"), "Gr": ((0, 170, 0), "white"),
                          "Gb": ((0, 110, 90), "white"), "B": ((0, 0, 255), "white")}
@@ -3118,6 +3124,7 @@ class Arbiter:
             for led in LEDBank.color_names()}
         self._cap_layers0 = {led: list(v) for led, v in self._cap_layers.items()}
         self._cap_values = dict(self._cap_global)
+        self._cap_spacing = str(config.calibration_min_spacing_ratio())
 
     @staticmethod
     def _cap_values_of(w) -> "dict[str, str]":
@@ -3170,6 +3177,9 @@ class Arbiter:
             p.put(f"cap_lbl_{key}", p[f"cap_lbl_{key}"].label,
                   on=lambda t=help_text: self._cap_hint(t))
             p.put(f"cap_fld_{key}", self._cap_values[key])
+        p.put("cap_lbl_spacing", p["cap_lbl_spacing"].label,
+              on=lambda: self._cap_hint(self._CAP_SPACING_HELP))
+        p.put("cap_fld_spacing", self._cap_spacing)
         problem = self._cap_problem()
         settings_ok = problem is None
         if not settings_ok:
@@ -3211,6 +3221,9 @@ class Arbiter:
             field = self._pool.get(f"cap_fld_{key}")
             if field is not None:
                 field.value = self._cap_values[key]
+        field = self._pool.get("cap_fld_spacing")
+        if field is not None:
+            field.value = self._cap_spacing
 
     def _cap_read_fields(self) -> None:
         """Keep what the fields now show: they are editable by keyboard."""
@@ -3220,6 +3233,9 @@ class Arbiter:
             field = self._pool.get(f"cap_fld_{key}")
             if field is not None:
                 self._cap_values[key] = str(field.value).strip()
+        field = self._pool.get("cap_fld_spacing")
+        if field is not None:
+            self._cap_spacing = str(field.value).strip()
 
     def _cap_parse(self, values: "dict[str, str]") -> "dict[str, float] | str":
         """Field texts as {config row: number}, or a message saying what is wrong."""
@@ -3240,11 +3256,25 @@ class Arbiter:
             return "Percentiles: 0 <= low < high <= 100"
         return out
 
+    def _cap_parse_spacing(self, text: str) -> "float | str":
+        """The Spacing box as a ratio, or a message saying what is wrong."""
+        try:
+            ratio = float(text)
+        except ValueError:
+            return "Spacing: not a number"
+        top = config.calibration_max_spacing_ratio()
+        if not 1.0 < ratio < top:
+            return f"Spacing must be over 1 and under {top:g}"
+        return ratio
+
     def _cap_problem(self) -> "str | None":
         """What is wrong with the settings now in the fields, or None."""
         self._cap_read_fields()
         parsed = self._cap_parse(self._cap_values)
-        return parsed if isinstance(parsed, str) else None
+        if isinstance(parsed, str):
+            return parsed
+        spacing = self._cap_parse_spacing(self._cap_spacing)
+        return spacing if isinstance(spacing, str) else None
 
     def _cap_commit(self) -> None:
         """Store the fields into the global window, or the chosen LED's own."""
@@ -3303,6 +3333,7 @@ class Arbiter:
             return
         self._cap_commit()
         global_rows = self._cap_parse(self._cap_global)
+        global_rows["min_spacing_ratio"] = self._cap_parse_spacing(self._cap_spacing)
         for row, value in global_rows.items():
             if value != config.get("calibration", row):
                 config.save("calibration", row, value)
@@ -3367,12 +3398,18 @@ class Arbiter:
             self._cap_values = dict(self._cap_global)
             self._cap_write_fields()
         settings = self._cap_run_settings()
+        import dataclasses
+        import exposure_fit as ef
         import exposure_fit_runner
         from capture_runner import CaptureConfig
+        # The spacing in the box, saved or not, like the windows above.
+        params = dataclasses.replace(
+            ef.FitParams.from_config(),
+            min_ratio=self._cap_parse_spacing(self._cap_spacing))
 
         def make_runner(cam, leds, cfg):
             return exposure_fit_runner.ExposureFitRunner(
-                cam, leds, cfg, only=only, settings=settings,
+                cam, leds, cfg, only=only, settings=settings, params=params,
                 on_status=self._cap_fit_status)
 
         session = self._new_session(CaptureConfig(), runner_factory=make_runner)
@@ -6167,6 +6204,24 @@ def _selftest() -> None:
     check("SAVE leaves choice",   arb._cap_view, None)
     check("low DN saved",         config.get("calibration", "window_low_dn"), 120)
     check("high pctl saved",      config.get("calibration", "window_high_pctl"), 95.0)
+
+    print("== capture screen: Spacing, the closest bracket ratio ==")
+    arb._menu_open_capture()
+    check("spacing shows config", arb._pool["cap_fld_spacing"].value,
+          str(config.calibration_min_spacing_ratio()))
+    arb._pool["cap_fld_spacing"].value = "0.9"
+    check("spacing of 1 or less refused", arb._cap_problem(),
+          "Spacing must be over 1 and under 2")
+    check("and calibrating is blocked", (arb._render_capture_choice(),
+          arb._pool["cap_suite"].enabled)[1], False)
+    arb._pool["cap_fld_spacing"].value = "1.05"
+    check("spacing accepted", arb._cap_problem(), None)
+    arb._cap_pick_led("green")
+    check("spacing is global, not per LED",
+          arb._pool["cap_fld_spacing"].value, "1.05")
+    arb._cap_pick_led("green")
+    arb._cap_choice_save()
+    check("spacing saved", config.calibration_min_spacing_ratio(), 1.05)
 
     print("== capture screen: layers and a window of their own per LED ==")
     arb._menu_open_capture()

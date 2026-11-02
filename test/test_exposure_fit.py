@@ -137,7 +137,10 @@ class TestFitLed(unittest.TestCase):
         self.assertEqual(fit.notes[g5[2]].remark, "log rung 1/2")
 
     def test_a_narrow_range_keeps_small_groups_and_drops_large_ones(self):
-        fit = ef.fit_led("blue", Sensor(0.05, PAD_DARK_BROWN), 10_000, P)
+        # A coarse spacing on purpose: at the 1.02 default this range (about
+        # x1.45) holds all five groups.
+        coarse = ef.FitParams(min_ratio=1.2)
+        fit = ef.fit_led("blue", Sensor(0.05, PAD_DARK_BROWN), 10_000, coarse)
         self.assertIn("1", fit.groups)
         self.assertIn("3", fit.groups)
         self.assertNotIn("5", fit.groups)

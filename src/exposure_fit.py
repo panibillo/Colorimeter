@@ -79,7 +79,7 @@ class FitParams:
     low_dn: float = 100.0
     high_dn: float = 850.0
     max_iter: int = 8
-    min_ratio: float = 1.2
+    min_ratio: float = 1.02
     max_ratio: float = 2.0
     max_us: int = 200_000
     min_us: int = MIN_EXPOSURE_US

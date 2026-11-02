@@ -352,25 +352,28 @@ CFG_RESTORE = Rect(  8, 184, 148,  48)   # back to the configured durations
 # overlap in y, but the two are never shown together.
 CAP_TITLE     = Rect(  8,   6, 304,  34)
 # Choice form (below the CANCEL / title / SAVE row, which reuses the menu's
-# corners): the LED bar, the four window settings, a hint line that also shows
-# the help for a tapped label, and the action row.
+# corners): the LED bar, the four window settings and the bracket spacing (three
+# rows of 26 px), a hint line that also shows the help for a tapped label, and
+# the action row.
 CAP_LED1      = Rect(  4,  54, 28,  30)     # 10 LED swatches, pitch 31
 CAP_LED_PITCH = 31
 CAP_LAYER1      = Rect(  4,  86, 30, 16)    # R, Gr, Gb, B swatches, pitch 18
 CAP_LAYER_PITCH = 18
-CAP_LBL_HIGH_DN = Rect( 40,  88, 62, 30)    # "High DN"
-CAP_FLD_HIGH_DN = Rect(104,  88, 50, 30)
-CAP_LBL_LOW_DN  = Rect( 40, 122, 62, 30)    # "Low DN"
-CAP_FLD_LOW_DN  = Rect(104, 122, 50, 30)
-CAP_LBL_HIGH_PC = Rect(164,  88, 72, 30)    # "High %"
-CAP_FLD_HIGH_PC = Rect(238,  88, 56, 30)
-CAP_LBL_LOW_PC  = Rect(164, 122, 72, 30)    # "Low %"
-CAP_FLD_LOW_PC  = Rect(238, 122, 56, 30)
-CAP_HINT      = Rect(  6, 158, 308,  18)
-CAP_SUITE     = Rect(  4, 180,  76,  46)    # Calibrate suite
-CAP_COLOR     = Rect( 82, 180,  76,  46)    # Calibrate color
-CAP_SHOW      = Rect(160, 180,  76,  46)    # Show
-CAP_PAD       = Rect(238, 180,  78,  46)    # Pad areas: place the test pad's patches
+CAP_LBL_HIGH_DN = Rect( 40,  88, 62, 26)    # "High DN"
+CAP_FLD_HIGH_DN = Rect(104,  88, 50, 26)
+CAP_LBL_LOW_DN  = Rect( 40, 116, 62, 26)    # "Low DN"
+CAP_FLD_LOW_DN  = Rect(104, 116, 50, 26)
+CAP_LBL_HIGH_PC = Rect(164,  88, 72, 26)    # "High %"
+CAP_FLD_HIGH_PC = Rect(238,  88, 56, 26)
+CAP_LBL_LOW_PC  = Rect(164, 116, 72, 26)    # "Low %"
+CAP_FLD_LOW_PC  = Rect(238, 116, 56, 26)
+CAP_LBL_SPACING = Rect( 40, 144, 62, 26)    # "Spacing": closest bracket ratio
+CAP_FLD_SPACING = Rect(104, 144, 50, 26)
+CAP_HINT      = Rect(  6, 172, 308,  18)
+CAP_SUITE     = Rect(  4, 192,  76,  44)    # Calibrate suite
+CAP_COLOR     = Rect( 82, 192,  76,  44)    # Calibrate color
+CAP_SHOW      = Rect(160, 192,  76,  44)    # Show
+CAP_PAD       = Rect(238, 192,  78,  44)    # Pad areas: place the test pad's patches
 # Show screen (Capture page's Show button), under the BACK / title / Capture row
 # that reuses the menu's corners.
 SHOW_MODE_EXP   = Rect(  4,  54, 154, 30)     # "One exposure"

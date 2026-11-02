@@ -126,8 +126,8 @@ INSERT OR IGNORE INTO config (active, isdefault, editable, add_dt, role, name,
    'percentile of a patch''s pixels compared with the high limit'),
   (0, 1, 1, '2026-10-26 00:00:00', 'calibration', 'max_search_iter', 'int', '8', 'seed',
    'most nudges allowed to bring one bracket into the window before giving up'),
-  (0, 1, 1, '2026-10-26 00:00:00', 'calibration', 'min_spacing_ratio', 'float', '1.2', 'seed',
-   'closest allowed ratio between neighboring brackets'),
+  (0, 1, 1, '2026-11-02 00:00:00', 'calibration', 'min_spacing_ratio', 'float', '1.02', 'seed',
+   'closest allowed ratio between neighboring brackets; set on Menu > Advanced > Capture'),
   (0, 1, 1, '2026-10-26 00:00:00', 'calibration', 'max_spacing_ratio', 'float', '2.0', 'seed',
    'widest allowed ratio between neighboring brackets (not used by the nested rungs)'),
   (0, 1, 1, '2026-10-26 00:00:00', 'calibration', 'max_exposure_us', 'int', '200000', 'seed',
@@ -293,7 +293,9 @@ INSERT OR IGNORE INTO config (active, isdefault, editable, add_dt, role, name,
   (0, 0, 1, '2026-07-21 00:00:00', 'defaults', 'testkit', 'str', 'Hach 1', 'history',
    'previously used test kit'),
   (0, 0, 1, '2026-07-21 00:00:00', 'defaults', 'testkit_vendor', 'str', 'Hach', 'history',
-   'vendor of a previously used test kit');
+   'vendor of a previously used test kit'),
+  (0, 0, 1, '2026-10-26 00:00:00', 'calibration', 'min_spacing_ratio', 'float', '1.2', 'history',
+   'the bracket spacing before 2026-11-02, when exposures were still snapped to a x1.09 grid');
 
 -- Activate every commissioned default that has nothing in force yet.  On a
 -- fresh database this promotes all of the above to active=1, leaving one row

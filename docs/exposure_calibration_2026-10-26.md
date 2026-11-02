@@ -52,7 +52,9 @@ grid, x1.09 steps, so LEDs at near-identical exposures could share a dark frame.
 A run now takes two dark frames whatever its exposures, so the grid was
 dropped: it made brackets closer than one step collide.) A group is dropped if
 the range is too narrow to keep
-neighbors at least 1.2× apart (5 brackets need a usable range of about 2.1×).
+neighbors at least the minimum spacing apart (calibration.min_spacing_ratio,
+set in the Spacing box on the Capture screen; 1.02 from 2026-11-02, 1.2
+before, when 5 brackets needed a usable range of about 2.1×).
 The log names the limiting patch.
 
 ### When no exposure suits the whole pad (spread mode)
@@ -73,7 +75,7 @@ through brown. Only the two ends are checked (position 0 for clipping,
 position 1 for darkness). Every stored remark of a spread ladder ends in
 `spread`, e.g. `high DN (pad_white.B) spread`, so the table shows the mode.
 A group is still dropped if the band between the two limits is too narrow to
-keep neighbors 1.2× apart, and a patch with no signal at all still fails.
+keep neighbors the minimum spacing apart, and a patch with no signal at all still fails.
 
 ## What is stored (`exposure` table)
 
