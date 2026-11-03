@@ -50,7 +50,30 @@ Method, all in bound-crop Bayer-layer coordinates:
              `depth` is an exact distance to the rectangle boundary rather
              than a distance transform of a ragged blob.
 
-Constants below are for bound roi 39 with the strip upright in the channel.
+Two holder layouts (`layout`, decided from the image by `_detect_layout`):
+
+  'channel'  the strip lies in an open channel and runs off the bottom of
+             the crop, so there is a long band of bare strip below the pad.
+             The sides are measured on that band, as above.  Every capture
+             up to C1037.
+
+  'window'   cassette 01 (from C1038, 2026-11-01): a dark frame with a small
+             window, about 4 layer rows of white above the pad and 9 below,
+             and a narrow darkish band between the pad's sides and the
+             frame.  There is no band of bare strip to measure the sides
+             on, so they are measured on the pad's own rows instead, as the
+             *outermost* crossing of half the pad level on each side.
+             Outermost, because cassette 01 stains the whole pad and is
+             expected to stain its edges more than its middle: a crossing
+             taken from the middle outward would be pulled in by a dark
+             edge, while one taken from the frame inward stops at the first
+             pad pixel.  The frame and the side bands read 0.05-0.3 in
+             composite R, far below half of any pad level.  The ends are
+             found exactly as in the channel layout, with the window's top
+             edge playing the part of the strip's end.
+
+Constants below are for bound roi 39 with the strip upright in the channel;
+the pad's size is the same in cassette 01.
 """
 import sys
 from pathlib import Path
@@ -91,6 +114,40 @@ HEIGHT_FIXED = 53.34
 RESEAT_TOLERANCE = 3.0
 WEAK_EDGE_SLOPE = 0.05
 RESEAT_SEARCH = 6
+
+#: Holder layouts; see the module docstring.
+LAYOUT_CHANNEL = "channel"
+LAYOUT_WINDOW = "window"
+
+#: Rows at the crop floor looked at to tell the layouts apart.
+FLOOR_ROWS = 4
+
+#: Window layout: pad rows kept clear of the shadow lines at the pad's ends
+#: when measuring its sides, and how far either side of the strip column
+#: the outermost crossing is searched for (half the pad width plus the side
+#: band, with room to spare).
+WINDOW_END_CLEARANCE = 3
+WINDOW_SIDE_SEARCH = 40
+
+
+def _detect_layout(rowprof) -> str:
+    """
+    Which holder the strip is in, from the profile down the strip column.
+
+    In the channel the strip runs off the bottom of the crop, so the last
+    rows are bare paper, about as bright as the pad.  In cassette 01 the
+    window closes above the crop floor and the last rows are frame, near 0.
+
+    Args:
+        rowprof: Composite R down the strip column, one value per layer row.
+
+    Returns:
+        LAYOUT_WINDOW if the crop floor reads below EDGE_FRACTION of the
+        strip's brightest level (its 95th percentile), else LAYOUT_CHANNEL.
+    """
+    bright = float(np.percentile(rowprof, 95))
+    floor = float(np.median(rowprof[-FLOOR_ROWS:]))
+    return LAYOUT_WINDOW if floor < EDGE_FRACTION * bright else LAYOUT_CHANNEL
 
 
 def _cross(v, i, thr):
@@ -179,10 +236,26 @@ class PadRect:
         self.xseed = strip_column(c)
         self.rowprof = np.median(
             self.comp[:, self.xseed - 8:self.xseed + 9], axis=1)
-        self.paper_level = float(np.median(self.rowprof[95:118]))
+        self.layout = _detect_layout(self.rowprof)
+        if self.layout == LAYOUT_WINDOW:
+            # No bare strip below the pad: take the level from the window
+            # itself, which is mostly pad.  The rows between the first and
+            # last bright row are the whole window, stained pad included
+            # however dark it is.
+            bright = np.flatnonzero(
+                self.rowprof > EDGE_FRACTION * np.percentile(self.rowprof, 95))
+            self.window_rows = (int(bright[0]), int(bright[-1]))
+            self.paper_level = float(np.median(
+                self.rowprof[bright[0]:bright[-1] + 1]))
+        else:
+            self.window_rows = None
+            self.paper_level = float(np.median(self.rowprof[95:118]))
 
         self._find_ends()
-        self._find_sides(w)
+        if self.layout == LAYOUT_WINDOW:
+            self._find_sides_on_pad(w)
+        else:
+            self._find_sides(w)
 
         if fixed_size:
             cu = 0.5 * (self.aL + self.aR)
@@ -312,6 +385,55 @@ class PadRect:
         if len(rows) < 8:
             raise RuntimeError(f"{self.capture.name}: only {len(rows)} usable "
                                f"strip rows below the pad")
+        self._fit_sides(rows, L, R)
+
+    def _find_sides_on_pad(self, w):
+        """
+        The pad's sides in the window layout, measured on the pad's own rows.
+
+        On each row between the pad's ends (kept WINDOW_END_CLEARANCE rows
+        clear of the shadow lines), the left edge is the first pixel above
+        half the pad level counting inward from WINDOW_SIDE_SEARCH px left of
+        the strip column, and the right edge likewise from the right.  A dark
+        stain anywhere inside the pad, the edges included, cannot move these
+        crossings as long as the pad's outermost column stays above half the
+        pad level.
+
+        Args:
+            w: Width of the layer grid.
+
+        Raises:
+            RuntimeError: Fewer than 8 rows gave two edges.
+        """
+        thr = EDGE_FRACTION * self.paper_level
+        lo = max(self.xseed - WINDOW_SIDE_SEARCH, 1)
+        hi = min(self.xseed + WINDOW_SIDE_SEARCH, w - 2)
+        y0 = int(np.ceil(self.top)) + WINDOW_END_CLEARANCE
+        y1 = int(np.floor(self.bot)) - WINDOW_END_CLEARANCE + 1
+        rows, L, R = [], [], []
+        for y in range(max(y0, 0), min(y1, self.comp.shape[0])):
+            above = np.flatnonzero(self.comp[y, lo:hi + 1] > thr) + lo
+            if len(above) == 0:
+                continue
+            a, b = int(above[0]), int(above[-1])
+            if a <= lo or b >= hi or b - a < 20:
+                continue                # an edge ran into the search limit
+            rows.append(y)
+            L.append(_cross(self.comp[y], a - 1, thr))
+            R.append(_cross(self.comp[y], b, thr))
+        if len(rows) < 8:
+            raise RuntimeError(f"{self.capture.name}: only {len(rows)} usable "
+                               f"pad rows in the window")
+        self._fit_sides(rows, L, R)
+
+    def _fit_sides(self, rows, L, R):
+        """
+        Fit the two sides as parallel lines, rejecting outlier rows.
+
+        Args:
+            rows: Layer rows the edges were measured on.
+            L, R: Subpixel left and right edge column on each row.
+        """
         rows = np.asarray(rows, dtype=np.float64)
         L, R = np.asarray(L), np.asarray(R)
         self.yc = float(rows.mean())
@@ -400,10 +522,15 @@ class PadRect:
         mode.  Pixels far below the region's own median are dropped, which
         removes the hand-written mark that appears on some strips.
 
+        In the window layout (cassette 01) the region stops `bottom_trim`
+        rows above the window's lower edge instead of the crop floor, so it
+        never reaches the dark frame.  With only about 9 rows of white below
+        the pad, the result there is a sliver or empty.
+
         Args:
             collar: Layer px of clearance kept below the pad's bottom edge.
-            bottom_trim: Rows dropped at the crop floor, where the strip runs
-                out of frame.
+            bottom_trim: Rows dropped at the crop floor (window layout: at
+                the window's lower edge), where the strip runs out of view.
             blemish: Fraction of the region median below which a pixel is
                 treated as a mark on the paper rather than paper.
 
@@ -415,7 +542,8 @@ class PadRect:
         """
         h = self.comp.shape[0]
         v_top = self.bot + collar
-        v_bot = h - bottom_trim
+        v_bot = (self.window_rows[1] + 1 - bottom_trim
+                 if self.layout == LAYOUT_WINDOW else h - bottom_trim)
         m = (self.u >= 0) & (self.u <= self.width) & \
             (self.v >= v_top) & (self.v < v_bot)
         if m.any():
@@ -441,7 +569,8 @@ class PadRect:
                 f"W={self.width:5.2f} | top={self.top:5.2f} bot={self.bot:5.2f} "
                 f"| tilt={self.angle_deg:+5.2f} deg  rms={self.edge_rms:.3f} px "
                 f" n={len(self.rows_used):2d}-{self.n_rejected:<2d} "
-                f"top_resid={tr}  clr={self.top_clearance:+5.2f}")
+                f"top_resid={tr}  clr={self.top_clearance:+5.2f}  "
+                f"{self.layout}")
 
 
 def pooled_size(names, max_softness: float = 2.5):

@@ -61,6 +61,8 @@ if __name__ == "__main__":
                               #  so the rowid is carried here
         bound=39,             # the bound to analyse
         roi_rowid=(32, 35, 36, 39),   # sample, chip2, chip1, bound
+        roles={32: "sample", 36: "gray1", 35: "gray2"},   # roi roles were
+                              # renamed to white_balance on 2026-08-09
         writedir="devdesk/flatfield/bound39a",
         rotated=("A180",),    # placements imaged end for end
         figures="--no-figures" not in sys.argv,

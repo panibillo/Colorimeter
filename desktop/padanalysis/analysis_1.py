@@ -213,7 +213,10 @@ MAX_SAT_FRACTION = 0.001
 #: day when hot pixels began to be left out.
 #: Then "+pre_white" the same day, when R_white moved from the bare paper
 #: to the pre-image's own pad.
-CHAIN = "dark_level+divisor_map+hot_mask+pre_white"
+#: Then "+ff_union" on 2026-11-02, when the flat field was refitted over the
+#: union bound (roi rowid 61, analysisref 'bound_union_a') after the gray
+#: chips moved on 2026-10-28.
+CHAIN = "dark_level+divisor_map+hot_mask+pre_white+ff_union"
 
 _STRIP_ROIS = (ROISAMPLE, ROIWHITE)     # move with the strip; see registration
 _ROI_NAMES = (ROIBOUND, ROIWHITE, ROIGRAY1, ROIGRAY2, ROISAMPLE)
