@@ -31,6 +31,27 @@ sqlite3 src/colorimeter.sqlite \
 
 ---
 
+## [Unreleased]
+
+### Fixed
+
+- The desktop readers handle the schema-5 dark frames. They go by what the
+  archive holds rather than by its schema number, so archives in the new
+  layout that still say schema 4 read correctly too.
+  - `desktop/padanalysis/probe.py`: `Capture.layer()` returned None for every
+    layer of a new-layout archive, because finding the dark failed on the
+    missing per-LED links. It now takes the dark level from the statistics.
+    `darklayer()` returns None there, because the arrays are not kept, and
+    `dark_groups()` lists the statistics.
+  - `devdesk/flatfield.py` and `devdesk/flatfield_pool.py`: `load_frame()` and
+    the pooled loader no longer require a per-LED dark link. The new
+    `flatfield.dark_used()` returns the level and where it came from: the link
+    name in older archives, as before, or "dark 1000us" for shared statistics.
+  - `devdesk/roi_darkdiff.py`: says the darks are statistics only and stops,
+    instead of printing blank rows.
+
+  Outputs on C1032 and C1038 are unchanged.
+
 ## [0.10.0] — 2026-11-02
 
 Writes: archive schema 5 · meta 2 · database 2
@@ -55,7 +76,10 @@ is the same at every exposure (the mean over 2564 dark frames is 64.02–64.04 D
 from 1 to 51 ms), which is why one number per layer is enough.
 `capture_h5.dark_level()` reads the new layout. Anything that subtracts a dark
 frame pixel by pixel, or follows a per-LED dark link, will not work on archives
-from C1038 on; see Known gaps.
+in the new layout; see Known gaps. The layout started with commit 6c62fcb
+(2026-11-02), so it applies to archives written by that code or later. Any made
+before this release was tagged still say schema 4. C1038 (2026-11-01) and every
+earlier capture are in the old layout.
 
 ### Added
 
@@ -169,8 +193,8 @@ Not part of the instrument, but recorded here because it moved a lot:
 
 - `desktop/padanalysis/probe.py`, `devdesk/flatfield.py` and
   `devdesk/roi_darkdiff.py` still look for per-LED dark links or full dark
-  arrays. They read archives up to C1037, but not schema-5 archives (C1038 on)
-  until they are updated to use `capture_h5.dark_level()`.
+  arrays, so they cannot read archives in the new layout. Fixed after this
+  release; see Unreleased.
 
 ## [0.9.0] — 2026-08-21
 

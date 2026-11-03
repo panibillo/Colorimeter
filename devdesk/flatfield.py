@@ -279,7 +279,9 @@ class Frame:
         label:  Exposure label, e.g. 'e1'.
         channel: Bayer channel name, one of BAYER_CHANNELS.
         exposure_us: Exposure time recorded on the lit dataset.
-        dark_link: Name of the dark group actually subtracted.
+        dark_link: Where the subtracted dark level came from: the LED's dark
+            link (schema <= 4), or "dark <us>us" for a schema-5 archive's
+            shared statistics.  See dark_used().
     """
     signal: np.ndarray
     mask: np.ndarray
@@ -371,9 +373,31 @@ def dark_level_for(reader: Hdf5Reader, led: str, label: str,
     Raises:
         KeyError: No dark frame holds this layer.
     """
+    return dark_used(reader, led, label, channel)[0]
+
+
+def dark_used(reader: Hdf5Reader, led: str, label: str,
+              channel: str) -> "tuple[float, str]":
+    """
+    Return the dark level for one lit layer, and a name for where it came from.
+
+    The name is the LED's own dark link where the archive has one (schema 4
+    and earlier), so those archives report exactly what they always did.  A
+    schema-5 sweep has no per-LED links -- its darks are two frames of
+    statistics under /dark -- so the name is the shared dark's exposure,
+    e.g. "dark 1000us".
+
+    Raises:
+        KeyError: No dark frame holds this layer.
+
+    Example:
+        >>> dark_used(reader, 'green', 'e1', 'Gr')     # doctest: +SKIP
+        (64.02, 'after_e1')
+    """
     link = find_dark_link(reader, led, label)
     fallback = f"/leds/{led}/dark/{link}/{channel}" if link else None
-    return capture_h5.dark_level(reader, channel, "", fallback)[0]
+    level, dark_us = capture_h5.dark_level(reader, channel, "", fallback)
+    return level, link or f"dark {int(dark_us)}us"
 
 
 def load_frame(reader: Hdf5Reader, led: str, label: str,
@@ -407,20 +431,19 @@ def load_frame(reader: Hdf5Reader, led: str, label: str,
         A Frame. Check `.usable` before fitting it.
 
     Raises:
-        KeyError: The lit dataset or its dark counterpart is absent, or was
-            measured and deliberately not stored — see read_layer().
+        KeyError: The lit dataset is absent, or was measured and deliberately
+            not stored — see read_layer() — or the archive has no dark frame
+            for this layer.  A schema-5 archive's statistics-only darks are
+            enough: only their mean is used.
 
     Example:
         >>> f = load_frame(reader, 'green', 'e1', 'Gr')    # doctest: +SKIP
         >>> f.mean, f.masked_fraction                      # doctest: +SKIP
         (770.9, 0.0)
     """
-    dark_link = find_dark_link(reader, led, label)
-    if dark_link is None:
-        raise KeyError(f"/leds/{led}/dark has no group matching '{label}'")
-
     lit = read_layer(reader, f"/leds/{led}/lit/{label}/{channel}")
-    signal = lit - dark_level_for(reader, led, label, channel)
+    black, dark_link = dark_used(reader, led, label, channel)
+    signal = lit - black
     mask = (lit < SATURATED_DN) & (signal > 0.0)
 
     return Frame(signal=signal, mask=mask, led=led, label=label,

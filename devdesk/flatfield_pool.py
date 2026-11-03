@@ -474,9 +474,10 @@ class Pool:
             the rotation control.
         black: Median over the captures of the dark level subtracted, DN.
         exposure_us: Exposure the captures agree on.
-        dark_links: {archive name: dark link matching the lit exposure}.
-            Kept for provenance; the level subtracted comes from the
-            archive's shortest-exposure dark (flatfield.dark_level_for).
+        dark_links: {archive name: where its dark level came from} -- the
+            LED's dark link, or "dark <us>us" in a schema-5 archive.  Kept
+            for provenance; the level subtracted comes from the archive's
+            shortest-exposure dark (flatfield.dark_used).
         led, label, channel: What this cell is.
     """
     frame: Frame
@@ -587,9 +588,9 @@ def load_pool(captures: Sequence[Capture], led: str, label: str,
         A Pool.
 
     Raises:
-        KeyError: The lit dataset or its dark counterpart is absent, or was
-            measured and deliberately not stored — see flatfield.read_layer().
-            analyze() catches this and moves on, which is what makes a pooled
+        KeyError: The lit dataset is absent, or was measured and deliberately
+            not stored — see flatfield.read_layer() — or the archive has no
+            dark frame for this layer.  analyze() catches this and moves on, which is what makes a pooled
             run tolerate archives that dropped their under-exposed layers.
         ValueError: The captures disagree on exposure time, which would make
             the pooled frame a blend of two different measurements.
@@ -603,14 +604,9 @@ def load_pool(captures: Sequence[Capture], led: str, label: str,
 
     for cap in captures:
         r = cap.reader
-        dark_link = ff_mod.find_dark_link(r, led, label)
-        if dark_link is None:
-            raise KeyError(
-                f"{cap.name}: /leds/{led}/dark has no group matching "
-                f"'{label}'")
         lit = ff_mod.read_layer(
             r, f"/leds/{led}/lit/{label}/{channel}")[cap.slices]
-        black = ff_mod.dark_level_for(r, led, label, channel)
+        black, dark_link = ff_mod.dark_used(r, led, label, channel)
 
         signal = lit - black
         masks.append((lit < SATURATED_DN) & (signal > 0.0))

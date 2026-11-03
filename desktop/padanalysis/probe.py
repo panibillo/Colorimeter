@@ -201,7 +201,9 @@ class Capture:
 
         One number per Bayer layer per sweep; see `layer`.  `led` and
         `label` are only used to find a fallback dark in archives that keep
-        no shared `/dark` groups.
+        no shared `/dark` groups.  A schema-5 sweep keeps its darks as
+        statistics only and has no per-LED links; the level comes from the
+        statistics (`raw_mean`), so nothing here needs the array.
 
         Raises:
             KeyError: The sweep has no dark frame for this layer.
@@ -266,6 +268,10 @@ class Capture:
 
         For inspecting the darks (analysis_2, hotpixel_analysis).  It is
         not what `layer` subtracts -- that is the scalar `dark_level`.
+
+        Always None for a schema-5 sweep: its dark frames are statistics
+        only and it has no per-LED dark links.  `dark_groups` lists the
+        statistics it does keep.
         """
         dl = self._dark_link(led, label)
         if dl is None:
@@ -287,8 +293,15 @@ class Capture:
         archives took two batches and named them "before_"/"after_"; "after"
         is preferred where both exist because it is the one every current
         run writes.
+
+        None when the LED has no dark group at all, as in every schema-5
+        sweep: those links stopped being written when a sweep's darks became
+        two frames of statistics (see capture_h5's `4 -> 5` note).
         """
-        kids = self.reader.list_children(f"{self._at}/leds/{led}/dark")
+        base = f"{self._at}/leds/{led}/dark"
+        if not self.reader.exists(base):
+            return None
+        kids = self.reader.list_children(base)
         m = [c for c in kids if c == label or c.endswith("_" + label)]
         if not m:
             return None
@@ -300,11 +313,14 @@ class Capture:
         """
         The shared dark frames this sweep holds, one entry per exposure batch.
 
-        Dark frames are photographed once per exposure time, after the sweep
-        (hence the "after_" prefix), and stored under
+        Up to schema 4, dark frames are photographed once per exposure time,
+        after the sweep (hence the "after_" prefix), and stored under
         `/<section>/dark/<when>_<us>us`; every `/leds/<led>/dark/<when>_<label>`
         is a soft link to one of them.  Ten LEDs at the same exposure share
         one dark frame, so the truthful listing is per exposure, not per LED.
+        From schema 5 a sweep keeps two dark frames -- 1000 us and its
+        longest lit exposure -- as statistics only, so every layer comes
+        back as `(raw_mean, None)`.
 
         `Capture.layer` already subtracts these, so this is for inspection
         only -- reading the noise floor and the fixed-pattern offset a

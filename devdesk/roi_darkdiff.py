@@ -12,6 +12,10 @@ working, not failing. Kept because the archives it applies to are kept, and
 because a future change to the sensor or its cooling would make the question
 live again.
 
+Schema-5 archives (software 0.10.0 on) keep their dark frames as statistics
+only -- two frames per sweep, no pixel arrays -- so there is nothing here to
+diff.  The tool says so and stops rather than printing blank rows.
+
 Knows about four fixed regions of interest, defined in pixel coordinates
 (x, y, w, h) relative to the per-channel ROI layer arrays stored under
 /dark/<when>_<us>us/<ch> (typically 315x98 or 330x98, rows x cols):
@@ -68,6 +72,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
+import capture_h5  # noqa: E402
 import version  # noqa: E402
 from hdf5read import Hdf5Reader  # noqa: E402
 
@@ -141,6 +146,24 @@ def crop_rect(array: np.ndarray, rect: tuple) -> np.ndarray:
 
 
 # ── Dark exposure discovery ──────────────────────────────────────────
+
+def darks_have_pixels(reader: Hdf5Reader) -> bool:
+    """
+    True if any dark frame under /dark stores a pixel array.
+
+    False when there is no /dark, or when every layer there is an omitted
+    layer (statistics only), as in every schema-5 sweep.  See capture_h5's
+    `4 -> 5` note and capture_h5.is_omitted().
+    """
+    if not reader.exists("/dark"):
+        return False
+    for name in reader.list_children("/dark"):
+        for channel in CHANNELS:
+            path = f"/dark/{name}/{channel}"
+            if reader.exists(path) and not capture_h5.is_omitted(reader.attrs(path)):
+                return True
+    return False
+
 
 def list_dark_exposures(reader: Hdf5Reader) -> list:
     """
@@ -490,6 +513,11 @@ def main() -> int:
         if problem:
             print(f"ERROR: {h5_path.name}: {problem}", file=sys.stderr)
             return 1
+        if reader.exists("/dark") and not darks_have_pixels(reader):
+            print(f"{h5_path.name}: its dark frames are statistics only "
+                  f"(schema {reader.attrs('/').get('schema_version', '?')}), "
+                  f"so there are no pixels to diff.")
+            return 0
         if run_dark_diff:
             cmd_dark_diff(reader, h5_path)
         if run_exposures:
