@@ -22,6 +22,10 @@ fails leaves no file under the real name and no row.
     for progress in runner.run():
         ...                                    # repaint, poll input
     runner.out_path                            # the saved file
+
+It also finishes the files of Menu → Advanced → Capture Suite, which runs the
+normal CaptureRunner and saves the result as a test image: suite_part_path(),
+finish_suite() and discard_suite() at the bottom of this file.
 """
 
 from __future__ import annotations
@@ -213,3 +217,69 @@ class CaptureImageRunner(CaptureRunner):
         log.info("test image: saved %s", self.out_path)
         yield Progress(phase="done", message=f"Saved {ch.name}", led_index=1,
                        led_total=1, fraction=1.0)
+
+
+# ── Image suites (Menu → Advanced → Capture Suite) ─────────────────────────────
+# A suite is the sample's own measurement sweep — every LED in
+# capture.led_color_order at the saved exposure group, with its dark frames and
+# closing white photograph — run on whatever is in the holder and saved under a
+# test-image name.  The capture itself is the normal CaptureRunner; these
+# functions only name its file and finish it off, the same way a test image is:
+# written as <name>.h5.part, stamped and renamed to <name>.h5 only once it is
+# complete, then given its row in the test_image table.
+
+SUITE_IMAGE_TYPE = "suite"     # test_image.image_types for a suite
+
+
+def suite_part_path(name: str, directory: "Path | None" = None) -> Path:
+    """Where a suite named `name` is written while it is being captured."""
+    directory = directory or config.capture_test_image_dir()
+    directory.mkdir(parents=True, exist_ok=True)
+    final = directory / test_image_repo.file_name(name)
+    return final.with_name(final.name + ".part")
+
+
+def finish_suite(part: Path, name: str, description: str,
+                 colors: "list[str]") -> Path:
+    """
+    Turn a completed suite's part file into <name>.h5 and record it.
+
+    The operator's name and description go on the archive's root as
+    `test_image_name` and `test_image_description`; the root's own
+    `description` attribute keeps saying what kind of file it is.
+
+    Args:
+        part:        The finished <name>.h5.part.
+        name:        The test-image name, without .h5.
+        description: What the operator typed in Desc.
+        colors:      The LEDs swept, in sweep order.
+
+    Returns:
+        The saved file's path.
+
+    Raises:
+        OSError, sqlite3.Error: the file could not be stamped or renamed, or
+        its row not written.
+    """
+    import h5py
+    with h5py.File(part, "a") as f:
+        f.attrs["test_image_name"] = name
+        f.attrs["test_image_description"] = description.strip()
+    final = part.with_name(test_image_repo.file_name(name))
+    part.rename(final)
+    test_image_repo.record(name, " ".join(colors), [], [],
+                           [SUITE_IMAGE_TYPE], description)
+    log.info("image suite: saved %s", final)
+    return final
+
+
+def discard_suite(part: "Path | None") -> None:
+    """Remove an unfinished suite's part file, if there is one.  Never raises."""
+    if part is None:
+        return
+    try:
+        if part.exists():
+            part.unlink()
+            log.info("image suite: removed the unfinished %s", part)
+    except OSError:
+        log.exception("image suite: could not remove %s", part)

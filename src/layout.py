@@ -171,14 +171,15 @@ MENU_POWER      = Rect(164, 182, 148,  56)   # row 3 right
 # ── advanced screen (Menu → Advanced) ─────────────────────────────────────────
 # The Menu's grid and corners again, for the tools an operator rarely needs.
 #
-#       Capture            | Test LED
-#       Capture Image      | Wifi
-#       Calibrate Touchpad |
+#       Calibrate Exposures | Test LED
+#       Capture Image       | Wifi
+#       Calibrate Touchpad  | Capture Suite
 ADV_CAPTURE     = Rect(  8,  54, 148,  56)   # row 1 left: capture choice screen
 ADV_TEST_LED    = Rect(164,  54, 148,  56)   # row 1 right: LED test
 ADV_CAP_IMAGE   = Rect(  8, 118, 148,  56)   # row 2 left
 ADV_WIFI        = Rect(164, 118, 148,  56)   # row 2 right
 ADV_TOUCH_CAL   = Rect(  8, 182, 148,  56)   # row 3 left
+ADV_CAP_SUITE   = Rect(164, 182, 148,  56)   # row 3 right
 
 # ── LED test (Menu → Advanced → Test LED) ─────────────────────────────────────
 # Under the CANCEL / title / SAVE row: the Capture page's LED bar (CAP_LED1),
@@ -201,6 +202,19 @@ IMG_FLD_DESC    = Rect(176, 138, 140,  26)
 IMG_TYPE1       = Rect(  4, 168,  60,  32)    # five image-type checkboxes, pitch 63
 IMG_TYPE_PITCH  = 63
 IMG_STATUS      = Rect(  6, 204, 308,  34)
+
+# ── Capture Suite (Menu → Advanced → Capture Suite) ───────────────────────────
+# Under the BACK / title / Capture row and the Capture page's LED bar
+# (CAP_LED1, showing only the suite's LEDs, in sweep order): the exposure
+# spread, the file name and description, a fixed message and a status line.
+# Nothing but Name and Desc can be changed here.
+SUITE_SPREAD    = Rect(  6,  90, 308,  20)    # "Exposure spread 3"
+SUITE_LBL_NAME  = Rect(  4, 116,  40,  26)
+SUITE_FLD_NAME  = Rect( 46, 116,  84,  26)
+SUITE_LBL_DESC  = Rect(134, 116,  40,  26)
+SUITE_FLD_DESC  = Rect(176, 116, 140,  26)
+SUITE_MSG       = Rect(  6, 150, 308,  20)    # "Capture a complete image suite"
+SUITE_STATUS    = Rect(  6, 176, 308,  56)
 
 # ── Wifi (Menu → Advanced → Wifi) ─────────────────────────────────────────────
 # Three views under the Menu's corners, never shown together.
@@ -345,7 +359,7 @@ CFG_R2_P60  = Rect(275, 104,  39,  40)   # +60 s  ┘
 CFG_HINT    = Rect(  8, 152, 304,  26)   # units + the mm:ss the seconds mean
 CFG_RESTORE = Rect(  8, 184, 148,  48)   # back to the configured durations
 
-# ── capture screen (Menu → Advanced → Capture: pick path + images, run, show
+# ── capture screen (Menu → Advanced → Calibrate Exposures: pick path + images, run, show
 # result) ───────────────────────────────────────────────────────────────────────
 # One screen of its own, reused for three views: the choice form, the running
 # progress, and the done/result. Selector rects and the wide progress rect

@@ -314,8 +314,19 @@ def _active_counts(con: sqlite3.Connection) -> Dict[Tuple[str, str], int]:
         "SELECT role, name, SUM(active) FROM config GROUP BY role, name")}
 
 
+def _active_rowids(con: sqlite3.Connection) -> set:
+    """The rowids of the rows in force."""
+    return {r for (r,) in con.execute("SELECT rowid FROM config WHERE active = 1")}
+
+
+def _rowids(con: sqlite3.Connection) -> set:
+    """The rowid of every config row."""
+    return {r for (r,) in con.execute("SELECT rowid FROM config")}
+
+
 def _restored(con: sqlite3.Connection,
-              was_active: Dict[Tuple[str, str], int]) -> List[Restored]:
+              was_active: Dict[Tuple[str, str], int],
+              was_in_force: "set | None" = None) -> List[Restored]:
     """
     Name the parameters the seed file just brought back.
 
@@ -324,17 +335,26 @@ def _restored(con: sqlite3.Connection,
     reseeded; one that was there with a count of zero had rows but none
     active, and the seed file's closing UPDATE reactivated its default.
 
+    A parameter the seed file's Renames section moved (to a new name or a new
+    role) is also absent from `was_active` under its new key, but its row was
+    in force all along and nothing was restored.  `was_in_force` — the
+    rowids active before — is what tells the two apart.
+
     Args:
-        con:        An open connection, after the seed file has run.
-        was_active: The _active_counts() taken before it ran.
+        con:          An open connection, after the seed file has run.
+        was_active:   The _active_counts() taken before it ran.
+        was_in_force: The _active_rowids() taken before it ran.
 
     Returns:
         A Restored per healed parameter, ordered by role and name.
     """
+    was_in_force = was_in_force or set()
     out: List[Restored] = []
     for rowid, role, name, value in con.execute(
             "SELECT rowid, role, name, value FROM config "
             " WHERE active = 1 ORDER BY role, name"):
+        if rowid in was_in_force:
+            continue                    # in force before: moved, not restored
         seen = was_active.get((role, name))
         if seen is None:
             out.append(Restored(rowid, role, name, value, RESEEDED))
@@ -404,23 +424,27 @@ def ensure(path=None) -> Result:
                 f"by hand, with a backup taken first — {MIGRATION_HINT}"
             )
 
-        before = 0 if state == "created" else con.execute(
-            "SELECT COUNT(*) FROM config").fetchone()[0]
+        # The rows there before the seed file ran, so `added` counts the
+        # rows it inserted — not the net change, which a retired parameter's
+        # DELETE would pull below zero.
+        before = set() if state == "created" else _rowids(con)
         # What was in force before the seed file ran, so the rows it heals can
         # be named afterwards rather than only counted.  Skipped on a new
         # database, where nothing was in force and nothing was restored.
         was_active = ({} if state == "created"
                       else _active_counts(con))
+        was_in_force = set() if state == "created" else _active_rowids(con)
 
         _run_script(con, DDL_PATH)
         _add_samples_columns(con)
         _add_exposure_columns(con)
         _run_script(con, DEFAULTS_PATH)
 
-        after  = con.execute("SELECT COUNT(*) FROM config").fetchone()[0]
-        restored = _restored(con, was_active) if state != "created" else []
+        added = len(_rowids(con) - before)
+        restored = (_restored(con, was_active, was_in_force)
+                    if state != "created" else [])
 
-        # Counted after `after`, so Result.added keeps meaning "seed rows the
+        # Counted after `added`, so Result.added keeps meaning "seed rows the
         # file put back", and before _verify, so software_ver always has an
         # active row by the time the fatal check for one runs.  config_repo
         # opens its own connection; `con` holds no write transaction here, so
@@ -438,7 +462,7 @@ def ensure(path=None) -> Result:
         if con:
             con.close()
 
-    result = Result(state=state, added=after - before, params=params,
+    result = Result(state=state, added=added, params=params,
                     restored=restored)
     if result.state == "created":
         log.info(f"db_bootstrap: created {path} with {result.params} "

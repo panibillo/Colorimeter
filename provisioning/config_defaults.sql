@@ -74,6 +74,15 @@ UPDATE config
    AND NOT EXISTS (SELECT 1 FROM config
                     WHERE role = 'capture' AND name = 'prefetch_budget_s');
 
+-- defaults.exposuregroup -> capture.exposuregroup (2026-11)
+--   A capture setting, not something a new test pre-fills with; under
+--   `capture` it is listed with the other capture settings in the editor.
+UPDATE config
+   SET role = 'capture'
+ WHERE role = 'defaults' AND name = 'exposuregroup'
+   AND NOT EXISTS (SELECT 1 FROM config
+                    WHERE role = 'capture' AND name = 'exposuregroup');
+
 -- ── capture ─────────────────────────────────────────────────────────────────
 INSERT OR IGNORE INTO config (active, isdefault, editable, add_dt, role, name,
                               vtype, value, source, remark)
@@ -86,6 +95,8 @@ INSERT OR IGNORE INTO config (active, isdefault, editable, add_dt, role, name,
    'strftime format naming each archive, and stored as its suite_id'),
   (0, 1, 1, '2026-08-01 00:00:00', 'capture', 'extension', 'str', '.h5', 'seed',
    'archive filename extension'),
+  (0, 1, 1, '2026-07-21 00:00:00', 'capture', 'exposuregroup', 'str', '3', 'seed',
+   'exposure spread: images per LED the Normal capture path uses, 1..5; see the `exposure` table'),
   (0, 1, 1, '2026-08-01 00:00:00', 'capture', 'led_color_order', 'str',
    'photo_red,red,red_orange,amber,green,cyan,blue,royal_blue,violet,white', 'seed',
    'LEDs both capture paths sweep, in order (comma-separated color names)'),
@@ -262,8 +273,6 @@ INSERT OR IGNORE INTO config (active, isdefault, editable, add_dt, role, name,
      VALUES
   (0, 1, 1, '2026-07-21 00:00:00', 'defaults', 'samp_no_template', 'str', 'ZZ1000', 'seed',
    'pattern the next sample number is generated from'),
-  (0, 1, 1, '2026-07-21 00:00:00', 'defaults', 'exposuregroup', 'str', '3', 'seed',
-   'images per LED the Normal capture path uses; see the `exposure` table'),
   (0, 1, 1, '2026-07-21 00:00:00', 'defaults', 'user', 'str', 'William Olsen', 'seed',
    'operator recorded on a new test'),
   (0, 1, 1, '2026-07-21 00:00:00', 'defaults', 'user_email', 'str', 'panibillo@gmail.com', 'seed',
@@ -388,6 +397,13 @@ UPDATE roi SET role = 'white_balance' WHERE role = 'white';
 -- The cost is this parameter's history.  Accepted: its values only ever
 -- answered a question that is no longer asked.  A no-op once nothing matches.
 DELETE FROM config WHERE role = 'protocol' AND name = 'reagent2_secs';
+
+-- capture.preimage_rung_shift (2026-10-26).  The pre-image stopped shifting the
+-- measurement's ladder down by whole rungs; it shoots the exposures flagged in
+-- the exposure table's preimage column instead.  Its seed row went then, but
+-- nothing removed it from databases already seeded, so it stayed in the editor
+-- with no reader.  Deleted for the same reasons as reagent2_secs above.
+DELETE FROM config WHERE role = 'capture' AND name = 'preimage_rung_shift';
 
 
 -- samples, exposure, colorcard and data are intentionally left empty: they

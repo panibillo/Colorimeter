@@ -31,6 +31,50 @@ sqlite3 src/colorimeter.sqlite \
 
 ---
 
+## [0.10.0] — 2026-11-02
+
+Writes: archive schema 4 · meta 2 · database 2
+Reads:  archive schema 1–4 · meta 1–2 · database 2
+
+Adds Menu → Advanced → Capture Suite, and tidies two config parameters.
+
+MINOR: a config parameter moved role (`defaults.exposuregroup` →
+`capture.exposuregroup`) and one was retired (`capture.preimage_rung_shift`).
+No format version moved.
+
+### Added
+
+- **Capture Suite** (Menu → Advanced → Capture Suite). Runs a sample's own
+  measurement sweep — the LEDs in `capture.led_color_order` at the saved
+  exposure spread, dark frames, closing white photograph — on whatever is in
+  the holder, and saves it as a test image, `<Name>.h5`, in
+  `capture.test_image_directory`. The screen shows the LEDs and the spread but
+  does not edit them; only Name and Desc are typed. The file is written as
+  `.h5.part` and renamed once complete, and BACK during a capture leaves no
+  file. Name and Desc are stored as the root attributes `test_image_name` and
+  `test_image_description`. Each suite gets a `test_image` row with
+  `image_types = 'suite'` and every LED it swept in `led`.
+
+### Changed
+
+- The Advanced screen's **Capture** button is now **Calibrate Exposures**, and
+  that screen's title says so.
+- `exposuregroup` (the exposure spread, 1–5) moved from role `defaults` to role
+  `capture`, so the config editor lists it with the other capture settings.
+  The seed file carries an existing value and its history across at the next
+  launch.
+
+### Removed
+
+- `capture.preimage_rung_shift`. Its reader went on 2026-10-26, when the
+  pre-image switched to the exposures flagged in the exposure table, but the
+  row stayed in databases seeded before then. The seed file now deletes it.
+
+### Fixed
+
+- The launch report no longer calls a moved parameter "reseeded", and its count
+  of added rows no longer goes negative when a retired row is deleted.
+
 ## [0.9.0] — 2026-08-21
 
 Writes: archive schema 4 · meta 2 · database 2

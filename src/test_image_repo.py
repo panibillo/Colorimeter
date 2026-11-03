@@ -1,10 +1,11 @@
 """
 test_image_repo.py  —  Data access for the `test_image` table.
 --------------------------------------------------------------
-One row per test image taken from Menu → Advanced → Capture Image.  The row
-records the file's name, so a name is never used twice; the files themselves
-are in config.capture_test_image_dir().  Nothing here deletes a row: to reuse a
-name, delete its row (and its file) from outside the program.
+One row per test image taken from Menu → Advanced → Capture Image or
+Capture Suite.  The row records the file's name, so a name is never used
+twice; the files themselves are in config.capture_test_image_dir().  Nothing
+here deletes a row: to reuse a name, delete its row (and its file) from
+outside the program.
 
 Names are a prefix and a number, like sample numbers: 'IMG0001', 'IMG0002'.
 

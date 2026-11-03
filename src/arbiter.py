@@ -372,6 +372,17 @@ class Arbiter:
         self._img_status = ""
         self._img_saving = ""       # the name of the image being captured
 
+        # Capture Suite state (Menu → Advanced → Capture Suite): the name and
+        # description typed, the status line, and while a suite is being
+        # captured, its name and the part file it is written to.  The name is
+        # re-offered (the next free one) each time the screen opens.
+        self._suite_name = ""
+        self._suite_desc = ""
+        self._suite_status = ""
+        self._suite_saving = ""
+        self._suite_colors: list = []
+        self._suite_part: "Path | None" = None
+
         # Wifi state (Menu → Advanced → Wifi): which view is up, the one
         # nmcli job in flight (polled by pump_wifi) and what the last ones
         # said.  The backend is made on first use: nmcli on the device, a
@@ -408,7 +419,7 @@ class Arbiter:
         self._tcal_msg = ""
         self._wifi_connecting = ""
 
-        # Capture screen state (Menu → Advanced → Capture): which view is
+        # Capture screen state (Menu → Advanced → Calibrate Exposures): which view is
         # showing and what kind of run is in flight.  A menu-launched run uses
         # self._capture with _capture_slot = None (the None marks it
         # standalone, so pump_capture routes it to _pump_capture_screen).  _cap_mode is the capture path a
@@ -1402,12 +1413,13 @@ class Arbiter:
         p.put("menu_cancel_btn", "CANCEL", on=self._render_menu)
         p.put("adv_title",       "Advanced")
         p.put("menu_ok_btn",     "OK",     on=self._render_menu)
-        p.put("adv_capture",   "Capture",  on=self._menu_open_capture)
+        p.put("adv_capture",   "Calibrate\nExposures", on=self._menu_open_capture)
         p.put("adv_test_led",  "Test LED", on=self._ledtest_open_screen,
               enabled=self._ledtest_available())
         p.put("adv_cap_image", "Capture\nImage", on=self._img_open)
         p.put("adv_wifi",      "Wifi",     on=self._wifi_open)
         p.put("adv_touch_cal", "Calibrate\nTouchpad", on=self._tcal_open)
+        p.put("adv_cap_suite", "Capture\nSuite", on=self._suite_open)
         p.render(self._disp)
         self._rebuild_focus()
 
@@ -1701,6 +1713,170 @@ class Arbiter:
                 self._pool["img_fld_name"].value = self._img_name
         if self._cap_view == "image":
             self._img_render()
+
+    # ── Capture Suite (Menu → Advanced → Capture Suite) ─────────────────────────
+    # Runs the sample's own measurement sweep — the LEDs in
+    # capture.led_color_order at the saved exposure group, dark frames, closing
+    # white — on whatever is in the holder, and saves it as a test image
+    # (capture_image.finish_suite).  Only Name and Desc can be changed here; the
+    # LEDs and spread are shown so the operator can see what will be taken.
+    # Like Capture Image there is no SAVE: BACK leaves, and abandons a capture
+    # under way, which then leaves no file.
+
+    def _suite_open(self) -> None:
+        import config_repo
+        import test_image_repo
+        self._suite_name = test_image_repo.next_name(config_repo.capture_test_image_dir())
+        self._suite_status = ""
+        self._cap_view = None
+        self._suite_render()
+
+    def _suite_read_fields(self) -> None:
+        """Keep what the two text boxes show: they are edited by keyboard."""
+        if self._pool is None or self._cap_view != "suite":
+            return
+        self._suite_name = str(self._pool["suite_fld_name"].value).strip()
+        self._suite_desc = str(self._pool["suite_fld_desc"].value)
+
+    def _suite_problem(self) -> "str | None":
+        """Why Capture cannot run now, or None."""
+        import config_repo
+        import test_image_repo
+        if not config.capture_led_color_order():
+            return "capture.led_color_order names no LEDs"
+        return test_image_repo.name_problem(
+            self._suite_name, config_repo.capture_test_image_dir())
+
+    def _suite_render(self) -> None:
+        if self._pool is None:
+            return
+        from palette import color, rgb
+        self._suite_read_fields()
+        self._cap_view = "suite"
+        p = self._pool
+        p.hide_all()
+        busy = self._capture is not None
+        problem = None if busy else self._suite_problem()
+        p.put("menu_cancel_btn", "BACK", on=self._suite_back)
+        p.put("suite_title", "Capture\nSuite")
+        p.put("menu_ok_btn", "Capture", on=self._suite_capture,
+              enabled=problem is None and self._ledtest_available())
+        # The suite's LEDs in sweep order, packed from the left; not pressable.
+        colors = (self._suite_colors if busy
+                  else config.capture_led_color_order())
+        for i, led in enumerate(colors[:10], 1):
+            name = f"cap_led{i}"
+            fill_rgb, text_name = _LEDPICK_SWATCH.get(led, ((128, 128, 128), "white"))
+            p.put(name, _led_initials(led), enabled=False)
+            w = p[name]
+            w.color = w.disabled_color = rgb(*fill_rgb)
+            w.text_color = color(text_name)
+            w.border_color = None
+        p.put("suite_spread", f"Exposure spread {self._initial_exposure_group()}")
+        p.put("suite_lbl_name", "Name", on=lambda: self._suite_hint(
+            "File name; saved as <name>.h5 in test_image"))
+        p.put("suite_fld_name", self._suite_name)
+        p.put("suite_lbl_desc", "Desc", on=lambda: self._suite_hint(
+            "Description, typed on the keyboard"))
+        p.put("suite_fld_desc", self._suite_desc)
+        p.put("suite_msg", "Capture a complete image suite")
+        p.put("suite_status", self._suite_status or problem or "Press Capture")
+        p.render(self._disp)
+        self._rebuild_focus()
+
+    def _suite_hint(self, text: str) -> None:
+        self._suite_read_fields()
+        self._suite_status = text
+        self._suite_render()
+
+    def _suite_back(self) -> None:
+        """Back to Advanced, abandoning a capture under way (it leaves no file)."""
+        import capture_image
+        if self._cap_run_mode == "suite" and self._capture is not None:
+            self._capture.cancel()
+            self._capture = None
+            self._capture_slot = None
+            capture_image.discard_suite(self._suite_part)
+            self._suite_part = None
+        self._suite_read_fields()
+        self._cap_view = None
+        self._render_advanced()
+
+    def _suite_capture(self) -> None:
+        """Run the measurement sweep and save it under the typed name."""
+        import capture_image
+        from capture_runner import CaptureConfig, MODE_NORMAL
+        self._suite_read_fields()
+        if not self._ledtest_available():
+            self._suite_hint("Camera busy - try again later")
+            return
+        problem = self._suite_problem()
+        if problem is not None:
+            self._suite_hint(problem)
+            return
+        part = capture_image.suite_part_path(self._suite_name)
+        capture_image.discard_suite(part)       # a leftover from a crashed run
+        # The same configuration a sample's measurement gets (see
+        # _measurement_config), less the sample, and written to the part file.
+        cfg = CaptureConfig(mode=MODE_NORMAL,
+                            exposure_group=self._initial_exposure_group(),
+                            archive_path=part)
+        session = self._new_session(cfg)
+        if not session.start():
+            log.error("Arbiter: image suite failed to start: %s", session.error)
+            self._suite_hint(f"Camera failed: {session.error}"[:48])
+            return
+        self._capture = session
+        self._capture_slot = None
+        self._cap_run_mode = "suite"
+        self._suite_part = part
+        self._suite_saving = self._suite_name
+        self._suite_colors = list(cfg.led_colors)
+        self._suite_status = "Starting camera..."
+        log.info("Arbiter: image suite %s started (LEDs %s, group %s)",
+                 self._suite_saving, ", ".join(cfg.led_colors), cfg.exposure_group)
+        self._suite_render()
+
+    def _pump_suite(self, session) -> None:
+        """Drive a running suite; say where it went when it ends."""
+        import capture_image
+        import config_repo
+        import test_image_repo
+        progress = session.step()
+        if progress is not None:
+            # "Capturing amber 2 of 3", counted as the read phase counts it
+            # (see pump_capture).
+            if progress.image_total and not progress.transient:
+                what = ("dark" if progress.step.startswith("dark")
+                        else progress.color)
+                self._suite_status = (f"Capturing {what} {progress.image_index} "
+                                      f"of {progress.image_total}")
+                if self._cap_view == "suite" and self._pool is not None:
+                    self._pool.set("suite_status", self._suite_status)
+                    self._pool.redraw(self._disp, "suite_status")
+            return
+        self._capture = None
+        self._capture_slot = None
+        part, self._suite_part = self._suite_part, None
+        if session.error is not None:
+            capture_image.discard_suite(part)
+            self._suite_status = f"Not saved: {session.error}"[:80]
+        else:
+            try:
+                final = capture_image.finish_suite(
+                    part, self._suite_saving, self._suite_desc, self._suite_colors)
+            except Exception as exc:                    # noqa: BLE001
+                log.exception("Arbiter: image suite %s could not be saved",
+                              self._suite_saving)
+                self._suite_status = f"Not saved: {exc}"[:80]
+            else:
+                self._suite_status = f"Saved {final.name}"
+                self._suite_name = test_image_repo.next_name(
+                    config_repo.capture_test_image_dir())
+                if self._pool is not None:      # the redraw reads the box back
+                    self._pool["suite_fld_name"].value = self._suite_name
+        if self._cap_view == "suite":
+            self._suite_render()
 
     # ── Wifi (Menu → Advanced → Wifi) ───────────────────────────────────────────
     # Status shows what the device is connected to and how to reach it (IP,
@@ -3077,7 +3253,7 @@ class Arbiter:
         for name in ("ledpick_rowid", "ledpick_value1", "ledpick_value2"):
             p[name].bg = bg
 
-    # ── Capture screen (Menu → Advanced → Capture) ─────────────────────────────
+    # ── Capture screen (Menu → Advanced → Calibrate Exposures) ────────────────────
     # A standalone capture launched from the Menu: pick a path (Calibration or
     # Normal) and a number of images per LED (1..5 = the exposure group), run it,
     # and see a placeholder analysis result. It uses the single camera via
@@ -3099,7 +3275,7 @@ class Arbiter:
     def _initial_exposure_group(self) -> str:
         """
         The exposure group to preselect when the capture screen opens: the value
-        in force for `defaults.exposuregroup`.
+        in force for `capture.exposuregroup`.
 
         The operator's saved choice is honoured whether or not the exposure
         table currently has rows for that group — preselecting anything else
@@ -3113,7 +3289,7 @@ class Arbiter:
         Default button on the config editor puts that back.
         """
         try:
-            return config.get("defaults", "exposuregroup")
+            return config.get("capture", "exposuregroup")
         except config.ConfigMissing:
             log.exception("Arbiter: no saved exposure group")
             return "1"
@@ -3179,9 +3355,12 @@ class Arbiter:
         p = self._pool
         p.hide_all()
         # Top row: CANCEL / title / SAVE, in the Menu screen's corners.
+        # Two lines, so the 18 pt the other two-line titles use; Show sets
+        # its own size back, since it shares this label.
         p["cap_title"].rect = layout.MENU_TITLE
+        p["cap_title"].size = 18
         p.put("menu_cancel_btn", "CANCEL", on=self._cap_choice_cancel)
-        p.put("cap_title", "Capture")
+        p.put("cap_title", "Calibrate\nExposures")
         p.put("menu_ok_btn",     "SAVE",   on=self._cap_choice_save)
         # The LED bar: tap a swatch to choose the color for Calibrate color
         # and Show.  The chosen one carries a border.
@@ -3569,6 +3748,7 @@ class Arbiter:
         p.hide_all()
         busy = self._capture is not None
         p["cap_title"].rect = layout.MENU_TITLE
+        p["cap_title"].size = 22
         p.put("menu_cancel_btn", "BACK", on=self._show_back)
         p.put("cap_title", f"Show\n{self._show_led}")
         p.put("menu_ok_btn", "Capture", on=self._show_capture, enabled=not busy)
@@ -3691,6 +3871,8 @@ class Arbiter:
             self._pump_show(session)
         elif self._cap_run_mode == "image":
             self._pump_image(session)
+        elif self._cap_run_mode == "suite":
+            self._pump_suite(session)
         else:
             self._pump_fit(session)
 
@@ -3723,7 +3905,7 @@ class Arbiter:
 
     @property
     def cap_mode(self) -> str:
-        """Current Menu -> Advanced -> Capture path: 'calibration' | 'normal'."""
+        """Current Menu -> Advanced -> Calibrate Exposures path: 'calibration' | 'normal'."""
         return self._cap_mode
 
     def image_reps(self, slot: Slot) -> int:
@@ -3752,7 +3934,7 @@ class Arbiter:
         so a run cannot get a different archive or a different path depending
         on whether its reagent2 countdown left time to prefetch.
 
-        Uses the Menu -> Advanced -> Capture screen's staged path + images
+        Uses the Menu -> Advanced -> Calibrate Exposures screen's staged path + images
         choice, same as the standalone menu capture — a sample's Read-phase
         capture must not silently fall back to a full calibration sweep.
 
@@ -6261,21 +6443,21 @@ def _selftest() -> None:
     _sh.rmtree(_capdir)
     arb._capture_factory = _FakeCapture
 
-    # ── Capture screen (Menu → Advanced → Capture) ───────────────────────────
+    # ── Capture screen (Menu → Advanced → Calibrate Exposures) ────────────────────
     # Like everything here, against the throwaway copy made at the top, so the
     # exposure table and the saved default group are exercised for real.
     _db.write_one("DELETE FROM exposure")
 
     def saved_group():
         """The exposure group persisted in the config table."""
-        return config.get("defaults", "exposuregroup")
+        return config.get("capture", "exposuregroup")
 
     class _R:                       # a stand-in LedResult carrying e*
         def __init__(self, color, estar):
             self.color = color; self.metadata = {"e3_final_us": estar}
 
     print("== capture screen: opens on the group in force ==")
-    config.save("defaults", "exposuregroup", "3")
+    config.save("capture", "exposuregroup", "3")
 
     print("== sample capture: uses the saved group without the Capture screen ==")
     arb._cap_group = "1"            # as after a restart: screen never opened
@@ -6494,16 +6676,19 @@ def _selftest() -> None:
     check("config slot is Reagent Phases",
           arb._pool["menu_config"].label, "Reagent\nPhases")
 
-    print("== advanced: Menu → Advanced → Capture, and back ==")
+    print("== advanced: Menu → Advanced → Calibrate Exposures, and back ==")
     check("first slot is Advanced", arb._pool["menu_capture"].label, "Advanced")
     arb._pool["menu_capture"].on_press()
     check("Advanced is up",        arb._pool["adv_title"].visible, True)
     check("menu grid hidden",      arb._pool["menu_capture"].visible, False)
     for _name in ("adv_capture", "adv_test_led", "adv_cap_image", "adv_wifi",
-                  "adv_touch_cal"):
+                  "adv_touch_cal", "adv_cap_suite"):
         check(f"{_name} shown", arb._pool[_name].visible, True)
     arb._pool["adv_capture"].on_press()
     check("Capture page up",       arb._cap_view, "choice")
+    check("titled Calibrate Exposures", (arb._pool["cap_title"].text,
+                                         arb._pool["cap_title"].size),
+          ("Calibrate\nExposures", 18))
     arb._cap_choice_cancel()
     check("CANCEL → Advanced",     arb._pool["adv_title"].visible, True)
     arb._pool["adv_capture"].on_press()
@@ -6636,6 +6821,92 @@ def _selftest() -> None:
     arb._pool["menu_cancel_btn"].on_press()             # BACK mid-capture
     check("BACK abandons the capture", arb._capture, None)
     check("BACK → Advanced",        arb._pool["adv_title"].visible, True)
+    arb._render_menu()
+
+    print("== Capture Suite: the sample's sweep, saved as a test image ==")
+    import capture_runner as _cr
+    import h5py as _h5py
+    _warm = (_cr.LED_ON_WARMUP_S, _cr.LED_OFF_SETTLE_S)
+    _cr.LED_ON_WARMUP_S = _cr.LED_OFF_SETTLE_S = 0.0     # no waits on the mocks
+    _order = config.get("capture", "led_color_order")
+    _group = config.get("capture", "exposuregroup")
+    config.save("capture", "led_color_order", "green,red")
+    config.save("capture", "exposuregroup", "4")
+    # The real runner on the mock camera and LED bank, not the stand-ins.
+    _factory, arb._capture_factory = arb._capture_factory, None
+    _hw = (arb._camera, arb._leds, arb._ensure_camera)
+    arb._camera = arb._leds = None
+    del arb._ensure_camera                              # back to the class's own
+    _img_dir.mkdir(parents=True, exist_ok=True)
+    (_img_dir / "IMG0042.h5").write_bytes(b"")          # a name already on disk
+    arb._render_advanced()
+    check("Calibrate Exposures renamed", arb._pool["adv_capture"].label,
+          "Calibrate\nExposures")
+    check("Capture Suite offered",  arb._pool["adv_cap_suite"].enabled, True)
+    arb._pool["adv_cap_suite"].on_press()
+    check("Capture Suite up",       arb._pool["suite_title"].visible, True)
+    check("Capture in the corner",  arb._pool["menu_ok_btn"].label, "Capture")
+    check("suite LEDs shown, in order",
+          [arb._pool[f"cap_led{i}"].label for i in (1, 2)], ["G", "R"])
+    check("only the suite's LEDs",  arb._pool["cap_led3"].visible, False)
+    check("LEDs not pressable",     arb._pool["cap_led1"].enabled, False)
+    check("spread shown",           arb._pool["suite_spread"].text, "Exposure spread 4")
+    check("fixed message",          arb._pool["suite_msg"].text,
+          "Capture a complete image suite")
+    check("status before",          arb._pool["suite_status"].text, "Press Capture")
+    _suite_name = _tir.next_name(_img_dir)
+    check("next free name offered", _suite_name, "IMG0043")
+    check("... in the box",         arb._pool["suite_fld_name"].value, _suite_name)
+    arb._pool["suite_fld_name"].value = "IMG0042"
+    arb._suite_render()
+    check("used name refused",      (arb._pool["menu_ok_btn"].enabled,
+                                     arb._pool["suite_status"].text),
+          (False, "IMG0042.h5 is already on disk"))
+    arb._pool["suite_fld_name"].value = _suite_name
+    arb._pool["suite_fld_desc"].value = "whole sweep"
+    arb._suite_render()
+    arb._pool["menu_ok_btn"].on_press()                 # Capture
+    check("capturing a suite",      arb._cap_run_mode, "suite")
+    check("Capture locked while busy", arb._pool["menu_ok_btn"].enabled, False)
+    _seen = set()
+    for _ in range(2000):
+        arb.pump_capture()
+        _seen.add(arb._pool["suite_status"].text)
+        if arb.capture_available():
+            break
+    check("camera freed",           arb.capture_available(), True)
+    check("counted as the read phase counts",
+          "Capturing green 1 of 4" in _seen, True)
+    check("status says saved",      arb._pool["suite_status"].text,
+          f"Saved {_suite_name}.h5")
+    _saved = _img_dir / f"{_suite_name}.h5"
+    check("file under the real name, no part file",
+          (_saved.exists(), _saved.with_name(_saved.name + ".part").exists()),
+          (True, False))
+    with _h5py.File(_saved, "r") as _f:
+        check("name and desc on the root",
+              (_f.attrs["test_image_name"], _f.attrs["test_image_description"]),
+              (_suite_name, "whole sweep"))
+        check("both LEDs in the archive", sorted(_f["leds"].keys())[:2] if "leds" in _f
+              else None, ["green", "red"])
+    check("row recorded",           _db.read_one(
+        "SELECT led, image_types, description FROM test_image WHERE h5name = ?",
+        (f"{_suite_name}.h5",)), ("green red", "suite", "whole sweep"))
+    check("next name offered",      arb._pool["suite_fld_name"].value,
+          _tir.next_name(_img_dir))
+    _next = arb._pool["suite_fld_name"].value
+    arb._pool["menu_ok_btn"].on_press()
+    arb.pump_capture()
+    arb._pool["menu_cancel_btn"].on_press()             # BACK mid-capture
+    check("BACK abandons the suite", arb._capture, None)
+    check("and leaves no file",     list(_img_dir.glob(f"{_next}.h5*")), [])
+    check("BACK → Advanced",        arb._pool["adv_title"].visible, True)
+    config.save("capture", "led_color_order", _order)
+    config.save("capture", "exposuregroup", _group)
+    _cr.LED_ON_WARMUP_S, _cr.LED_OFF_SETTLE_S = _warm
+    arb._release_camera()
+    arb._capture_factory = _factory
+    arb._camera, arb._leds, arb._ensure_camera = _hw
     arb._render_menu()
 
     print("== Wifi: status, networks, join, forget ==")

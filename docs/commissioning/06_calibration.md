@@ -88,17 +88,17 @@ This section is the procedure.
 
 1. Put the **calibration test pad** (white, yellow and brown patches) in the
    card holder next to the gray chips.
-2. Place its three regions: **Menu → Advanced → Capture → Pad areas**. The first time,
+2. Place its three regions: **Menu → Advanced → Calibrate Exposures → Pad areas**. The first time,
    the viewer opens with the sample region split into three equal bands (top
    yellow, middle brown, bottom white). Select a patch, press Edit, and move its
    edges onto the real patch as in Menu → View Image; Save keeps it (the old
    rows stay as history). Exit returns to the Capture page. Until all three
    exist a run stops at once with a message naming the missing ones, before any
    LED is lit.
-3. Check the window under **Menu → Advanced → Capture** (High DN, Low DN, High %, Low %).
+3. Check the window under **Menu → Advanced → Calibrate Exposures** (High DN, Low DN, High %, Low %).
    The seeded 100 / 850 DN at the 10th / 90th percentile are placeholders.
 
-**Running it** (Menu → Advanced → Capture)
+**Running it** (Menu → Advanced → Calibrate Exposures)
 
 | Control | Effect |
 |---|---|

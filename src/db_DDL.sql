@@ -466,7 +466,10 @@ CREATE TABLE IF NOT EXISTS colorcard (
 
 -- ────────────────────────────────────────────────────────────────────────────
 -- test_image — one row per test image taken from Menu → Advanced → Capture
--- Image.  The file is capture.test_image_directory/<h5name>.
+-- Image or Capture Suite.  The file is capture.test_image_directory/<h5name>.
+-- A suite (image_types 'suite') lists every LED it swept in `led`, in sweep
+-- order, and leaves rungs and exposures_us empty: its exposures differ by LED
+-- and are in the file.
 --
 -- The row is what stops a name being used twice: the screen refuses a name
 -- that is in this table or already on disk.  Nothing in the program deletes a
@@ -476,7 +479,8 @@ CREATE TABLE IF NOT EXISTS test_image (
     rowid        INTEGER PRIMARY KEY NOT NULL,
     add_dt       TEXT,                  -- when it was saved (local time)
     h5name       TEXT NOT NULL UNIQUE COLLATE NOCASE,  -- 'IMG0001.h5'
-    led          TEXT,                  -- the LED's color name
+    led          TEXT,                  -- the LED's color name ('green red ...'
+                                        --   for a suite)
     rungs        TEXT,                  -- exposure rungs taken: '0 1/4 1'
     exposures_us TEXT,                  -- their exposures, same order: '3522 5283'
     image_types  TEXT,                  -- what was stored: 'jpg_whole bayer_bound

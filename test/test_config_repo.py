@@ -276,7 +276,7 @@ class TestCoercion(ConfigTestCase):
     def test_types_come_back_as_declared(self):
         self.assertIsInstance(config.reagent1_secs(), int)
         self.assertIsInstance(config.analysis_secs(), float)
-        self.assertIsInstance(config.get("defaults", "exposuregroup"), str)
+        self.assertIsInstance(config.get("capture", "exposuregroup"), str)
 
     def test_valid_accepts_what_parses(self):
         self.assertTrue(config.valid("42", "int"))
@@ -611,6 +611,50 @@ class TestBootstrap(ConfigTestCase):
         self.assertEqual(db_bootstrap.ensure(self._tmpdb).added, 0)
         config.load(reload=True)
         self.assertEqual(config.capture_archive_name("X"), "X.h5")
+
+    def test_exposuregroup_moves_to_capture_with_its_history(self):
+        """
+        A database seeded before 2026-11 has the spread under `defaults`.  The
+        operator's value stays in force, its seed row stays the default, and
+        nothing is left behind under the old role.
+        """
+        con = sqlite3.connect(self._tmpdb)
+        con.execute("UPDATE config SET role = 'defaults' "
+                    "WHERE role = 'capture' AND name = 'exposuregroup'")
+        con.execute("UPDATE config SET active = 0 "
+                    "WHERE role = 'defaults' AND name = 'exposuregroup'")
+        con.execute("INSERT INTO config (active, isdefault, editable, add_dt, "
+                    "role, name, vtype, value, source) VALUES (1, 0, 1, "
+                    "'2026-08-12 16:00:35', 'defaults', 'exposuregroup', "
+                    "'str', '1', 'operator')")
+        con.commit()
+        con.close()
+        result = db_bootstrap.ensure(self._tmpdb)
+        self.assertEqual(result.added, 0)
+        self.assertEqual(result.restored, [], "a move is not a restore")
+        config.load(reload=True)
+        self.assertEqual(config.get("capture", "exposuregroup"), "1")
+        self.assertEqual(sorted(self.rows(
+            "SELECT value, active, isdefault FROM config "
+            "WHERE role = 'capture' AND name = 'exposuregroup'")),
+            [("1", 1, 0), ("3", 0, 1)])
+        self.assertEqual(self.rows(
+            "SELECT COUNT(*) FROM config WHERE name = 'exposuregroup' "
+            "AND role <> 'capture'"), [(0,)])
+
+    def test_retired_preimage_rung_shift_is_removed(self):
+        con = sqlite3.connect(self._tmpdb)
+        con.execute("INSERT INTO config (active, isdefault, editable, add_dt, "
+                    "role, name, vtype, value, source) VALUES (1, 1, 1, "
+                    "'2026-08-18 00:00:00', 'capture', 'preimage_rung_shift', "
+                    "'int', '-2', 'seed')")
+        con.commit()
+        con.close()
+        result = db_bootstrap.ensure(self._tmpdb)
+        self.assertEqual((result.added, result.restored), (0, []))
+        self.assertEqual(self.rows(
+            "SELECT COUNT(*) FROM config WHERE name = 'preimage_rung_shift'"),
+            [(0,)])
 
     def test_a_parameter_beyond_repair_is_fatal(self):
         con = sqlite3.connect(self._tmpdb)

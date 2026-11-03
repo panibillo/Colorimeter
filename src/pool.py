@@ -236,12 +236,15 @@ class Pool:
 
         # ── advanced screen (Menu → Advanced): the Menu's corners and grid ─────
         label("adv_title",        L.MENU_TITLE,        "black",   "white",       20, text="Advanced")
-        button("adv_capture",     L.ADV_CAPTURE,       "hdr_text", "start_green", 18, text="Capture")
+        button("adv_capture",     L.ADV_CAPTURE,       "hdr_text", "start_green", 18,
+               text="Calibrate\nExposures")
         button("adv_test_led",    L.ADV_TEST_LED,      "hdr_text", "slot_a_bg",   18, text="Test LED")
         button("adv_cap_image",   L.ADV_CAP_IMAGE,     "hdr_text", "btn_gray",    18, text="Capture\nImage")
         button("adv_wifi",        L.ADV_WIFI,          "hdr_text", "btn_gray",    18, text="Wifi")
         button("adv_touch_cal",   L.ADV_TOUCH_CAL,     "hdr_text", "slot_b_bg",   16,
                text="Calibrate\nTouchpad")
+        button("adv_cap_suite",   L.ADV_CAP_SUITE,     "hdr_text", "slot_a_bg",   18,
+               text="Capture\nSuite")
 
         # ── LED test (Menu → Advanced → Test LED): the LED bar is the Capture
         # page's cap_led1..10, so only the title and two text lines are new.
@@ -268,6 +271,19 @@ class Pool:
                      L.IMG_TYPE1.w, L.IMG_TYPE1.h)
             button(f"img_type{i + 1}", r, "black", "btn_gray", 11)
         label("img_status",       L.IMG_STATUS,        "black",   "white",       13,
+              align="left", valign="top")
+
+        # ── Capture Suite (Menu → Advanced → Capture Suite): the LED bar is the
+        # Capture page's cap_led1..10, shown but not pressable.
+        label("suite_title",      L.MENU_TITLE,        "black",   "white",       18,
+              text="Capture\nSuite")
+        label("suite_spread",     L.SUITE_SPREAD,      "black",   "white",       14, align="left")
+        button("suite_lbl_name",  L.SUITE_LBL_NAME,    "white", "label_coral",   12, text="Name")
+        field("suite_fld_name",   L.SUITE_FLD_NAME,    13, "field_blue")
+        button("suite_lbl_desc",  L.SUITE_LBL_DESC,    "white", "label_coral",   12, text="Desc")
+        field("suite_fld_desc",   L.SUITE_FLD_DESC,    12, "field_blue")
+        label("suite_msg",        L.SUITE_MSG,         "black",   "white",       14, align="left")
+        label("suite_status",     L.SUITE_STATUS,      "black",   "white",       14,
               align="left", valign="top")
 
         # ── Wifi (Menu → Advanced → Wifi): status, networks and join views ─────
@@ -388,7 +404,7 @@ class Pool:
         label("cfg_hint",    L.CFG_HINT,   "black", "white", 13, align="left")
         button("cfg_restore", L.CFG_RESTORE, "btn_text", "btn_gray", 16, text="Restore")
 
-        # ── capture screen (Menu → Advanced → Capture): choice form, progress,
+        # ── capture screen (Menu → Advanced → Calibrate Exposures): choice form, progress,
         # result.
         # Mode + N buttons act as radio groups — the arbiter recolours the
         # selected one green and the rest gray on each render.

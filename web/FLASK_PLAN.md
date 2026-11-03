@@ -295,7 +295,7 @@ Small and incremental, per `CLAUDE.md`. Each step ends runnable.
 Not in this plan, and stated so it is not mistaken for an omission: the image viewer /
 ROI editor and the capture-launch screens stay panel-only for now — they are the two
 most fused into `arbiter.py` (~1100 lines) and need extraction first. `_cap_mode` should
-move to `config` alongside the already-persisted `defaults.exposuregroup` so both
+move to `config` alongside the already-persisted `capture.exposuregroup` so both
 frontends read one source.
 
 ## Files
