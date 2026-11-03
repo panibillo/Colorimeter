@@ -5862,12 +5862,32 @@ class Arbiter:
             if not self._pool.handle_touch(px, py, self._disp):
                 self._tcal_mark(px, py)
             return
+        # The boxes being edited before this touch.  Touching a different box
+        # ends their edit (through _move_focus below) without Enter or Tab, and
+        # those are the only other paths to _field_commit.  So the edit is
+        # committed here instead.  Otherwise the typed value reaches the record,
+        # but the screen never redraws from it, and on a reagent screen START
+        # stays hidden until some later Enter happens to redraw it.
+        was_editing = [w for w in self._focusables
+                       if isinstance(w, TextBox) and w.editing]
         if self._pool.handle_touch(px, py, self._disp):
             # A touch may have started editing a TextBox — sync keyboard focus.
-            for i, w in enumerate(self._focusables):
-                if isinstance(w, TextBox) and w.editing and i != self._focus_idx:
-                    self._move_focus(i)
-                    break
+            self._focus_editing_box()
+        ended = [w for w in was_editing if not w.editing]
+        if ended:
+            for w in ended:
+                self._field_commit(w)
+            # The commit's redraw rebuilt the focus list and put keyboard focus
+            # on the first widget.  Hand it back to the box this touch opened,
+            # so typing goes where the operator is looking.
+            self._focus_editing_box()
+
+    def _focus_editing_box(self) -> None:
+        """Move keyboard focus to the TextBox being edited, if there is one."""
+        for i, w in enumerate(self._focusables):
+            if isinstance(w, TextBox) and w.editing and i != self._focus_idx:
+                self._move_focus(i)
+                break
 
     def _writethrough(self, textbox) -> None:
         """
@@ -6352,6 +6372,43 @@ def _selftest() -> None:
     check("capture_end untouched", A.record["capture_end"], None)
     check("camera freed",        arb.capture_available(), True)
     check("not capturing",       A.capturing, False)
+
+    print("== touching another box commits the weight it leaves (C1042) ==")
+    # A packet first weighed light, corrected by touch, then left by touching
+    # the next box rather than pressing Enter: START must follow the
+    # correction without any further key.
+    arb.focus(A)
+    _saved_wt = {k: A.record.get(k) for k in
+                 ("samp_grams", "reagent1_initial_wt", "reagent1_final_wt")}
+    _saved_run = (A.running, A.timer)
+    A.running, A.timer = False, None         # armed: waiting for START
+    A.record.update(samp_grams="100.0", reagent1_initial_wt="",
+                    reagent1_final_wt="")
+    arb.render(A)
+    _init, _fin = arb._pool["wt1_init_fld"], arb._pool["wt1_final_fld"]
+
+    def _touch_type(box, text):
+        arb.on_touch(box.rect.x + 5, box.rect.y + 5)
+        for _ in range(8):
+            arb.on_key("backspace")
+        for ch in text:
+            arb.on_key(ch)
+
+    _touch_type(_init, "3.000"); arb.on_key("enter")
+    check("light packet: no START",  arb._pool["run_btn"].visible, False)
+    _touch_type(_init, "3.500")
+    check("still editing: no START yet", arb._pool["run_btn"].visible, False)
+    arb.on_touch(_fin.rect.x + 5, _fin.rect.y + 5)
+    check("touching away offers START", arb._pool["run_btn"].visible, True)
+    check("the new box is editing",  _fin.editing, True)
+    check("keyboard follows the touch", arb._focused_widget() is _fin, True)
+    arb.on_key("7")
+    check("typing lands in the new box", A.record["reagent1_final_wt"], "7")
+    arb.on_touch(5, 5)                       # empty space: the edit stays open
+    check("empty space leaves the edit", _fin.editing, True)
+    arb.on_key("enter")
+    A.record.update(_saved_wt)
+    A.running, A.timer = _saved_run
 
     print("== the measurement adds to the pre-image's archive ==")
     cfg = arb._measurement_config(A)
