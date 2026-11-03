@@ -28,8 +28,10 @@ Layout:
     /leds/<color>/lit/<label>/<ch>        attrs: exposure_us, captured_dt
     /leds/<color>/lit_whole/<label>/<ch>  the whole frame  (test images only)
     /leds/<color>/dark/<when>_<label>     soft link → /dark/<when>_<us>us
+                                          (test images and schema <= 4 only)
     /leds/<color>/dark_whole/<when>_<label>  soft link → /dark_whole/…
-    /dark/<when>_<us>us/<ch>              attrs: exposure_us, captured_dt
+    /dark/<when>_<us>us/<ch>              attrs: exposure_us, captured_dt;
+                                          statistics only in a schema-5 sweep
     /dark_whole/<when>_<us>us/<ch>        the whole frame  (test images only)
     /photo                                raw JPEG bytes  (optional)
     /pre/…                                the same shape again, for the
@@ -130,7 +132,15 @@ from hdf5write import Hdf5Writer
 # reader gets the measurement sweep right and simply does not see the
 # pre-image; a reader that wants the blank looks under /pre and accepts its
 # absence.
-SCHEMA_VERSION    = 4
+# 4 -> 5: a sweep's dark frames are statistics only.  A sample sweep (and its
+# pre-image) keeps two dark frames, at 1000 us and its longest lit exposure,
+# each layer stored as an omitted layer (zero-size, see OMITTED_ATTR) rather
+# than an array, and no longer writes the /leds/<color>/dark/ links.  A reader
+# that wants the dark level calls dark_level(), which reads /dark directly; one
+# that subtracts a dark frame pixel by pixel, or follows a per-LED dark link,
+# finds neither in a version-5 sweep.  Test images (capture_image.py) still
+# store dark arrays and links when Dark frames is ticked.
+SCHEMA_VERSION    = 5
 SUITE_DESCRIPTION = "Colorimeter camtest8 capture suite"
 METADATA_NAME     = "meta"
 

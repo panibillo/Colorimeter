@@ -33,47 +33,144 @@ sqlite3 src/colorimeter.sqlite \
 
 ## [0.10.0] — 2026-11-02
 
-Writes: archive schema 4 · meta 2 · database 2
-Reads:  archive schema 1–4 · meta 1–2 · database 2
+Writes: archive schema 5 · meta 2 · database 2
+Reads:  archive schema 1–5 · meta 1–2 · database 2
 
-Adds Menu → Advanced → Capture Suite, and tidies two config parameters.
+Covers everything since 0.9.0 (2026-08-21 to 2026-11-02): exposure
+calibration rebuilt around a test pad, a new Advanced menu of tools, test-variant
+runs, a smaller dark-frame protocol, and the desktop analysis chain.
 
-MINOR: a config parameter moved role (`defaults.exposuregroup` →
-`capture.exposuregroup`) and one was retired (`capture.preimage_rung_shift`).
-No format version moved.
+MINOR, on several counts: the archive schema moved to 5; config parameters were
+added (`capture.test_image_directory`, `capture.preview_target_90th_dn`,
+`protocol.test_variant`, and the `calibration` section), one moved role
+(`defaults.exposuregroup` → `capture.exposuregroup`) and one was retired
+(`capture.preimage_rung_shift`); tables were added (`treatments`, `test_equip`,
+`test_image`, `hotpixels`) and `exposure` gained columns; and the run gained a
+screen.
+
+**Archive schema 5.** A sample sweep (and its pre-image) now keeps two dark
+frames, at 1000 µs and its longest lit exposure, stored as statistics only, and
+no longer writes the per-LED links under `/leds/<color>/dark/`. The dark level
+is the same at every exposure (the mean over 2564 dark frames is 64.02–64.04 DN
+from 1 to 51 ms), which is why one number per layer is enough.
+`capture_h5.dark_level()` reads the new layout. Anything that subtracts a dark
+frame pixel by pixel, or follows a per-LED dark link, will not work on archives
+from C1038 on; see Known gaps.
 
 ### Added
 
-- **Capture Suite** (Menu → Advanced → Capture Suite). Runs a sample's own
-  measurement sweep — the LEDs in `capture.led_color_order` at the saved
-  exposure spread, dark frames, closing white photograph — on whatever is in
-  the holder, and saves it as a test image, `<Name>.h5`, in
-  `capture.test_image_directory`. The screen shows the LEDs and the spread but
-  does not edit them; only Name and Desc are typed. The file is written as
-  `.h5.part` and renamed once complete, and BACK during a capture leaves no
-  file. Name and Desc are stored as the root attributes `test_image_name` and
-  `test_image_description`. Each suite gets a `test_image` row with
-  `image_types = 'suite'` and every LED it swept in `led`.
+- **Exposure calibration against a test pad** (Menu → Advanced → Calibrate
+  Exposures). Each stored exposure is now tested against a calibration window
+  on a test pad (white, yellow and brown patches) and the gray chips, instead
+  of being a fixed multiple of one exposure. Seven nested rungs (log positions
+  0, 1/4, 1/3, 1/2, 2/3, 3/4, 1) serve exposure spreads 1–5. The screen has the
+  LED bar, the window settings (global or per LED), a column choosing which
+  Bayer layers must pass, a Spacing box (`calibration.min_spacing_ratio`, seeded
+  1.02), Pad areas (places the test pad's three patches in the image viewer),
+  and Show (plots the pad's sorted signal against the window). When no exposure
+  suits every patch, the rungs are spread from the white-limited exposure to the
+  brown-limited one, and the remark ends in "spread". The screen says why an LED
+  did not fit.
+- White is calibrated for one exposure only, and that calibration also measures
+  the photo's colour gains from the gray chips, saved as
+  `capture.photo_wb_gains`. If the chips are out of range at that exposure, the
+  gains are measured again at a rescaled exposure (up to three frames).
+- **The Advanced menu** (the Menu's old Capture button), with:
+  - **Test LED**: tap a color to light it.
+  - **Capture Image**: one LED at chosen rungs, saving the ticked image types
+    (JPEG and Bayer, whole frame or bound crop, dark frames) as a test image.
+  - **Capture Suite**: a sample's whole measurement sweep on whatever is in the
+    holder, saved as a test image. Only Name and Desc are typed.
+  - **Wifi**: connection status, IP, MAC and hostname; connect to or forget a
+    network, or join one from a USB keyboard.
+  - **Calibrate Touchpad**: four corner taps, a 30-second trial, and SAVE.
+
+  Test images go in `capture.test_image_directory` as `<Name>.h5`, written as
+  `.h5.part` and renamed once complete, with a row in the new `test_image`
+  table. A failed or abandoned capture leaves no file and no row.
+- **Test-variant runs.** With `protocol.test_variant = 1`, a screen after Entry
+  2 sets the equipment (from the `test_equip` list), the number of image sets
+  (1–5), and weight and time factors for each reagent. They are recorded in the
+  new `treatments` table and applied: reagent targets and countdowns are scaled,
+  and with n image sets both the pre-image and the measurement run n times, set
+  k ≥ 2 in its own `{samp_no}rep{k}.h5`. With `test_variant = 0` a run is
+  unchanged.
+- A red **Start / Vent / Hood** screen after Entry 2, before the pre-image or
+  reagent 1. OK is the only way on.
+- The image viewer's preview uses the white LED's colour gains, and meters its
+  exposure on the 90th percentile of the brightest Bayer layer against
+  `capture.preview_target_90th_dn` (seeded 400 DN), so a two-tone card is
+  exposed for its lighter half.
+- A narrow LED steps down to the next smaller exposure spread it has (3 → 2 →
+  1) rather than falling back to a single default exposure. Each LED's metadata
+  records the spread used and the spread asked for.
+- The progress line reads "Capturing <color> n of N", counted within each LED.
+- Pressure-logger signalling over UDP at run milestones (`baro_signal.py`). It
+  is off unless `config/baro_udp.json` and `config/secrets_net.py` both exist.
+- The `hotpixels` table, holding hot pixels found in the dark frames.
+- `devdesk/hdf5inspect.py`: the summary is a full inventory, one row per LED
+  and stored exposure.
 
 ### Changed
 
-- The Advanced screen's **Capture** button is now **Calibrate Exposures**, and
-  that screen's title says so.
-- `exposuregroup` (the exposure spread, 1–5) moved from role `defaults` to role
-  `capture`, so the config editor lists it with the other capture settings.
-  The seed file carries an existing value and its history across at the next
-  launch.
+- The pre-image shoots the exposures flagged in the `exposure` table's new
+  `preimage` column (the middle of the usable range), falling back to the
+  middle of spread 1. The per-LED rung shift and its ladder arithmetic are gone.
+- White is photographed once, last, at its spread-1 exposure, after the dark
+  frames. The same frame is both the white measurement and the colour photo.
+- Exposures are kept in whole microseconds. The shared ×1.09 grid that let LEDs
+  share a dark frame is gone; it made close rungs collide, so a narrow pad lost
+  spreads 4 and 5.
+- `exposuregroup` (the exposure spread, 1–5) moved from role `defaults` to
+  role `capture`, so the config editor lists it with the other capture
+  settings. The seed file carries an existing value and its history across at
+  the next launch.
+- Entry 2's Continue saves the sample temperature as
+  `defaults.default_temperature`, so the next run starts from it.
+- Touchpad calibration files are saved safely: the old file is backed up,
+  the new one written to a temporary file and swapped in, then read back.
 
 ### Removed
 
-- `capture.preimage_rung_shift`. Its reader went on 2026-10-26, when the
-  pre-image switched to the exposures flagged in the exposure table, but the
-  row stayed in databases seeded before then. The seed file now deletes it.
+- `capture.preimage_rung_shift`. Its reader went with the pre-image change
+  above, but the row stayed in databases seeded before then. The seed file now
+  deletes it.
 
 ### Fixed
 
+- Sample runs read the saved exposure spread every time. After a restart they
+  used to take spread 1 whatever was saved (C1037 and C1038 hold one exposure
+  per LED with 3 saved).
+- A manual reading typed ahead on the Read screen survives redraws and reaches
+  `samples.manual_read`.
+- The Calibrate Exposures page crashed on the device: its swatches used the
+  image-space Rect, which the real display driver cannot draw.
 - The launch report no longer calls a moved parameter "reseeded", and its count
   of added rows no longer goes negative when a retired row is deleted.
+- The arbiter self-test runs against a copy of the database from the start
+  (it used to write to the live one), and runs on the mock drivers without
+  setup.
+
+### Desktop analysis (`desktop/padanalysis/`)
+
+Not part of the instrument, but recorded here because it moved a lot:
+
+- `analysis_1.py`, the hand-run pipeline for one strip: locate the pad in both
+  sweeps, read a cell through the photometric chain, and separate the two dyes.
+- Pre-processing: the dark correction is one level per Bayer layer per sweep,
+  the gray-chip divisor is per pixel, and hot pixels are masked, not repaired.
+- R_inf's white reference is the strip's own dry pad in the pre-image. Bare
+  paper is no longer a reference anywhere; `duotone.PadCube` follows.
+- Studies and write-ups: R_inf guide, dark-signal characterization, dot study,
+  PCA study and shading study. Edge-correlation pad registration was tried and
+  shelved; the arithmetic registration stays.
+
+### Known gaps
+
+- `desktop/padanalysis/probe.py`, `devdesk/flatfield.py` and
+  `devdesk/roi_darkdiff.py` still look for per-LED dark links or full dark
+  arrays. They read archives up to C1037, but not schema-5 archives (C1038 on)
+  until they are updated to use `capture_h5.dark_level()`.
 
 ## [0.9.0] — 2026-08-21
 
