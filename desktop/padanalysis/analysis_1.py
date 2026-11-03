@@ -1923,6 +1923,9 @@ def run_sampno():
     # ── locate_pad() must run before anything that measures the pad.
     SAMPS = [f"C{n}" for n in range(1034, 1037)] 
     SAMPS = [f"C{1000+n}" for n in (14, 15, 16, 17, 18, 19, 21, 26, 27)]
+    SAMPS = ["C1038_IMG003",]
+    SAMPS = ["C1038",]
+    
     # SAMPS = ['C1025']
     # SAMP = SAMPS[-1]
     # SAMPS = [SAMP]
@@ -1951,7 +1954,7 @@ def run_sampno():
 
     # 4. Every cell at once, then the same thing as numbers.
     #    quantity = one of 'sig', 'R', 'R_inf', 'A', 'KS', 'KS_signed' 
-    if 1:
+    if 0:
         
         for SAMP in SAMPS:
             try:
@@ -1961,8 +1964,8 @@ def run_sampno():
                     contact_sheet(SAMP, quantity=quantity, figs=True, savefigs=True)
                     print()
                 cell_table(SAMP, roi=ROISAMPLE)
-            except:
-                print(f"\n=== missing ({SAMP})")
+            except Exception as e:
+                print(f"\n   Exception {e}\n   === missing ({SAMP})")
 
         return
 
@@ -1979,7 +1982,8 @@ def run_sampno():
 
     # 6. One cell end to end, and the strip against its own dry self.
     #    quantity = one of 'sig', 'R', 'R_inf', 'A', 'KS', 'KS_signed' 
-    if 0: 
+    if 1: 
+        SAMP = SAMPS[0]
         for quantity in [ None, 'sig', 'R', 'R_inf', 'A', 'KS', 'KS_signed']:
         # for quantity in [None]:
             print(f"\n=== a single cell, quantity = {quantity!r}")
