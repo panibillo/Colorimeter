@@ -33,6 +33,45 @@ sqlite3 src/colorimeter.sqlite \
 
 ## [Unreleased]
 
+### Changed
+
+- The run screens take their colors from one table, `STYLE_TABLE` in
+  `src/palette.py`. A look can be changed there without touching any screen's
+  code. `src/pool.py` explains how a widget gets its colors.
+  - Amber with black text, in a red frame, means "do this next". Red means
+    something is wrong. Pink is an entry that isn't valid.
+  - Disabled buttons and boxes are light gray with dark-gray text, and that
+    look wins over every other state.
+  - A box being typed into is yellow. Its frame is red if the box is also
+    due (pending), and medium green otherwise.
+  - Row-label buttons (User, Temp, ...) are light blue. Action buttons stay
+    green.
+- Things marked as the next to do:
+  - Continue, once its screen is filled in (Entry 1: user, test and test lot;
+    Entry 2: a temperature and a sample weight that read as numbers; test
+    variant: every factor valid).
+  - Resume, whenever it shows.
+  - The pre-image and capture buttons, while a press would start one.
+  - A reagent weight that is owed. Reagent 1's initial is owed from the start.
+    Reagent 2's initial is now owed only from the start of reagent 1's
+    countdown (it used to be flagged from the start too). The finals are owed
+    from the start of reagent 2, as before.
+  - Instructions that wait on the operator: insert or swap the strip, weigh or
+    add a reagent, weigh both packets. Stirring lines and "Imaging - DO NOT
+    TOUCH" stay plain.
+- A weight that doesn't read as a number, or a packet that is short of
+  target, is marked invalid (red while it is still owed). The amber this used
+  to be is now kept for "do this next". A bad test-variant factor is red too.
+- The weight grid's Over cell is pink instead of amber when the packet holds
+  more than the tolerance allows.
+- The step chips: running is cyan instead of amber, done is gray, and each
+  chip's text color is chosen to be readable on its tint. The startup
+  screen's warnings keep their amber.
+- The capture screen's prompt reads "Load Cassette Holder" instead of
+  "Insert strip & press Capture".
+- When it counts sets, the pre-image button uses three lines
+  ("Pre / image / 1 of 2") in a smaller font, so the count fits.
+
 ### Fixed
 
 - A box being typed into keeps the keyboard when the screen redraws on its

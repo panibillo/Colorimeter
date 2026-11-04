@@ -67,6 +67,7 @@ from typing import Callable, List, Optional
 from PIL import Image
 
 from geometry import Rect
+import palette
 
 log = logging.getLogger(__name__)
 
@@ -89,6 +90,46 @@ def _darken(color565: int, factor: float = 0.5) -> int:
     return (int(r * factor) << 11) | (int(g * factor) << 5) | int(b * factor)
 
 
+def style_state(w: "Widget") -> str:
+    """
+    The STYLE_TABLE state of a widget, from its four separate facts.
+
+    The first that applies wins:
+      disabled         not enabled — wins over everything, "complete" included
+      editing_pending  a text box being typed into that is also pending
+      editing          a text box being typed into
+      invalid_pending  valid is False and pending is True
+      invalid          valid is False
+      pending          pending is True
+      normal           otherwise
+
+    `enabled` and `editing` belong to the widget; `valid` and `pending` are
+    set by the phase through Pool.mark() and reset by Pool.hide_all().
+    """
+    if not w.enabled:
+        return "disabled"
+    if getattr(w, "editing", False):
+        # Editing and pending can hold at once.  The pending mark is set at
+        # each render, and typing does not render (it only writes the value
+        # through), so a box that was owed when the screen was drawn keeps
+        # its pending frame while it is typed in, until the next render.
+        return "editing_pending" if w.pending else "editing"
+    if not w.valid:
+        return "invalid_pending" if w.pending else "invalid"
+    return "pending" if w.pending else "normal"
+
+
+def _style(w: "Widget") -> Optional["palette.Style"]:
+    """The widget's look from the style table, or None if it has no role."""
+    return palette.style(w.role, style_state(w)) if w.role else None
+
+
+def _draw_frame(display, w: "Widget", st: "palette.Style") -> None:
+    """Draw a style's frame inside the widget's rect, if it has one."""
+    if st.frame is not None and st.width > 0:
+        display.draw_rect(w.rect, st.frame, fill=False, thickness=st.width)
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Base widget
 # ─────────────────────────────────────────────────────────────────────────────
@@ -106,6 +147,19 @@ class Widget:
     Attributes set by subclasses
     ----------------------------
     focusable : True for interactive widgets (Button, editable TextBox)
+
+    Style attributes (run screens only)
+    -----------------------------------
+    role    : None, or a STYLE_TABLE role ("action", "rowlabel", "textbox",
+              "msgbox").  With a role, Button, TextBox and Label take their
+              colours from palette.STYLE_TABLE each time they draw, and ignore
+              their own colour attributes.  Without one they draw exactly as
+              they were built.
+    pending : True when this is what the operator should do next.
+    valid   : False when the widget holds a bad entry.
+    See style_state() for how these combine with enabled and editing.
+    The whole route is described in pool.py, "Where a widget's colours come
+    from".
     """
 
     def __init__(self, rect: Rect, name: str = "", widget_id: int = 0):
@@ -116,6 +170,9 @@ class Widget:
         self.enabled          = True
         self.focusable        = False
         self.focused          = False
+        self.role: Optional[str] = None
+        self.pending          = False
+        self.valid            = True
         self.on_focus_change: Optional[Callable] = None
         log.debug("created %s %r", type(self).__name__, name or "(unnamed)")
 
@@ -426,6 +483,9 @@ class Label(Widget):
     align  : "left" | "center" | "right"
     valign : "top"  | "middle" | "bottom"
     name   : identifier for logging
+
+    With a role (see Widget), the colours come from palette.STYLE_TABLE and
+    the style's frame is drawn inside the rect, after the text.
     """
 
     def __init__(
@@ -449,15 +509,19 @@ class Label(Widget):
         self.valign = valign
 
     def draw(self, display) -> None:
+        st = _style(self)
+        bg, fg = (st.bg, st.text) if st else (self.bg, self.color)
         # Paint the background first: draw_text renders glyphs only (transparent),
         # so a coloured label needs its own fill, and a redraw needs it to erase
         # the previous text (e.g. the 1 Hz clock).
-        display.fill_rect(self.rect, self.bg)
+        display.fill_rect(self.rect, bg)
         display.draw_text(self.text, self.rect,
-                          color=self.color, bg=self.bg,
+                          color=fg, bg=bg,
                           size=self.size,
                           align=self.align, valign=self.valign,
                           widget_id=str(self.widget_id) if self.widget_id else "")
+        if st:
+            _draw_frame(display, self, st)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -560,22 +624,36 @@ class TextBox(Widget):
             self.draw(display, force=True)
 
     def draw(self, display, force: bool = False) -> None:
-        state = (self.value, self.focused, self.editing, self.enabled, self.secret)
+        # The style facts are in the key: without them a box marked pending
+        # (or invalid) after its last draw would skip the repaint that shows it.
+        state = (self.value, self.focused, self.editing, self.enabled, self.secret,
+                 self.role, self.pending, self.valid)
         if not force and state == self._last_drawn:
             return
         self._last_drawn = state
         widget_id_str = str(self.widget_id) if self.widget_id else ""
-        color = self.color if self.enabled else _darken(self.color)
+        st = _style(self)
+        if st:
+            bg, color = st.bg, st.text
+        else:
+            bg, color = self.bg, (self.color if self.enabled else _darken(self.color))
         # Fill the background first so edits/backspaces erase the old value
         # (draw_text renders glyphs only).  The border is drawn after, on top.
-        display.fill_rect(self.rect, self.bg)
+        display.fill_rect(self.rect, bg)
         shown = "*" * len(self.value) if self.secret else self.value
         display.draw_text(shown, self.rect,
-                          color=color, bg=self.bg,
+                          color=color, bg=bg,
                           size=self.size,
                           align=self.align, valign=self.valign,
                           widget_id=widget_id_str)
-        if self.editing:
+        if st:
+            # The style's frame covers editing too (its own table row); only
+            # the keyboard-focus ring is drawn on top of it, as before.
+            if self.focused and not self.editing:
+                display.draw_rect(self.rect, self.FOCUS_BORDER, fill=False, thickness=2)
+            else:
+                _draw_frame(display, self, st)
+        elif self.editing:
             display.draw_rect(self.rect, self.EDIT_BORDER, fill=False, thickness=2)
         elif self.focused:
             display.draw_rect(self.rect, self.FOCUS_BORDER, fill=False, thickness=2)
@@ -666,7 +744,13 @@ class Button(Widget):
         self.pressed        = False
 
     def draw(self, display) -> None:
-        if not self.enabled:
+        st = _style(self)
+        if st:
+            # Disabled is a row of the style table, not a darkened face.
+            face, tcolor = st.bg, st.text
+            if self.pressed:
+                face = _darken(face, 0.65)
+        elif not self.enabled:
             face   = (self.disabled_color if self.disabled_color is not None
                       else _darken(self.color))
             tcolor = _darken(self.text_color)
@@ -681,6 +765,8 @@ class Button(Widget):
 
         if self.focused and self.enabled and not self.pressed:
             display.draw_rect(self.rect, self.FOCUS_BORDER, fill=False, thickness=2)
+        elif st and not self.pressed:
+            _draw_frame(display, self, st)
         elif self.border_color is not None and not self.pressed:
             display.draw_rect(self.rect, self.border_color)
 
@@ -1021,9 +1107,9 @@ if __name__ == "__main__":
         """Prints draw calls instead of driving hardware."""
         def fill_screen(self, color):
             print(f"    fill_screen #{color:04x}")
-        def fill_rect(self, rect, color):
+        def fill_rect(self, rect, color, **kw):
             print(f"    fill_rect   ({rect.x},{rect.y} {rect.w}x{rect.h}) #{color:04x}")
-        def draw_rect(self, rect, color, fill=False, thickness=1):
+        def draw_rect(self, rect, color, fill=False, thickness=1, **kw):
             mode = "fill" if fill else f"border t={thickness}"
             print(f"    draw_rect   ({rect.x},{rect.y} {rect.w}x{rect.h}) #{color:04x} {mode}")
         def draw_text(self, text, rect, **kw):

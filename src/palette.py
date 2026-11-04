@@ -55,25 +55,38 @@ PALETTE: dict[str, int] = {
     "field_red":   0xF800,   # red
     "status_bg":   0x0000,
     # Step-status chips (reagent 1 / 2 / Capture).  "ready" reuses start_green
-    # (the RUN colour); the rest are its dim form and a running amber + dim.
-    #   "step_pending":0x03E0,   # dim green  — step not yet reached / unavailable
-    "step_pending":0xC5F7,   # light gray — step not yet reached / unavailable
-    "step_running":0xFD20,   # amber      — step in progress
-    "step_done":   0x7A80,   # dim amber  — step complete
+    # (the RUN colour).  Amber is kept off the chips: on the run screens amber
+    # means "do this next" (see STYLE_TABLE below), and a chip is a status,
+    # not an action.  Each tint has its own text colour, chosen to be readable
+    # on it — see Phase._show_steps.
+    "step_pending":0xC638,   # light gray — step not yet reached / unavailable
+    "step_running":0x07FF,   # cyan       — step in progress
+    "step_done":   0x8410,   # gray       — step complete
+    # Run-screen style colours, used by STYLE_TABLE below.
+    "amber":       0xFD20,   # (255, 165, 0)  — do this next
+    "red":         0xF800,   # (255,   0, 0)  — something is wrong
+    "pink":        0xFDB8,   # (255, 182, 193) — an entry that is not valid
+    "yellow":      0xFFE0,   # (255, 255,   0) — a box being typed in
+    "light_blue":  0xA65F,   # (160, 200, 255) — row-label buttons
+    "light_gray":  0xC638,   # (198, 198, 198) — disabled face
+    "dark_gray":   0x4208,   # ( 66,  66,  66) — disabled frame and text
+    "medium_green":0x0540,   # (  0, 170,   0) — the frame of a box being typed in
+    "pending_frame":0xF800,  # red — the frame round anything that is pending
     # Visible alarm button: a backgrounded slot's timer expired unattended.
     "alarm_bg":    0xF800,   # red
     "alarm_text":  0xFFE0,   # yellow
     # Vent reminder screen (VentPhase): the whole screen, so it cannot be
     # mistaken for an ordinary step.
     "vent_bg":     0xF800,   # red
-    # Reagent weight grid: how the weighed amount sits against target.  Named
-    # for the state, not the hue, so the same five rules can be read off any
-    # frontend: "missing" is a weight the run still owes, "alarm" is short of
-    # target beyond the tolerance, "warn" is outside it the recoverable way,
-    # and under/over tint the text of a reading still inside the tolerance.
-    "wt_missing":  0xFFE0,   # yellow — a weight that is owed has not been entered
+    # Reagent weight grid, Over cell: how the weighed amount sits against
+    # target.  Named for the state, not the hue, so the same rules can be read
+    # off any frontend: "alarm" is short of target beyond the tolerance, "warn"
+    # is outside it the recoverable way (too much), and under/over tint the
+    # text of a reading still inside the tolerance.  The entry boxes beside it
+    # (Initial, Final) take their look from STYLE_TABLE instead.
     "wt_alarm":    0xF800,   # red    — short of target by more than the tolerance
-    "wt_warn":     0xFD20,   # amber  — outside the tolerance the recoverable way
+    "wt_warn":     0xFDB8,   # pink   — outside the tolerance the recoverable way
+                             #          (pink, not amber: amber means "do this next")
     "wt_under":    0xF800,   # red    — under target, still within tolerance (text)
     "wt_over":     0x001F,   # blue   — over target (text)
     # Splash screen
@@ -88,6 +101,126 @@ PALETTE: dict[str, int] = {
     "roi_edit":     0x07E0,  # green    — the rectangle under edit
     "roi_edge":     0xF81F,  # magenta  — its armed side
 }
+
+
+# ── Run-screen styles ─────────────────────────────────────────────────────────
+#
+# How a run-screen widget looks, by its role and its state.  The whole route,
+# from phase to pixel, is described in pool.py under "Where a widget's colours
+# come from".  Edit the table to change a look; nothing else needs to change.
+# Columns are separated by spaces; "-" in the frame column means no frame.
+#
+#   role      action   — a button that does the step's work (Continue, START,
+#                        Capture, Resume, ...)
+#             rowlabel — a row's label button on an entry screen (User, Temp,
+#                        ...): pressing it loads that row's default
+#             textbox  — a box the operator types into
+#             msgbox   — an instruction line
+#
+#   state     Worked out by the widget when it draws (widgets.style_state),
+#             from four separate facts — the first that applies wins:
+#               disabled         the widget is not enabled
+#               editing_pending  a text box being typed into that is pending
+#               editing          a text box being typed into
+#               invalid_pending  holds a bad entry, and fixing it is next
+#               invalid          holds a bad entry
+#               pending          this is what the operator should do next
+#               normal           none of the above
+#
+#   width     The frame's thickness in pixels, drawn inside the widget's rect,
+#             so a thicker frame never moves anything.
+#
+# A role with no row for a state uses its "normal" row (for example a message
+# box is never disabled).  Widgets without a role — the menus, the footer,
+# the slot button, the vent screen — keep the colours they were built with.
+#
+# Meanings:  amber  = do this next;  red = something is wrong;
+#            pink   = an entry that is not valid;
+#            yellow = the box being typed in (framed red if it is also pending).
+STYLE_TABLE = """
+role      state            background   frame          width  text
+action    disabled         light_gray   dark_gray      1      dark_gray
+action    normal           start_green  -              0      black
+action    pending          amber        pending_frame  2      black
+rowlabel  disabled         light_gray   dark_gray      1      dark_gray
+rowlabel  normal           light_blue   -              0      black
+rowlabel  pending          amber        pending_frame  2      black
+textbox   disabled         light_gray   dark_gray      1      dark_gray
+textbox   normal           white        field_blue     1      black
+textbox   pending          amber        pending_frame  2      black
+textbox   invalid          pink         -              0      black
+textbox   invalid_pending  red          -              0      black
+textbox   editing_pending  yellow       pending_frame  2      black
+textbox   editing          yellow       medium_green   2      black
+msgbox    normal           white        -              0      black
+msgbox    pending          amber        pending_frame  2      black
+"""
+
+
+class Style:
+    """
+    One row of STYLE_TABLE, resolved to RGB565.
+
+    Attributes:
+        bg:     Background fill.
+        frame:  Frame colour, or None for no frame.
+        width:  Frame thickness in pixels (0 when there is no frame).
+        text:   Text colour.
+    """
+
+    __slots__ = ("bg", "frame", "width", "text")
+
+    def __init__(self, bg: int, frame, width: int, text: int):
+        self.bg, self.frame, self.width, self.text = bg, frame, width, text
+
+    def __repr__(self) -> str:
+        frame = "none" if self.frame is None else f"0x{self.frame:04X}/{self.width}px"
+        return f"Style(bg=0x{self.bg:04X}, frame={frame}, text=0x{self.text:04X})"
+
+
+def _parse_styles(table: str) -> dict:
+    """
+    Read STYLE_TABLE into {(role, state): Style}.
+
+    Raises:
+        ValueError: a row has the wrong number of columns, names a colour
+            that is not in PALETTE, or gives a width that is not a number —
+            so a typo stops the program at start rather than painting black.
+    """
+    rows = [ln.split() for ln in table.strip().splitlines()]
+    styles = {}
+    for cols in rows[1:]:                       # rows[0] is the heading
+        if len(cols) != 6:
+            raise ValueError(f"STYLE_TABLE: expected 6 columns, got {cols}")
+        role, state, bg, frame, width, text = cols
+        for name in (bg, text) + (() if frame == "-" else (frame,)):
+            if name not in PALETTE:
+                raise ValueError(f"STYLE_TABLE: unknown colour {name!r} in {cols}")
+        styles[(role, state)] = Style(PALETTE[bg],
+                                      None if frame == "-" else PALETTE[frame],
+                                      0 if frame == "-" else int(width),
+                                      PALETTE[text])
+    return styles
+
+
+STYLES: dict = _parse_styles(STYLE_TABLE)
+
+
+def style(role: str, state: str) -> Style:
+    """
+    The look for `role` in `state`, falling back to the role's normal row.
+
+    Args:
+        role:  "action", "rowlabel", "textbox" or "msgbox".
+        state: One of the states listed above STYLE_TABLE.
+
+    Returns:
+        The Style to draw with.
+
+    Raises:
+        KeyError: the role has no "normal" row (a role name typed wrong).
+    """
+    return STYLES.get((role, state)) or STYLES[(role, "normal")]
 
 
 def color(name: str) -> int:

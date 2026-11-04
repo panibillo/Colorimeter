@@ -26,6 +26,34 @@ unless a phase asked for it.  The usual flow, owned by the arbiter, is:
 
 Phases speak only in names and text here — never pixels (those live in
 layout.py) and never raw colours (those are palette names resolved at build).
+
+Where a widget's colours come from
+----------------------------------
+There are two routes, and a widget takes exactly one of them.
+
+1. **Run-screen widgets (styled).**  The widgets named in `_ROLES` below get
+   a role at build: action, rowlabel, textbox or msgbox.  Their colours are
+   never set directly.  Instead:
+
+   a. The phase states facts with `mark(name, pending=..., valid=...)`:
+      pending means "this is what to do next"; valid=False means "this box
+      holds a bad entry".  `enabled` is set as before, with put()/enable().
+   b. `hide_all()`, which the arbiter calls before every render, resets every
+      mark to pending=False, valid=True.  So a phase marks only the
+      exceptions, and a mark can never leak from one screen to the next.
+   c. When the widget draws, widgets.style_state() turns its facts (plus its
+      own `editing` flag) into one state, and palette.style(role, state)
+      looks up that row of palette.STYLE_TABLE: background, frame, frame
+      width, text.
+   d. palette.PALETTE turns the table's colour names into RGB565 numbers.
+
+   To change a look, edit STYLE_TABLE (or a colour in PALETTE).  No phase
+   needs to change.
+
+2. **Everything else (unstyled).**  Menus, the header slot button, the
+   footer, the step chips, the weight grid's calculated cells, the vent
+   screen and the modals keep the palette colours given at build below, and
+   may be recoloured with `recolor()`.
 """
 
 from __future__ import annotations
@@ -41,6 +69,25 @@ import version
 from timer import TimerWidget
 
 log = logging.getLogger(__name__)
+
+
+# The run-screen widgets that take their look from palette.STYLE_TABLE (see
+# "Where a widget's colours come from" above).  The colours each is built with
+# below are then unused while it has a role.
+_ROLES: Dict[str, tuple] = {
+    "action":   ("main_btn", "run_btn"),
+    "rowlabel": ("id_lbl", "user_lbl", "test_lbl", "test_lot_lbl",
+                 "temp_lbl", "weight_lbl", "collectdt_lbl", "remark_lbl",
+                 "result_lbl",
+                 "var_equip_lbl", "var_reps_lbl", "var_r1_lbl", "var_r2_lbl"),
+    "textbox":  ("id_fld", "user_fld", "test_fld", "test_lot_fld",
+                 "temp_fld", "weight_fld", "collectdt_fld", "remark_fld",
+                 "result_fld", "color_fld",
+                 "wt1_init_fld", "wt1_final_fld", "wt2_init_fld", "wt2_final_fld",
+                 "var_r1_wt_fld", "var_r1_time_fld", "var_r2_wt_fld",
+                 "var_r2_time_fld"),
+    "msgbox":   ("instr1", "color_lbl"),
+}
 
 
 class Pool:
@@ -508,6 +555,10 @@ class Pool:
         button("modal_no",  L.MODAL_NO,  "btn_text", "btn_gray", 18)
         button("modal_third", L.MODAL_3C, "btn_text", "btn_gray", 14)   # 3-choice modals
 
+        for role, names in _ROLES.items():
+            for name in names:
+                p[name].role = role
+
         log.info("Pool.build: %d widgets", len(p._widgets))
         return p
 
@@ -553,15 +604,56 @@ class Pool:
     def recolor(self, name: str, bg: Optional[str] = None,
                 fg: Optional[str] = None) -> Widget:
         """
-        Recolour a widget by *palette name* (phases still never touch raw
-        values — the pool resolves the name).  bg sets the fill, fg the text.
-        Used for status coding, e.g. the reagent/capture step chips.
+        Recolour an *unstyled* widget by palette name (phases still never touch
+        raw values — the pool resolves the name).  bg sets the fill, fg the
+        text.  Used for status coding, e.g. the step chips and the weight
+        grid's Over cell.
+
+        A Button keeps its face in `color` and its text in `text_color`, where
+        a Label or TextBox keeps them in `bg` and `color`; this maps bg/fg onto
+        whichever the widget has, so callers need not know the difference.
+
+        A styled widget (one with a role) draws from the style table and would
+        ignore these colours, so recolouring one is logged as a mistake: use
+        mark() instead.
         """
         w = self[name]
-        if bg is not None:
-            w.bg = color(bg)
-        if fg is not None:
-            w.color = color(fg)
+        if w.role:
+            log.warning("Pool.recolor: %r is styled (%s) — use mark()", name, w.role)
+        if isinstance(w, Button):
+            if bg is not None:
+                w.color = color(bg)
+            if fg is not None:
+                w.text_color = color(fg)
+        else:
+            if bg is not None:
+                w.bg = color(bg)
+            if fg is not None:
+                w.color = color(fg)
+        return w
+
+    def mark(self, name: str, pending: Optional[bool] = None,
+             valid: Optional[bool] = None) -> Widget:
+        """
+        State facts about a styled widget; its look follows from the style
+        table when it draws.
+
+        Args:
+            name:    The widget.
+            pending: True when this is what the operator should do next.
+                     None leaves it as it is.
+            valid:   False when the widget holds a bad entry.  None leaves it
+                     as it is.
+
+        Both reset at every hide_all(), so a phase marks only the exceptions.
+        """
+        w = self[name]
+        if not w.role:
+            log.warning("Pool.mark: %r has no style role; the mark has no effect", name)
+        if pending is not None:
+            w.pending = bool(pending)
+        if valid is not None:
+            w.valid = bool(valid)
         return w
 
     def on(self, name: str, callback: Optional[Callable]) -> Widget:
@@ -610,8 +702,14 @@ class Pool:
             self[n].visible = False
 
     def hide_all(self) -> None:
+        """
+        Hide every widget and clear every style mark (pending=False,
+        valid=True), ready for a phase to configure the next screen.
+        """
         for w in self._widgets.values():
             w.visible = False
+            w.pending = False
+            w.valid = True
 
     def visible_names(self) -> List[str]:
         return [n for n, w in self._widgets.items() if w.visible]

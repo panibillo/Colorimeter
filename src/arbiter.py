@@ -6479,6 +6479,10 @@ def _selftest() -> None:
     _real_view = arb.open_image_view
     arb.open_image_view = lambda *a, **k: _views.append(k)
     _touch_type(_w1, "3.2")
+    # The weight was owed when the screen was drawn, and typing does not
+    # redraw, so the box is yellow in the pending red frame while it is typed.
+    check("typed while owed: editing and pending",
+          widgets.style_state(_w1), "editing_pending")
     for _ in range(5):
         arb.pump_capture()
     check("stays on preimage",   A.phase, "preimage")
@@ -6486,13 +6490,17 @@ def _selftest() -> None:
     check("View Sample is back", arb._pool["view_sample_btn"].visible, True)
     check("the weight box keeps the keyboard",
           (arb._focused_widget() is _w1, _w1.editing), (True, True))
+    # The capture's redraw read the 3.2 g already written through: the weight
+    # is no longer owed, so the frame turns from pending red to editing green.
+    check("redrawn with a weight: editing only",
+          widgets.style_state(_w1), "editing")
     arb.on_key("5"); arb.on_key("enter")
     check("Enter finishes the weight", (A.record["reagent1_initial_wt"], _w1.editing),
           ("3.25", False))
     check("and opens no viewer", _views, [])
     arb.open_image_view = _real_view
     arb.focus(A)
-    check("button offers set 2", arb._pool["run_btn"].label, "Pre-image\n2 of 2")
+    check("button offers set 2", arb._pool["run_btn"].label, "Pre\nimage\n2 of 2")
     check("set 2 pre-image: its own file",
           arb._preimage_config(A).archive_path, _rep2)
     cap_pre2 = _FakeCapture(mode="pre"); cap_pre2.out_path = _rep2
