@@ -6869,6 +6869,10 @@ def _selftest() -> None:
     import test_image_repo as _tir
     _img_dir = Path(_tmpdir) / "test_image"
     config.save("capture", "test_image_directory", str(_img_dir))
+    # The throwaway database is a copy of the live one, which holds whatever
+    # test images this instrument has taken, and next_name() counts on from
+    # those.  Empty the copy's table so the names below start at IMG0001.
+    _db.write_one("DELETE FROM test_image")
     _er.write_led_exposures("green", "5", [2000, 2500, 3200, 4000, 5000])
     _er.write_led_exposures("green", "4", [2000, 2800, 3600, 5000])
     arb._render_advanced()
