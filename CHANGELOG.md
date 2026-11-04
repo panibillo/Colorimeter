@@ -35,6 +35,13 @@ sqlite3 src/colorimeter.sqlite \
 
 ### Fixed
 
+- A box being typed into keeps the keyboard when the screen redraws on its
+  own, as it does when a capture finishes. The redraw used to move keyboard
+  focus to the first button while the box still looked as if it were being
+  edited. On the pre-image screen that button is View Sample, so the Enter
+  meant to finish a reagent weight opened the image viewer (rpizero3,
+  2026-11-03). A box that is no longer on screen now has its edit ended.
+
 - The desktop readers handle the schema-5 dark frames. They go by what the
   archive holds rather than by its schema number, so archives in the new
   layout that still say schema 4 read correctly too.

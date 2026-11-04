@@ -5793,9 +5793,35 @@ class Arbiter:
     # ── Focus / keyboard (over the pool) ───────────────────────────────────────
 
     def _rebuild_focus(self) -> None:
+        """
+        Recompute the keyboard focus list after a render.
+
+        Focus normally goes to the first focusable widget.  A box that was
+        being typed into is the exception: a render the operator did not ask
+        for (a capture finishing, a timer advancing the phase) must not take
+        the keyboard away from it.  It used to, and the box went on looking
+        as if it were being edited while keys went to the first widget — on
+        the pre-image screen that is View Sample, so the Enter that was meant
+        to finish a weight opened the image viewer.
+
+        So a box still editing and still on screen keeps focus and its edit.
+        One that is no longer on screen has its edit ended, so it cannot come
+        back later looking active.
+        """
         self._focusables = self._pool.focusable_widgets()
         self._focus_idx  = -1
-        if self._focusables:
+        keep = None
+        for name in self._pool.names:
+            w = self._pool[name]
+            if isinstance(w, TextBox) and w.editing:
+                if w in self._focusables and keep is None:
+                    keep = w
+                else:
+                    w.editing = False
+                    w.focused = False
+        if keep is not None:
+            self._move_focus(self._focusables.index(keep))
+        elif self._focusables:
             self._move_focus(0)
 
     def _focused_widget(self):
@@ -6441,10 +6467,30 @@ def _selftest() -> None:
     cap_pre = _FakeCapture(mode="pre")
     arb._capture_factory = lambda: cap_pre
     arb.request_preimage(A); A.capturing = True
+    # The operator weighs reagent 1 while the pre-image runs, as the
+    # instruction asks.  The capture finishing redraws the screen, and View
+    # Sample comes back as the first focusable widget; the box being typed in
+    # must keep the keyboard, or the Enter that finishes the weight presses
+    # View Sample instead (seen on rpizero3, 2026-11-03).
+    arb.focus(A)
+    A.record["reagent1_initial_wt"] = ""
+    _w1 = arb._pool["wt1_init_fld"]
+    _views = []
+    _real_view = arb.open_image_view
+    arb.open_image_view = lambda *a, **k: _views.append(k)
+    _touch_type(_w1, "3.2")
     for _ in range(5):
         arb.pump_capture()
     check("stays on preimage",   A.phase, "preimage")
     check("set 1 is the h5file", A.record["h5file"], "fake.h5")
+    check("View Sample is back", arb._pool["view_sample_btn"].visible, True)
+    check("the weight box keeps the keyboard",
+          (arb._focused_widget() is _w1, _w1.editing), (True, True))
+    arb.on_key("5"); arb.on_key("enter")
+    check("Enter finishes the weight", (A.record["reagent1_initial_wt"], _w1.editing),
+          ("3.25", False))
+    check("and opens no viewer", _views, [])
+    arb.open_image_view = _real_view
     arb.focus(A)
     check("button offers set 2", arb._pool["run_btn"].label, "Pre-image\n2 of 2")
     check("set 2 pre-image: its own file",
