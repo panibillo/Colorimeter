@@ -143,6 +143,12 @@ MODAL_ONE   = Rect(110, 132, 100,  46)   # single-button layout (centred)
 MODAL_3A    = Rect( 28, 134,  84,  46)   # three-button layout (keep/delete/resume)
 MODAL_3B    = Rect(118, 134,  84,  46)
 MODAL_3C    = Rect(208, 134,  84,  46)
+# Tall two-button layout, for a message that is a list (the "incomplete"
+# check on POST and NEXT).  The message area holds about 7 lines at 13 pt.
+MODAL_TALL_PANEL = Rect( 20,  24, 280, 200)
+MODAL_TALL_MSG   = Rect( 32,  30, 256, 132)
+MODAL_TALL_YES   = Rect( 40, 170, 100,  44)
+MODAL_TALL_NO    = Rect(180, 170, 100,  44)
 
 # ── menu screen (reached by the dedicated footer MENU button — a screen of its
 # own, not part of the A/B toggle) ───────────────────────────────────────────────

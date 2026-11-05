@@ -72,6 +72,17 @@ sqlite3 src/colorimeter.sqlite \
 
   The pre-image screen and the steps after it may still mark several things
   at once.
+- Once the analysis result is in, PRIOR on the analysis screen opens, so
+  every earlier screen can be looked over until NEXT is pressed. Resume is
+  then plain rather than marked, since nothing is waiting.
+- POST and NEXT first check the run. If anything is left undone, a dialog
+  lists it, with Continue (go ahead anyway) and Return. Return, the safe
+  choice, is the green button. It counts:
+  - empty or bad entry and test-variant boxes;
+  - an empty manual color reading;
+  - a missing final weight;
+  - image sets not all taken.
+- The read screen says "Ready to analyze" (it was spelled "analyse").
 - Entry 2's Continue now waits for a temperature and a sample weight that
   read as numbers. Without a weight there is no reagent target, so reagent 1's
   START never appeared. A failed probe reading ("err") is marked invalid. On a

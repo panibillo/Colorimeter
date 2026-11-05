@@ -372,13 +372,16 @@ class Phase:
 
         `main_pending` marks the main button pending (amber, see the style
         table): the phase says so when the screen is complete and Continue is
-        the next thing to press.  Resume is always pending — the live step is unfinished by
-        definition, and going back to it is the next thing to do.
+        the next thing to press.  Resume is pending while the live step still
+        needs the operator, and plain once the analysis result is in.
         """
         if slot.phase != slot.active_phase:                 # previewing another step
             main_label, main_enabled = "Resume", True
             main_on  = lambda: arb.resume(slot)
-            main_pending = True
+            # Pending while the live step still needs the operator.  Once the
+            # analysis result is in, nothing is waiting: Resume is just the
+            # way back to POST and NEXT.
+            main_pending = not (slot.active_phase == "analysis" and slot.result)
             lock_nav = False                                # previewing is safe
             pool.enable("run_btn", False)
             pool.mark("run_btn", pending=False)             # nothing to start here
@@ -1283,7 +1286,7 @@ class ReadPhase(Phase):
             pool["run_btn"].size = _RUN_BTN_SIZE_2LINE
             _line(pool, "instr1",
                   "Weigh both packets to finish" if not ready
-                  else "Ready to analyse", pending=is_live and not ready)
+                  else "Ready to analyze", pending=is_live and not ready)
             self._show_weights(pool, slot, arb)
             self._show_steps(pool, slot)
             self._chrome(pool, slot, arb, "CANCEL",
@@ -1343,12 +1346,17 @@ class ReadPhase(Phase):
 class AnalysisPhase(Phase):
     """
     Capture is done; analysis runs.  Until it lands, the result field shows
-    progress and POST is disabled.  When the result arrives, POST enables and
-    the header offers NEXT to start the next sample.
+    progress, POST is disabled and PRIOR is locked.  When the result arrives,
+    POST enables, the header offers NEXT to start the next sample, and PRIOR
+    opens: every earlier screen can be looked over until NEXT is pressed.
+
+    POST only sends the data to the server, and NEXT ends the run.  Both first
+    check the run for anything left undone (incomplete_items) and, if there
+    is something, list it in a dialog offering Return and Continue.
     """
 
     phase_id = "analysis"
-    prior    = None
+    prior    = "read"          # usable once the result is in (see lock_nav)
     next     = None
 
     def activate(self, arb, slot) -> None:
@@ -1365,16 +1373,99 @@ class AnalysisPhase(Phase):
         done = bool(slot.result)
         pool.put("result_fld", slot.result if done else slot.progress)
         pool.put("run_btn", "POST",
-                 on=(lambda: arb.post_results(slot)) if done else None,
+                 on=(lambda: _checked(arb, slot, "incomplete_post",
+                                      lambda: arb.post_results(slot)))
+                 if done else None,
                  enabled=done)
         self._show_collect(pool, slot)
         if done:
             self._chrome(pool, slot, arb, "NEXT",
-                         main_on=lambda: arb.next_sample(slot))
+                         main_on=lambda: _checked(arb, slot, "incomplete_next",
+                                                  lambda: arb.next_sample(slot)))
         else:
             self._chrome(pool, slot, arb, "CANCEL",
                          main_on=lambda: arb.open_modal(slot, "cancel"),
                          lock_nav=True)
+
+
+def incomplete_items(arb, slot) -> list:
+    """
+    What the run still lacks, as short lines for the POST / NEXT check.
+
+    Counted:
+      - the boxes of the entry and test-variant screens that are empty or do
+        not read right: user, test, test lot, temperature, sample weight and
+        the four factors (a production run keeps every factor at 1.0, so
+        they only show up on a variant run that went wrong);
+      - the manual color reading, if empty;
+      - a final packet weight that is missing;
+      - the image sets, if the last one was not captured.
+
+    Returns:
+        A list of strings, one per item, in screen order; empty when the run
+        is complete.
+    """
+    r = slot.record
+    items = [name for key, name in (("user", "User"), ("test_kit", "Test"),
+                                    ("test_lot", "Test lot"))
+             if not _filled(r.get(key))]
+    if _to_float(r.get("samp_degC")) is None:
+        items.append("Temperature")
+    if _to_float(r.get("samp_grams")) is None:
+        items.append("Sample weight")
+    for key, name in (("R1_wt_factor", "R1 weight factor"),
+                      ("R1_time_factor", "R1 time factor"),
+                      ("R2_wt_factor", "R2 weight factor"),
+                      ("R2_time_factor", "R2 time factor")):
+        if not _factor_ok(r.get(key)):
+            items.append(name)
+    if not _filled(r.get("manual_read")):
+        items.append("Manual color reading")
+    for n in (1, 2):
+        if not _filled(r.get(f"reagent{n}_final_wt")):
+            items.append(f"R{n} final weight")
+    reps = arb.image_reps(slot)
+    if slot.cap_rep < reps or not r.get("capture_end"):
+        items.append(f"Image sets: {min(slot.cap_rep, reps)} of {reps} taken")
+    return items
+
+
+# Lines of the list that fit the tall dialog under its heading.
+_INCOMPLETE_LINES = 6
+
+
+def _incomplete_message(arb, slot) -> str:
+    """The "incomplete" dialog's text: a heading and the list, cut to fit."""
+    items = incomplete_items(arb, slot)
+    shown = items[:_INCOMPLETE_LINES]
+    if len(items) > _INCOMPLETE_LINES:
+        shown = items[:_INCOMPLETE_LINES - 1] + [
+            f"... and {len(items) - _INCOMPLETE_LINES + 1} more"]
+    return "\n".join([f"{slot.record.get('samp_no', '')} is not complete:"]
+                     + [f"  {line}" for line in shown])
+
+
+def _checked(arb, slot, modal_id: str, action) -> None:
+    """
+    Run `action` (POST or NEXT) if the run is complete; otherwise open the
+    "incomplete" dialog `modal_id`, whose Continue runs it anyway.
+    """
+    if incomplete_items(arb, slot):
+        arb.open_modal(slot, modal_id)
+    else:
+        action()
+
+
+def _post_anyway(arb, slot) -> None:
+    """Incomplete dialog, POST: back to the analysis screen, then post."""
+    arb.close_modal(slot)
+    arb.post_results(slot)
+
+
+def _next_anyway(arb, slot) -> None:
+    """Incomplete dialog, NEXT: start the next sample (this ends the run)."""
+    slot.modal_return = None
+    arb.next_sample(slot)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1384,27 +1475,54 @@ class AnalysisPhase(Phase):
 class ModalPhase(Phase):
     """
     A choice dialog.  `message` may reference record fields (e.g. "{samp_no}")
-    and the slot id as "{slot}".  `buttons` is a list of 1..3 (label, action)
-    pairs, laid out by count; action is a callable(arb, slot), or None to simply
-    close back to the phase that opened the modal.
+    and the slot id as "{slot}"; or it may be a callable(arb, slot) -> str,
+    built when the dialog opens (the "incomplete" list).  `buttons` is a list
+    of 1..3 (label, action) pairs, laid out by count; action is a
+    callable(arb, slot), or None to simply close back to the phase that
+    opened the modal.
+
+    `tall` gives a two-button dialog the tall panel, with the message in a
+    smaller font, left-aligned from the top, so a list of several lines fits.
+
+    `green` is the index of the button painted green, the others gray.  It
+    is the first by default; a dialog whose first button is the risky one
+    (the "incomplete" check's Continue) makes the safe choice green instead.
     """
 
-    def __init__(self, phase_id: str, message: str, buttons: list):
+    _MSG_SIZE      = 16    # modal_msg as built in pool.build
+    _MSG_SIZE_TALL = 13
+
+    def __init__(self, phase_id: str, message, buttons: list, tall: bool = False,
+                 green: int = 0):
         self.phase_id = phase_id
         self.message  = message
         self.buttons  = buttons
+        self.tall     = tall
+        self.green    = green
 
     def enter(self, pool, slot, arb) -> None:
-        # slot.name is exposed as {slot}; it wins over any record field of the
-        # same name so the slot id is always the A/B being cancelled.
-        fields = {**slot.record, "slot": slot.name}
-        try:
-            msg = self.message.format(**fields)
-        except (KeyError, IndexError):
-            msg = self.message
+        if callable(self.message):
+            msg = self.message(arb, slot)
+        else:
+            # slot.name is exposed as {slot}; it wins over any record field of
+            # the same name so the slot id is always the A/B being cancelled.
+            fields = {**slot.record, "slot": slot.name}
+            try:
+                msg = self.message.format(**fields)
+            except (KeyError, IndexError):
+                msg = self.message
         pool.put("modal_panel")
         pool.put("modal_msg", msg)
-        names = pool.layout_modal_buttons(len(self.buttons))
+        # Set every time: the widget is shared by every dialog, so a tall
+        # dialog's small left-aligned text would otherwise carry over.
+        m = pool["modal_msg"]
+        m.size = self._MSG_SIZE_TALL if self.tall else self._MSG_SIZE
+        m.align, m.valign = ("left", "top") if self.tall else ("center", "middle")
+        names = pool.layout_modal_buttons(len(self.buttons), tall=self.tall)
+        # Colored every time, for the same reason as the message: the buttons
+        # are shared, and one dialog's green would otherwise carry over.
+        for i, name in enumerate(names):
+            pool.recolor(name, bg="start_green" if i == self.green else "btn_gray")
         for name, (label, action) in zip(names, self.buttons):
             on = ((lambda a=action: a(arb, slot)) if action
                   else (lambda: arb.close_modal(slot)))
@@ -1484,6 +1602,15 @@ def build_phases(reagent1_secs: int = 120, preimage: bool = True,
                    [("Keep row",   lambda arb, slot: arb.cancel_test(slot, delete=False)),
                     ("Delete row", lambda arb, slot: arb.cancel_test(slot, delete=True)),
                     ("Resume",     None)]),
+        # POST and NEXT on a run with something left undone: the list, then
+        # Continue to go ahead anyway or Return to the analysis screen.  Return,
+        # the safe choice, is the green one.
+        ModalPhase("incomplete_post", _incomplete_message,
+                   [("Continue", _post_anyway), ("Return", None)], tall=True,
+                   green=1),
+        ModalPhase("incomplete_next", _incomplete_message,
+                   [("Continue", _next_anyway), ("Return", None)], tall=True,
+                   green=1),
         ModalPhase("reset", "Reset the timer?",
                    [("Reset", lambda arb, slot: arb.reset_timer(slot)),
                     ("No",    None)]),
@@ -2241,6 +2368,52 @@ if __name__ == "__main__":
     check("result persisted",   A.record["txt_result"], "Nitrate 12 ppm")
     check("main is NEXT",       pool["main_btn"].label, "NEXT")
 
+    print("== analysis: earlier screens can be looked over until NEXT ==")
+    check("PRIOR open once the result is in", pool["prior_btn"].enabled, True)
+    press(pool, "prior_btn")
+    check("previewing the read screen", A.phase, "read")
+    check("Resume is plain: nothing is waiting",
+          (pool["main_btn"].label, _st("main_btn")), ("Resume", "normal"))
+    press(pool, "main_btn")
+    check("Resume -> analysis", A.phase, "analysis")
+
+    print("== POST and NEXT list what is incomplete: Return or Continue ==")
+    import layout as _layout
+    A.record["manual_read"] = ""
+    check("an empty manual reading is counted",
+          "Manual color reading" in incomplete_items(arb, A), True)
+    press(pool, "run_btn")                          # POST
+    check("POST opens the list",  A.phase, "incomplete_post")
+    check("the list names it", "Manual color reading" in pool["modal_msg"].text, True)
+    check("in the tall dialog",
+          (pool["modal_panel"].rect, pool["modal_msg"].size, pool["modal_msg"].align),
+          (_layout.MODAL_TALL_PANEL, 13, "left"))
+    check("Continue and Return",
+          (pool["modal_yes"].label, pool["modal_no"].label), ("Continue", "Return"))
+    check("Return, the safe choice, is green",
+          (pool["modal_yes"].color, pool["modal_no"].color),
+          (_color("btn_gray"), _color("start_green")))
+    press(pool, "modal_no")                         # Return
+    check("Return: back, nothing posted",
+          (A.phase, "post" in arb.calls), ("analysis", False))
+    press(pool, "run_btn"); press(pool, "modal_yes")
+    check("Continue posts anyway", (A.phase, arb.calls[-1]), ("analysis", "post"))
+    press(pool, "main_btn")                         # NEXT
+    check("NEXT opens the list too", A.phase, "incomplete_next")
+    press(pool, "modal_no")
+    check("Return keeps the run",    A.phase, "analysis")
+    A.record["manual_read"] = "10"
+    check("nothing else is missing", incomplete_items(arb, A), [])
+    _calls = len(arb.calls)
+    press(pool, "run_btn")
+    check("complete: POST goes straight through",
+          (A.phase, arb.calls[_calls:]), ("analysis", ["post"]))
+    A.record["manual_read"] = ""
+    press(pool, "main_btn"); press(pool, "modal_yes")   # NEXT -> list -> Continue
+    check("NEXT, Continue: the run ends, a new one starts",
+          (arb.calls[-1], A.phase, A.modal_return, A.record["samp_no"] != "ZZ1001"),
+          ("next_sample", "entry", None, True))
+
     print("== cancel offers 3 choices; Delete row deletes ==")
     B = Slot("B"); arb.slots = [B]
     arb.goto(B, "entry"); press(pool, "main_btn")  # Begin -> claims, stays on entry
@@ -2250,6 +2423,12 @@ if __name__ == "__main__":
     press(pool, "vent_ok")                          # OK -> preimage
     press(pool, "main_btn")                         # CANCEL -> cancel modal
     check("cancel modal",      B.phase, "cancel")
+    check("a short dialog again after a tall one",
+          (pool["modal_panel"].rect, pool["modal_msg"].size, pool["modal_msg"].align),
+          (_layout.MODAL_PANEL, 16, "center"))
+    check("and its first button green again",
+          (pool["modal_yes"].color, pool["modal_no"].color, pool["modal_third"].color),
+          (_color("start_green"), _color("btn_gray"), _color("btn_gray")))
     check("cancel msg: slot + samp_no",
           pool["modal_msg"].text, f"Cancel test B  {B.record['samp_no']}?")
     check("3rd button shown",  pool["modal_third"].visible, True)

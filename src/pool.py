@@ -745,14 +745,21 @@ class Pool:
         return [w for w in self._widgets.values()
                 if w.visible and w.enabled and w.focusable]
 
-    def layout_modal_buttons(self, count: int) -> List[str]:
+    def layout_modal_buttons(self, count: int, tall: bool = False) -> List[str]:
         """
-        Position the modal action buttons for a 1/2/3-choice dialog and return
-        their widget names in order.  One shared set of button widgets is
-        repositioned per dialog (centred / two-across / three-across), so
+        Position the modal panel, message and action buttons for a
+        1/2/3-choice dialog and return the button widget names in order.  One
+        shared set of widgets is repositioned per dialog (centred / two-across
+        / three-across, or the tall two-button panel for a list), so
         ModalPhase never mentions pixels.
         """
-        if count <= 1:
+        self["modal_panel"].rect = (layout.MODAL_TALL_PANEL if tall
+                                    else layout.MODAL_PANEL)
+        self["modal_msg"].rect = layout.MODAL_TALL_MSG if tall else layout.MODAL_MSG
+        if tall:
+            names, rects = ["modal_yes", "modal_no"], [layout.MODAL_TALL_YES,
+                                                       layout.MODAL_TALL_NO]
+        elif count <= 1:
             names, rects = ["modal_yes"], [layout.MODAL_ONE]
         elif count == 2:
             names, rects = ["modal_yes", "modal_no"], [layout.MODAL_YES, layout.MODAL_NO]
