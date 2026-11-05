@@ -45,6 +45,16 @@ sqlite3 src/colorimeter.sqlite \
   - Unlike the other choices, it isn't carried over from the last run. A
     series of standards changes it every run, and a carried value would label
     the sample with the wrong concentration.
+- A short beep when an image set is stored and another set is still to
+  come, on both the pre-image and the measurement capture, so the operator
+  knows to reposition the cassette. The last set doesn't beep; the run moves
+  on by itself.
+
+### Removed
+
+- The RESET button on the reagent screens, and its "Reset the timer?"
+  dialog. No use for it had come up. A START pressed by mistake is now
+  undone only by CANCEL.
 
 ### Changed
 
@@ -123,8 +133,26 @@ sqlite3 src/colorimeter.sqlite \
 - The step chips: running is cyan instead of amber, done is gray, and each
   chip's text color is chosen to be readable on its tint. The startup
   screen's warnings keep their amber.
-- The capture screen's prompt reads "Load Cassette Holder" instead of
-  "Insert strip & press Capture".
+- The reagent screens' instruction line follows the reaction, and every
+  line is marked as the thing to do while it shows:
+  - reagent 1 ready: "Start stir - Add R1 - Press Start";
+  - reagent 1 running: "Stop stir at beep. Ready R2 and Baro", then after
+    the stir beep "Ready cassette in holder, R2, and Baro" (with no stir
+    time configured: "Keep stirring. Ready R2 and Baro");
+  - reagent 2 ready: "Add R2, Seal cassette, Start";
+  - reagent 2 running: "VENTILATE · verify Baro, enter finals".
+
+  The lines are 14 pt so the longest fits. The wording that names Baro is
+  marked `# BARO-UDP`, like the other development barometer hooks.
+- The reagent button reads "R1 Start" / "R2 Start" (marked as the thing to
+  do), and "R1 Running" / "R2 Running", grayed out, while the countdown runs.
+- The read screen's instruction is on the same line as the other run
+  screens (y 125), and "Manually read color:" with its box moves down a row.
+  The prompt reads "Load cassette in meter" ("Load Cassette Holder"
+  before), "Reposition cassette" between sets, and "Imaging set n of N" over
+  "DO NOT TOUCH" while a set is taken. The manual-reading box is marked
+  while it is empty.
+- The instruction line's text is centered, so it stays clear of the frame.
 - When it counts sets, the pre-image button uses three lines
   ("Pre / image / 1 of 2") in a smaller font, so the count fits.
 

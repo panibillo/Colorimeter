@@ -1097,6 +1097,18 @@ class Arbiter:
         if callable(fn):
             fn(duration=2.0)
 
+    def _set_done_beep(self, slot: Slot) -> None:
+        """
+        One short beep when an image set is stored and another is still to
+        come: the cassette has to be repositioned before the next set, and
+        the operator may have looked away during the imaging.  Not after the
+        last set, whose end moves the run on by itself.
+        """
+        log.info("Arbiter: image set stored for slot %s, next set due", slot.name)
+        fn = getattr(self._beeper, "beep", None) if self._beeper else None
+        if callable(fn):
+            fn()
+
     # ── Phase contract: database / sample lifecycle ────────────────────────────
 
     def defaults(self):
@@ -4158,18 +4170,6 @@ class Arbiter:
         slot.clear_run()
         self.goto(slot, "entry")
 
-    def reset_timer(self, slot: Slot) -> None:
-        # Reset re-arms the reagent step, so its recorded start is no longer valid.
-        ap = slot.active_phase
-        if ap in ("reagent1", "reagent2"):
-            self.persist(slot, **{f"{ap}_start": None})
-        slot.timer = None
-        slot.running = False
-        slot.stir_deadline = None
-        slot.stir_role = None
-        slot.stir_fired = False
-        self.close_modal(slot)
-
     def retry_capture(self, slot: Slot) -> None:
         # Return to the read phase; the operator presses CAPTURE again.
         self.close_modal(slot)
@@ -4325,6 +4325,7 @@ class Arbiter:
             if k < reps:
                 owner.progress = f"Pre-image {k} of {reps} stored"
                 self.render(owner)
+                self._set_done_beep(owner)
                 return
             owner.progress = "Pre-image stored"
             self.goto(owner, "reagent1")
@@ -4340,6 +4341,7 @@ class Arbiter:
             # phase asks for the cassette to be replaced and offers the next.
             owner.progress = f"Set {k} of {reps} stored"
             self.render(owner)
+            self._set_done_beep(owner)
             if (self._focused is not None and self._focused is not owner
                     and self._focused.phase == "read"):
                 self.render(self._focused)
@@ -4640,11 +4642,12 @@ class Arbiter:
         prefetch is live.
 
         The prefetch check matters even though a parked prefetch's slot is
-        (by definition) within _camera_wanted()'s own reagent2 threshold: an
-        operator can RESET the reagent2 timer while a prefetch is in flight
-        or parked, which clears slot.timer without changing active_phase —
-        _reagent2_within() then reads False for that slot, so this guard is
-        what actually keeps the camera from being pulled out from under it.
+        (by definition) within _camera_wanted()'s own reagent2 threshold: if
+        the reagent2 timer is cleared while a prefetch is in flight or parked
+        without active_phase changing (the old RESET button did this; it was
+        removed on 2026-11-04, but the guard costs nothing),
+        _reagent2_within() reads False for that slot, and this guard is what
+        keeps the camera from being pulled out from under it.
         """
         if self._camera is None and self._leds is None:
             return
@@ -6501,6 +6504,12 @@ def _selftest() -> None:
     config.capture_dir = lambda: _capdir
     _cm.update_archive_sample = lambda p, rowid: _refreshed.append(str(p)) or True
     _rep2 = _capdir / f"ZP9001rep2{config.get('capture', 'extension')}"
+    # A fake beeper, so the beep after each set but the last can be counted.
+    _beeps = []
+    class _FakeBeeper:
+        def beep(self, duration=None):
+            _beeps.append("pre" if A.phase == "preimage" else "cap")
+    _real_beeper, arb._beeper = arb._beeper, _FakeBeeper()
     A.record.update(db_rowid=None, samp_no="ZP9001", image_reps=2,
                     h5file="", capture_start=None, capture_end=None)
     A.pre_rep = A.cap_rep = 0; A.rep_files = {}
@@ -6553,6 +6562,7 @@ def _selftest() -> None:
     for _ in range(5):
         arb.pump_capture()
     check("last set moves on",   A.phase, "reagent1")
+    check("no beep after the last pre-image set", _beeps, ["pre"])
     check("both sets remembered", A.rep_files, {1: Path("fake.h5"), 2: _rep2})
     check("h5file still set 1",  A.record["h5file"], "fake.h5")
 
@@ -6575,8 +6585,9 @@ def _selftest() -> None:
     check("stays on read",       A.phase, "read")
     check("no capture_end yet",  A.record["capture_end"], None)
     check("button offers set 2", arb._pool["run_btn"].label, "Capture\n2 of 2")
-    check("asks for a swap",     arb._pool["color_lbl"].text,
-          "Remove & replace cassette")
+    check("asks for a swap",     arb._pool["instr1"].text,
+          "Reposition cassette")
+    check("beeped once per set but the last", _beeps, ["pre", "cap"])
     check("no archive refreshed yet", _refreshed, [])
     A.record["capture_start"] = 123                 # marks set 1's stamp
     cap_m2 = _FakeCapture(); cap_m2.out_path = _rep2
@@ -6587,6 +6598,8 @@ def _selftest() -> None:
     for _ in range(5):
         arb.pump_capture()
     check("capture_end after the last", bool(A.record["capture_end"]), True)
+    check("no beep after the last capture set", _beeps, ["pre", "cap"])
+    arb._beeper = _real_beeper
     check("h5file is set 1's",   A.record["h5file"], "fake.h5")
     check("every set's archive refreshed",
           sorted(_refreshed), sorted(["fake.h5", str(_rep2)]))

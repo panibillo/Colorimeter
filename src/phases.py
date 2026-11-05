@@ -60,7 +60,6 @@ Arbiter contract (what phases call; arbiter.py implements it)
     arb.equipment_list()->list      the test-variant Equip choices (labels)
     arb.latest_treatment()          the newest treatments row as a dict, or None
     arb.save_treatment(slot)        write the slot's treatments row
-    arb.reset_timer(slot)           clear the countdown, back to armed
     arb.retry_capture(slot)         re-attempt a capture after 'no sample'
     arb.start_analysis(slot)        begin analysis of the captured images
     arb.post_results(slot)          upload the result
@@ -99,12 +98,17 @@ _TIMER_LBL_SIZE_ANALYSIS = 22   # analysis "Final"     — base
 _RUN_BTN_SIZE       = 24   # as built in pool.build — one short word
 _RUN_BTN_SIZE_2LINE = 18   # "Pre-image\nA", "Capture\nA", "ANALYZE"
 _RUN_BTN_SIZE_3LINE = 15   # "Pre\nimage\n1 of 2"
+_RUN_BTN_SIZE_REAGENT = 16 # "R1\nStart" / "R1\nRunning" ("Running" is 66 px)
 
 # Instruction-line font size (instr1 as built in pool.build).  Named so
 # _line() can restore it: the widgets are shared between phases, so a size set
 # for one state would otherwise persist into every later one.
 _INSTR_SIZE = 16
 _INSTR_SIZE_2LINE = 12   # two lines in a 28 px box (14 px a line at 12 pt)
+# The reagent screens' lines run to 38 characters ("Ready cassette in holder,
+# R2, and Baro" is 312 px at 16 pt, 273 px at 14), so every line of those
+# screens is drawn at 14 pt and the size does not jump between states.
+_INSTR_SIZE_REAGENT = 14
 
 # The reagent weight grid, one tuple per row: (row label, packet cell, initial
 # box, final box, over cell, target cell).  Indexed by reagent number - 1.
@@ -1103,7 +1107,9 @@ class ReagentPhase(Phase):
     A timed reagent step with weight entry and stir sub-alarm.
 
     Two states, not four: armed (waiting for START) and running (counting
-    down).  The weight grid below is the same in both — it is what used to
+    down).  There is no RESET (removed 2026-11-04: no use for it had come
+    up); while the countdown runs the button reads "R1 Running", disabled,
+    and a START pressed by mistake is undone only by CANCEL.  The weight grid below is the same in both — it is what used to
     supply the extra states, by relabelling one column Initial or Final
     depending on the timers.  All that is left to vary here is the instruction
     line, the timer binding, and whether START is offered.
@@ -1117,14 +1123,16 @@ class ReagentPhase(Phase):
     Full-duration expiry still advances to `next` regardless of weight state.
     """
 
+    # instr1 once the packet is good and START is offered (Bill, 2026-11-04).
+    ready_line = "Start stir - Add R1 - Press Start"
+
     def __init__(self, phase_id: str, secs: int, next_phase: str, prior: str,
-                 armed: str, start_label: str = "START"):
+                 armed: str):
         self.phase_id    = phase_id
         self.secs        = secs
         self.next        = next_phase
         self.prior       = prior
-        self.armed       = armed        # instr1 while waiting for START
-        self.start_label = start_label  # armed START button text (may be multi-line)
+        self.armed       = armed        # instr1 while the packet is not yet good
 
     def duration(self, slot, arb) -> int:
         """
@@ -1147,17 +1155,19 @@ class ReagentPhase(Phase):
 
     def _running_line(self, slot, arb) -> str:
         """
-        The instruction shown while the countdown runs.
+        The instruction shown while the countdown runs: get the next step
+        ready.  It changes when the stir sub-alarm beeps, since stirring is
+        then over and the cassette can be readied.  A stir time of 0 means
+        stir throughout, with no beep.  Overridden by Reagent2Phase.
 
-        Built from the configured stir duration rather than stated as a
-        constant, so an operator who edits the stir seconds in Menu is told the
-        duration actually being timed.  Overridden by Reagent2Phase, whose step
-        also has to be ventilated.
+        "Baro" is the development barometer logger (see baro_signal.py);
+        these lines lose that word when it goes.
         """
+        if self.stir_secs(slot, arb) <= 0:
+            return "Keep stirring. Ready R2 and Baro"        # BARO-UDP
         if slot.stir_fired:
-            return "Stop stirring, VENTILATE"
-        stir = self.stir_secs(slot, arb)
-        return f"Stir {_mmss(stir)}, then rest" if stir > 0 else "Stir continuously"
+            return "Ready cassette in holder, R2, and Baro"  # BARO-UDP
+        return "Stop stir at beep. Ready R2 and Baro"        # BARO-UDP
 
     def enter(self, pool, slot, arb) -> None:
         is_live = slot.active_phase == self.phase_id
@@ -1166,14 +1176,15 @@ class ReagentPhase(Phase):
 
         pool["timer_lbl"].size = _TIMER_LBL_SIZE_REAGENT
 
+        # Every line on these screens waits on the operator, the running ones
+        # included (they say what to get ready), so all are pending while live.
         if is_live and slot.running:
             pool["timer"].bind(slot.timer, interactive=True)
             pool.put("timer")
-            pool.put("run_btn", "RESET", on=lambda: arb.open_modal(slot, "reset"))
-            pool["run_btn"].size = _RUN_BTN_SIZE
-            # Plain, not pending: the stirring is under way, and the countdown
-            # is what the operator watches now.
-            _line(pool, "instr1", self._running_line(slot, arb))
+            pool.put("run_btn", f"R{n}\nRunning", enabled=False)
+            pool["run_btn"].size = _RUN_BTN_SIZE_REAGENT
+            _line(pool, "instr1", self._running_line(slot, arb),
+                  pending=True, size=_INSTR_SIZE_REAGENT)
         else:
             pool.put("timer_lbl", "Remaining")
             # START is gated on the packet holding enough to reach target, so
@@ -1185,17 +1196,19 @@ class ReagentPhase(Phase):
                 preview.pause(arb.now())
                 pool["timer"].bind(preview, interactive=False)
                 pool.put("timer")
-                pool.put("run_btn", self.start_label,
+                pool.put("run_btn", f"R{n}\nStart",
                          on=lambda: self.start(arb, slot), enabled=is_live)
-                pool["run_btn"].size = _RUN_BTN_SIZE
+                pool["run_btn"].size = _RUN_BTN_SIZE_REAGENT
                 pool["run_btn"].visible = is_live
-                _line(pool, "instr1", f"Add {w.target:.3f} g of Reagent {n}",
-                      pending=is_live)
+                pool.mark("run_btn", pending=is_live)
+                _line(pool, "instr1", self.ready_line, pending=is_live,
+                      size=_INSTR_SIZE_REAGENT)
             else:
                 pool.put("timer")           # shown but unbound — an empty clock
                 pool.put("run_btn", "")
                 pool["run_btn"].visible = False
-                _line(pool, "instr1", self.armed, pending=is_live)
+                _line(pool, "instr1", self.armed, pending=is_live,
+                      size=_INSTR_SIZE_REAGENT)
 
         self._show_weights(pool, slot, arb)
         self._show_steps(pool, slot)
@@ -1257,16 +1270,15 @@ class Reagent2Phase(ReagentPhase):
         """Stir sub-alarm duration for reagent 2 (temperature-compensated)."""
         return arb.reagent2_stir_plan(slot)
 
+    ready_line = "Add R2, Seal cassette, Start"
+
     def _running_line(self, slot, arb) -> str:
         """
-        Reagent 2 evolves arsine, so every line of this step carries the
-        ventilation warning as well as the stir instruction.
+        Reagent 2 evolves arsine, so the line leads with the ventilation
+        warning, stir beep or not (Bill, 2026-11-04).  The finals are owed
+        from this step's start, so it asks for them too.
         """
-        if slot.stir_fired:
-            return "Stop stirring, VENTILATE"
-        stir = self.stir_secs(slot, arb)
-        return (f"Stir {_mmss(stir)} and VENTILATE!" if stir > 0
-                else "Stir continuously and VENTILATE")
+        return "VENTILATE · verify Baro, enter finals"  # BARO-UDP
 
     # BARO-UDP begin: tool-dev hooks, see src/baro_signal.py
     def start(self, arb, slot) -> None:
@@ -1297,8 +1309,8 @@ class ReadPhase(Phase):
     colour-reading row, and ANALYZE lights only once both finals are entered.
 
     A test-variant run may take several image sets (image_reps).  Between sets
-    the run stays here, the cassette is removed and replaced, and CAPTURE
-    reads "Capture k of n".  capture_end is stamped only after the last set,
+    the run stays here, the cassette is repositioned, and CAPTURE reads
+    "Capture k of n".  capture_end is stamped only after the last set,
     so the weights gate above waits for it without a flag of its own.
     """
 
@@ -1355,9 +1367,9 @@ class ReadPhase(Phase):
             pool["timer"].bind(preview, interactive=False)
         pool.put("timer")
         if awaiting:
-            # The colour-reading row (manual_lbl / color_fld / color_lbl) stays
-            # hidden: its rects lie under the grid, and the reading was taken
-            # when CAPTURE was pressed.
+            # The colour-reading row (manual_lbl / color_fld) stays hidden:
+            # its rects lie under the grid, and the reading was taken when
+            # CAPTURE was pressed.
             ready = arb.reagent_finals_complete(slot)
             pool.put("run_btn", "ANALYZE", enabled=is_live and ready)
             # Cleared rather than left unset: Pool.put ignores on=None, so the
@@ -1376,17 +1388,25 @@ class ReadPhase(Phase):
             return
         # manual_lbl ("Manually read color:") is a fixed prompt beside the
         # entry field — its text never changes, so a bare show() suffices.
+        # It sits a row below the instruction line (y158; the line is at
+        # y125, where it is on every other run screen).  The reading is owed
+        # until it is typed: POST and NEXT list it as incomplete otherwise.
         pool.show("manual_lbl")
-        pool.put("color_fld", slot.record.get("manual_read", ""))
+        manual = slot.record.get("manual_read", "")
+        pool.put("color_fld", manual)
+        pool.mark("color_fld", pending=is_live and not _filled(manual))
+        reps = arb.image_reps(slot)
         if is_live and slot.capturing:
             pool.put("run_btn", "RUNNING", enabled=False)
             pool["run_btn"].size = _RUN_BTN_SIZE_2LINE
-            pool.put("color_lbl", "Imaging - DO NOT TOUCH")
+            # Plain, as on the pre-image screen: hands off until it is stored.
+            _line(pool, "instr1",
+                  f"Imaging set {slot.cap_rep + 1} of {reps}\nDO NOT TOUCH",
+                  size=_INSTR_SIZE_2LINE)
         else:
             # Reflect what a press will actually do — the Menu -> Advanced ->
             # Capture screen's Path selection governs this capture too, so a
             # stale "CAPTURE" label can no longer hide a full calibration sweep.
-            reps = arb.image_reps(slot)
             between = is_live and 0 < slot.cap_rep < reps
             if arb.cap_mode == "calibration":
                 label = "Calibrate\nExposures"
@@ -1399,9 +1419,8 @@ class ReadPhase(Phase):
                      on=lambda: self.capture(arb, slot, pool), enabled=ready)
             pool["run_btn"].size = _RUN_BTN_SIZE_2LINE
             pool.mark("run_btn", pending=ready)
-            pool.put("color_lbl", "Remove & replace cassette" if between
-                     else "Load Cassette Holder")
-            pool.mark("color_lbl", pending=is_live)
+            _line(pool, "instr1", "Reposition cassette" if between
+                  else "Load cassette in meter", pending=is_live)
         self._show_steps(pool, slot)
         self._show_collect(pool, slot)
         # A capture in flight does NOT lock nav either: it is arbiter-owned and
@@ -1672,12 +1691,10 @@ def build_phases(reagent1_secs: int = 120, preimage: bool = True,
         vent,
         ReagentPhase("reagent1", reagent1_secs, "reagent2",
                      prior="preimage" if preimage else before,
-                     armed="Weigh the reagent 1 packet",
-                     start_label="START\n1"),
+                     armed="Weigh the reagent 1 packet"),
         # secs=0 is never read: Reagent2Phase.duration() overrides it outright.
         Reagent2Phase("reagent2", 0, "read", prior="reagent1",
-                      armed="Weigh the reagent 2 packet",
-                      start_label="START\n2"),
+                      armed="Weigh the reagent 2 packet"),
         ReadPhase(),
         AnalysisPhase(),
         # Cancel offers three outcomes: stop the run but keep the reserved DB row
@@ -1695,9 +1712,6 @@ def build_phases(reagent1_secs: int = 120, preimage: bool = True,
         ModalPhase("incomplete_next", _incomplete_message,
                    [("Continue", _next_anyway), ("Return", None)], tall=True,
                    green=1),
-        ModalPhase("reset", "Reset the timer?",
-                   [("Reset", lambda arb, slot: arb.reset_timer(slot)),
-                    ("No",    None)]),
         ModalPhase("nosample", "INSERT SAMPLE AND CONTINUE",
                    [("CAPTURE", lambda arb, slot: arb.retry_capture(slot)),
                     ("RETURN",  None)]),
@@ -1999,15 +2013,6 @@ if __name__ == "__main__":
                 self.claimed = [n for n in self.claimed
                                 if n != slot.record.get("samp_no")]
             slot.clear_run(); self.goto(slot, "entry")
-        def reset_timer(self, slot):
-            ap = slot.active_phase
-            if ap in ("reagent1", "reagent2"):
-                self.persist(slot, **{f"{ap}_start": None})
-            slot.timer = None
-            slot.running = False
-            slot.stir_deadline = None
-            slot.stir_role = None
-            slot.stir_fired = False
             self.close_modal(slot)
         def retry_capture(self, slot):
             self.close_modal(slot)
@@ -2232,8 +2237,10 @@ if __name__ == "__main__":
     A.record["reagent1_initial_wt"] = "1.850"
     arb.render(A)
     check("run_btn shown after weight", pool["run_btn"].visible, True)
-    check("run_btn label",    pool["run_btn"].label, "START\n1")
-    check("instr1",           pool["instr1"].text.startswith("Add"), True)
+    check("run_btn label",    pool["run_btn"].label, "R1\nStart")
+    check("Start is pending", _st("run_btn"), "pending")
+    check("instr1",           pool["instr1"].text, "Start stir - Add R1 - Press Start")
+    check("instr1 pending",   _st("instr1"), "pending")
 
     print("== weight grid: the four Over bands and the two nagging colours ==")
     from palette import color as _color
@@ -2368,22 +2375,24 @@ if __name__ == "__main__":
     check("with it, reagent1 <- preimage",
           arb.phases["reagent1"].prior, "preimage")
 
-    print("== reagent1 START stamps reagent1_start ==")
+    print("== reagent1 START stamps reagent1_start; no RESET ==")
     press(pool, "run_btn")
     check("running",              A.running, True)
-    check("run_btn is RESET",     pool["run_btn"].label, "RESET")
+    check("button says running",  pool["run_btn"].label, "R1\nRunning")
+    check("and is disabled",      _st("run_btn"), "disabled")
+    check("no reset modal left",  "reset" in arb.phases, False)
     check("reagent1_start stamped", A.record["reagent1_start"], arb.epoch_s)
-
-    print("== reset modal (2 buttons) nulls the start ==")
-    press(pool, "run_btn")                         # RESET -> reset modal
-    check("phase is modal",    A.phase, "reset")
-    check("modal msg",         pool["modal_msg"].text, "Reset the timer?")
-    check("no 3rd button",     pool["modal_third"].visible, False)
-    press(pool, "modal_no")                        # No -> back to running reagent1
-    check("back to reagent1",  A.phase, "reagent1")
-    press(pool, "run_btn"); press(pool, "modal_yes")   # RESET -> confirmed
-    check("timer cleared",     A.timer, None)
-    check("reagent1_start nulled", A.record["reagent1_start"], None)
+    check("stir line before the beep", pool["instr1"].text,
+          "Stop stir at beep. Ready R2 and Baro")
+    check("running line pending", _st("instr1"), "pending")
+    A.stir_fired = True; arb.render(A)
+    check("after the stir beep",  pool["instr1"].text,
+          "Ready cassette in holder, R2, and Baro")
+    A.stir_fired = False
+    # Put the run back to armed for the expiry test below, as CANCEL would
+    # leave nothing to test with.
+    A.running = False; A.timer = None; A.record["reagent1_start"] = None
+    arb.render(A)
 
     print("== run to expiry -> reagent2 (stamps reagent1_end) ==")
     press(pool, "run_btn")                         # START reagent1
@@ -2426,9 +2435,19 @@ if __name__ == "__main__":
           pool["wt2_over_lbl"].text.startswith("+"), True)
     check("START offered", pool["run_btn"].visible, True)
 
+    check("R2 Start label", pool["run_btn"].label, "R2\nStart")
+    check("R2 ready line",  pool["instr1"].text, "Add R2, Seal cassette, Start")
+
     print("== reagent2 -> read (capture) ==")
     A.record["samp_degC"] = 21.5; arb.render(A)
     press(pool, "run_btn")                         # START reagent2
+    check("R2 running",     pool["run_btn"].label, "R2\nRunning")
+    check("ventilate line", pool["instr1"].text,
+          "VENTILATE · verify Baro, enter finals")
+    A.stir_fired = True; arb.render(A)
+    check("same line after the stir beep", pool["instr1"].text,
+          "VENTILATE · verify Baro, enter finals")
+    A.stir_fired = False
     arb.clock += 919                               # past the computed deadline
     arb.poll()
     check("advanced to read",  A.phase, "read")
@@ -2761,23 +2780,30 @@ if __name__ == "__main__":
     check("seen later: done",    (pool["instr_r"].text, _st("instr_r")),
           ("Pre-image done", "normal"))
     arb.resume(R)
-    check("RUN not pending again", _st("run_btn"), "normal")
+    # The packets were weighed during the pre-image, so R1 Start is next.
+    check("R1 Start is next",    (pool["run_btn"].label, _st("run_btn")),
+          ("R1\nStart", "pending"))
     check("each set its own file", R.rep_files, {1: "fake.h5", 2: "fakerep2.h5"})
     check("h5file still set 1",  R.record["h5file"], "fake.h5")
 
     print("== image reps: each set is measured, the reading ends after the last ==")
     arb.goto(R, "read")
     check("button counts sets",  pool["run_btn"].label, "Capture\n1 of 2")
-    check("first set: load",     pool["color_lbl"].text, "Load Cassette Holder")
+    check("first set: load",     pool["instr1"].text, "Load cassette in meter")
+    check("manual reading owed", _st("color_fld"), "pending")
+    check("reading below the line",
+          pool["manual_lbl"].rect.y > pool["instr1"].rect.bottom, True)
     press(pool, "run_btn")
+    check("imaging line",        pool["instr1"].text, "Imaging set 1 of 2\nDO NOT TOUCH")
+    check("imaging is plain",    _st("instr1"), "normal")
     _start = R.record["capture_start"]
     check("set 1 starts the clock", _start, arb.epoch_s)
     arb.complete_capture(R)
     check("stays on read",       R.phase, "read")
     check("no capture_end yet",  R.record["capture_end"], None)
     check("button offers set 2", pool["run_btn"].label, "Capture\n2 of 2")
-    check("asks for a swap",     pool["color_lbl"].text, "Remove & replace cassette")
-    check("swap is pending",     _st("color_lbl"), "pending")
+    check("asks for a swap",     pool["instr1"].text, "Reposition cassette")
+    check("swap is pending",     _st("instr1"), "pending")
     check("capture is pending",  _st("run_btn"), "pending")
     check("manual read row kept", pool["color_fld"].visible, True)
     arb.epoch_s += 60
@@ -2797,6 +2823,8 @@ if __name__ == "__main__":
     check("pre-image names the slot", pool["run_btn"].label, "Pre-image\nS")
     arb.goto(S, "read")
     check("capture names the slot",   pool["run_btn"].label, "Capture\nS")
-    check("reading prompt pending",   _st("color_lbl"), "pending")
+    check("reading prompt pending",   _st("instr1"), "pending")
+    S.record["manual_read"] = "12"; arb.render(S)
+    check("reading typed: box plain", _st("color_fld"), "normal")
 
     print("\n== all phase self-tests passed ==")

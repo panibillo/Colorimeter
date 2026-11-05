@@ -51,7 +51,7 @@ DIV3        = Rect(  0, 172, 320,  1)
 # ── body: timer cluster  y 55..117 ─────────────────────────────────────────────
 TIMER_LBL   = Rect(  8,  55,  68, 67)   # Remaining / Elapsed / Final
 TIMER       = Rect( 90,  55, 140, 42)   # compound: ‖ | MM:SS | ›
-RUN_BTN     = Rect(240,  55,  72, 67)   # START / RESET / CAPTURE / POST
+RUN_BTN     = Rect(240,  55,  72, 67)   # Start / Running / Capture / ANALYZE
 
 # ── body: reagent weight grid  y 154..214 ──────────────────────────────────────
 # Two fixed rows — reagent 1 above, reagent 2 below — of five cells each, under
@@ -120,16 +120,13 @@ COLLECT_LINE = Rect(  8, 188, 224, 22)
 COLOR_LBL   = Rect(  8,  95, 110, 35);  COLOR_FLD  = Rect(120,  93, 130, 39)
 RESULT_LBL  = Rect(  8, 135,  68, 35);  RESULT_FLD = Rect( 82, 133, 230, 39)
 
-# ── body: read-strip prompt (ReadPhase) ────────────────────────────────────────
-# Two stacked rows, same y128..186 footprint as before — bounded above by
-# CHIP_C's bottom (y122) and below by COLLECT_LINE's top (y188), so neither
-# overlaps:
-#   row 1 (y128..156): "Manually read color:" prompt + the reading entry,
-#                       side by side;
-#   row 2 (y158..186): the full-width capture instruction line.
-MANUAL_LBL  = Rect(  8, 128, 176, 28)   # "Manually read color:" prompt
-READ_FLD    = Rect(190, 128, 122, 28)   # manual colour reading entry
-READ_LBL    = Rect(  8, 158, 304, 28)   # capture instruction (single line)
+# ── body: read-strip prompt (ReadPhase)  y158..186 ────────────────────────────
+# One row: the "Manually read color:" prompt and the reading entry side by side,
+# below the instruction line (INSTR1, y125..153), which sits where it does on
+# every other run screen.  Bounded below by COLLECT_LINE's top (y188).  The two
+# swapped places on 2026-11-04; the old separate capture line (READ_LBL) went.
+MANUAL_LBL  = Rect(  8, 158, 176, 28)   # "Manually read color:" prompt
+READ_FLD    = Rect(190, 158, 122, 28)   # manual colour reading entry
 
 # ── body: test-variant screen (VariantPhase) ───────────────────────────────────
 # Rows 1-2 reuse the generic label/field rows (Equip and Reps, whose values are
