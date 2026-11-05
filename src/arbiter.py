@@ -1028,7 +1028,9 @@ class Arbiter:
             n: 1 for reagent 1, 2 for reagent 2.
 
         Returns:
-            A ReagentWeights(initial, final, net, target, overage, tol).
+            A ReagentWeights(initial, final, net, target, overage, tol,
+            packet).  `packet` is target plus the empty packet's weight: what
+            a correctly filled packet reads on the balance.
         """
         prefix = f"reagent{n}_"
         empty_wt = (config.reagent1_empty_packet_wt() if n == 1
@@ -1051,9 +1053,11 @@ class Arbiter:
         target = (None if sample_wt is None else sample_wt / 100.0 * ratio
                   * _factor_value(slot.record.get(f"R{n}_wt_factor")))
         overage = None if (net is None or target is None) else net - target
+        packet = None if target is None else target + empty_wt
 
         return ReagentWeights(initial=initial, final=final, net=net,
-                              target=target, overage=overage, tol=tol)
+                              target=target, overage=overage, tol=tol,
+                              packet=packet)
 
     def reagent_time_factor(self, slot: Slot, n: int) -> float:
         """

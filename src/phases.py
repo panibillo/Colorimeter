@@ -36,7 +36,8 @@ Arbiter contract (what phases call; arbiter.py implements it)
     arb.reagent2_plan(slot)         (secs, temp_c, measured) for this slot's
                                     reagent-2 countdown — see Reagent2Phase
     arb.reagent_weigh_plan(slot, n) ReagentWeights(initial, final, net, target,
-                                    overage, tol) for the weight grid's row n
+                                    overage, tol, packet) for the weight
+                                    grid's row n
     arb.reagent_finals_complete(slot) -> bool  both final weighings entered
     arb.image_reps(slot)            image sets taken at each imaging step (1..5)
     arb.reagent_time_factor(slot, n) multiplier on reagent `n`'s countdown
@@ -103,14 +104,18 @@ _RUN_BTN_SIZE_3LINE = 15   # "Pre\nimage\n1 of 2"
 # _line() can restore it: the widgets are shared between phases, so a size set
 # for one state would otherwise persist into every later one.
 _INSTR_SIZE = 16
+_INSTR_SIZE_2LINE = 12   # two lines in a 28 px box (14 px a line at 12 pt)
 
-# The reagent weight grid, one tuple per row: (row label, initial box, final
-# box, over cell, target cell).  Indexed by reagent number - 1.
+# The reagent weight grid, one tuple per row: (row label, packet cell, initial
+# box, final box, over cell, target cell).  Indexed by reagent number - 1.
 _WT_ROWS = (
-    ("wt1_row_lbl", "wt1_init_fld", "wt1_final_fld", "wt1_over_lbl", "wt1_targ_lbl"),
-    ("wt2_row_lbl", "wt2_init_fld", "wt2_final_fld", "wt2_over_lbl", "wt2_targ_lbl"),
+    ("wt1_row_lbl", "wt1_pack_lbl", "wt1_init_fld", "wt1_final_fld",
+     "wt1_over_lbl", "wt1_targ_lbl"),
+    ("wt2_row_lbl", "wt2_pack_lbl", "wt2_init_fld", "wt2_final_fld",
+     "wt2_over_lbl", "wt2_targ_lbl"),
 )
-_WT_HEADINGS = ("wt_hdr_init", "wt_hdr_final", "wt_hdr_over", "wt_hdr_targ")
+_WT_HEADINGS = ("wt_hdr_pack", "wt_hdr_init", "wt_hdr_final", "wt_hdr_over",
+                "wt_hdr_targ")
 
 # What the grid needs to know about one reagent's weights, as returned by
 # arb.reagent_weigh_plan().  Defined here rather than in the arbiter because
@@ -119,8 +124,10 @@ _WT_HEADINGS = ("wt_hdr_init", "wt_hdr_final", "wt_hdr_over", "wt_hdr_targ")
 # A named tuple rather than four positional values because `net` deliberately
 # means two things (packet contents before the pour, amount poured after it),
 # and a caller reading `w.net` cannot mistake it for a field it is not.
+# `packet` is target + the empty packet's own weight: the gross weight a
+# correctly filled packet shows on the balance (the grid's Packet column).
 ReagentWeights = collections.namedtuple(
-    "ReagentWeights", "initial final net target overage tol")
+    "ReagentWeights", "initial final net target overage tol packet")
 
 # The three progress chips shown in the reagent/capture phases:
 # (widget name, the step's phase id, chip text).
@@ -219,9 +226,9 @@ class Phase:
 
     def _show_weights(self, pool, slot, arb) -> None:
         """
-        The reagent weight grid: two fixed rows, four cells each.
+        The reagent weight grid: two fixed rows, five cells each.
 
-        Position never carries meaning here — row 1 is reagent 1 and column 2
+        Position never carries meaning here — row 1 is reagent 1 and column 3
         is the final weighing on every screen and in every run state.  Only the
         values and the colours change, which is what the grid replaced: the old
         single column relabelled itself Initial/Final as timers started, so the
@@ -230,19 +237,27 @@ class Phase:
         Both entry boxes stay editable throughout, so a packet can be re-weighed
         or a typo corrected at any point.
 
+        Packet is what a correctly filled packet reads on the balance (target
+        plus the empty packet), two decimals, so the operator has a number to
+        weigh to.  It is blank until the sample weight gives a target.
+
         Look, per cell.  Initial and Final are styled text boxes: the phase
         marks them and the style table supplies the colours (see pool.py,
-        "Where a widget's colours come from").
+        "Where a widget's colours come from").  A box is "done" when it reads
+        as a number and, for Initial, the packet is not short of target past
+        tolerance.  A box that is not done is pending only while it is owed
+        (Bill, 2026-11-04):
 
-            Initial   valid = False  when it does not read as a number, or the
-                                     packet is short of target past tolerance
-                      pending        while it is owed (R1 always, R2 once
-                                     reagent 1 has started) and not yet valid
-            Final     valid = False  when it does not read as a number
-                      pending        while it is owed (from reagent 2's start)
-                                     and not yet valid
+            R1 Initial   before reagent 1 starts, and again from reagent 2's
+                         start (while reagent 1 counts down, only R2 Initial
+                         may ask for attention)
+            R2 Initial   once R1 Initial is done, or reagent 1 has started
+            Finals       from reagent 2's start
 
-        Over and Target are plain labels, recoloured here on every call:
+            valid = False  when the box does not read as a number, or (Initial
+                           only) the packet is short past tolerance
+
+        Packet, Over and Target are plain labels, recoloured here on every call:
 
             Over      short past tol           -> black on red
                       under target within tol  -> red on white
@@ -254,35 +269,40 @@ class Phase:
         case would strand an old tint on a cell that has gone back to normal.
         (The boxes' marks need no such care — they reset on every render.)
         """
+        r1_started = bool(slot.record.get("reagent1_start"))
         # Both final weighings come due when reagent 2 starts: that is the last
         # moment the operator is not yet busy with the strip, and it leaves the
         # whole reagent-2 countdown to get them entered.
-        finals_due = bool(slot.record.get("reagent2_start"))
-        # Reagent 1's packet is owed from the start.  Reagent 2's comes due
-        # when reagent 1's countdown starts: before that the operator's
-        # attention belongs on reagent 1, and the countdown is the time to
-        # weigh the next packet.
-        initial_due = {1: True, 2: bool(slot.record.get("reagent1_start"))}
+        r2_started = bool(slot.record.get("reagent2_start"))
         pool.show(*_WT_HEADINGS)
 
+        plans = {n: arb.reagent_weigh_plan(slot, n) for n in (1, 2)}
+        init_done = {n: _initial_done(plans[n]) for n in (1, 2)}
+        initial_due = {1: not r1_started or r2_started,
+                       2: init_done[1] or r1_started}
+
         for n in (1, 2):
-            row_lbl, init_fld, final_fld, over_lbl, targ_lbl = _WT_ROWS[n - 1]
-            w = arb.reagent_weigh_plan(slot, n)
+            row_lbl, pack_lbl, init_fld, final_fld, over_lbl, targ_lbl = \
+                _WT_ROWS[n - 1]
+            w = plans[n]
             short = w.overage is not None and w.overage < -w.tol
 
             pool.put(row_lbl, f"R{n}")
+
+            pool.put(pack_lbl, "" if w.packet is None else f"{w.packet:4.2f}")
+            pool.recolor(pack_lbl, fg="black", bg="white")
 
             init_text = _text(slot.record.get(f"reagent{n}_initial_wt", ""))
             init_ok = not (init_text.strip() and w.initial is None) and not short
             pool.put(init_fld, init_text)
             pool.mark(init_fld, valid=init_ok,
-                      pending=initial_due[n] and not (w.initial is not None and init_ok))
+                      pending=initial_due[n] and not init_done[n])
 
             final_text = _text(slot.record.get(f"reagent{n}_final_wt", ""))
             final_ok = not (final_text.strip() and w.final is None)
             pool.put(final_fld, final_text)
             pool.mark(final_fld, valid=final_ok,
-                      pending=finals_due and not (w.final is not None and final_ok))
+                      pending=r2_started and not (w.final is not None and final_ok))
 
             if w.overage is None:
                 over_fg, over_bg = "black", "white"
@@ -436,6 +456,17 @@ def _to_float(s):
         return float(s) if s else None
     except (TypeError, ValueError):
         return None
+
+
+def _initial_done(w) -> bool:
+    """
+    A reagent's initial weighing is entered and good: it reads as a number
+    and the packet is not short of target past tolerance.  `w` is
+    that reagent's arb.reagent_weigh_plan().  Shared by the weight grid's marks and the
+    pre-image screen's "Weigh R1"/"Weigh R2" box, so the two always agree.
+    """
+    short = w.overage is not None and w.overage < -w.tol
+    return w.initial is not None and not short
 
 
 class EntryPhase(Phase):
@@ -981,7 +1012,7 @@ class PreImagePhase(Phase):
 
     A test-variant run may ask for more than one image set (image_reps).  Each
     set after the first goes in its own "{samp_no}rep{k}.h5", and between sets
-    the run stays here and asks for the cassette to be removed and replaced;
+    the run stays here and asks for the cassette to be repositioned;
     only the last set moves the run on to reagent 1.
     """
 
@@ -1000,12 +1031,17 @@ class PreImagePhase(Phase):
             pool.put("view_sample_btn", "View\nSample",
                      on=lambda: arb.open_image_view(
                          slot=slot, focus_role=_roi.ROLE_SAMPLE))
+        reps = arb.image_reps(slot)
         if is_live and slot.capturing:
             pool.put("run_btn", "RUNNING", enabled=False)
             pool["run_btn"].size = _RUN_BTN_SIZE_2LINE
-            _line(pool, "instr1", "Imaging - DO NOT TOUCH")
+            # Plain: nothing for the operator to do until the set is stored,
+            # except keep hands off the meter.  Two lines at 12 pt fill the
+            # box's 28 px exactly.
+            _line(pool, "instr_r",
+                  f"Imaging set {slot.pre_rep + 1} of {reps}\nDO NOT TOUCH",
+                  size=_INSTR_SIZE_2LINE)
         else:
-            reps = arb.image_reps(slot)
             between = is_live and 0 < slot.pre_rep < reps
             # Three lines when counting sets: "Pre-image" and "1 of 2" do not
             # fit side by side, and the hyphen goes where the word breaks.
@@ -1020,11 +1056,28 @@ class PreImagePhase(Phase):
             pool["run_btn"].size = size
             pool.mark("run_btn", pending=ready)
             # Both are things to do before the button is pressed, so both stay
-            # pending until the capture starts and the line changes.
-            _line(pool, "instr1",
-                  "Remove & replace cassette" if between
-                  else "Insert new strip, weigh reagent 1",
+            # pending until the capture starts and the line changes.  Seen
+            # from a later step, the imaging is simply done.
+            if not is_live and slot.pre_rep >= reps:
+                _line(pool, "instr_r", "Pre-image done")
+            else:
+                _line(pool, "instr_r",
+                      "Reposition cassette" if between
+                      else "Load cassette in meter",
+                      pending=is_live)
+
+        # Left half: the reagent packets, one at a time — reagent 1 until its
+        # initial weight is entered and good, then reagent 2, then nothing.
+        # Weighing goes on while the imaging runs, so this half is pending
+        # even during a capture.  The weight to aim for is in the grid's
+        # Packet column, not here (Bill, 2026-11-04).
+        r1 = _initial_done(arb.reagent_weigh_plan(slot, 1))
+        r2 = _initial_done(arb.reagent_weigh_plan(slot, 2))
+        if not (r1 and r2):
+            _line(pool, "instr_l", "Weigh R2" if r1 else "Weigh R1",
                   pending=is_live)
+        else:
+            _line(pool, "instr_l", "")
 
         # The grid is on screen from here to the end of the run: reagent 1 is
         # weighed during this step, and reagent 2's row shows what is still owed.
@@ -1765,9 +1818,11 @@ if __name__ == "__main__":
             target = (None if sample_wt is None else sample_wt / 100.0 * ratio
                       * _factor_value(slot.record.get(f"R{n}_wt_factor")))
             overage = None if (net is None or target is None) else net - target
+            packet = None if target is None else target + empty_wt
 
             return ReagentWeights(initial=initial, final=final, net=net,
-                                   target=target, overage=overage, tol=tol)
+                                   target=target, overage=overage, tol=tol,
+                                   packet=packet)
 
         def reagent_time_factor(self, slot, n):
             return _factor_value(slot.record.get(f"R{n}_time_factor"))
@@ -2145,14 +2200,21 @@ if __name__ == "__main__":
     press(pool, "vent_ok")
     check("phase preimage",   A.phase, "preimage")
     check("run_btn label",    pool["run_btn"].label, "Pre-image\nA")
-    check("instr1",           pool["instr1"].text,
-          "Insert new strip, weigh reagent 1")
+    check("one line split in two", (pool["instr1"].visible,
+          pool["instr_l"].visible, pool["instr_r"].visible), (False, True, True))
+    check("left: weigh R1",   pool["instr_l"].text, "Weigh R1")
+    check("right: load",      pool["instr_r"].text, "Load cassette in meter")
+    check("both pending",     (_st("instr_l"), _st("instr_r")),
+          ("pending", "pending"))
     check("main is CANCEL",   pool["main_btn"].label, "CANCEL")
 
     print("== preimage runs, stamps h5file, and advances to reagent1 ==")
     press(pool, "run_btn")
     check("capturing",        A.capturing, True)
     check("run_btn is RUNNING", pool["run_btn"].label, "RUNNING")
+    check("right: imaging",   pool["instr_r"].text, "Imaging set 1 of 1\nDO NOT TOUCH")
+    check("imaging is plain", _st("instr_r"), "normal")
+    check("weighing still asked", _st("instr_l"), "pending")
     check("no View Sample while imaging",
           pool["view_sample_btn"].visible, False)
     check("no capture_start",  A.record["capture_start"], None)
@@ -2225,16 +2287,48 @@ if __name__ == "__main__":
     check("after pouring: Over reads the amount added", _over.text, "+0.000")
     check("after pouring: blue on white", _over.bg, _color("white"))
 
-    print("== weight grid: R2 Initial nags only once reagent 1 has started ==")
-    _W.record["reagent2_initial_wt"] = ""
-    _W.record["reagent1_start"] = None
+    print("== weight grid: Packet shows the gross weight to aim for ==")
+    # Target 2.900 + the 0.530 g empty packet; reagent 2: 1.300 + 0.540.
+    check("R1 Packet",          pool["wt1_pack_lbl"].text, "3.43")
+    check("R2 Packet",          pool["wt2_pack_lbl"].text, "1.84")
+    check("Packet heading",     pool["wt_hdr_pack"].visible, True)
+    _W.record["samp_grams"] = ""
     arb.render(_W)
-    check("before reagent 1, R2 Initial is plain",
-          _st("wt2_init_fld"), "normal")
-    _W.record["reagent1_start"] = arb.epoch()
+    check("no sample weight: Packet blank", pool["wt1_pack_lbl"].text, "")
+    _W.record["samp_grams"] = "100.0"
+
+    print("== weight grid: which Initial asks for attention (Bill, 2026-11-04) ==")
+    # (R1 Initial, R2 Initial, reagent 1 started, reagent 2 started)
+    #   -> (R1 Initial look, R2 Initial look)
+    _cases = [
+        ("",      "",      False, False, ("pending", "normal")),
+        ("3.450", "",      False, False, ("normal",  "pending")),
+        ("",      "1.900", False, False, ("pending", "normal")),
+        ("3.450", "1.900", False, False, ("normal",  "normal")),
+        # While reagent 1 counts down, only R2 Initial may ask.
+        ("",      "",      True,  False, ("normal",  "pending")),
+        ("3.450", "1.900", True,  False, ("normal",  "normal")),
+        # From reagent 2's start, attention may go back to anything missing.
+        ("",      "",      True,  True,  ("pending", "pending")),
+        ("3.450", "1.900", True,  True,  ("normal",  "normal")),
+    ]
+    _W.record["reagent1_final_wt"] = ""
+    _W.record["reagent2_final_wt"] = ""
+    for r1, r2, s1, s2, want in _cases:
+        _W.record.update(reagent1_initial_wt=r1, reagent2_initial_wt=r2,
+                         reagent1_start=arb.epoch() if s1 else None,
+                         reagent2_start=arb.epoch() if s2 else None)
+        arb.render(_W)
+        check(f"R1={r1 or '-'} R2={r2 or '-'} started={int(s1)}{int(s2)}",
+              (_st("wt1_init_fld"), _st("wt2_init_fld")), want)
+    # A short R2 packet is not done, so it stays owed and shows red.
+    _W.record.update(reagent1_initial_wt="3.450", reagent2_initial_wt="1.000",
+                     reagent1_start=None, reagent2_start=None)
     arb.render(_W)
-    check("once reagent 1 starts, R2 Initial nags",
-          _st("wt2_init_fld"), "pending")
+    check("short R2 packet: invalid and owed", _st("wt2_init_fld"),
+          "invalid_pending")
+    _W.record.update(reagent1_initial_wt="3.600", reagent2_initial_wt="",
+                     reagent1_start=arb.epoch())
 
     print("== weight grid: Final boxes nag only once reagent 2 has started ==")
     _W.record["reagent1_final_wt"] = ""
@@ -2637,22 +2731,36 @@ if __name__ == "__main__":
     R.record.update(samp_no="ZP2000", image_reps=2)
     arb.goto(R, "preimage")
     check("button counts sets",  pool["run_btn"].label, "Pre\nimage\n1 of 2")
-    check("first set: insert",   pool["instr1"].text, "Insert new strip, weigh reagent 1")
+    check("first set: load",     pool["instr_r"].text, "Load cassette in meter")
     check("capture is pending",  _st("run_btn"), "pending")
-    check("insert is pending",   _st("instr1"), "pending")
+    check("load is pending",     _st("instr_r"), "pending")
+    R.record["samp_grams"] = "100"
+    R.record["reagent1_initial_wt"] = "3.450"
+    arb.render(R)
+    check("R1 done: weigh R2",   pool["instr_l"].text, "Weigh R2")
+    R.record["reagent2_initial_wt"] = "1.900"
+    arb.render(R)
+    check("both done: left blank", (pool["instr_l"].text, _st("instr_l")),
+          ("", "normal"))
     press(pool, "run_btn")
     check("set 1 running",       R.capturing, True)
     arb.complete_preimage(R)
     check("stays on preimage",   R.phase, "preimage")
     check("set 1 is the h5file", R.record["h5file"], "fake.h5")
     check("button offers set 2", pool["run_btn"].label, "Pre\nimage\n2 of 2")
-    check("asks for a swap",     pool["instr1"].text, "Remove & replace cassette")
-    check("swap is pending",     _st("instr1"), "pending")
+    check("asks for a swap",     pool["instr_r"].text, "Reposition cassette")
+    check("swap is pending",     _st("instr_r"), "pending")
     press(pool, "run_btn")
     check("running: disabled",   _st("run_btn"), "disabled")
-    check("DO NOT TOUCH is plain", _st("instr1"), "normal")
+    check("set 2 imaging",       pool["instr_r"].text, "Imaging set 2 of 2\nDO NOT TOUCH")
+    check("two lines, smaller",  pool["instr_r"].size, _INSTR_SIZE_2LINE)
+    check("imaging is plain",    _st("instr_r"), "normal")
     arb.complete_preimage(R)
     check("last set moves on",   R.phase, "reagent1")
+    arb.view(R, "preimage")
+    check("seen later: done",    (pool["instr_r"].text, _st("instr_r")),
+          ("Pre-image done", "normal"))
+    arb.resume(R)
     check("RUN not pending again", _st("run_btn"), "normal")
     check("each set its own file", R.rep_files, {1: "fake.h5", 2: "fakerep2.h5"})
     check("h5file still set 1",  R.record["h5file"], "fake.h5")

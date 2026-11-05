@@ -86,7 +86,7 @@ _ROLES: Dict[str, tuple] = {
                  "wt1_init_fld", "wt1_final_fld", "wt2_init_fld", "wt2_final_fld",
                  "var_r1_wt_fld", "var_r1_time_fld", "var_r2_wt_fld",
                  "var_r2_time_fld", "var_conc_fld"),
-    "msgbox":   ("instr1", "color_lbl"),
+    "msgbox":   ("instr1", "instr_l", "instr_r", "color_lbl"),
 }
 
 
@@ -174,23 +174,26 @@ class Pool:
         button("run_btn", L.RUN_BTN, "btn_text", "start_green", 24)
 
         # ── body: reagent weight grid ──────────────────────────────────────────
-        # Two rows x four cells under a heading strip.  Initial and Final are
-        # TextBoxes and stay editable in every state; Over and Target are
-        # calculated, and are Labels rather than read-only fields because
+        # Two rows x five cells under a heading strip.  Initial and Final are
+        # TextBoxes and stay editable in every state; Packet, Over and Target
+        # are calculated, and are Labels rather than read-only fields because
         # Label always repaints — TextBox.draw caches on
         # (value, focused, editing, enabled), which does not include the
         # colours these cells change by, and would need an invalidate() on
         # every recolour.  Phase._show_weights sets the text and the colours.
+        label("wt_hdr_pack",  L.WT_HDR_PACK,  "black", "white", 10, text="Packet")
         label("wt_hdr_init",  L.WT_HDR_INIT,  "black", "white", 10, text="Initial")
         label("wt_hdr_final", L.WT_HDR_FINAL, "black", "white", 10, text="Final")
         label("wt_hdr_over",  L.WT_HDR_OVER,  "black", "white", 10, text="Over")
         label("wt_hdr_targ",  L.WT_HDR_TARG,  "black", "white", 10, text="Target")
         label("wt1_row_lbl",  L.WT1_ROW_LBL,  "black", "white", 12, text="R1")
+        label("wt1_pack_lbl",  L.WT1_PACK,  "black", "white", 14)
         field("wt1_init_fld",  L.WT1_INIT,  14, "field_blue", align="center")
         field("wt1_final_fld", L.WT1_FINAL, 14, "field_blue", align="center")
         label("wt1_over_lbl",  L.WT1_OVER,  "black", "white", 14)
         label("wt1_targ_lbl",  L.WT1_TARG,  "black", "white", 14)
         label("wt2_row_lbl",  L.WT2_ROW_LBL,  "black", "white", 12, text="R2")
+        label("wt2_pack_lbl",  L.WT2_PACK,  "black", "white", 14)
         field("wt2_init_fld",  L.WT2_INIT,  14, "field_blue", align="center")
         field("wt2_final_fld", L.WT2_FINAL, 14, "field_blue", align="center")
         label("wt2_over_lbl",  L.WT2_OVER,  "black", "white", 14)
@@ -200,6 +203,10 @@ class Pool:
         # here; the reagent screens spent two of them formatting weights into
         # prose, which the grid below now shows as numbers.
         label("instr1", L.INSTR1, "black", "white", 16, align="left")
+        # The pre-image screen's two halves of the line: reagent packets on
+        # the left, imaging on the right (PreImagePhase).
+        label("instr_l", L.INSTR_L, "black", "white", 16, align="center")
+        label("instr_r", L.INSTR_R, "black", "white", 16, align="center")
         label("collect_line", L.COLLECT_LINE, "black", "white", 13, align="left")
 
         # ── body: step-status chips (reagent 1 / 2 / Capture) ──────────────────
@@ -827,10 +834,11 @@ if __name__ == "__main__":
     pool.set("wt1_targ_lbl", "2.900")
     pool.show("title", "main_btn", "slot_btn", "timer_lbl", "timer", "run_btn",
               "instr1", "chip_a", "chip_b", "chip_c",
-              "wt_hdr_init", "wt_hdr_final", "wt_hdr_over", "wt_hdr_targ",
-              "wt1_row_lbl", "wt1_init_fld", "wt1_final_fld",
+              "wt_hdr_pack", "wt_hdr_init", "wt_hdr_final", "wt_hdr_over",
+              "wt_hdr_targ",
+              "wt1_row_lbl", "wt1_pack_lbl", "wt1_init_fld", "wt1_final_fld",
               "wt1_over_lbl", "wt1_targ_lbl",
-              "wt2_row_lbl", "wt2_init_fld", "wt2_final_fld",
+              "wt2_row_lbl", "wt2_pack_lbl", "wt2_init_fld", "wt2_final_fld",
               "wt2_over_lbl", "wt2_targ_lbl",
               "prior_btn", "clock", "next_btn")
     pool.render(disp)
@@ -949,17 +957,17 @@ if __name__ == "__main__":
     print(f"  4 rows y{_rows[0].y}..{_rows[-1].bottom}, "
           f"footer y{_footer[0].y}..{_footer[-1].bottom}, no overlaps")
 
-    print("\n== reagent weight grid: two rows of four cells, clear of the footer ==")
+    print("\n== reagent weight grid: two rows of five cells, clear of the footer ==")
     # The grid is the bottom band of the reagent screens, so the two things
     # that can go wrong are a cell escaping its row and row 2 running into the
     # footer.  Cells are touch targets that open an entry field, so their width
     # is checked too.
-    _hdr = [pool[n].rect for n in ("wt_hdr_init", "wt_hdr_final",
+    _hdr = [pool[n].rect for n in ("wt_hdr_pack", "wt_hdr_init", "wt_hdr_final",
                                    "wt_hdr_over", "wt_hdr_targ")]
     _wt_rows = []
     for i in (1, 2):
         cells = [pool[f"wt{i}_{n}"].rect
-                 for n in ("row_lbl", "init_fld", "final_fld",
+                 for n in ("row_lbl", "pack_lbl", "init_fld", "final_fld",
                            "over_lbl", "targ_lbl")]
         for a, b in zip(cells, cells[1:]):
             assert a.right <= b.x, f"wt row {i}: {a} overlaps {b}"
@@ -974,8 +982,17 @@ if __name__ == "__main__":
         "wt row 2 runs into the footer"
     assert pool["instr1"].rect.bottom <= _hdr[0].y, \
         "instr1 runs into the weight grid"
-    for c in _wt_rows[0][1:]:
-        assert c.w >= 60, f"wt cell is only {c.w} px wide"
+    # Packet (cell 1) is a narrow calculated cell; the four after it need
+    # room for "+0.020" at 14 pt (about 52 px) and are touch targets.
+    for c in _wt_rows[0][2:]:
+        assert c.w >= 56, f"wt cell is only {c.w} px wide"
+    # The pre-image screen's two message boxes sit side by side in instr1's
+    # band, so they must not overlap each other or the grid headings.
+    _il, _ir = pool["instr_l"].rect, pool["instr_r"].rect
+    assert _il.right <= _ir.x, "instr_l overlaps instr_r"
+    assert _il.y == _ir.y == pool["instr1"].rect.y, "instr_l/r are off instr1's band"
+    assert max(_il.bottom, _ir.bottom) <= _hdr[0].y, "instr_l/r run into the grid"
+    assert _ir.right <= layout.SCREEN_W, "instr_r runs off screen"
     # Each heading sits over the column it names.
     for h, c in zip(_hdr, _wt_rows[0][1:]):
         assert h.x == c.x and h.w == c.w, f"heading {h} is not over {c}"

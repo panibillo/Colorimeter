@@ -54,31 +54,39 @@ TIMER       = Rect( 90,  55, 140, 42)   # compound: ‖ | MM:SS | ›
 RUN_BTN     = Rect(240,  55,  72, 67)   # START / RESET / CAPTURE / POST
 
 # ── body: reagent weight grid  y 154..214 ──────────────────────────────────────
-# Two fixed rows — reagent 1 above, reagent 2 below — of four cells each, under
+# Two fixed rows — reagent 1 above, reagent 2 below — of five cells each, under
 # a thin column-heading strip.  Positional and unchanging: a cell means the same
 # thing on every screen that shows the grid and in every run state, which is the
 # whole point of the grid replacing the old flip-flopping Initial/Final column.
 #
-#        Initial   Final    Over   Target
-#     R1 [ 3.762 ][ 1.201 ][+0.020][1.450]
-#     R2 [       ][       ][      ][0.650]
+#        Packet  Initial   Final    Over   Target
+#     R1 [ 3.43][ 3.762][ 1.201][+0.020][ 2.900]
+#     R2 [ 1.84][      ][      ][      ][ 1.300]
+#
+# Packet is what a full packet should weigh on the balance (target plus the
+# empty packet), so it is narrower: "3.43" needs about 30 px at 14 pt.  The
+# other four share what is left.  "+0.020" is the widest text, about 52 px.
+# Columns: row label 22, Packet 46, four of 58, 2 px gaps — x 6..316.
 #
 # Shown on the pre-image and both reagent phases, and on the read phase only
 # while a finished capture waits for the final packet weights.
-WT_HDR_INIT  = Rect( 30, 154,  70, 12)
-WT_HDR_FINAL = Rect(102, 154,  70, 12)
-WT_HDR_OVER  = Rect(174, 154,  70, 12)
-WT_HDR_TARG  = Rect(246, 154,  70, 12)
+WT_HDR_PACK  = Rect( 30, 154,  46, 12)
+WT_HDR_INIT  = Rect( 78, 154,  58, 12)
+WT_HDR_FINAL = Rect(138, 154,  58, 12)
+WT_HDR_OVER  = Rect(198, 154,  58, 12)
+WT_HDR_TARG  = Rect(258, 154,  58, 12)
 WT1_ROW_LBL  = Rect(  6, 167,  22, 23)   # "R1"
-WT1_INIT     = Rect( 30, 167,  70, 23)   # wt1_init_fld   (editable)
-WT1_FINAL    = Rect(102, 167,  70, 23)   # wt1_final_fld  (editable)
-WT1_OVER     = Rect(174, 167,  70, 23)   # wt1_over_lbl   (calculated)
-WT1_TARG     = Rect(246, 167,  70, 23)   # wt1_targ_lbl   (calculated)
+WT1_PACK     = Rect( 30, 167,  46, 23)   # wt1_pack_lbl   (calculated)
+WT1_INIT     = Rect( 78, 167,  58, 23)   # wt1_init_fld   (editable)
+WT1_FINAL    = Rect(138, 167,  58, 23)   # wt1_final_fld  (editable)
+WT1_OVER     = Rect(198, 167,  58, 23)   # wt1_over_lbl   (calculated)
+WT1_TARG     = Rect(258, 167,  58, 23)   # wt1_targ_lbl   (calculated)
 WT2_ROW_LBL  = Rect(  6, 191,  22, 23)   # row 2: same x/w as row 1, y + 24
-WT2_INIT     = Rect( 30, 191,  70, 23)
-WT2_FINAL    = Rect(102, 191,  70, 23)
-WT2_OVER     = Rect(174, 191,  70, 23)
-WT2_TARG     = Rect(246, 191,  70, 23)
+WT2_PACK     = Rect( 30, 191,  46, 23)
+WT2_INIT     = Rect( 78, 191,  58, 23)
+WT2_FINAL    = Rect(138, 191,  58, 23)
+WT2_OVER     = Rect(198, 191,  58, 23)
+WT2_TARG     = Rect(258, 191,  58, 23)
 
 # ── body: step-status chips  y 95..229 ─────────────────────────────────────────
 # A "chip" is a small pill/badge widget (the UI sense of the word) — here three
@@ -94,6 +102,12 @@ CHIP_C      = Rect( 182, 100,  48, 22)   # Capture
 # lines formatted weights into prose.  The grid at y154 shows those as numbers
 # and takes the space, leaving room for this one line above it.
 INSTR1      = Rect(  8, 125, 304, 28)
+# The pre-image screen splits the line in two, because two things are owed at
+# once there: the reagent packets (left) and the imaging (right).  The left box
+# only ever says "Weigh R1" or "Weigh R2", so it is narrow; the right one has
+# to hold "Load cassette in meter", about 184 px at 16 pt.
+INSTR_L     = Rect(  8, 125,  96, 28)
+INSTR_R     = Rect(108, 125, 204, 28)
 
 # ── body: persistent collect stamp  y 188..210 ─────────────────────────────────
 # Shown on the read/analysis phases (below the instructions, above the footer)

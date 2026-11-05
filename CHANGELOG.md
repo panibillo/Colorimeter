@@ -65,13 +65,28 @@ sqlite3 src/colorimeter.sqlite \
     variant: every factor valid).
   - Resume, whenever it shows.
   - The pre-image and capture buttons, while a press would start one.
-  - A reagent weight that is owed. Reagent 1's initial is owed from the start.
-    Reagent 2's initial is now owed only from the start of reagent 1's
-    countdown (it used to be flagged from the start too). The finals are owed
-    from the start of reagent 2, as before.
-  - Instructions that wait on the operator: insert or swap the strip, weigh or
-    add a reagent, weigh both packets. Stirring lines and "Imaging - DO NOT
-    TOUCH" stay plain.
+  - A reagent weight that is owed:
+    - reagent 1's initial, until reagent 1 starts, and again from reagent 2's
+      start if it is missing;
+    - reagent 2's initial, once reagent 1's initial is in and good, or once
+      reagent 1 has started;
+    - the finals, from the start of reagent 2, as before.
+
+    While reagent 1 counts down, reagent 2's initial is the only weight that
+    can be marked.
+  - Instructions that wait on the operator: load or reposition the cassette,
+    weigh or add a reagent, weigh both packets. Stirring lines and the
+    imaging line stay plain.
+- The pre-image screen's instruction line is split in two.
+  - The left box is for the reagent packets: "Weigh R1" until reagent 1's
+    initial weight is in and good, then "Weigh R2", then blank.
+  - The right box is for the imaging: "Load cassette in meter", "Imaging set
+    n of N" over "DO NOT TOUCH" while a set is taken, and "Reposition cassette" between sets.
+    Seen from a later step, it reads "Pre-image done".
+- The weight grid has a new Packet column, left of Initial. It shows what a
+  correctly filled packet should weigh on the balance (target plus the empty
+  packet), to two decimals. The other columns are a little narrower to make
+  room.
 - The entry screens and the test-variant screen show one thing to do at a
   time, in screen order. A row's label button and its box are marked
   together, since pressing the label loads the default.
