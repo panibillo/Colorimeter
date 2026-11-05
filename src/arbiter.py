@@ -5960,23 +5960,35 @@ class Arbiter:
             if begin.enabled != want:
                 begin.enabled = want
                 begin.draw(self._disp)
-        # Likewise a factor box decides whether Continue is available.
-        if slot.phase == "variant" and slot.active_phase == "variant":
+        # Likewise Entry 2's temperature and weight, and the test-variant
+        # factors, decide whether Continue is available.  Only on the live
+        # screen: a preview's main button is Resume.
+        if (slot.phase in ("entry2", "variant")
+                and slot.active_phase == slot.phase
+                and slot.record.get("db_rowid") is not None):
             cont = self._pool["main_btn"]
-            want = self._phases["variant"].ready(slot)
+            want = self._phases[slot.phase].ready(slot)
             if cont.enabled != want:
                 cont.enabled = want
                 cont.draw(self._disp)
 
     def _field_commit(self, textbox) -> None:
         """
-        A box just stopped being edited.  The weight grid and the test-variant
-        factors both colour cells by what was typed, so each repaints here.
+        A box just stopped being edited.  The weight grid, the entry screens
+        and the test-variant factors all mark boxes by what was typed (which
+        one is pending, which are invalid), so each repaints here.  On the
+        entry screens that is what moves the pending mark on to the next row.
         """
         if str(textbox.name) in WT_FIELD_KEYS:
             self._weight_field_commit(textbox)
-        elif (str(textbox.name) in VariantPhase.FIELDS
+        elif (any(str(textbox.name) in f for f in
+                  (EntryPhase.FIELDS, Entry2Phase.FIELDS, VariantPhase.FIELDS))
+              and str(textbox.name) != "id_fld"
               and self._focused is not None):
+            # Not the ID box: rendering the unclaimed entry screen with an
+            # empty ID runs autofill(), which would put a new number straight
+            # back into a box the operator has just cleared.  Begin's enabling
+            # already follows each keystroke (_writethrough).
             self.render(self._focused)
 
     def _weight_field_commit(self, textbox) -> None:
@@ -6435,6 +6447,32 @@ def _selftest() -> None:
     arb.on_key("enter")
     A.record.update(_saved_wt)
     A.running, A.timer = _saved_run
+
+    print("== entry 2 by keyboard: one pending item at a time, Continue gated ==")
+    # Typing writes through without a redraw; Enter commits the box and
+    # redraws, which is what moves the pending mark on to the next row.  The
+    # Continue gate follows each keystroke.
+    _saved_e2 = (A.phase, A.active_phase,
+                 {k: A.record.get(k) for k in ("samp_degC", "samp_grams")})
+    A.phase = A.active_phase = "entry2"
+    A.record.update(samp_degC="", samp_grams="")
+    arb.focus(A)
+    _temp, _wt = arb._pool["temp_fld"], arb._pool["weight_fld"]
+    check("temperature is the pending item",
+          (widgets.style_state(_temp), widgets.style_state(_wt),
+           arb._pool["main_btn"].enabled), ("pending", "normal", False))
+    _touch_type(_temp, "21.5"); arb.on_key("enter")
+    check("Enter moves the mark to weight",
+          (widgets.style_state(_temp), widgets.style_state(_wt)),
+          ("normal", "pending"))
+    _touch_type(_wt, "10")
+    check("Continue lights as the weight is typed",
+          arb._pool["main_btn"].enabled, True)
+    arb.on_key("enter")
+    check("then Continue is the pending item",
+          widgets.style_state(arb._pool["main_btn"]), "pending")
+    A.phase, A.active_phase, _vals = _saved_e2
+    A.record.update(_vals)
 
     print("== the measurement adds to the pre-image's archive ==")
     cfg = arb._measurement_config(A)

@@ -317,6 +317,37 @@ class Phase:
         pool.on(lbl_name, on if enabled else None)
         pool.put(fld_name, value, enabled=enabled)
 
+    def _mark_next(self, pool, rows, live: bool) -> bool:
+        """
+        Mark what to do next on an entry screen: one item at a time.
+
+        Each row is (row-label button, box, ok, valid):
+          ok    — the row holds what the run needs from it;
+          valid — False when the box holds a bad entry (shown pink, or red
+                  when it is the pending one).
+
+        The first row in screen order that is not ok is the one pending item:
+        its label button (one press loads the default) and its box are both
+        marked.  Later rows that are not ok wait their turn unmarked, except
+        that a bad entry is always shown invalid.  Nothing is marked on a
+        preview (`live` False): the pending item there is Resume.
+
+        The pre-image screen and the steps after it do not use this; they may
+        show several pending items at once (Bill, 2026-11-04).
+
+        Returns:
+            True when every row is ok — the caller then marks Begin or
+            Continue pending.
+        """
+        pending_done = False
+        for lbl, box, ok, valid in rows:
+            pool.mark(box, valid=valid)
+            if live and not ok and not pending_done:
+                pool.mark(lbl, pending=True)
+                pool.mark(box, pending=True)
+                pending_done = True
+        return not pending_done and all(ok for _, _, ok, _ in rows)
+
     def _chrome(self, pool, slot, arb, main_label: str, main_on,
                 main_enabled: bool = True, lock_nav: bool = False,
                 title: str = None, main_pending: bool = False) -> None:
@@ -380,6 +411,20 @@ def _text(v) -> str:
     return "" if v is None else str(v)
 
 
+def _filled(v) -> bool:
+    """A stored text field holds something other than blanks."""
+    return bool(str(v or "").strip())
+
+
+def _number_row(v) -> tuple:
+    """
+    (ok, valid) for a box that must hold a number: ok when it reads as one,
+    valid unless it holds something that does not (empty is not yet invalid).
+    """
+    ok = _to_float(v) is not None
+    return ok, ok or not _filled(v)
+
+
 def _to_float(s):
     """Parse a numeric entry field to float, or None if blank/invalid."""
     try:
@@ -422,28 +467,28 @@ class EntryPhase(Phase):
         self._row(pool, "test_lot_lbl", "Test lot", "test_lot_fld", r["test_lot"],
                   on=lambda: self.fill_test_lot(arb, slot), enabled=claimed)
         pool.show("div1", "div2", "div3")
+        live = slot.active_phase == self.phase_id
+        # One pending item at a time: the ID until it holds a number, then
+        # Begin; after Begin, the first empty identity row, then Continue.
         if claimed:
+            done = self._mark_next(pool, [
+                ("user_lbl",     "user_fld",     _filled(r.get("user")),     True),
+                ("test_lbl",     "test_fld",     _filled(r.get("test_kit")), True),
+                ("test_lot_lbl", "test_lot_fld", _filled(r.get("test_lot")), True),
+            ], live)
+            # An empty identity row is pointed at but never holds the run
+            # back: Begin fills these from the defaults, and an operator may
+            # have a reason to leave one blank.
             self._chrome(pool, slot, arb, "Continue",
                          main_on=lambda: self.proceed(arb, slot),
-                         title=r["samp_no"],
-                         main_pending=self.complete(slot))
+                         title=r["samp_no"], main_pending=done)
         else:
+            done = self._mark_next(pool, [
+                ("id_lbl", "id_fld", slot.ready_to_begin(), True),
+            ], live)
             self._chrome(pool, slot, arb, "Begin",
                          main_on=lambda: self.begin(arb, slot),
-                         main_enabled=slot.ready_to_begin())
-
-    def complete(self, slot) -> bool:
-        """
-        The screen is filled in: a claimed number and every identity field.
-
-        Only colours Continue — it never holds the run back, because Begin
-        fills these from the defaults and an operator may have a reason to
-        leave one blank.
-        """
-        r = slot.record
-        return (r.get("db_rowid") is not None and
-                all(str(r.get(k) or "").strip()
-                    for k in ("user", "test_kit", "test_lot")))
+                         main_enabled=slot.ready_to_begin(), main_pending=done)
 
     # ── defaults + label-button fills ───────────────────────────────────────────
     # Each row label is a Button: pressing it loads that field's default value.
@@ -558,19 +603,29 @@ class Entry2Phase(Phase):
                   "remark_fld", r.get("remark") or "",
                   on=lambda: self.fill_remark(arb, slot), enabled=claimed)
         pool.show("div1", "div2", "div3")
+        live = claimed and slot.active_phase == self.phase_id
+        # One pending item at a time: temperature, then weight, then Continue.
+        # Collect is stamped on Continue if left empty and Remark is optional,
+        # so neither is ever pending.
+        done = self._mark_next(pool, [
+            ("temp_lbl",   "temp_fld",   *_number_row(r.get("samp_degC"))),
+            ("weight_lbl", "weight_fld", *_number_row(r.get("samp_grams"))),
+        ], live)
         self._chrome(pool, slot, arb, "Continue",
                      main_on=lambda: self.proceed(arb, slot),
-                     main_pending=claimed and self.complete(slot))
+                     main_enabled=not claimed or self.ready(slot),
+                     main_pending=done)
 
-    def complete(self, slot) -> bool:
+    def ready(self, slot) -> bool:
         """
-        The screen holds what the run needs from it: a temperature and a
-        sample weight that both read as numbers.
+        The screen holds what the run needs from it, so Continue is allowed: a
+        temperature and a sample weight that both read as numbers.
 
-        The reagent targets scale from the weight and the reagent-2 countdown
-        from the temperature.  Collect is stamped on Continue if left empty,
-        and Remark is optional, so neither counts.  Like the entry screen,
-        this only colours Continue; it does not hold the run back.
+        The reagent targets scale from the weight, and reagent 2's countdown
+        from the temperature.  Without a weight there is no target, so reagent
+        1's START could never appear (the 2026-11-03 bug, route C).  On a unit
+        with no probe the Temp button writes the configured stand-in, so a
+        temperature is always one press away.
         """
         r = slot.record
         return (_to_float(r.get("samp_degC")) is not None and
@@ -656,6 +711,8 @@ class Entry2Phase(Phase):
         Temp button (on a unit with no probe) offers what was used last.
         """
         r = slot.record
+        if not self.ready(slot):
+            return
         if not r.get("collect_dt"):
             r["collect_dt"] = arb.timestamp()
         temp_c = _to_float(r.get("samp_degC"))
@@ -755,6 +812,7 @@ class VariantPhase(Phase):
         pool.on("var_reps_btn",
                 (lambda: self.step_reps(arb, slot)) if live else None)
 
+        rows = []
         for lbl, wt_fld, time_fld, n in _VAR_FACTOR_ROWS:
             pool.put(lbl, f"Reagent {n}", enabled=live)
             pool.on(lbl, (lambda n=n: self.reset_factors(arb, slot, n))
@@ -762,16 +820,19 @@ class VariantPhase(Phase):
             for fld in (wt_fld, time_fld):
                 value = r.get(self.FIELDS[fld], "")
                 pool.put(fld, value, enabled=live)
-                # A bad factor holds Continue back, so on the live screen it
-                # is also the next thing to fix: invalid and pending (red).
                 ok = _factor_ok(value)
-                pool.mark(fld, valid=ok, pending=live and not ok)
+                rows.append((lbl, fld, ok, ok))
+        # One pending item at a time: the first bad factor box in screen order
+        # is red (bad and next to fix), any others pink (bad, waiting), and
+        # Continue is pending once all four are good.  The row label is marked
+        # with its box: one press puts both of that reagent's factors to 1.0.
+        done = self._mark_next(pool, rows, live)
         pool.show(*_VAR_CAPTIONS)
         pool.show("div1", "div2", "div3")
         self._chrome(pool, slot, arb, "Continue",
                      main_on=lambda: self.proceed(arb, slot),
                      main_enabled=self.ready(slot),
-                     main_pending=live)
+                     main_pending=done)
 
     def ready(self, slot) -> bool:
         """Every factor box holds a number greater than zero."""
@@ -1820,7 +1881,14 @@ if __name__ == "__main__":
     check("Resume is pending",    _st("main_btn"), "pending")
     press(pool, "main_btn")                        # Resume -> back to entry
     check("back on entry",        A.phase, "entry")
-    check("Begin is not pending", _st("main_btn"), "normal")
+    check("ID holds a number: Begin is the pending item",
+          (_st("main_btn"), _st("id_fld")), ("pending", "normal"))
+    print("== entry, one at a time: a blank ID is pending, Begin waits ==")
+    _no = A.record["samp_no"]
+    A.record["samp_no"] = "   "; arb.render(A)      # blanks: no autofill, not ready
+    check("ID row pending",  (_st("id_lbl"), _st("id_fld")), ("pending", "pending"))
+    check("Begin disabled",  _st("main_btn"), "disabled")
+    A.record["samp_no"] = _no; arb.render(A)
 
     print("== Begin claims the number and stays on screen 1 ==")
     press(pool, "main_btn")
@@ -1841,6 +1909,13 @@ if __name__ == "__main__":
     A.record["user"] = ""; arb.render(A)
     check("user cleared",   pool["user_fld"].value, "")
     check("incomplete: Continue plain", _st("main_btn"), "normal")
+    check("the empty row is the pending item",
+          (_st("user_lbl"), _st("user_fld")), ("pending", "pending"))
+    A.record["test_kit"] = ""; arb.render(A)
+    check("one at a time: only the first empty row",
+          (_st("user_fld"), _st("test_fld")), ("pending", "normal"))
+    A.record["test_kit"] = DEFAULTS.testkit; arb.render(A)
+    check("never held back",  pool["main_btn"].enabled, True)
     press(pool, "user_lbl")                        # User label = load-default button
     check("user refilled",  pool["user_fld"].value, DEFAULTS.user)
     check("complete again: pending",   _st("main_btn"), "pending")
@@ -1851,6 +1926,9 @@ if __name__ == "__main__":
     check("main is Continue",  pool["main_btn"].label, "Continue")
     check("temp label shown",  pool["temp_lbl"].visible, True)
     check("entry2 now editable", pool["temp_fld"].enabled, True)
+    check("temperature first",
+          (_st("temp_fld"), _st("weight_fld"), _st("main_btn")),
+          ("pending", "normal", "disabled"))
 
     print("== entry2: Temp label reads the sensor into temp_fld ==")
     check("plain label with a probe", pool["temp_lbl"].label, "Temp °C")
@@ -1880,7 +1958,8 @@ if __name__ == "__main__":
 
     print("== entry2: collect stamp + Continue persists -> vent reminder ==")
     arb.render(A)
-    check("temp err: Continue plain", _st("main_btn"), "normal")
+    check("temp err: Continue held",  _st("main_btn"), "disabled")
+    check("err is a bad entry, and next", _st("temp_fld"), "invalid_pending")
     A.record["samp_degC"] = "21.5"; A.record["samp_grams"] = "3.2"   # writethrough sim
     A.record["remark"] = "cloudy sample"                             # writethrough sim
     press(pool, "collectdt_lbl")                   # Collect label stamps the datetime
@@ -2166,6 +2245,7 @@ if __name__ == "__main__":
     B = Slot("B"); arb.slots = [B]
     arb.goto(B, "entry"); press(pool, "main_btn")  # Begin -> claims, stays on entry
     press(pool, "main_btn")                         # Continue -> entry2
+    B.record.update(samp_degC="21.0", samp_grams="100"); arb.render(B)  # Continue needs both
     press(pool, "main_btn")                         # Continue -> vent
     press(pool, "vent_ok")                          # OK -> preimage
     press(pool, "main_btn")                         # CANCEL -> cancel modal
@@ -2223,7 +2303,8 @@ if __name__ == "__main__":
     D = Slot("D"); arb.slots = [D]
     arb.goto(D, "entry"); press(pool, "main_btn")  # Begin
     press(pool, "main_btn")                         # Continue -> entry2
-    D.record["samp_grams"] = "100"                  # writethrough sim
+    D.record.update(samp_degC="21.0", samp_grams="100")   # writethrough sim
+    arb.render(D)                                   # Continue needs both
     press(pool, "main_btn")                         # Continue -> variant
     check("phase variant",       D.phase, "variant")
     check("first equipment",     pool["var_equip_btn"].label, "A Original bottle")
@@ -2256,6 +2337,14 @@ if __name__ == "__main__":
     from palette import color as _color
     check("bad box: invalid, fix next", _st("var_r1_time_fld"), "invalid_pending")
     check("good box is plain",   _st("var_r1_wt_fld"), "normal")
+    check("Continue not pending", _st("main_btn"), "disabled")
+    D.record["R2_wt_factor"] = "x"; arb.render(D)
+    check("one at a time: the later bad box waits, pink",
+          (_st("var_r1_time_fld"), _st("var_r2_wt_fld")),
+          ("invalid_pending", "invalid"))
+    check("its row label is marked with it",
+          (_st("var_r1_lbl"), _st("var_r2_lbl")), ("pending", "normal"))
+    D.record["R2_wt_factor"] = "1.0"
     D.record["R1_time_factor"] = "0"; arb.render(D)
     check("zero is refused too", pool["main_btn"].enabled, False)
     press(pool, "var_r1_lbl")
@@ -2264,6 +2353,7 @@ if __name__ == "__main__":
     D.record["R1_time_factor"] = "1.5"; D.record["R2_wt_factor"] = "0.5"
     arb.render(D)
     check("Continue live again", pool["main_btn"].enabled, True)
+    check("all good: Continue is the pending item", _st("main_btn"), "pending")
 
     print("== test variant: Continue saves the treatment and goes to vent ==")
     press(pool, "main_btn")
@@ -2287,6 +2377,7 @@ if __name__ == "__main__":
     print("== test variant: the next run carries the last treatment over ==")
     E = Slot("E"); arb.slots = [E]
     arb.goto(E, "entry"); press(pool, "main_btn"); press(pool, "main_btn")
+    E.record.update(samp_degC="21.0", samp_grams="100"); arb.render(E)  # Continue needs both
     press(pool, "main_btn")                         # -> variant
     check("equipment carried",   E.record["test_equip"], "B 250 Ehrl, unprotected")
     check("reps carried",        E.record["image_reps"], 2)

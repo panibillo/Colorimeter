@@ -59,6 +59,23 @@ sqlite3 src/colorimeter.sqlite \
   - Instructions that wait on the operator: insert or swap the strip, weigh or
     add a reagent, weigh both packets. Stirring lines and "Imaging - DO NOT
     TOUCH" stay plain.
+- The entry screens and the test-variant screen show one thing to do at a
+  time, in screen order. A row's label button and its box are marked
+  together, since pressing the label loads the default.
+  - New Test: the ID while it is blank, then Begin. After Begin: the first
+    empty identity row, then Continue. Continue on this screen is never held
+    back.
+  - Entry 2: the temperature, then the sample weight, then Continue.
+  - Test variant: the first bad factor box (red), then Continue. Other bad
+    boxes are pink until their turn.
+  - While another step is being previewed, only Resume is marked.
+
+  The pre-image screen and the steps after it may still mark several things
+  at once.
+- Entry 2's Continue now waits for a temperature and a sample weight that
+  read as numbers. Without a weight there is no reagent target, so reagent 1's
+  START never appeared. A failed probe reading ("err") is marked invalid. On a
+  unit with no probe, the Temp button still fills in the configured default.
 - A weight that doesn't read as a number, or a packet that is short of
   target, is marked invalid (red while it is still owed). The amber this used
   to be is now kept for "do this next". A bad test-variant factor is red too.
