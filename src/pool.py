@@ -85,7 +85,7 @@ _ROLES: Dict[str, tuple] = {
                  "result_fld", "color_fld",
                  "wt1_init_fld", "wt1_final_fld", "wt2_init_fld", "wt2_final_fld",
                  "var_r1_wt_fld", "var_r1_time_fld", "var_r2_wt_fld",
-                 "var_r2_time_fld"),
+                 "var_r2_time_fld", "var_conc_fld"),
     "msgbox":   ("instr1", "color_lbl"),
 }
 
@@ -243,6 +243,9 @@ class Pool:
         field("var_r2_wt_fld",  L.VAR_WT_FLD4,   18, "field_blue", align="center")
         label("var_r2_time_cap", L.VAR_TIME_CAP4, "black", "white", 13, text="time")
         field("var_r2_time_fld", L.VAR_TIME_FLD4, 18, "field_blue", align="center")
+        # The standard's arsenic concentration, beside the Reps value.
+        label("var_conc_cap",   L.VAR_CONC_CAP2, "black", "white", 11, text="C\nµg/L")
+        field("var_conc_fld",   L.VAR_CONC_FLD2, 18, "field_blue", align="center")
 
         # ── body: vent reminder (VentPhase) — a red backdrop over the whole
         # screen, built first so the text and OK land on top of it.

@@ -321,7 +321,7 @@ class Phase:
         """
         Mark what to do next on an entry screen: one item at a time.
 
-        Each row is (row-label button, box, ok, valid):
+        Each row is (row-label button or None, box, ok, valid):
           ok    — the row holds what the run needs from it;
           valid — False when the box holds a bad entry (shown pink, or red
                   when it is the pending one).
@@ -343,7 +343,8 @@ class Phase:
         for lbl, box, ok, valid in rows:
             pool.mark(box, valid=valid)
             if live and not ok and not pending_done:
-                pool.mark(lbl, pending=True)
+                if lbl:
+                    pool.mark(lbl, pending=True)
                 pool.mark(box, pending=True)
                 pending_done = True
         return not pending_done and all(ok for _, _, ok, _ in rows)
@@ -762,6 +763,17 @@ def _factor_ok(s) -> bool:
     return v is not None and v > 0
 
 
+def _conc_ok(s) -> bool:
+    """
+    The standard-concentration box is usable: empty (the run is not a
+    standard) or a number of µg/L that is not negative (0 is a blank).
+    """
+    if not _filled(s):
+        return True
+    v = _to_float(s)
+    return v is not None and v >= 0
+
+
 def _factor_value(s) -> float:
     """
     A stored factor as the multiplier to apply: 1.0 unless it is usable.
@@ -795,8 +807,16 @@ class VariantPhase(Phase):
     title      = ""                 # header shows the sample id
     proceed_to = "vent"
 
+    # The four factor boxes.  Each must hold a number greater than zero.
     FIELDS = {"var_r1_wt_fld": "R1_wt_factor", "var_r1_time_fld": "R1_time_factor",
               "var_r2_wt_fld": "R2_wt_factor", "var_r2_time_fld": "R2_time_factor"}
+    # The standard's arsenic concentration, µg/L: optional, since most runs
+    # are not standards.  Not carried over from the last treatment — a series
+    # of standards changes it run to run, and a stale value would label a
+    # sample with the wrong concentration.
+    CONC = {"var_conc_fld": "standard_conc"}
+    # Every typed box on the screen, for the write-through.
+    BOXES = {**FIELDS, **CONC}
 
     def enter(self, pool, slot, arb) -> None:
         r = slot.record
@@ -815,7 +835,10 @@ class VariantPhase(Phase):
         pool.on("var_reps_btn",
                 (lambda: self.step_reps(arb, slot)) if live else None)
 
-        rows = []
+        pool.show("var_conc_cap")
+        conc = _text(r.get("standard_conc"))
+        pool.put("var_conc_fld", conc, enabled=live)
+        rows = [(None, "var_conc_fld", _conc_ok(conc), _conc_ok(conc))]
         for lbl, wt_fld, time_fld, n in _VAR_FACTOR_ROWS:
             pool.put(lbl, f"Reagent {n}", enabled=live)
             pool.on(lbl, (lambda n=n: self.reset_factors(arb, slot, n))
@@ -825,9 +848,10 @@ class VariantPhase(Phase):
                 pool.put(fld, value, enabled=live)
                 ok = _factor_ok(value)
                 rows.append((lbl, fld, ok, ok))
-        # One pending item at a time: the first bad factor box in screen order
-        # is red (bad and next to fix), any others pink (bad, waiting), and
-        # Continue is pending once all four are good.  The row label is marked
+        # One pending item at a time: the first bad box in screen order (the
+        # concentration, then the factors) is red (bad and next to fix), any
+        # others pink (bad, waiting), and Continue is pending once all are
+        # good.  An empty concentration is good: the run is not a standard.  The row label is marked
         # with its box: one press puts both of that reagent's factors to 1.0.
         done = self._mark_next(pool, rows, live)
         pool.show(*_VAR_CAPTIONS)
@@ -838,8 +862,13 @@ class VariantPhase(Phase):
                      main_pending=done)
 
     def ready(self, slot) -> bool:
-        """Every factor box holds a number greater than zero."""
-        return all(_factor_ok(slot.record.get(k)) for k in self.FIELDS.values())
+        """
+        Every factor box holds a number greater than zero, and the
+        concentration is empty or a number that is not negative.
+        """
+        r = slot.record
+        return (all(_factor_ok(r.get(k)) for k in self.FIELDS.values())
+                and _conc_ok(r.get("standard_conc")))
 
     # ── filling and stepping ────────────────────────────────────────────────────
 
@@ -1419,6 +1448,8 @@ def incomplete_items(arb, slot) -> list:
                       ("R2_time_factor", "R2 time factor")):
         if not _factor_ok(r.get(key)):
             items.append(name)
+    if not _conc_ok(r.get("standard_conc")):
+        items.append("Standard concentration")
     if not _filled(r.get("manual_read")):
         items.append("Manual color reading")
     for n in (1, 2):
@@ -1941,6 +1972,7 @@ if __name__ == "__main__":
             self.treatments.pop(r["samp_no"], None)   # re-saving moves it last
             self.treatments[r["samp_no"]] = {
                 "test_equip": r["test_equip"], "image_reps": r["image_reps"],
+                "standard_conc": _to_float(r.get("standard_conc")),
                 **{k: _to_float(r[k]) for k in VariantPhase.FIELDS.values()}}
 
         def next_sample(self, slot):
@@ -2532,6 +2564,17 @@ if __name__ == "__main__":
     D.record["R1_time_factor"] = "1.5"; D.record["R2_wt_factor"] = "0.5"
     arb.render(D)
     check("Continue live again", pool["main_btn"].enabled, True)
+    print("== test variant: the standard concentration box ==")
+    check("C box shown, empty is fine",
+          (pool["var_conc_fld"].visible, _st("var_conc_fld")), (True, "normal"))
+    D.record["standard_conc"] = "abc"; arb.render(D)
+    check("a bad C holds Continue back, and is next",
+          (pool["main_btn"].enabled, _st("var_conc_fld")), (False, "invalid_pending"))
+    check("listed as incomplete",
+          "Standard concentration" in incomplete_items(arb, D), True)
+    D.record["standard_conc"] = "0"; arb.render(D)
+    check("0 is a blank standard: fine", pool["main_btn"].enabled, True)
+    D.record["standard_conc"] = "12.5"; arb.render(D)
     check("all good: Continue is the pending item", _st("main_btn"), "pending")
 
     print("== test variant: Continue saves the treatment and goes to vent ==")
@@ -2540,7 +2583,7 @@ if __name__ == "__main__":
     check("treatment saved", arb.treatments[D.record["samp_no"]],
           {"test_equip": "B 250 Ehrl, unprotected", "image_reps": 2,
            "R1_wt_factor": 1.0, "R1_time_factor": 1.5,
-           "R2_wt_factor": 0.5, "R2_time_factor": 1.0})
+           "R2_wt_factor": 0.5, "R2_time_factor": 1.0, "standard_conc": 12.5})
     press(pool, "vent_ok")
     check("then preimage",       D.phase, "preimage")
 
@@ -2562,6 +2605,9 @@ if __name__ == "__main__":
     check("reps carried",        E.record["image_reps"], 2)
     check("factors carried",     [E.record[k] for k in VariantPhase.FIELDS.values()],
           ["1.0", "1.5", "0.5", "1.0"])
+    check("the last run's concentration was saved",
+          arb.latest_treatment()["standard_conc"], 12.5)
+    check("but is not carried over", E.record["standard_conc"], "")
 
     print("== test variant: the factors scale targets and countdowns ==")
     # D: 100 g sample, R1 time x1.5, R2 weight x0.5 (saved above).

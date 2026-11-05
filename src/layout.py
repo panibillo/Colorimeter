@@ -122,6 +122,9 @@ READ_LBL    = Rect(  8, 158, 304, 28)   # capture instruction (single line)
 # tap-to-step buttons).  Rows 3-4 split the field span into two captioned
 # factor boxes per reagent:
 #     [Reagent 1]  wt [ 1.0 ]  time [ 1.0 ]
+# Row 2 also holds the standard concentration, right of the short Reps value:
+#     [Image reps] [   2   ]  C µg/L [ 10 ]
+VAR_CONC_CAP2 = Rect(214,  95,  30, 35); VAR_CONC_FLD2 = Rect(246,  93,  66, 39)
 VAR_WT_CAP3   = Rect( 82, 135,  26, 35); VAR_WT_FLD3   = Rect(110, 133,  76, 39)
 VAR_TIME_CAP3 = Rect(190, 135,  38, 35); VAR_TIME_FLD3 = Rect(230, 133,  82, 39)
 VAR_WT_CAP4   = Rect( 82, 175,  26, 35); VAR_WT_FLD4   = Rect(110, 173,  76, 39)

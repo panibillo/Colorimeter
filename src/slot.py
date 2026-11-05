@@ -65,6 +65,7 @@ def _new_record() -> dict:
         "R1_time_factor": "1.0", # var_r1_time_fld
         "R2_wt_factor":   "1.0", # var_r2_wt_fld
         "R2_time_factor": "1.0", # var_r2_time_fld
+        "standard_conc":  "",    # var_conc_fld — µg/L of a standard; "" = not one
         # ── results ─────────────────────────────────────────────────────────
         "txt_result":    "",   # samples.txt_result
         "num_result":    None, # samples.num_result

@@ -261,6 +261,21 @@ def _add_exposure_columns(con: sqlite3.Connection) -> None:
     con.commit()
 
 
+def _add_treatments_columns(con: sqlite3.Connection) -> None:
+    """
+    Add the treatment columns added since the table was first made
+    (idempotent).  standard_conc: the arsenic concentration of a standard,
+    in µg/L, or NULL for a run that is not a standard.
+    """
+    existing = {row[1] for row in con.execute("PRAGMA table_info(treatments)")}
+    if not existing:
+        return                      # no table yet: the DDL makes it whole
+    for name, type_ in (("standard_conc", "REAL"),):
+        if name not in existing:
+            con.execute(f"ALTER TABLE treatments ADD COLUMN {name} {type_}")
+    con.commit()
+
+
 def _verify(con: sqlite3.Connection) -> int:
     """
     Check that every parameter in the table is usable, and count them.
@@ -438,6 +453,7 @@ def ensure(path=None) -> Result:
         _run_script(con, DDL_PATH)
         _add_samples_columns(con)
         _add_exposure_columns(con)
+        _add_treatments_columns(con)
         _run_script(con, DEFAULTS_PATH)
 
         added = len(_rowids(con) - before)

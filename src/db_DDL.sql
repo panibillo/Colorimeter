@@ -192,7 +192,8 @@ CREATE TABLE IF NOT EXISTS treatments (
     R1_wt_factor   REAL,       -- reagent 1 target weight multiplier
     R1_time_factor REAL,       -- reagent 1 countdown multiplier
     R2_wt_factor   REAL,       -- reagent 2 target weight multiplier
-    R2_time_factor REAL        -- reagent 2 countdown multiplier
+    R2_time_factor REAL,       -- reagent 2 countdown multiplier
+    standard_conc  REAL        -- µg/L arsenic of a standard; NULL = not a standard
 );
 
 

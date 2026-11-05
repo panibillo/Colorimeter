@@ -33,6 +33,19 @@ sqlite3 src/colorimeter.sqlite \
 
 ## [Unreleased]
 
+### Added
+
+- The test-variant screen has a "C µg/L" box beside the image-reps value,
+  for a standard's arsenic concentration. It is saved in a new
+  `treatments.standard_conc` column, which is added to an existing database
+  at start-up.
+  - Leave it empty for a run that isn't a standard; it is stored as NULL.
+  - 0 is a valid entry, for a blank standard. A negative number or text is
+    marked invalid and holds Continue back.
+  - Unlike the other choices, it isn't carried over from the last run. A
+    series of standards changes it every run, and a carried value would label
+    the sample with the wrong concentration.
+
 ### Changed
 
 - The run screens take their colors from one table, `STYLE_TABLE` in

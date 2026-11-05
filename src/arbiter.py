@@ -1214,6 +1214,7 @@ class Arbiter:
             sample_repo.save_treatment(
                 r.get("samp_no"), test_equip=r.get("test_equip"),
                 image_reps=int(r.get("image_reps") or 1),
+                standard_conc=_to_float(r.get("standard_conc")),   # "" -> NULL
                 **{k: _to_float(r.get(k)) for k in VariantPhase.FIELDS.values()})
         except sqlite3.Error:
             log.exception("Arbiter: save_treatment failed for slot %s", slot.name)
@@ -5943,7 +5944,7 @@ class Arbiter:
 
         fields = {"entry":   EntryPhase.FIELDS,
                   "entry2":  Entry2Phase.FIELDS,
-                  "variant": VariantPhase.FIELDS,
+                  "variant": VariantPhase.BOXES,
                   "read":    ReadPhase.FIELDS}.get(slot.phase)
         if not fields:
             return
@@ -5982,7 +5983,7 @@ class Arbiter:
         if str(textbox.name) in WT_FIELD_KEYS:
             self._weight_field_commit(textbox)
         elif (any(str(textbox.name) in f for f in
-                  (EntryPhase.FIELDS, Entry2Phase.FIELDS, VariantPhase.FIELDS))
+                  (EntryPhase.FIELDS, Entry2Phase.FIELDS, VariantPhase.BOXES))
               and str(textbox.name) != "id_fld"
               and self._focused is not None):
             # Not the ID box: rendering the unclaimed entry screen with an
@@ -7620,15 +7621,28 @@ def _selftest() -> None:
     _fld.set_value("1.25")
     arb._writethrough(_fld)
     check("a good one releases it",  arb._pool["main_btn"].enabled, True)
+    _conc = arb._pool["var_conc_fld"]
+    _conc.set_value("-1")
+    arb._writethrough(_conc)
+    check("a negative concentration holds Continue back",
+          (A.record["standard_conc"], arb._pool["main_btn"].enabled), ("-1", False))
+    _conc.set_value("10")
+    arb._writethrough(_conc)
+    check("10 ug/L releases it",     arb._pool["main_btn"].enabled, True)
     arb._pool["var_reps_btn"].on_press()            # 1 -> 2
     arb._pool["main_btn"].on_press()                # Continue
     check("on to the vent reminder", A.phase, "vent")
-    _row = _db.read_one("SELECT test_equip, image_reps, R2_time_factor "
+    _row = _db.read_one("SELECT test_equip, image_reps, R2_time_factor, standard_conc "
                         "FROM treatments WHERE samp_no = ?", (A.record["samp_no"],))
     check("treatment row written",
-          _row, (sample_repo.equipment_list()[0], 2, 1.25))
+          _row, (sample_repo.equipment_list()[0], 2, 1.25, 10.0))
     check("and is what the next run starts from",
           arb.latest_treatment()["R2_time_factor"], 1.25)
+    A.record["standard_conc"] = ""
+    arb.save_treatment(A)
+    check("an empty concentration is stored as NULL",
+          _db.read_val("SELECT standard_conc FROM treatments WHERE samp_no = ?",
+                       (A.record["samp_no"],)), None)
 
     print("== test variant: the factors reach the targets and countdowns ==")
     _grams_was = A.record.get("samp_grams")

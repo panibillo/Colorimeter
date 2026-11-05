@@ -257,7 +257,8 @@ def delete_sample(rowid: int) -> int:
 # writes through, which keeps caller-supplied names out of the SQL text.
 TREATMENT_COLS = ("test_equip", "image_reps",
                   "R1_wt_factor", "R1_time_factor",
-                  "R2_wt_factor", "R2_time_factor")
+                  "R2_wt_factor", "R2_time_factor",
+                  "standard_conc")
 
 
 def equipment_list() -> list:
@@ -474,7 +475,10 @@ if __name__ == "__main__":
     check("row written", latest_treatment(),
           {"test_equip": "B 250 Ehrl, unprotected", "image_reps": 2,
            "R1_wt_factor": 1.0, "R1_time_factor": 1.5,
-           "R2_wt_factor": 0.5, "R2_time_factor": 1.0})
+           "R2_wt_factor": 0.5, "R2_time_factor": 1.0,
+           "standard_conc": None})                # not a standard: NULL
+    save_treatment("ZZ2001", standard_conc=10.0)
+    check("a standard's concentration", latest_treatment()["standard_conc"], 10.0)
     save_treatment("zz2001", image_reps=3)        # same sample, any case
     check("one row per sample",
           db.read_val("SELECT COUNT(*) FROM treatments"), 1)
