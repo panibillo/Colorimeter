@@ -601,6 +601,7 @@ class EntryPhase(Phase):
     def proceed(self, arb, slot) -> None:
         """Leave for screen 2; goto() flushes any identity edits on the way out."""
         baro_signal.send("NEWRUN", slot.record["samp_no"])  # BARO-UDP
+        baro_signal.send("CALIBRATE")  # BARO-UDP: >= 10 s before START
         arb.goto(slot, self.next)
 
 

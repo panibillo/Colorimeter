@@ -35,6 +35,12 @@ sqlite3 src/colorimeter.sqlite \
 
 ### Added
 
+- Two more pressure-logger signals (`baro_signal.py`, development only):
+  - `CALIBRATE`, with no arguments, right after `NEWRUN`. This is well over
+    10 seconds before reagent 2's `START`.
+  - `STOP <samp_no> Canceled` when a run is canceled after reagent 2's
+    `START` and before the measurement capture's `STOP`. Until now a cancel
+    left the laptop recording.
 - The test-variant screen has a "C µg/L" box beside the image-reps value,
   for a standard's arsenic concentration. It is saved in a new
   `treatments.standard_conc` column, which is added to an existing database

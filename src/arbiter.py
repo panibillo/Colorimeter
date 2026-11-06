@@ -4158,6 +4158,13 @@ class Arbiter:
             self._prefetch = None
             self._prefetch_slot = None
             self._prefetch_epoch = None
+        # BARO-UDP begin: the laptop records from reagent 2's START until the
+        # measurement capture's STOP (capture_start is stamped with it), so a
+        # cancel in between stops it here.
+        if (slot.record.get("reagent2_start")
+                and slot.record.get("capture_start") is None):
+            baro_signal.send("STOP", slot.record.get("samp_no"), "Canceled")
+        # BARO-UDP end
         if delete:
             rowid = slot.record.get("db_rowid")
             if rowid is not None:
@@ -7686,6 +7693,25 @@ def _selftest() -> None:
                        (_samp,)), 0)
     arb._phases = _saved_phases
     A.clear_run(); B.clear_run()
+
+    # BARO-UDP begin
+    print("== CANCEL stops the baro logger only while it records ==")
+    _sent = []
+    _send_was = baro_signal.send
+    baro_signal.send = lambda *parts: _sent.append(parts)
+    try:
+        for r2, cap, want in [(None, None, []),
+                              (111,  None, [("STOP", "ZZ9001", "Canceled")]),
+                              (111,  222,  [])]:
+            _sent.clear()
+            A.record.update(samp_no="ZZ9001", reagent2_start=r2,
+                            capture_start=cap)
+            arb.cancel_test(A, delete=False)
+            check(f"reagent2_start={r2}, capture_start={cap}", _sent, want)
+    finally:
+        baro_signal.send = _send_was
+    A.clear_run()
+    # BARO-UDP end
 
     print("== config editor: Restore Factory Defaults undoes all of it ==")
     arb._cfge_open()

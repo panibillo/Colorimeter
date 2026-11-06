@@ -11,13 +11,20 @@ protocol is set out in the pico_udp_client project,
 
 What is sent
 ------------
-One tab-delimited ASCII line per datagram; the sample number is always the
-first argument after the command word:
+One tab-delimited ASCII line per datagram.  Every command but CALIBRATE
+carries the sample number as its first argument:
 
     NEWRUN\t<samp_no>               Continue out of the ID screen
+    CALIBRATE                       right after NEWRUN
     START\t<samp_no>\tReagent2      reagent 2 START
     MARK\t<samp_no>\tEndReagent2    reagent 2 countdown ran out
     STOP\t<samp_no>                 the measurement capture began
+    STOP\t<samp_no>\tCanceled       CANCEL after reagent 2 START, before
+                                    the measurement capture
+
+CALIBRATE has to reach the laptop at least 10 seconds before START (Bill,
+2026-11-05).  Sending it with NEWRUN meets that: START cannot come before the
+pre-image screen and reagent 1's whole countdown are behind the run.
 
 The laptop answers each with one line, `OK\t...` or `ERR\t<reason>`.  Either
 answer ends the retries and is only logged: an ERR (a repeated START, say)
@@ -80,6 +87,7 @@ Public API
     import baro_signal
     baro_signal.enable()                              # once, at app start
     baro_signal.send("START", "ZZ1001", "Reagent2")   # returns at once
+    baro_signal.send("CALIBRATE")                     # no sample number
 
 Run tests:
     python test/run_tests.py test_baro_signal
@@ -165,19 +173,21 @@ def enable(path: Path = CONFIG_PATH, secrets_path: Path = SECRETS_PATH) -> bool:
     return True
 
 
-def send(command: str, samp_no: str, *text: str) -> None:
+def send(command: str, *args: str) -> None:
     """
     Queue one signal for the laptop.  Returns at once; does nothing when off.
 
-    The parts are joined with tabs.  A tab or line break inside a part would
+    `args` is the sample number and any text after it, or nothing at all for
+    CALIBRATE.  The parts are joined with tabs.  A tab or line break inside a part would
     break the line apart on the laptop, so each becomes a space.
 
     Example:
         >>> send("START", "ZZ1001", "Reagent2")   # sends START\\tZZ1001\\tReagent2
+        >>> send("CALIBRATE")                     # sends CALIBRATE
     """
     if _queue is None:
         return
-    parts = [command, samp_no, *text]
+    parts = [command, *args]
     _queue.put("\t".join(_one_line(p) for p in parts))
 
 
