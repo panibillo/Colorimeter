@@ -127,7 +127,8 @@ provisioning/deploy/commissioning_status.sh
 #
 # WARNING Syncing overwrites whatever the Pi holds, including a value it wrote
 # itself through save_focus_cal().  If a unit has been re-focused on the
-# device, pull that value back (sync_from_pi.sh) before pushing.
+# device, pull that value back before pushing, e.g.
+#   scp <host>:~/pi/Colorimeter/config/focus_cal.json config/
 # config/focus_cal.json
 
 # ── Tools run on the Pi ──────────────────────────────────────────────────

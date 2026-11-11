@@ -20,6 +20,7 @@ from pathlib import Path
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(1, str(Path(__file__).resolve().parent.parent))  # padanalysis/: modules still in use
 import measure  # noqa: E402
 from chemistry import Reduction, cell_name, exposed  # noqa: E402
 from samples import PAIRS, SAMPLES, quantified, replicates  # noqa: E402

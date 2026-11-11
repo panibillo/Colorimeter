@@ -37,6 +37,7 @@ This project's guidance is organized into four focused documents:
 - **Implementing features?** → Check [ARCHITECTURE.md](ARCHITECTURE.md) then [CODING_GUIDELINES.md](CODING_GUIDELINES.md)
 - **Code review?** → Use [CODING_GUIDELINES.md](CODING_GUIDELINES.md) as a checklist
 - **Working on the analysis chain** (images, statistics, color, write-ups)? → Read [How_best_to_help_Bill.md](How_best_to_help_Bill.md) first
+- **Looking for a desktop script, or adding/retiring one?** → [docs/desktop_tools/](docs/desktop_tools/) lists every inspection, analysis-chain and Pi-transfer script with its status and output. Keep its rows current when scripts change.
 
 ## Why Separate Docs?
 

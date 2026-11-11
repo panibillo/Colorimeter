@@ -36,6 +36,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(1, str(Path(__file__).resolve().parent.parent))  # padanalysis/: modules still in use
 from probe import open_capture  # noqa: E402
 from padrect import PadRect  # noqa: E402
 from fields import reflectance  # noqa: E402
@@ -115,7 +116,7 @@ def _span(rows) -> str:
     return f"{min(ppb):g} to {max(ppb):g}" if ppb else "an unknown range of"
 
 
-def main(path="records.json"):
+def main(path=str(Path(__file__).resolve().parent / "records.json")):
     red = Reduction(path)
     FIG.mkdir(exist_ok=True)
     out = [analyse(n, erode=red.erode) for n in NAMES]

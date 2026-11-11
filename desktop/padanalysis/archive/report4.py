@@ -7,6 +7,7 @@ from pathlib import Path
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(1, str(Path(__file__).resolve().parent.parent))  # padanalysis/: modules still in use
 from probe import Capture, FILES, open_capture  # noqa: E402
 from measure import measure_capture  # noqa: E402
 from whitecorr import load_models  # noqa: E402

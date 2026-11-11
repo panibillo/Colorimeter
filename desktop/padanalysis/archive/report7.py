@@ -16,6 +16,7 @@ import matplotlib.pyplot as plt
 from matplotlib.patches import Polygon
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(1, str(Path(__file__).resolve().parent.parent))  # padanalysis/: modules still in use
 from probe import Capture, open_capture  # noqa: E402
 from samples import WHITE_LED_SET as FILES  # noqa: E402
 from segment import Pad, white_fields  # noqa: E402

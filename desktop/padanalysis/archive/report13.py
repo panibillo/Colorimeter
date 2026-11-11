@@ -43,6 +43,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(1, str(Path(__file__).resolve().parent.parent))  # padanalysis/: modules still in use
 from probe import Capture, open_capture  # noqa: E402
 from chemistry import Reduction, exposed  # noqa: E402
 from samples import SAMPLES, quantified  # noqa: E402
@@ -87,7 +88,7 @@ def permutation_r(x, y, n=N_PERMUTATIONS, seed=0):
     return r, float((np.abs(null) >= abs(r)).mean())
 
 
-def main(path="records.json"):
+def main(path=str(Path(__file__).resolve().parent / "records.json")):
     red = Reduction(path)
     FIG.mkdir(exist_ok=True)
     cell = ("royal_blue", "B")

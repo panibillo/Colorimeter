@@ -35,6 +35,7 @@ import numpy as np
 
 SP = Path(__file__).resolve().parent
 sys.path.insert(0, str(SP))
+sys.path.insert(1, str(SP.parent))  # padanalysis/: modules still in use
 
 import analysis_1 as A                                      # noqa: E402
 import padphot                                              # noqa: E402

@@ -32,18 +32,18 @@ Note that src/colorimeter.sqlite here is the *desktop's* copy; the instrument
 carries its own.  Getting the rows across is a manual step.
 
 Usage:
-    .venv/bin/python3 devdesk/run_bound39a.py
-    .venv/bin/python3 devdesk/run_bound39a.py --no-figures --no-publish
+    .venv/bin/python3 devdesk/archive/run_bound39a.py
+    .venv/bin/python3 devdesk/archive/run_bound39a.py --no-figures --no-publish
 """
 
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # devdesk/
 
 from flatfield_pool import analyze  # noqa: E402
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
+REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 
 FILES = (
     ("ZP1001_grayA1a.h5", 26, "A1"),

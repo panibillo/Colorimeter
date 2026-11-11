@@ -90,7 +90,7 @@ Three destinations, and only the last one leaves the desktop:
                                  reduced result the instrument reads
 
 The last is opt-in: pass `layermodels_db=` to analyze(), which
-`run_bound39a.py` does.  It puts new weights **in force**, superseding the
+`run_bound_union_a.py` does.  It puts new weights **in force**, superseding the
 previous rows rather than deleting them.  See build_layermodels() for which
 cell becomes which row, and src/layermodel_repo.py for what reads them back.
 
@@ -109,7 +109,7 @@ whole crop.  The extra step here is that the archives were cropped to a
 to the target bound before anything else happens.  See `subcrop_slices()`.
 
 Usage:
-    .venv/bin/python3 devdesk/run_bound39a.py
+    .venv/bin/python3 devdesk/run_bound_union_a.py
     .venv/bin/python3 devdesk/flatfield_pool.py --selftest
 """
 
@@ -2685,4 +2685,4 @@ if __name__ == "__main__":
     if "--selftest" in sys.argv:
         sys.exit(_selftest())
     print(__doc__)
-    print("Run devdesk/run_bound39a.py, or import analyze() from this module.")
+    print("Run devdesk/run_bound_union_a.py, or import analyze() from this module.")

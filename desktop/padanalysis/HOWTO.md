@@ -33,19 +33,25 @@ Use the project virtual environment.  The system Python does not have `h5py`,
 
 ---
 
+> **2026-11-11:** sections 1–7 describe the August pipeline, which is now in
+> `desktop/padanalysis/archive/` (scripts, record files and figures).  The
+> commands below have been updated to that folder; several reports no longer
+> run.  Status of every script: `docs/desktop_tools/`.  Section 8
+> (`analysis_1.py`) is the current chain.
+
 ## 1. The short version
 
 Three commands reproduce the whole analysis from the archives.
 
-    .venv/bin/python3 desktop/padanalysis/measure.py 6 rect
+    .venv/bin/python3 desktop/padanalysis/archive/measure.py 6 rect
     for n in 9 10 11 12 13; do
-        .venv/bin/python3 desktop/padanalysis/report$n.py
+        .venv/bin/python3 desktop/padanalysis/archive/report$n.py
     done
 
 The two-dye analysis reads the archives directly and needs no `records.json`:
 
-    timeout -k 10 900 .venv/bin/python3 -u desktop/padanalysis/look3.py
-    timeout -k 10 1800 .venv/bin/python3 -u desktop/padanalysis/report14.py
+    timeout -k 10 900 .venv/bin/python3 -u desktop/padanalysis/archive/look3.py
+    timeout -k 10 1800 .venv/bin/python3 -u desktop/padanalysis/archive/report14.py
 
 `report8.py` compares the two pad finders, so it needs the other record file
 as well — `measure.py 6 blob` — and both must be rebuilt together or it is
@@ -146,7 +152,7 @@ captures only).
 
 ## 4. Measuring
 
-    .venv/bin/python3 desktop/padanalysis/measure.py <erode> <finder>
+    .venv/bin/python3 desktop/padanalysis/archive/measure.py <erode> <finder>
 
 `<erode>` is how many layer pixels to back off from every pad edge before
 averaging; `6` is the documented default.  `<finder>` is `rect` (the geometric
@@ -162,7 +168,7 @@ The pad is darker at its rim than in its middle, so the measured absorbance
 falls as the erosion deepens.  To confirm that nothing you care about depends
 on the choice:
 
-    .venv/bin/python3 desktop/padanalysis/sweep.py
+    .venv/bin/python3 desktop/padanalysis/archive/sweep.py
 
 It measures at 4, 6, 8, 10 and 12 px in a temporary directory, leaves
 `records.json` alone, and tabulates the dose-response exponent, the scatter
@@ -306,7 +312,7 @@ clearance or a large `rms` all put the region in the wrong place.
 **Long runs** — nothing here should take more than a few minutes.  Cap it
 anyway, as the project guidelines require:
 
-    timeout -k 10 600 .venv/bin/python3 -u desktop/padanalysis/measure.py 6 rect
+    timeout -k 10 600 .venv/bin/python3 -u desktop/padanalysis/archive/measure.py 6 rect
 
 ---
 

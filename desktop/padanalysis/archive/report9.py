@@ -29,13 +29,14 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(1, str(Path(__file__).resolve().parent.parent))  # padanalysis/: modules still in use
 from chemistry import Reduction, cell_name  # noqa: E402
 from samples import NAMES, SAMPLES, PAIRS  # noqa: E402
 
 FIG = Path(__file__).resolve().parent / "fig"
 
 
-def main(path="records.json"):
+def main(path=str(Path(__file__).resolve().parent / "records.json")):
     r = Reduction(path)
     FIG.mkdir(exist_ok=True)
 

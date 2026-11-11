@@ -8,6 +8,14 @@ Exploratory pipeline for the C10xx strip captures.  Findings:
 **To run the analysis yourself, read [HOWTO.md](HOWTO.md).**  This file is the
 module reference.
 
+> **2026-11-11: the August pipeline is archived.**  `measure.py`, `sweep.py`,
+> `segment.py`, `look1`–`look3`, `report1`–`report14`, `pca.py`, `R_guide.py`
+> and the record files (`records.json`, `records_blob.json`,
+> `ratios_by_erode.json`) moved to [`archive/`](archive/), with their figures
+> in `archive/fig/`.  Run them as `desktop/padanalysis/archive/<name>.py`.
+> Several no longer run.  The status of every script is in
+> [`docs/desktop_tools/`](../../docs/desktop_tools/).
+
 Everything here is **read-only** against `captures/*.h5` and
 `src/colorimeter.sqlite`.  Nothing writes to the instrument database, and the
 `layermodels` rows are read but never superseded.  Desktop only — matplotlib
@@ -15,7 +23,7 @@ and scipy dependencies, not synced to the Pi.
 
 Run with the project venv, from anywhere:
 
-    .venv/bin/python3 desktop/padanalysis/report10.py
+    .venv/bin/python3 desktop/padanalysis/archive/report10.py
 
 ## The modules
 
@@ -39,8 +47,8 @@ cells.
 
 `measure.py` takes an erosion depth and a finder:
 
-    .venv/bin/python3 desktop/padanalysis/measure.py 6 rect   # -> records.json
-    .venv/bin/python3 desktop/padanalysis/measure.py 6 blob   # -> records_blob.json
+    .venv/bin/python3 desktop/padanalysis/archive/measure.py 6 rect   # -> records.json
+    .venv/bin/python3 desktop/padanalysis/archive/measure.py 6 blob   # -> records_blob.json
 
 ## The reports
 

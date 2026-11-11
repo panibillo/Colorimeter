@@ -37,6 +37,7 @@ from pathlib import Path
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(1, str(Path(__file__).resolve().parent.parent))  # padanalysis/: modules still in use
 from probe import Capture, open_capture  # noqa: E402
 from samples import NAMES, SAMPLES, WHITE_LED_SET  # noqa: E402
 from segment import Pad  # noqa: E402

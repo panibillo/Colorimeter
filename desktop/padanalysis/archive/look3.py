@@ -30,6 +30,7 @@ from matplotlib.colors import ListedColormap  # noqa: E402
 from matplotlib.patches import Patch  # noqa: E402
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(1, str(Path(__file__).resolve().parent.parent))  # padanalysis/: modules still in use
 import duotone  # noqa: E402
 
 FIG = Path(__file__).resolve().parent / "fig"

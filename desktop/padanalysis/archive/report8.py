@@ -17,6 +17,7 @@ from pathlib import Path
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(1, str(Path(__file__).resolve().parent.parent))  # padanalysis/: modules still in use
 from samples import WHITE_LED_SET, replicates  # noqa: E402
 
 SP = Path(__file__).resolve().parent
