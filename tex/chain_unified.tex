@@ -121,7 +121,9 @@ bigger means darker; 0.001\,A is about 0.23\,\% of the light.
 \toprule
 Source of spread & Rough size \\
 \midrule
-Camera noise, one pixel, one photo & about 0.002\,A \\
+Camera noise, one pixel, one photo & 0.004--0.007\,A on clean paper
+  (photo\_red.R 0.0042, green.B 0.0068); up to 0.012\,A on stained paper
+  (measured 2026-11-11; 0.002\,A was assumed before) \\
 Paper texture, pixel to pixel & 0.006--0.008\,A (1.4--1.8\,\%) \\
 Darkening at the pad's edge & up to 30\,\% in the outermost layer
   pixel, 2--3 pixels wide \\
@@ -657,14 +659,22 @@ Because $f_p$ averages to 1 and the noise averages to 0 over the 40 or so
 pixels of a band, $\ell_k$ is nearly free of both.  Pixels past the last
 band have $\ell = 1$.  The number of bands is set by the data (decided,
 Bill, 2026-11-09): add bands
-until a band's mean is within camera noise (0.002\,A) of the interior.  The
-measured darkening is 2--3 pixels wide, so expect about three.
+until a band's mean is within camera noise of the interior.  With the
+measured noise (\cref{sec:whitecheck}) that is 4--5 bands per edge in
+photo\_red.R, green.B and violet.B; eight are used, which costs nothing.
 
-\textbf{Corners.}  A pixel near two edges, in band $k$ of one and band $k^*$
-of the other, gets the product $\ell_p = \ell_k\, \ell_{k^*}$.  For an evenly
-spreading light this is exact at the corner itself and 0.5--1.5\,\% low a
-little way in (\file{docs/color\_coordinates\_brightness\_2026-10-25.md},
-\S6).
+\textbf{Each photo's own bands.}  The band means come from the pre-image
+being divided into, not from a stored model.  Stored edge models were
+tried (\cref{sec:whitecheck}) and dropped for now (Bill, 2026-11-11):
+edge darkening differs too much from strip to strip.
+
+\textbf{Corners.}  A pixel within 8 pixels of a side and of an end has no
+model white: it is divided by its own pre-image pixel ($\lambda = 1$;
+Bill, 2026-11-11).  The product rule $\ell_p = \ell_k\, \ell_{k^*}$, exact
+at the corner for an evenly spreading light
+(\file{docs/color\_coordinates\_brightness\_2026-10-25.md}, \S6), and three
+other rules were tried; all miss the measured corners by 0.05--0.15\,A in
+the two outermost rings (\cref{sec:whitecheck}).
 
 \textbf{The model white} is then $\widetilde W_p = S'\, \ell_p$.  It has the edge and
 almost no noise, but not the pixel's own texture.
@@ -725,21 +735,24 @@ form keeps the small noise left in $\widetilde W_p$; it changes the numbers slig
 not the conclusion.  It is in \file{tex/chain\_derivation\_B.tex},
 eq.~\texttt{lambda-exact}.)
 
-\textbf{Example with round numbers.}  Camera noise 0.002\,A is
-$\sigma_{\delta'} = 0.0046$; texture 0.007\,A is $\sigma_\eta = 0.016$.  Then
-$\lambda = 0.92$.  The white adds 0.0019\,A of spread, against 0.0020\,A
-for $\lambda = 1$ (the pixel alone) and 0.0069\,A for $\lambda = 0$ (the
-model alone).
+\textbf{Example with measured numbers} (photo\_red.R, pad interior,
+\cref{sec:whitecheck}).  Camera noise 0.0042\,A is
+$\sigma_{\delta'} = 0.0097$; texture 0.0065\,A is $\sigma_\eta = 0.015$.
+Then $\lambda = 0.70$.  The white adds 0.0035\,A of spread, against
+0.0042\,A for $\lambda = 1$ (the pixel alone) and 0.0065\,A for
+$\lambda = 0$ (the model alone).  In green.B (noise 0.0068\,A, texture
+0.0078\,A), $\lambda = 0.57$ and the white adds 0.0051\,A.
 
-\textbf{What the example says.}  With these numbers the texture is larger
-than the noise, so the best white is almost the raw pixel, and blending
-gains only 0.0001\,A per pixel.  The edge bands matter more for another
+\textbf{What the example says.}  The noise is about as large as the
+texture, so the best white is a real blend in the interior.  Still, the
+gain is a few thousandths of an absorbance per pixel, and it averages
+away over a pad.  The edge bands matter more for another
 reason: they give each photo's edge factor from its own fitted edge, so a
 small error in lining up no longer leaves a false change at the edge, and
 they are how a change in the edge with dye can be measured
 \open{op:dyededge}.  Test~B's slopes (\cref{sec:factors}) say the texture
-carries over less than Assumption~F assumes; the best $\lambda$ must be
-measured, not taken from these round numbers \open{op:texture}.
+carries over less than Assumption~F assumes; inside the dye the best $\lambda$
+must be measured again \open{op:texture}.
 
 \textbf{Noise-free example at an edge pixel.}  $S' = 480$ (pre-image level
 600 times paper 0.8), $\ell = 0.70$, $f = 0.98$.  Then $W = 329.28$,
@@ -749,11 +762,97 @@ texture costs $0.434 \times 0.1 \times (1/0.98 - 1) = 0.0009$\,A here, as
 
 \begin{evidence}
   \item Band profiles $\ell_k$ for each edge, several pads and channels,
-    raw pre-image beside the model, same color scale.
+    raw pre-image beside the model, same color scale.  (Profiles done,
+    step~2a; the image comparison is still to make.)
   \item Measured $\sigma_{\delta'}$ (from repeat photos) and $\sigma_\eta$
     (the texture left after the bands), and the resulting $\lambda$.
+    (Done, \cref{sec:whitecheck}.)
   \item Side effect: the blended white must not change the pad's mean.
+    (Checked: under 0.0001\,A, \cref{sec:whitecheck}.)
 \end{evidence}
+
+\subsection{What the measurements say (proof-of-concept study, 2026-11-11)}
+\label{sec:whitecheck}
+
+\textbf{Question.}  How large are the camera noise and the texture the
+model white lacks, what is the best $\lambda$, and does the blend matter?
+Script: \file{desktop/padanalysis/white\_study.py}, steps 2a--2c; tables in
+\file{white\_out/}.
+
+\textbf{Camera noise.}  Measured three ways: three photos taken a minute
+apart without moving the cartridge (\texttt{test\_image/IMG0005}--0007,
+the saved C1034 strip, and IMG0008--0010, the saved C1044 strip), two
+exposures within one photo, and reseated pre-images.  One pixel, one
+photo, clean paper: photo\_red.R 0.0042--0.0050\,A, green.B
+0.006--0.008\,A, violet.B 0.004\,A.  On the stained C1044 pad, green.B
+reaches 0.009--0.012\,A.  These are 2--4 times the 0.002\,A assumed
+before.
+
+\textbf{Stored edge models.}  An edge model fitted once to all F, G and H
+pre-images (darkening falling off exponentially with distance from the
+edge, with poorly fitting edge pixels dropped) predicts a new strip's
+bands 0--3 two to seven times worse than that strip's own band means
+(photo\_red.R band~1: 0.029\,A against 0.009\,A).  Further in, a mix of
+the two helps by about 0.0005\,A.  The top and bottom edges are darkest
+1--2 pixels inside the fitted edge, not at it.  Dropped for now (Bill,
+2026-11-11).  Bill may return to stored models later, to need fewer
+exposures (less light on the pad) and to check each capture's consistency
+as it is taken.
+
+\textbf{The best $\lambda$.}  Two ways, which agree
+(\cref{fig:step2c_lambda}): the formula \eqref{eq:lambda} with the measured
+noise and texture, and a direct trial in which one photo of a clean pad
+plays the post-image and another plays the pre-image.
+\begin{center}
+\begin{tabular}{@{}lcccc@{}}
+\toprule
+ & interior & bands 4--7 & bands 2--3 & bands 0--1 \\
+\midrule
+best $\lambda$, photo\_red.R & 0.70--0.75 & 0.8 & 0.9 & 1.0 \\
+best $\lambda$, green.B & 0.55--0.65 & 0.6 & 0.85 & 1.0 \\
+texture the model lacks, A & 0.006--0.008 & 0.006--0.010 & 0.009--0.016
+  & 0.04--0.06 \\
+\bottomrule
+\end{tabular}
+\end{center}
+In bands 0--1 the darkening changes steeply within a band one pixel wide,
+so a band mean cannot follow it, and the pixel alone is best.
+
+\textbf{Does the blend matter?}  Little.  On reseated pre-images lined up
+as the chain does it, the best blend lowers the interior spread per pixel
+from 0.0066 to 0.0064\,A (photo\_red.R) and from 0.0097 to 0.0092\,A
+(green.B), and changes each pad's mean $A$ by under 0.0001\,A.  The blend
+is kept for now (Bill, 2026-11-11), with $\lambda$ set by zone as in the
+table.
+
+\textbf{What lining up costs.}  With the white made the same way, the
+spread in bands 0--1 is 0.013--0.020\,A after lining up, against
+0.009--0.013\,A for unmoved photos; in the corners 0.014--0.024\,A
+against 0.006--0.011\,A.  This is step~1's leftover misfit acting where
+the white changes steeply.
+
+\textbf{Stain drift.}  The stained C1044 pad read about 0.0035\,A darker
+in photo\_red.R on each repeat a minute apart, after a little over 2\,s of
+each LED per capture; the C1034 pad did not change (0.001\,A or less)
+\open{op:drift}.
+
+\begin{figure}[h!]
+    \centering
+    \includegraphics[scale=0.57]{step2c_lambda_photo_red.R}
+    \caption{
+    Choosing the blend weight, photo\_red.R, with no dye anywhere.  One
+    photo of a clean pad plays the post-image and another the pre-image;
+    the spread of $A$ from pixel to pixel is the error.  Horizontal: the
+    weight $\lambda$ on the pixel itself (0 = model white alone, 1 = pixel
+    alone).  Panels from the interior out to the outermost two bands.
+    Dark gray: photos without moving the cartridge; colors: reseated
+    pre-images, lined up, by holder; dotted: the formula; dots: each
+    line's lowest point.  Plain-language notes:
+    \texttt{figs/step2c\_lambda\_photo\_red.R.txt}.  Made by
+    \texttt{white\_study.show\_lambda}.
+    }
+\label{fig:step2c_lambda}
+\end{figure}
 
 %======================================================================
 \section{Step 6: the ratio}
@@ -1164,7 +1263,8 @@ G: same shape of light in both photos & \sno{sec:phi} & test: do the two
 L: lining up places the same paper on the same pixel & \sno{sec:lineup}
   & checked: $\pm0.1$\,px across, ends 0.1--0.3\,px (deferred); band~1
   false change 0.005--0.008\,A, left to step~5 \\
-N: noise random and unrelated & \sno{sec:white} & in use \\
+N: noise random and unrelated & \sno{sec:white} & in use; noise
+  measured 0.004--0.012\,A, formula for $\lambda$ matches trial \\
 C: two dyes plus brightness, adding in absorbance & \sno{sec:color},
   \sno{sec:mass} & $\mM$ needs only the endpoints, no PCA; PCA is a check:
   two directions hold 99.8\,\%, a real third exists \open{op:third} \\
@@ -1188,8 +1288,9 @@ C: two dyes plus brightness, adding in absorbance & \sno{sec:color},
     Compare the band profiles $\ell_k$ in the pre-image and the post-image
     of pads whose edges were and were not reached by dye.
   \item \label{op:texture} \textbf{How much texture carries into the
-    dye?}  Measure $\sigma_{\delta'}$ and $\sigma_\eta$, and the carry-over
-    slope by distance from the dot's edge; set $\lambda$ from them.
+    dye?}  $\sigma_{\delta'}$ and $\sigma_\eta$ are measured and $\lambda$
+    is set for clean paper (\cref{sec:whitecheck}).  Still to measure: the
+    carry-over slope by distance from the dot's edge (step~2d).
   \item \label{op:third} \textbf{Is the third color direction worth
     keeping?}  Fit the arsenic calibration with two and with three amounts
     and compare with the replicate scatter.
@@ -1214,9 +1315,17 @@ C: two dyes plus brightness, adding in absorbance & \sno{sec:color},
     for each channel's own ratio (the offset is the same in both photos),
     but at the pad's edge the channels of one pixel look at slightly
     different spots, which matters for the per-pixel color of
-    \sref{sec:color}.  To do: measure the offsets (the edge model's
-    amplitudes per layer give them), and decide whether to shift each layer
+    \sref{sec:color}.  To do: measure the offsets (each layer's edge band
+    profiles give them), and decide whether to shift each layer
     before step~8.
+  \item \label{op:drift} \textbf{Does the stain change during capture?}
+    The saved, aged C1044 pad read about 0.0035\,A darker in photo\_red.R
+    on each of three captures a minute apart, each giving a little over
+    2\,s of every LED (\cref{sec:whitecheck}).  A stain-drift study is to
+    come later (Bill, 2026-11-11): a timed series of captures, with the
+    LEDs off between them, to tell a stain still developing from one
+    darkened by the light.  It bears on Bill's concern about how much
+    light the pad receives.
 \end{enumerate}
 
 %======================================================================
@@ -1302,7 +1411,11 @@ the same meanings; $\nu = \kappa I d$ is not needed.
 \toprule
 Number & Where \\
 \midrule
-Camera noise 0.002\,A; texture 0.006--0.008\,A & \file{How\_best\_to\_help\_Bill.md}
+Camera noise 0.004--0.012\,A; texture the model lacks; best $\lambda$
+  & \file{desktop/padanalysis/white\_study.py} (2026-11-11),
+  \file{white\_out/noise\_still.json}, \file{texture\_pre.json},
+  \file{lambda\_reseated.json} \\
+Texture 0.006--0.008\,A (earlier) & \file{How\_best\_to\_help\_Bill.md}
   \S6; \file{docs/shading\_study\_2026-09-29.md} \\
 Edge up to 30\,\%, 2--3 px; $L = 0.10$\,mm & \file{docs/pad\_light\_physics\_2026-10-25.md}
   \S4.8 (C1032 \texttt{royal\_blue.B}) \\

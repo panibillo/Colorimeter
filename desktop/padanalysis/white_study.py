@@ -25,8 +25,9 @@ THE PARTS (each is a guarded block in `run()`)
         sigma_delta' from repeats taken without moving the cartridge, from
         two exposures of one photo, and from reseated pre-images.
                                                            (done 2026-11-11)
-    2c  texture left after the bands, sigma_eta, and the best blend weight
-        lambda.                                              (next)
+    2c  `texture_still`, `texture_pre`, `lambda_still`, `lambda_reseated`:
+        texture the model white lacks, sigma_eta, and the best blend weight
+        lambda, by the formula and by direct trial.       (done 2026-11-11)
     2d  post-images: edge bands with dye at the edge against without (open
         item 3), and how much texture carries into the dye (open item 4).
                                                              (not yet)
@@ -84,18 +85,40 @@ RESULTS, 2026-11-11 (tables in white_out/; A = absorbance, bigger = darker)
         0.05-0.06 A in the next.  DECISION (Bill, 2026-11-11): each corner
         pixel is divided by its own pre-image pixel, with no model; then
         measure how much stain falls in the two outer corner rings.
-    2b, camera noise, one pixel, one photo.  White pad (saved C1034,
-        test_image/IMG0005-0007): photo_red.R 0.0045 A, green.B
+    2b, camera noise, one pixel, one photo.  Dot pad (saved, aged C1034,
+        test_image/IMG0005-0007; mostly plain paper with a small stain
+        dot near the middle, which violet.B shows at about +0.23 A): photo_red.R 0.0045 A, green.B
         0.006-0.008, violet.B 0.004.  Stained pad (saved C1044, IMG0008-0010):
         photo_red.R 0.005-0.006, green.B 0.009-0.012.  Exposure rungs and
         reseated pre-images agree (photo_red.R 0.004-0.005).  This is 2-4
         times the 0.002 A the chain assumed (NOISE_A, still used by
         `bands_needed`); DECISION (Bill): use the measured noise per channel
         and redo the stop rule and lambda.
-    2b, drift.  The aged stained pad read about 0.0035 A darker in
-        photo_red.R on each repeat, about a minute apart, after a little
-        over 2 s of each LED per capture.  The white pad did not drift
+    2b, drift.  The aged stained pad (saved C1044) read about 0.0035 A
+        darker in photo_red.R on each repeat, about a minute apart, after a
+        little over 2 s of each LED per capture.  The dot pad did not drift
         (0.001 A or less).  A stain-drift study is to come later (Bill).
+    2c, the blend.  Model white = plane times each photo's own band
+        means (`model_white`); corners use the pixel alone.  What the model
+        lacks, per pixel, in the F/G/H pre-images: interior 0.006-0.007 A
+        (photo_red.R), 0.007-0.008 (green.B), about the size of the noise;
+        bands 0-1 about 0.04-0.06 A, because darkening changes steeply
+        within one band.  Best lam, by the formula and by direct trial
+        (they agree): interior 0.55-0.75, bands 4-7 0.55-0.85, bands 2-3
+        0.75-0.95, bands 0-1 1.0.  The gain over the pixel alone is small:
+        reseated pre-images, interior, photo_red.R 0.0066 -> 0.0064 A per
+        pixel, green.B 0.0097 -> 0.0092; none at bands 0-1.  The blend moves
+        a pad's mean A by under 0.0001 A (96 and 76 reseated pairs).
+        Lining up adds spread where the white changes steeply: bands 0-1
+        0.013-0.020 A against 0.009-0.013 unmoved, corners 0.014-0.024
+        against 0.006-0.011.  With the measured noise the band stop rule
+        needs 4-5 bands per edge (8 are modeled).
+        DECISION (Bill, 2026-11-11): keep the blend for now, lam by zone.
+        Bill is concerned about exposing pads to too much light, and may
+        later use stored models to need fewer exposures and to check each
+        capture's consistency as it is taken.
+        Plain-language notes on the figure axes: tex/figs/
+        step2c_lambda_<cell>.txt.
 
 Run with:  timeout -k 10 1800 ../../.venv/bin/python3 -u white_study.py
 """
@@ -910,10 +933,12 @@ def summarize_tests(t):
 # ── 2b: camera noise ───────────────────────────────────────────────────
 
 #: Repeat sets taken without moving the cartridge (Bill, 2026-11-11):
-#: IMG0005-0007 an unexposed (white) pad, IMG0008-0010 a stained pad.
+#: IMG0005-0007 the saved, aged C1034 strip, plain paper with a small stain
+#: dot near the middle (a dot-geometry capture); IMG0008-0010 the saved C1044
+#: strip, stained all over.
 #: Saved from the Test Image screen into test_image/; full LED suites with
 #: three exposures (e0, e1, e2) each, and no pre-image section.
-STILL_SETS = {"white pad": ("IMG0005", "IMG0006", "IMG0007"),
+STILL_SETS = {"dot pad": ("IMG0005", "IMG0006", "IMG0007"),
               "stained pad": ("IMG0008", "IMG0009", "IMG0010")}
 #: Channels looked at in 2b: the pre-image channels plus green.B.
 NOISE_CELLS = CELLS
@@ -1050,7 +1075,6 @@ def noise_reseated(sample="C1040", files=None, cells=(("photo_red", "R"),
     Returns:
         list of dicts: cell, pair, noise_A (one photo, interior), mean_A, n.
     """
-    from scipy import ndimage as ndi
     files = files or SETS["F"][sample]
     out = []
     for cell in cells:
@@ -1059,20 +1083,364 @@ def noise_reseated(sample="C1040", files=None, cells=(("photo_red", "R"),
                 fa, fb = files[i], files[j]
                 Ra = sr.frame(fa, cell, a1.PRE)["R"]
                 Rb = sr.frame(fb, cell, a1.PRE)["R"]
-                pa, pb = a1.pad_of(fa, a1.PRE), a1.pad_of(fb, a1.PRE)
-                rows, cols = Rb.shape
-                yy, xx = np.mgrid[0:rows, 0:cols].astype(float)
-                u = xx - (pb.aL + pb.m * (yy - pb.yc))
-                ya = pa.top + (yy - pb.top)
-                xa = pa.aL + u + pa.m * (ya - pa.yc)
-                Ra_on_b = ndi.map_coordinates(Ra, [ya, xa], order=1,
-                                              mode="nearest")
+                Ra_on_b = _onto(fa, fb, Ra, Rb.shape)
+                pb = a1.pad_of(fb, a1.PRE)
                 inner = pb.mask(INTERIOR_PX)
                 nz, mu, n = _pair_noise(Ra_on_b, Rb, inner)
                 out.append(dict(cell=a1.cell_name(cell), pair=f"{fa}-{fb}",
                                 noise_A=nz, mean_A=mu, n=n))
         a1.close_all()
     return out
+
+
+def _onto(fa, fb, arr, shape):
+    """
+    Carry an array in pre-image fa's pixels onto pre-image fb's pixels,
+    lining up by the two guided pad fits.  Each fb pixel takes the
+    weighted average of the four nearest fa pixels (bilinear, as
+    `a1.pre_to_post` does).  A result that leans on a NaN pixel is NaN.
+
+    Args:
+        fa, fb: scalar str, repeat file names.
+        arr: array in fa's pixels.
+        shape: (rows, cols) of fb's arrays.
+
+    Returns:
+        array of `shape`.
+    """
+    from scipy import ndimage as ndi
+    pa, pb = a1.pad_of(fa, a1.PRE), a1.pad_of(fb, a1.PRE)
+    rows, cols = shape
+    yy, xx = np.mgrid[0:rows, 0:cols].astype(float)
+    u = xx - (pb.aL + pb.m * (yy - pb.yc))
+    ya = pa.top + (yy - pb.top)
+    xa = pa.aL + u + pa.m * (ya - pa.yc)
+    bad = ~np.isfinite(arr)
+    out = ndi.map_coordinates(np.where(bad, 0.0, arr), [ya, xa], order=1,
+                              mode="nearest")
+    if bad.any():
+        hit = ndi.map_coordinates(bad.astype(float), [ya, xa], order=1,
+                                  mode="nearest")
+        out[hit > 0] = np.nan
+    return out
+
+
+# ── 2c: texture, and the best blend weight ─────────────────────────────
+#
+# The white used in the ratio is  W-hat = lam * W + (1 - lam) * W-tilde
+# (chain step 5): W is the pixel itself, W-tilde the model white.  The
+# model white here is a plane over the interior times each edge's own band
+# means, measured on the same photo (the saved edge models were dropped,
+# Bill 2026-11-11).  Corner pixels get no model: they are divided by their
+# own pixel (lam = 1 there, Bill 2026-11-11).
+#
+# What the model lacks is the paper's texture.  What the pixel carries is
+# camera noise.  With texture spread t and noise spread s (both in A), the
+# document's best weight is  lam = t^2 / (t^2 + s^2).
+
+#: Blend weights tried in the direct trials.
+LAMBDAS = [round(x, 2) for x in np.linspace(0, 1, 21)]
+#: Pixel groups reported in 2c, by distance to the nearest edge.
+ZONES = ("interior", "bands 0-1", "bands 2-3", "bands 4-7")
+
+
+def zones_of(samp, sec):
+    """
+    Sort a photo's pad pixels into the 2c groups.
+
+    A pixel within BAND_CLEAR_PX of a side and of an end is a corner.  The
+    other pixels are sorted by the distance to their nearest edge: under 2,
+    2 to 4, 4 to NBANDS layer px, or the interior (NBANDS or more).
+
+    Returns:
+        (zone, nearest, dist): zone, dict name -> bool array, the ZONES and
+        "corner"; nearest, array of the nearest edge's index in EDGES;
+        dist, from `edge_distances`.
+    """
+    dist, _, _ = edge_distances(samp, sec)
+    D = np.stack([dist[e] for e in EDGES])
+    inside = (D >= 0).all(0)
+    near = D.min(0)
+    side = np.minimum(dist["L"], dist["R"])
+    end = np.minimum(dist["T"], dist["B"])
+    corner = inside & (side < BAND_CLEAR_PX) & (end < BAND_CLEAR_PX)
+    edge = inside & ~corner & (near < NBANDS)
+    zone = {"interior": inside & (near >= NBANDS),
+            "bands 0-1": edge & (near < 2),
+            "bands 2-3": edge & (near >= 2) & (near < 4),
+            "bands 4-7": edge & (near >= 4),
+            "corner": corner}
+    return zone, D.argmin(0), dist
+
+
+def model_white(R, samp, sec):
+    """
+    The model white W-tilde for one photo: the smooth part times each
+    edge's own band means.
+
+    How:
+        1. S': a plane a + b*u + c*v fitted to R over the interior.
+        2. For each edge and band k (pixels whose nearest edge it is, k to
+           k+1 layer px in, corners left out): l_k = mean of R / S'.
+        3. W-tilde = S' in the interior, S' * l_k in band k, NaN in the
+           corners and off the pad.
+
+    Args:
+        R: array, the photo's reflectance (hot pixels NaN).
+        samp, sec: the photo, for its pad fit.
+
+    Returns:
+        (Wt, zone): the model white and the `zones_of` groups.
+    """
+    zone, nearest, dist = zones_of(samp, sec)
+    _, u, v = edge_distances(samp, sec)
+    ok = np.isfinite(R)
+    inner = zone["interior"] & ok
+    X = np.c_[np.ones(inner.sum()), u[inner], v[inner]]
+    coef, *_ = np.linalg.lstsq(X, R[inner], rcond=None)
+    S = coef[0] + coef[1] * u + coef[2] * v
+    Wt = np.full(R.shape, np.nan)
+    Wt[zone["interior"]] = S[zone["interior"]]
+    edge = zone["bands 0-1"] | zone["bands 2-3"] | zone["bands 4-7"]
+    for i, e in enumerate(EDGES):
+        for k in range(NBANDS):
+            m = edge & (nearest == i) & (dist[e] >= k) & (dist[e] < k + 1)
+            if (m & ok).any():
+                Wt[m] = S[m] * np.mean(R[m & ok] / S[m & ok])
+    return Wt, zone
+
+
+def _best(t2, s2):
+    """The document's best weight and the white's spread there, from
+    texture t2 and noise s2 (both squared, A^2)."""
+    lam = t2 / (t2 + s2) if t2 + s2 > 0 else float("nan")
+    return lam, float(np.sqrt(t2 * s2 / (t2 + s2))) if t2 + s2 > 0 else 0.0
+
+
+def texture_still(sets=STILL_SETS, cells=NOISE_CELLS):
+    """
+    Step 2c, way 1: the texture the model white lacks, from the repeats
+    taken without moving the cartridge.
+
+    How, for each set, channel and exposure:
+        1. M: the mean of the three photos.  Its noise is the one-photo
+           noise s over sqrt(3).
+        2. A = -log10(M / W-tilde(M)): texture plus that noise.
+        3. s from the pairs of photos on the same pixels (`_pair_noise`).
+        4. texture t: t^2 = var(A) - s^2 / 3, per zone.
+        5. The document's best lam and the white's spread there.
+
+    Returns:
+        list of dicts: set, cell, rung, zone, n, texture_A, noise_A,
+        lam, white_A (spread the white adds at that lam).
+    """
+    out = []
+    for name, files in sets.items():
+        for cell in cells:
+            labels = a1.open_sample(files[0], "").labels(cell[0])
+            for rung in labels:
+                fr = [frame_at(f, cell, "", rung) for f in files]
+                if any(x is None for x in fr):
+                    continue
+                Rs = [x["R"] for x in fr]
+                M = np.mean(Rs, axis=0)
+                Wt, zone = model_white(M, files[0], "")
+                with np.errstate(invalid="ignore", divide="ignore"):
+                    A = -np.log10(M / Wt)
+                for zn in ZONES:
+                    z = zone[zn] & np.isfinite(A)
+                    s2 = float(np.mean([_pair_noise(Rs[i], Rs[j], z)[0] ** 2
+                                        for i in range(3)
+                                        for j in range(i + 1, 3)]))
+                    t2 = max(float(np.var(A[z])) - s2 / 3, 0.0)
+                    lam, w = _best(t2, s2)
+                    out.append(dict(set=name, cell=a1.cell_name(cell),
+                                    rung=rung, zone=zn, n=int(z.sum()),
+                                    texture_A=float(np.sqrt(t2)),
+                                    noise_A=float(np.sqrt(s2)),
+                                    lam=lam, white_A=w))
+        a1.close_all()
+    return out
+
+
+def texture_pre(cells=(("photo_red", "R"), ("green", "B"))):
+    """
+    Step 2c, way 2: the texture in the F/G/H pre-images.
+
+    Each pre-image is one photo, so its noise cannot be taken out from the
+    photo itself.  The noise s is taken from `noise_still` (dot pad,
+    interior, median for the channel): t^2 = var(A) - s^2.
+
+    Returns:
+        list of dicts: holder, sample, file, cell, zone, n, total_A,
+        noise_A (assumed), texture_A, lam, white_A.
+    """
+    ns = _load("noise_still")
+    out = []
+    for cell in cells:
+        name = a1.cell_name(cell)
+        s = float(np.median([r["noise_inner_A"] for r in ns
+                             if r["set"] == "dot pad" and r["cell"] == name]))
+        for hold, smp, f in _files_with(cell):
+            R = np.array(sr.frame(f, cell, a1.PRE)["R"], float)
+            Wt, zone = model_white(R, f, a1.PRE)
+            with np.errstate(invalid="ignore", divide="ignore"):
+                A = -np.log10(R / Wt)
+            for zn in ZONES:
+                z = zone[zn] & np.isfinite(A)
+                tot = float(np.var(A[z]))
+                t2 = max(tot - s ** 2, 0.0)
+                lam, w = _best(t2, s ** 2)
+                out.append(dict(holder=hold, sample=smp, file=f, cell=name,
+                                zone=zn, n=int(z.sum()),
+                                total_A=float(np.sqrt(tot)), noise_A=s,
+                                texture_A=float(np.sqrt(t2)), lam=lam,
+                                white_A=w))
+        a1.close_all()
+    return out
+
+
+def _trial(Rpost, Rpre, Wt, zone):
+    """
+    The spread of A = -log10(Rpost / W-hat) per zone, for every lam in
+    LAMBDAS.  Corner pixels use the pixel itself (lam = 1).
+
+    Returns:
+        dict zone -> list of spreads (A), one per lam; and "n" per zone.
+    """
+    out = {}
+    for zn in ZONES + ("corner",):
+        z = zone[zn] & np.isfinite(Rpost) & np.isfinite(Rpre)
+        if zn != "corner":
+            z &= np.isfinite(Wt)
+        sds = []
+        for lam in LAMBDAS:
+            W = Rpre[z] if zn == "corner" else lam * Rpre[z] + (1 - lam) * Wt[z]
+            with np.errstate(invalid="ignore", divide="ignore"):
+                sds.append(float(np.std(-np.log10(Rpost[z] / W))))
+        out[zn] = sds
+        out["n " + zn] = int(z.sum())
+    return out
+
+
+def lambda_still(sets=STILL_SETS, cells=NOISE_CELLS):
+    """
+    Step 2c, way 3: try every lam on the unmoved repeats.  One photo plays
+    the post-image, another the pre-image (same pixels, no lining up, no
+    dye).  The spread of the resulting A over each zone is what the white
+    adds plus the post-image's own noise.
+
+    Returns:
+        list of dicts: set, cell, rung, post, pre, and `_trial`'s results.
+    """
+    out = []
+    for name, files in sets.items():
+        for cell in cells:
+            labels = a1.open_sample(files[0], "").labels(cell[0])
+            for rung in labels:
+                fr = [frame_at(f, cell, "", rung) for f in files]
+                if any(x is None for x in fr):
+                    continue
+                for j in range(3):                 # j: the "pre-image"
+                    Wt, zone = model_white(fr[j]["R"], files[j], "")
+                    for i in range(3):             # i: the "post-image"
+                        if i == j:
+                            continue
+                        row = dict(set=name, cell=a1.cell_name(cell),
+                                   rung=rung, post=files[i], pre=files[j])
+                        row.update(_trial(fr[i]["R"], fr[j]["R"], Wt, zone))
+                        out.append(row)
+        a1.close_all()
+    return out
+
+
+def lambda_reseated(cells=(("photo_red", "R"), ("green", "B"))):
+    """
+    Step 2c, way 4: try every lam on reseated repeats of one sample.  One
+    pre-image plays the post-image; another, lined up onto it by the
+    guided pad fits (bilinear, as the chain does), plays the pre-image.
+    This adds what lining up does: the bilinear average lowers the
+    pre-image's noise, and any misfit moves the texture.
+
+    Returns:
+        list of dicts: holder, sample, cell, post, pre, and `_trial`'s
+        results.
+    """
+    out = []
+    for cell in cells:
+        fl = _files_with(cell)
+        for hold, smp in sorted({(h, s) for h, s, _ in fl}):
+            files = [f for h, s, f in fl if s == smp]
+            R = {f: np.array(sr.frame(f, cell, a1.PRE)["R"], float)
+                 for f in files}
+            Wt = {f: model_white(R[f], f, a1.PRE)[0] for f in files}
+            for fb in files:                       # fb: the "post-image"
+                zone, _, _ = zones_of(fb, a1.PRE)
+                for fa in files:                   # fa: the "pre-image"
+                    if fa == fb:
+                        continue
+                    Ra = _onto(fa, fb, R[fa], R[fb].shape)
+                    Wa = _onto(fa, fb, Wt[fa], R[fb].shape)
+                    row = dict(holder=hold, sample=smp, cell=a1.cell_name(cell),
+                               post=fb, pre=fa)
+                    row.update(_trial(R[fb], Ra, Wa, zone))
+                    out.append(row)
+            a1.close_all()
+    return out
+
+
+def summarize_2c(tex_still, tex_pre, lam_still, lam_res):
+    """
+    Print step 2c's numbers.
+
+    Texture: median t, s and the document's best lam per zone.  Trials:
+    the root-mean-square spread over pairs at lam = 0 (model only), 1
+    (pixel only) and the best lam on the grid.
+    """
+    def med(rows, key):
+        return float(np.median([r[key] for r in rows]))
+
+    print("TEXTURE the model lacks, A (median): texture / noise -> best lam,"
+          " white's spread")
+    for name in ("dot pad", "stained pad"):
+        for cell in sorted({r["cell"] for r in tex_still}):
+            rs = [r for r in tex_still if r["set"] == name and r["cell"] == cell]
+            if not rs:
+                continue
+            txt = "  ".join(
+                f"{zn}: {med(z, 'texture_A'):.4f}/{med(z, 'noise_A'):.4f}"
+                f" -> {med(z, 'lam'):.2f}, {med(z, 'white_A'):.4f}"
+                for zn in ZONES if (z := [r for r in rs if r["zone"] == zn]))
+            print(f"  still {name:11s} {cell:13s} {txt}")
+    for cell in sorted({r["cell"] for r in tex_pre}):
+        for hold in sorted({r["holder"] for r in tex_pre}):
+            rs = [r for r in tex_pre if r["cell"] == cell and r["holder"] == hold]
+            if not rs:
+                continue
+            txt = "  ".join(
+                f"{zn}: {med(z, 'texture_A'):.4f}/{med(z, 'noise_A'):.4f}"
+                f" -> {med(z, 'lam'):.2f}, {med(z, 'white_A'):.4f}"
+                for zn in ZONES if (z := [r for r in rs if r["zone"] == zn]))
+            print(f"  pre {hold:2s} {cell:13s} {txt}")
+
+    def curves(rows, label):
+        for cell in sorted({r["cell"] for r in rows}):
+            rs = [r for r in rows if r["cell"] == cell]
+            parts = []
+            for zn in ZONES + ("corner",):
+                c = np.sqrt(np.mean([np.square(r[zn]) for r in rs], axis=0))
+                b = int(np.argmin(c))
+                parts.append(f"{zn}: {c[0]:.4f}/{c[-1]:.4f}/{c[b]:.4f}"
+                             f"@{LAMBDAS[b]:.2f}" if zn != "corner"
+                             else f"corner: {c[-1]:.4f}")
+            print(f"  {label:20s} {cell:13s} " + "  ".join(parts))
+
+    print("TRIALS: spread of A, rms over pairs: model only / pixel only /"
+          " best @ lam")
+    for name in ("dot pad", "stained pad"):
+        curves([r for r in lam_still if r["set"] == name], "still " + name)
+    for hold in sorted({r["holder"] for r in lam_res}):
+        curves([r for r in lam_res if r["holder"] == hold], "reseated " + hold)
 
 
 # ── figures ────────────────────────────────────────────────────────────
@@ -1169,6 +1537,74 @@ def show_holders(rows, cell="photo_red.R", savefigs=True):
     return fig
 
 
+def show_lambda(lam_still, lam_res, tex_still, cell="photo_red.R",
+                savefigs=True):
+    """
+    Figure for step 2c: the spread of A against the blend weight lam.
+
+    Goal: see where the best lam lies in each zone, and whether the
+    document's formula matches the direct trial.  One panel per zone, from
+    the interior out to bands 0-1.  Lines: the trial on the unmoved dot-pad
+    repeats (dark gray) and on reseated pre-images, lined up, per holder
+    (holder colors); each is the root-mean-square over its pairs.  A filled
+    marker sits at each line's lowest point.  Dotted: the formula for the
+    dot pad, spread^2 = s^2 + lam^2 s^2 + (1 - lam)^2 t^2, with the noise s
+    and texture t of `texture_still` (the first s^2 is the post-image's own
+    noise, which no lam removes).  lam = 0 is the model white alone, lam = 1
+    the pixel alone.
+    """
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    lam = np.array(LAMBDAS)
+    order = ("interior", "bands 4-7", "bands 2-3", "bands 0-1")
+    fig, axs = plt.subplots(4, 1, figsize=(7.4, 9.2), sharex=True)
+
+    def line(ax, rows, zn, col, lab, ls="-"):
+        c = np.sqrt(np.mean([np.square(r[zn]) for r in rows], axis=0))
+        ax.plot(lam, c, ls, color=col, lw=1.6, label=lab)
+        b = int(np.argmin(c))
+        ax.plot(lam[b], c[b], "o", color=col, ms=6, mec="white", mew=1.2,
+                zorder=3)
+
+    for ax, zn in zip(axs, order):
+        rs = [r for r in lam_still if r["set"] == "dot pad" and r["cell"] == cell]
+        if rs:
+            line(ax, rs, zn, "#4a4944", f"unmoved repeats, dot pad "
+                 f"({len(rs)} pairs)")
+        for hold, (col, mk, lab) in HOLDER_STYLE.items():
+            rs = [r for r in lam_res if r["holder"] == hold and r["cell"] == cell]
+            if rs:
+                line(ax, rs, zn, col, f"reseated pre-images, {lab} "
+                     f"({len(rs)} pairs)")
+        ts = [r for r in tex_still if r["set"] == "dot pad"
+              and r["cell"] == cell and r["zone"] == zn]
+        if ts:
+            s = np.median([r["noise_A"] for r in ts])
+            t = np.median([r["texture_A"] for r in ts])
+            ax.plot(lam, np.sqrt(s**2 + lam**2 * s**2 + (1 - lam)**2 * t**2),
+                    ":", color="#4a4944", lw=1.2,
+                    label="formula, dot pad (s, t from texture_still)")
+        ax.set_title(zn if zn != "interior" else
+                     f"interior ({NBANDS} or more px from every edge)",
+                     loc="left", fontsize=9)
+        ax.set_ylabel("spread of A")
+        ax.grid(axis="y", color="#ecebe6", lw=0.8)
+        for sp in ("top", "right"):
+            ax.spines[sp].set_visible(False)
+    axs[0].legend(fontsize=7, frameon=False, loc="upper right")
+    axs[-1].set_xlabel("blend weight lam on the pixel itself "
+                       "(0 = model white alone, 1 = pixel alone)")
+    fig.suptitle(f"Pre-images as stand-in post-images, {cell}: spread of "
+                 f"A = -log10(R_post / W-hat) against lam\n"
+                 f"W-hat = lam * pixel + (1 - lam) * model white; dots = "
+                 f"lowest point; no dye anywhere", fontsize=10, x=0.02,
+                 ha="left")
+    fig.tight_layout(rect=(0, 0, 1, 0.94))
+    _savefig(fig, f"step2c_lambda_{cell}", savefigs)
+    return fig
+
+
 def _savefig(fig, name, savefigs):
     if savefigs:
         FIGS.mkdir(parents=True, exist_ok=True)
@@ -1192,20 +1628,48 @@ def run():
     """
     The study, step by step.  Turn each step on (1) or off (0).
 
-        2a  band_profiles   -> white_out/bands.json
-            summary         -> terminal
-            figures         -> tex/figs/step2a_bands_channels.png,
-                               step2a_bands_holders_<cell>.png
+        2a     band_profiles   -> white_out/bands.json
+               summary         -> terminal
+               figures         -> tex/figs/step2a_bands_channels.png,
+                                  step2a_bands_holders_<cell>.png
+        2a-ii  fit_all_models  -> white_out/edge_models.json (about 3 min)
+               test_models     -> white_out/edge_test.json (about 25 min)
+        2b     noise_still, noise_rungs, noise_reseated
+                               -> white_out/noise_*.json
+        2c     texture_still, texture_pre, lambda_still, lambda_reseated
+                               -> white_out/texture_*.json, lambda_*.json
+               summarize_2c    -> terminal
+               show_lambda     -> tex/figs/step2c_lambda_<cell>.png
     """
-    if 1:   # 2a: band profiles from the pre-images (reads the photos)
+    if 0:   # 2a: band profiles from the pre-images (reads the photos)
         _save("bands", band_profiles())
-    if 1:   # 2a: numbers
+    if 0:   # 2a: numbers
         summary(_load("bands"))
-    if 1:   # 2a: figures
+    if 0:   # 2a: figures
         rows = _load("bands")
         show_channels(rows)
         show_holders(rows, "photo_red.R")
         show_holders(rows, "green.B")
+    if 0:   # 2a-ii: saved edge models and their held-out tests (slow)
+        _save("edge_models", fit_all_models())
+        t = test_models()
+        _save("edge_test", t)
+        summarize_tests(t)
+    if 0:   # 2b: camera noise
+        _save("noise_still", noise_still())
+        _save("noise_rungs", noise_rungs())
+        _save("noise_reseated", noise_reseated())
+    if 1:   # 2c: texture and the blend weight (needs noise_still.json)
+        _save("texture_still", texture_still())
+        _save("texture_pre", texture_pre())
+        _save("lambda_still", lambda_still())
+        _save("lambda_reseated", lambda_reseated())
+    if 1:   # 2c: numbers and figures
+        ts, tp = _load("texture_still"), _load("texture_pre")
+        ls, lr = _load("lambda_still"), _load("lambda_reseated")
+        summarize_2c(ts, tp, ls, lr)
+        show_lambda(ls, lr, ts, "photo_red.R")
+        show_lambda(ls, lr, ts, "green.B")
 
 
 if __name__ == "__main__":

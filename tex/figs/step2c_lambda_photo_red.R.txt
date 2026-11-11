@@ -1,0 +1,56 @@
+step2c_lambda_photo_red.R.png: what the axes measure
+Made by desktop/padanalysis/white_study.show_lambda, 2026-11-11.  Channel: photo_red.R.
+
+THE SET-UP
+No dye is involved anywhere in this figure.  One photo of an unstained pad
+plays the "post-image" and another photo of the same pad plays the
+"pre-image".  Each post-image pixel is divided by a white made from the
+pre-image, and the result is turned into absorbance A.  Since both photos
+show the same clean paper, the right answer is the same at every pixel (no
+stain).  Any pixel-to-pixel scatter in A is error added by the white and by
+the camera.
+
+HORIZONTAL AXIS: "blend weight lam on the pixel itself"
+How the white for each pixel is made.  It is a weighted average of two
+things:
+  - the pixel itself: that pixel's value in the pre-image.  It carries the
+    paper's own grain (texture) at that spot, which is good, because the
+    same grain is in the post-image and divides out.  But it also carries
+    the camera's random noise for that one photo.
+  - the model white: a smooth version made from the whole pad (a gently
+    tilted flat level, times the average darkening of each 1-pixel-wide
+    strip along each edge).  It has almost no noise, because it averages
+    many pixels, but it knows nothing about the grain at this spot.
+lam = 0 uses the model white alone.  lam = 1 uses the pixel alone.
+lam = 0.7 means 70 % pixel and 30 % model.  The same lam is used for every
+pixel in a panel.  Corner pixels always use the pixel alone.
+
+VERTICAL AXIS: "spread of A"
+How much A scatters from pixel to pixel within the panel's group of pixels,
+as a standard deviation, in absorbance units.  0.001 A is about 0.23 % of
+the light.  Lower is better.  Each line is the typical value over many
+photo pairs (root-mean-square).  The spread always includes the
+post-image's own camera noise, which no choice of lam can remove, so no
+line reaches zero.
+
+THE PANELS
+Pixels are grouped by how far they are from the nearest pad edge, in layer
+pixels: the interior (8 or more from every edge), 4 to 8, 2 to 4, and the
+outermost 0 to 2.  Each panel has its own vertical scale.
+
+THE LINES
+  dark gray, solid: photos taken without moving the cartridge (test_image
+    IMG0005-0007, the saved C1034 strip).  Same pixels, no lining up.
+  colored, solid: pre-images of one sample taken after reseating the strip
+    (holders F, G1, H1), lined up onto each other the way the chain lines
+    up a post-image.  This adds the effect of lining up.
+  dark gray, dotted: what the formula in tex/chain_unified.tex step 5
+    predicts for the unmoved photos, from their measured noise and texture.
+  dots: the lowest point of each line, i.e. the best lam for that group.
+
+HOW TO READ IT
+A line that falls from left to right means the pixel's own grain matters
+more than its noise there.  A dip in the middle means a blend beats both
+pure choices.  The left end lies far above the right end near the edge,
+because the darkening changes too steeply within a 1-pixel strip for the
+smooth model to follow.
