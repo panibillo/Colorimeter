@@ -36,6 +36,7 @@ import capture_h5  # noqa: E402
 from hdf5read import Hdf5Reader  # noqa: E402
 
 CAPTURES = REPO / "captures"
+TEST_IMAGES = REPO / "test_image"
 BAYER = ("R", "Gr", "Gb", "B")
 RAW_MAX = 1023
 SATURATED_DN = RAW_MAX - 23
@@ -54,8 +55,16 @@ PRE = "pre"
 
 
 def archive_path(name):
-    """Return the archive path for a capture name."""
-    return CAPTURES / f"{name}.h5"
+    """
+    Return the archive path for a capture name.
+
+    Looks in captures/ first, then test_image/ (the test-image suites, e.g.
+    IMG0005, saved from the Test Image screen).
+    """
+    path = CAPTURES / f"{name}.h5"
+    if not path.exists() and (TEST_IMAGES / f"{name}.h5").exists():
+        path = TEST_IMAGES / f"{name}.h5"
+    return path
 
 
 def sections(name) -> list:
