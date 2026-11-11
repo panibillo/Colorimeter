@@ -1,0 +1,1379 @@
+\documentclass[11pt,letterpaper]{article}
+
+\usepackage[margin=2.5cm]{geometry}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{bm}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{ragged2e}
+\usepackage{seqsplit}
+\usepackage{enumitem}
+\usepackage{xcolor}
+\usepackage{listings}
+\usepackage[hidelinks]{hyperref}
+\usepackage{caption}
+\usepackage{float}
+\usepackage{graphicx}
+
+\DeclareGraphicsExtensions{.pdf}
+\graphicspath{{figs/}}
+
+\DeclareRobustCommand{\file}[1]{\texttt{\seqsplit{#1}}}
+\newcommand{\code}[1]{\texttt{#1}}
+\setlength{\emergencystretch}{3em}
+\newcolumntype{L}[1]{>{\RaggedRight\arraybackslash}p{#1}}
+
+% Symbols used throughout.  Bold lower case = a column of n numbers, one per
+% channel; bold upper case = a matrix.
+\newcommand{\va}{\mathbf{a}}
+\newcommand{\vx}{\mathbf{x}}
+\newcommand{\vr}{\mathbf{r}}
+\newcommand{\vd}{\mathbf{d}}
+\newcommand{\vw}{\mathbf{w}}
+\newcommand{\vz}{\mathbf{z}}
+\newcommand{\vs}{\mathbf{s}}
+\newcommand{\vv}{\mathbf{v}}
+\newcommand{\vone}{\mathbf{1}}
+\newcommand{\vu}{\mathbf{u}}
+\newcommand{\epsy}{\bm{\varepsilon}_y}
+\newcommand{\epsb}{\bm{\varepsilon}_b}
+\newcommand{\ey}{\mathbf{e}_y}
+\newcommand{\eb}{\mathbf{e}_b}
+\newcommand{\mA}{\mathbf{A}}
+\newcommand{\mX}{\mathbf{X}}
+\newcommand{\mP}{\mathbf{P}}
+\newcommand{\mI}{\mathbf{I}}
+\newcommand{\mE}{\mathbf{E}}
+\newcommand{\mF}{\mathbf{F}}
+\newcommand{\mM}{\mathbf{M}}
+\newcommand{\mL}{\mathbf{L}}
+\newcommand{\mC}{\mathbf{C}}
+\newcommand{\mB}{\mathbf{B}}
+\newcommand{\mU}{\mathbf{U}}
+\newcommand{\mS}{\mathbf{S}}
+\newcommand{\mV}{\mathbf{V}}
+\newcommand{\T}{^{\mathsf{T}}}
+\newcommand{\inv}{^{-1}}
+
+% Code listings.  Line numbers are the real line numbers in duotone.py as of
+% the date on the title page.
+\definecolor{codebg}{gray}{0.96}
+\lstdefinestyle{py}{
+  language=Python,
+  basicstyle=\ttfamily\footnotesize,
+  backgroundcolor=\color{codebg},
+  frame=single,
+  numbers=left,
+  numberstyle=\tiny\color{gray},
+  breaklines=true,
+  breakatwhitespace=true,
+  showstringspaces=false,
+  keywordstyle=\color{blue!55!black},
+  commentstyle=\color{green!35!black},
+  stringstyle=\color{red!45!black},
+  captionpos=b,
+}
+\newcommand{\src}[3]{%
+  \lstinputlisting[style=py,firstline=#1,lastline=#2,firstnumber=#1,
+     caption={#3}]{./figs/duotone-v2026-09-27.py}}
+%    caption={#3}]{../desktop/padanalysis/duotone.py}}
+
+\title{\file{duotone.py}: splitting a pad into yellow and brown\\
+\large What it does, why, and the matrix algebra behind it, with a review}
+\author{Colorimeter project --- pad analysis}
+\date{2026-09-28, branch \file{preimage-capture}}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+\noindent
+\file{desktop/padanalysis/duotone.py} takes the photographs of one test pad
+and, for every pixel, estimates how much of a yellow color and how much of a
+brown color it holds.  This report explains, step by step and in plain
+language, what each function computes and why, and writes out the matrix
+algebra so each step can be followed.  For each matrix product it says what
+the product \emph{means}.  All the figures and numbers come from real pads
+(C1017--C1025 and C1028--C1036) processed by the module as it stands today.
+
+The report is also a review.  Section~\ref{sec:findings} lists what is wrong
+or misleading.  The most important finding: the step that finds the two
+reference colors from the pixels, \code{endmembers()}, currently returns
+colors almost exactly \emph{opposite} to the real yellow and brown
+(Figure~\ref{fig:spectra}).  Everything after it inherits that error.  The
+remaining steps are sound, with smaller issues noted.  This report does not
+change any code; the fixes are proposals for you to decide on.
+\end{abstract}
+
+\tableofcontents
+\newpage
+
+%======================================================================
+\section{What the module is for}
+%======================================================================
+
+The Gutzeit reaction leaves a stain on the mercuric bromide pad.  At low
+arsenic the stain is pale yellow; at high arsenic the center of the dot turns
+brown.  These are two different chemical products with two different colors,
+not one color at two strengths.  One number per pad cannot describe both, so
+\file{duotone.py} works pixel by pixel and asks, for each pixel: \emph{how
+much yellow, and how much brown?}
+
+The module is a chain of small functions.  Table~\ref{tab:functions} lists
+them in the order the data flows through them, and who calls each one today.
+
+\begin{table}[H]
+\centering\small
+\begin{tabular}{@{}L{3.3cm}L{7.2cm}L{4.3cm}@{}}
+\toprule
+Function & What it does & Used by (today) \\
+\midrule
+\code{PadCube} & Loads one pad: absorbance for every pixel in every
+  channel, plus a noise level per channel. (Sec.~\ref{sec:data}) &
+  \code{cell\_PCA}, \code{pca\_study}, \code{build} \\
+\code{contrast} & Removes from each pixel the part that is the same in every
+  channel (shading). (Sec.~\ref{sec:contrast}) &
+  \code{cell\_PCA}, \code{pca\_study}, \code{fit}, \code{unmix} \\
+\code{hue\_plane} & Finds the flat sheet (plane) in which nearly all pixels
+  lie; this is the ``color map''. (Sec.~\ref{sec:plane}) &
+  \code{cell\_PCA}, \code{pca\_study}, \code{fit} \\
+\code{endmembers} & Picks the two reference colors, yellow and brown, as the
+  two edges of the cloud of pixels on that map. (Sec.~\ref{sec:endmembers}) &
+  \code{cell\_PCA} (by default), \code{pca\_study}, \code{fit} \\
+\code{unmix} & Splits each pixel into a yellow amount and a brown amount.
+  (Sec.~\ref{sec:unmix}) & \code{cell\_PCA}, \code{\_\_main\_\_} \\
+\code{residual\_rms} & How much of the pixels the two colors fail to explain.
+  & \code{cell\_PCA}, \code{\_\_main\_\_} \\
+\code{classify} & Labels each pixel white, yellow or brown.
+  (Sec.~\ref{sec:classify}) & \code{\_\_main\_\_} \\
+\code{amount\_sigma}, \code{noise\_cov} & How noisy the yellow and brown
+  amounts are. (Sec.~\ref{sec:noise}) & \code{\_\_main\_\_} \\
+\code{j\_hue}, \code{j\_amounts}, \code{subset\_sigma},
+  \code{subset\_unmix} & Score a chosen subset of channels: how well it
+  separates or measures the two colors. (Sec.~\ref{sec:subsets}) &
+  \code{report14} only (a record; no longer runs) \\
+\code{build}, \code{fit} & Load many pads on a shared channel list; find one
+  pair of reference colors for all of them. (Sec.~\ref{sec:helpers}) &
+  \code{\_\_main\_\_}, \code{look3} (record) \\
+\code{render\_rgb} & A true-color picture, for looking at, not measuring.
+  (Sec.~\ref{sec:helpers}) & \code{cell\_PCA} \\
+\bottomrule
+\end{tabular}
+\caption{The functions of \file{duotone.py}, in data-flow order.
+\code{cell\_PCA} is in \file{analysis\_1.py}; \code{pca\_study} is
+\file{pca\_study.py}; \code{\_\_main\_\_} is what runs when
+\file{duotone.py} is run by itself.}
+\label{tab:functions}
+\end{table}
+
+\paragraph{A note on the name ``PCA''.}  The code and printouts speak of
+``PCA'' and ``PC1, PC2''.  Strictly, what it does is a close relative of
+principal component analysis (PCA) that measures spread from the origin
+rather than from the average pixel.  Section~\ref{sec:plane} explains the
+difference and why the relative is the right choice here.
+
+%======================================================================
+\section{The data: one pixel is a list of six numbers}
+\label{sec:data}
+%======================================================================
+
+\subsection{Channels}
+
+A \emph{channel} (the code says \emph{cell}) is one LED seen through one
+color layer of the camera's Bayer filter, for example
+\code{royal\_blue.B}: the royal-blue LED, read from the blue-filtered
+pixels.  Each channel reports how much light of roughly one color the pad
+reflects.
+
+Only channels that the pre-image lit can be used, because only those have a
+white reference (Section~\ref{sec:absorbance}).  All 18 pads share six:
+\begin{center}\small
+\begin{tabular}{@{}lllllll@{}}
+\toprule
+& violet.B & royal\_blue.B & cyan.B & green.Gb & green.Gr & photo\_red.R \\
+\midrule
+LED peak (nm) & 410 & 455 & 500 & 525 & 525 & 660 \\
+\bottomrule
+\end{tabular}
+\end{center}
+Throughout this report $n$ is the number of channels ($n = 6$ here) and $N$
+is the number of pad pixels (about 2{,}200 per pad).  The two green channels
+are the same LED seen through the camera's two green filter layers; they are
+kept apart because they differ slightly.
+
+\subsection{From camera counts to absorbance}
+\label{sec:absorbance}
+
+\code{PadCube} does not compute anything new here; it calls
+\code{analysis\_1.get\_balanced\_cell\_data}, which does this for every
+channel:
+\begin{enumerate}[nosep]
+\item subtract the camera's dark level;
+\item divide by the gray chips (so the lamp's brightness cancels):
+  this gives the reflectance $R$;
+\item divide by the median $R$ of the same strip's \emph{dry pad in the
+  pre-image} (the photo taken before any reagent): this gives
+  $R_\infty = R / R_\text{white}$, which is 1 on an unstained pad;
+\item take $A = -\log_{10} R_\infty$, the \emph{absorbance}.
+\end{enumerate}
+So $A = 0$ means ``as white as the dry pad was'', and $A = 0.3$ means ``this
+pixel returns half as much light as it did before the test''
+($10^{-0.3} \approx 0.5$).
+
+\paragraph{Why absorbance, not reflectance?}  Two reasons, both about
+\emph{adding}.
+\begin{itemize}[nosep]
+\item \textbf{Shading adds a constant.}  A shadow, or a pixel that sits a
+  little lower in the paper, returns a fraction $s$ of the light in
+  \emph{every} channel: $R_\infty \to s R_\infty$.  In absorbance that is
+  $A \to A - \log_{10} s$: the \emph{same number added to every channel}.
+\item \textbf{Dyes add (approximately).}  If two colored substances both
+  absorb, their absorbances add (Beer--Lambert).  This is exact for light
+  passing through a clear solution; for light scattered back out of paper it
+  is only approximate (Section~\ref{sec:limits}).
+\end{itemize}
+Both effects then appear as sums, and sums are what matrix algebra handles.
+
+\subsection{The matrix $\mA$}
+
+\code{PadCube.A} holds the absorbances as a table with one row per pixel and
+one column per channel($N$ pixels, $n$ channels):
+\[
+\mA = \begin{pmatrix}
+A_{1,1} & A_{1,2} & \cdots & A_{1,n}\\
+\vdots  &         &        & \vdots \\
+A_{N,1} & A_{N,2} & \cdots & A_{N,n}
+\end{pmatrix}
+\quad (N \times n).
+\]
+Row $i$ is pixel $i$'s \emph{spectrum}: six absorbances, one per channel.
+When the report talks about one pixel it writes that row as a column
+$\va = (a_1, \dots, a_n)\T$.  The rest of \code{PadCube} is bookkeeping:
+\code{mask} says which pixels of the image are the rows, \code{yx} gives
+each row's position, and \code{paint()} writes a per-pixel result back into
+an image.  Pixels are left out if they are known hot pixels or if any
+channel lacks a value there, so every channel has the same rows.
+
+\subsection{Pixel scatter per channel}
+\label{sec:padnoise}
+
+To know whether a small absorbance is real, \code{PadCube} measures how much
+each channel's pixels scatter from one pixel to the next on the dry pad in
+the pre-image, where there is no stain.  The code calls this scatter
+``noise''.  Section~\ref{sec:scatterwhat} shows it is mostly the paper's own
+texture, not camera noise.
+
+\src{172}{179}{\code{PadCube}: each channel's dry pad, read from the
+pre-image on its own grid, and turned into a plain array.}
+
+\src{196}{202}{\code{PadCube}: pixel scatter from neighbor differences.}
+
+For each pair of side-by-side pixels it takes the difference and divides by
+$\sqrt2$:
+\[
+\delta = \frac{a_{\text{right}} - a_{\text{left}}}{\sqrt 2}.
+\]
+Why a difference: the pad has slow, smooth changes across it (light
+fall-off, the paper's own gradient).  Two neighbors share almost the same
+smooth part, so it cancels in their difference, and what is left is the
+pixel-to-pixel scatter.  Why $\sqrt2$: if each pixel scatters independently
+by $\sigma$, the difference of two scatters by $\sigma\sqrt2$; dividing by
+$\sqrt2$ gives back $\sigma$.
+
+\src{252}{256}{\code{\_pair\_noise}: a robust spread.}
+
+The spread is measured with the \emph{median absolute deviation} (MAD): the
+median of $|\delta - \text{median}(\delta)|$.  One speck of dust changes a
+median very little, where it could change a standard deviation a lot.  For
+ordinary bell-curve scatter, $\sigma = 1.4826 \times \text{MAD}$, hence the
+constant.  On these pads $\sigma$ is 0.006--0.009 in absorbance for every
+channel.  \code{PadCube.dnoise} keeps all the differences so that
+\code{noise\_cov} can later see whether the channels scatter together
+(Section~\ref{sec:noise}).
+
+\subsubsection{Reading the numpy}
+
+Two pieces of notation unlock these lines.
+
+\paragraph{NaN.}  Each channel's pad arrives from \code{analysis\_1} as a
+\emph{masked array}: the pixels off the pad carry a ``no value'' flag.
+\code{np.ma.filled(..., np.nan)} swaps each flag for NaN (``not a number''),
+so from then on everything is a plain array and NaN means ``not on the pad''.
+
+\paragraph{Slicing.}  \code{a[:, 1:]} means ``all rows (\code{:}),
+columns from 1 to the end''; \code{a[:, :-1]} means ``all rows, columns from
+0 up to but not including the last''.  For one row of four pixels:
+\begin{center}\small
+\begin{tabular}{@{}ll@{}}
+\code{a[:, :-1]} & $(p_0,\ p_1,\ p_2)$ \quad each pixel that has a right-hand neighbor \\
+\code{a[:, 1:]}  & $(p_1,\ p_2,\ p_3)$ \quad that neighbor \\
+difference       & $(p_1 - p_0,\ p_2 - p_1,\ p_3 - p_2)$
+\end{tabular}
+\end{center}
+The two slices line up so that position $j$ holds a pixel and its right-hand
+neighbor.  Table~\ref{tab:numpy} goes through the lines one by one.
+
+\begin{table}[tbp]
+\centering\small
+\begin{tabular}{@{}l L{4.6cm} L{6.6cm} L{2.0cm}@{}}
+\toprule
+Line & Code & What it does & Result shape \\
+\midrule
+178--179 & \code{np.ma.filled(pre.A\allowbreak.astype(float), np.nan)} &
+  \code{astype(float)} makes the values floating point; \code{filled}
+  replaces every ``no value'' flag with NaN. & (rows, cols) \\
+196 & \code{np.stack(pre\_planes, axis=-1)} & Piles the $n$ channel images
+  into one 3-D block.  \code{axis=-1} means ``put the new axis last'', so
+  \code{pre[i, j, k]} is pixel $(i, j)$ in channel $k$. & (rows, cols, $n$) \\
+197 & \code{np.isfinite(pre)\allowbreak.all(axis=-1)} & \code{isfinite} is
+  True where there is a number, False at NaN.  \code{.all(axis=-1)} combines
+  across the channels: True only if \emph{every} channel has a value there. &
+  (rows, cols) \\
+198 & \code{ok[:, :-1] \& ok[:, 1:]} & The slicing above.  \code{\&} is
+  ``and'', element by element: True where a pixel \emph{and} its right-hand
+  neighbor are both on the pad. & (rows, cols$-1$) \\
+199 & \code{pre[:, 1:, :] -\allowbreak{} pre[:, :-1, :]} & Right minus left,
+  for every pair and every channel.  The third \code{:} keeps all channels. &
+  (rows, cols$-1$, $n$) \\
+199 & \code{[pair]} & Indexing with a True/False array shaped like the first
+  two axes: keeps only the True positions and lists them one after another,
+  row by row.  The channel axis is kept. & ($n_\text{pairs}$, $n$) \\
+200 & \code{/ np.sqrt(2.0)} & Divides every entry by $\sqrt2$. & same \\
+201--202 & \code{np.array([\_pair\_noise(\allowbreak self.dnoise[:, k])
+  for k in range(len(cells))])} & A \emph{list comprehension}: for each
+  channel $k$, take column $k$ (all pairs, that channel), reduce it to one
+  number, and collect the $n$ numbers into an array. & ($n$,) \\
+252 & \code{d.size} & The number of entries; if there are none, the answer is
+  NaN. & \\
+255 & \code{np.median(np.abs(\allowbreak d - np.median(d)))} & From the
+  inside out: the median of \code{d}; subtract it from every entry; take
+  absolute values; take the median of those.  This is the MAD. & one number \\
+256 & \code{float(1.4826 * mad)} & Converts the MAD to $\sigma$.
+  \code{float()} turns numpy's number type into a plain Python number. & one
+  number \\
+\bottomrule
+\end{tabular}
+\caption{The numpy in the scatter measurement, line by line.  Line numbers
+are those of \file{duotone.py}.}
+\label{tab:numpy}
+\end{table}
+
+\subsubsection{Is this the right way to measure it?}
+\label{sec:scatterwhat}
+
+\paragraph{The method is standard.}  Estimating scatter from differences
+between neighbors is a textbook method: Rice introduced the one-dimensional
+version for statistics,\footnote{J.~Rice, ``Bandwidth choice for
+nonparametric regression'', \emph{Annals of Statistics} 12 (1984)
+1215--1230.} and for images Immerk{\ae}r uses a $3\times3$ kernel close to
+``each pixel minus the mean of its four neighbors''.\footnote{J.~Immerk{\ae}r,
+``Fast noise variance estimation'', \emph{Computer Vision and Image
+Understanding} 64 (1996) 300--302.}  Both are unbiased when each pixel
+scatters independently of its neighbors.  (The four-neighbor version
+divides by $\sqrt{1.25}$ instead of $\sqrt2$, because the neighbors' average
+itself scatters by $\sigma/2$.)  A smooth gradient across the pad adds the
+same constant to every difference, and the MAD's subtraction of the median
+removes it.
+
+\paragraph{Other directions and four neighbors give the same answer.}  On
+four dry pads (C1017, C1025, C1032, C1034), all six channels, relative to the
+horizontal pairs used here:
+\begin{center}\small
+\begin{tabular}{@{}lc@{}}
+\toprule
+method & $\sigma$ relative to horizontal pairs (average of 24) \\
+\midrule
+vertical pairs & 1.015 \\
+diagonal pairs & 1.057 \\
+pixel minus the mean of its 4 neighbors & 0.970 \\
+\bottomrule
+\end{tabular}
+\end{center}
+Each estimate uses about 1{,}200 pairs, so it is itself uncertain by about
+$\pm4\,\%$.  The methods agree within that.
+
+\paragraph{What it measures is mostly the paper's texture.}  The shading
+study (\file{docs/shading\_study\_2026-09-29.md}, step~1a) found that 90--99\,\%
+of the pixel-to-pixel variation repeats from one exposure to the next, and
+that it moves with the strip when the strip is moved.  Camera noise is only
+about 0.002 in absorbance.  So $\sigma$ is the grain of the paper.  That is
+still the right yardstick for ``does this pixel hold dye'': a pixel has to
+stand out from the paper's own grain, not just from the camera's noise.  It
+also means the pre-image's shorter exposure hardly matters.
+
+\paragraph{Neighbors are not independent.}  The texture is 1--2~px across:
+neighboring pixels on the dry pad correlate about 0.2 at 1~px and 0.1 at
+2~px.  Whatever two neighbors share cancels in their difference, so
+$\sigma$ may read up to about 10\,\% low as a measure of the full scatter
+(all neighbor methods share this).  It also means an average over many
+pixels shrinks more slowly than for independent pixels.
+
+%======================================================================
+\section{The model}
+\label{sec:model}
+%======================================================================
+
+The module assumes each pixel's spectrum is built from three ingredients:
+\begin{equation}
+\va \;=\; g\,\vone \;+\; y\,\epsy \;+\; b\,\epsb \;+\; \text{noise}.
+\label{eq:model}
+\end{equation}
+\begin{itemize}[nosep]
+\item $\vone = (1,1,\dots,1)\T$: the same amount in every channel.  Its
+  amount $g$ is the \emph{shading}: any shadow or other effect that dims all
+  channels equally.  $g$ may be positive or negative, and is thrown away.
+\item $\epsy$: the yellow spectrum, how strongly the yellow product absorbs
+  in each channel.  Its amount $y \ge 0$.
+\item $\epsb$: the brown spectrum.  Its amount $b \ge 0$.
+\end{itemize}
+Amounts cannot be negative: there is no such thing as a negative amount of
+dye.  The two spectra are the same for every pixel of every pad; only the
+three amounts change from pixel to pixel.
+
+\paragraph{Matrix form.}  Put the three ingredients side by side as the
+columns of one matrix, and the three amounts in one column:
+\begin{equation}
+\va = \mF\,\bm\theta,\qquad
+\mF = \begin{pmatrix} \vone & \epsy & \epsb \end{pmatrix}\ (n \times 3),
+\qquad
+\bm\theta = \begin{pmatrix} g \\ y \\ b \end{pmatrix}.
+\label{eq:modelmatrix}
+\end{equation}
+\emph{Meaning of the product $\mF\bm\theta$:} $\mF$ is the list of
+ingredients, $\bm\theta$ is the recipe (how much of each), and the product
+is the spectrum that recipe would produce.  Fitting the model means finding,
+for each pixel, the recipe whose product comes closest to the measured
+$\va$.
+
+%======================================================================
+\section{Step 1: remove the part that is the same in every channel}
+\label{sec:contrast}
+%======================================================================
+
+\src{259}{272}{\code{flat\_direction} and \code{contrast}.}
+
+\subsection{The algebra}
+
+Let $\vu = \vone/\sqrt n$, the all-ones vector scaled to length 1 (this is
+\code{flat\_direction}).  For one pixel:
+\begin{itemize}
+\item $\vu\T\va = \frac{1}{\sqrt n}\sum_k a_k = \sqrt n\,\bar a$, where
+  $\bar a$ is the pixel's average over its channels.  \emph{Meaning:} how far
+  the pixel reaches in the ``same in every channel'' direction.
+\item $(\vu\T\va)\,\vu = \sqrt n\,\bar a \cdot \frac{1}{\sqrt n}\vone =
+  \bar a\,\vone$.  \emph{Meaning:} the flat part of the pixel, a spectrum with
+  $\bar a$ in every channel.
+\item The contrast is what is left:
+  \begin{equation}
+  \vx = \va - \bar a\,\vone = \va - \vu\,(\vu\T\va) = (\mI - \vu\vu\T)\,\va
+  = \mP\,\va.
+  \label{eq:contrast}
+  \end{equation}
+\end{itemize}
+In words: \textbf{contrast = each channel minus the pixel's own average}.
+Figure~\ref{fig:split} shows it for three real pixels.
+
+$\mP = \mI - \vu\vu\T$ is called a \emph{projector}.  $\vu\vu\T$ is an
+$n\times n$ matrix with every entry $1/n$; multiplying a spectrum by it
+replaces every channel with the average.  $\mP$ has three properties used
+below:
+\begin{align}
+\mP\vone &= \mathbf 0 && \text{a flat spectrum has no contrast at all;} \label{eq:P1}\\
+\mP\mP &= \mP && \text{removing the average twice changes nothing;} \label{eq:PP}\\
+\mP\T &= \mP && \text{it is symmetric.} \label{eq:PT}
+\end{align}
+
+For all pixels at once, the code computes \code{A - np.outer(A @ u, u)}.
+\code{A @ u} is a column of $N$ numbers, $\vu\T\va$ for each pixel; the outer
+product with $\vu$ turns each into that pixel's flat part.  So
+\begin{equation}
+\mX = \mA - (\mA\vu)\vu\T = \mA\,(\mI - \vu\vu\T) = \mA\mP.
+\end{equation}
+Each row of $\mX$ is one pixel's contrast.  Every row adds up to zero.
+
+\subsection{What it does to the model}
+
+Apply $\mP$ to both sides of the model~\eqref{eq:model}.  By
+\eqref{eq:P1} the shading term vanishes:
+\begin{equation}
+\vx = \mP\va = g\,\underbrace{\mP\vone}_{=\,\mathbf 0} + y\,\mP\epsy +
+b\,\mP\epsb = y\,\ey + b\,\eb,
+\qquad \ey = \mP\epsy,\ \eb = \mP\epsb.
+\label{eq:contrastmodel}
+\end{equation}
+This is the reason for the step: after it, shading is gone and only the two
+dyes remain.
+
+\subsection{What it costs}
+
+$\mP$ also removes each dye's own average.  The contrast
+spectra $\ey$, $\eb$ are the dye spectra with their flat part taken out.  A
+dye that absorbed equally in every channel would vanish completely: it
+cannot be told from a shadow.  The docstring says this plainly (``$y$ and
+$b$ measure \emph{contrast}, not total optical density'').
+Figure~\ref{fig:split} shows how much it removes from real pixels: the brown
+example averages $A = 0.48$, and all of that average is discarded.  The pale
+yellow example keeps more of its signal, because yellow absorbs very unevenly
+across the channels.  This is why, in \file{pca\_study}, the strength inside
+the dot hardly changes with concentration (Section~\ref{sec:limits}).
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=\linewidth]{duotone-split}
+\caption{Three real spectra split by \code{contrast}.  Top: absorbance in
+the six channels, with the pixel's average (red dashes).  Bottom: absorbance
+minus the average, which is all that later steps see.  \emph{White}: C1034's
+pad at least 6~px outside the dot (780 pixels); essentially zero everywhere,
+as it should be against the dry pad.  \emph{Yellow}: C1034 (2.2~ppb), at
+least 3~px inside the dot (98 pixels); absorbs violet most, then royal blue,
+little else.  \emph{Brown}: C1024 (80~ppb), inside the dot (514 pixels);
+absorbs strongly from violet to green, not photo red.  Each bar is the median
+of the group's pixels.  Made by \file{duotone\_guide.py}.}
+\label{fig:split}
+\end{figure}
+
+%======================================================================
+\section{Step 2: the color map (\code{hue\_plane})}
+\label{sec:plane}
+%======================================================================
+
+\src{288}{290}{The body of \code{hue\_plane}.}
+
+\subsection{The idea}
+
+After Step~1, each pixel's contrast $\vx$ is a point in six-dimensional space
+(five really, since the entries add to zero).  By
+equation~\eqref{eq:contrastmodel}, if the model is right every point is
+$y\ey + b\eb$: it lies on the flat sheet (plane) through the origin that
+contains the two arrows $\ey$ and $\eb$.  \code{hue\_plane} finds that plane
+from the data without knowing $\ey$ or $\eb$.  Once the plane is known, every
+pixel can be drawn on a two-dimensional map.
+
+\subsection{The algebra: singular value decomposition}
+
+The tool is the singular value decomposition (SVD).  Any $N\times n$ matrix
+can be written as
+\begin{equation}
+\mX = \mU\,\mS\,\mV\T,
+\label{eq:svd}
+\end{equation}
+where the rows of $\mV\T$, called $\vv_1\T,\dots,\vv_n\T$, are $n$
+perpendicular unit-length directions in channel space; $\mS$ is diagonal
+with $s_1 \ge s_2 \ge \dots \ge 0$; and $\mU$ has perpendicular unit-length
+columns.  What each piece means here:
+\begin{itemize}
+\item \textbf{$\mX\vv_k$} (multiply both sides of \eqref{eq:svd} by
+  $\mV$: $\mX\mV = \mU\mS$).  Row $i$ of $\mX\vv_k$ is $\vx_i\T\vv_k$, the
+  dot product of pixel $i$ with direction $\vv_k$.  \emph{Meaning:} how far
+  pixel $i$ reaches along direction $k$ --- its coordinate on axis $k$.
+\item \textbf{$s_k^2$} is the sum over all pixels of that coordinate squared.
+  \emph{Meaning:} how much of the whole cloud lies along direction $k$.
+\item The directions come out in order: $\vv_1$ captures the most, $\vv_2$
+  the most of what is left while being perpendicular to $\vv_1$, and so on.
+\end{itemize}
+\code{hue\_plane} keeps the first two directions as the rows of a
+$2\times n$ matrix $\mB$ (\code{basis}), and reports
+\[
+\text{explained}_k = \frac{s_k^2}{\sum_j s_j^2},
+\]
+the share of the cloud along each direction.  Pooled over all 18 pads:
+\begin{center}\small
+\begin{tabular}{@{}lcccccc@{}}
+\toprule
+direction $k$ & 1 & 2 & 3 & 4 & 5 & 6 \\
+\midrule
+share & 89.0\,\% & 9.3\,\% & 0.75\,\% & 0.68\,\% & 0.20\,\% & 0 \\
+\bottomrule
+\end{tabular}
+\end{center}
+The first two hold 98.3\,\%, which is what two colors predict.  The sixth
+is exactly zero, as a check: every row of $\mX$ is perpendicular to $\vu$
+($\mX\vu = \mA\mP\vu = \mathbf 0$), so the cloud has no extent along $\vu$ at
+all.  The 1.7\,\% in directions 3--5 is noise plus whatever the two-color
+model misses.
+
+\paragraph{Why not ordinary PCA?}  Ordinary PCA first subtracts the
+\emph{average pixel} from every pixel, then does the SVD.  It measures spread
+around the average.  \code{hue\_plane} skips that subtraction and measures
+spread around the \emph{origin}.  Here the origin has a physical meaning: it
+is the dry pad (no dye, $A = 0$ in every channel), and the model says every
+pixel is a sum of arrows starting there.  The average pixel is a mix of dot
+and white and has no such meaning.  So ``explained'' is a share of the total
+sum of squares, not of variance in the textbook sense.
+
+\subsection{The map}
+\label{sec:map}
+
+A pixel's position on the map is
+\begin{equation}
+\vs = \mB\,\vx = \begin{pmatrix}\vv_1\T\vx\\ \vv_2\T\vx\end{pmatrix}
+\quad\text{and for all pixels}\quad
+\mathbf S_2 = \mX\mB\T\ (N\times 2).
+\end{equation}
+\emph{Meaning of $\mX\mB\T$:} every pixel's dot product with each of the two
+map directions, i.e.\ its two map coordinates.  (This is \code{X @ basis.T}
+in \code{endmembers} and in \file{pca\_study.py}.)  On the map:
+\begin{itemize}[nosep]
+\item \textbf{distance} from the origin, $\|\vs\|$, is the \emph{strength}
+  of the color;
+\item \textbf{angle}, $\operatorname{atan2}(s_2, s_1)$, is the \emph{hue}.
+\end{itemize}
+This works because of the model: a pixel with twice as much of the same
+mixture sits twice as far out along the same line.  The angle depends only on
+the ratio $y:b$.
+
+Going the other way, a direction on the map, $\mathbf{q} = (\cos\phi,
+\sin\phi)\T$, corresponds to the spectrum
+\begin{equation}
+\mathbf e = \mB\T\mathbf q = \cos\phi\;\vv_1 + \sin\phi\;\vv_2,
+\label{eq:backtocells}
+\end{equation}
+\emph{meaning:} the contrast spectrum that points in that direction on the
+map.  (Code: \code{d @ basis}.)
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.92\linewidth]{duotone-plane}
+\caption{All 39{,}789 pad pixels of the 18 pads on the pooled map (gray, log
+density).  The axes are the map's axis~1 and axis~2 (the same map as in
+\file{pca\_study}; axis~2 is signed so brown is up).  The white crowd at the
+origin is the unstained pad.  From it the pixels run out along a straight
+line at about $-30^\circ$ (pale yellow) and then bend up to about
+$+20^\circ$ (brown).  Red markers: the yellow and brown example pixels of
+Figure~\ref{fig:split}.  Arrows: the two reference colors that
+\code{duotone.fit} actually returns today; they point away from the data
+(Section~\ref{sec:endmembers}).  Inset: the origin enlarged; the dotted
+circle is the median strength (0.025), the cutoff \code{endmembers} uses.}
+\label{fig:plane}
+\end{figure}
+
+%======================================================================
+\section{Step 3: the two reference colors (\code{endmembers})}
+\label{sec:endmembers}
+%======================================================================
+
+\subsection{The idea: the wedge}
+
+By equation~\eqref{eq:contrastmodel} every pixel is $y\ey + b\eb$ with $y,b
+\ge 0$.  On the map, that is $y$ times one arrow plus $b$ times another.
+Adding two arrows with non-negative amounts can only land \emph{between}
+them.  So all pixels lie in a wedge whose two edges point along pure yellow
+and pure brown.  The reference colors (``endmembers'') can then be read off
+as the two \emph{extreme angles} of the cloud.  Using angles rather than
+distances keeps a merely dark pixel from being taken as a pure one.
+
+\subsection{The steps}
+
+\src{318}{340}{The body of \code{endmembers}.}
+
+\begin{enumerate}
+\item \textbf{Map coordinates and angles} of every pixel (lines 318--319):
+  $\vs_i = \mB\vx_i$, $\theta_i = \operatorname{atan2}(s_{i2}, s_{i1})$.
+\item \textbf{Weights} (320--321): by default each pixel's strength
+  $w_i = \|\vs_i\|$.
+\item \textbf{Middle direction} (325--326).  The average of the pixels'
+  unit arrows, weighted by strength:
+  $\bar\theta = \operatorname{atan2}\bigl(\sum w_i\sin\theta_i,\ \sum
+  w_i\cos\theta_i\bigr)$.  Angles cannot simply be averaged ($+179^\circ$
+  and $-179^\circ$ average to $0^\circ$, the wrong way), so the arrows are
+  added instead.
+\item \textbf{Angles relative to the middle} (327), wrapped into
+  $-180^\circ\dots+180^\circ$.  This keeps the wedge from straddling the
+  $\pm180^\circ$ seam.
+\item \textbf{Keep the stronger half} (328): pixels with $w_i$ above the
+  median.  The intent is to leave out the white pixels, whose angle is just
+  noise.
+\item \textbf{The two edges} (329--330): the 2nd and 98th percentiles of the
+  kept pixels' relative angles.  Percentiles instead of minimum and maximum,
+  so one stray pixel does not decide.
+\item \textbf{Back to channel space} (332--336) by
+  equation~\eqref{eq:backtocells}, and scaled to length~1.  These are the
+  unit contrast spectra $\ey$ and $\eb$.
+\item \textbf{Which is which} (338--340).  An SVD direction's sign is
+  arbitrary, so the two edges have to be named.  \code{\_long\_wave\_share}
+  shifts each spectrum so its lowest channel is zero, then divides its
+  average at 500~nm and above by its average below 500~nm.  Brown keeps
+  absorbing into the green where yellow has stopped, so the edge with the
+  larger ratio is called brown.
+\end{enumerate}
+
+\subsection{What goes wrong today}
+\label{sec:endmembersfail}
+
+On the pooled 18 pads the two edges come out at $+150^\circ$ and
+$-164^\circ$ on the map (arrows in Figure~\ref{fig:plane}), pointing away
+from every stained pixel.  Figure~\ref{fig:spectra} compares them with the
+real yellow and brown: each is almost exactly the \emph{negative} of the
+real color (the cosine of the angle between them is $-0.995$ for yellow and
+$-0.996$ for brown).
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=\linewidth]{duotone-spectra}
+\caption{Red: the unit contrast spectra of the yellow and brown example
+pixels of Figure~\ref{fig:split}.  Gray: what \code{duotone.fit} returns as
+``yellow'' and ``brown'' on the 18 pads.  Each gray set is nearly a mirror
+image of the red: where yellow absorbs most (violet), fit's ``yellow''
+absorbs least.}
+\label{fig:spectra}
+\end{figure}
+
+\paragraph{Why.}  Most of each pad is white: the median strength of all
+pixels is only 0.025, about four times the noise (Figure~\ref{fig:plane},
+inset).  ``Above the median'' therefore keeps many near-white pixels whose
+angle is set by noise and points in every direction; 11\,\% of the kept
+pixels point more than $90^\circ$ away from the middle direction.  The 2nd
+and 98th percentiles land among them, on the far side of the origin.  The
+naming step then names the two wrong-way spectra as best it can.
+
+\paragraph{What it does downstream.}  With both reference colors pointing
+backward, \code{unmix} finds almost no yellow or brown anywhere.
+Running \file{duotone.py} by itself (its \code{\_\_main\_\_}) today gives:
+
+\begin{center}\small
+\begin{tabular}{@{}lrrrrrr@{}}
+\toprule
+pad & ppb & pixels & white & yellow & brown & residual (A) \\
+\midrule
+C1034 & 2.2 & 2166 & 2061 & 94 & 11 & 0.054 \\
+C1032 & 5 & 2237 & 2125 & 69 & 43 & 0.073 \\
+C1017 & 10 & 2166 & 2038 & 32 & 96 & 0.107 \\
+C1029 & 20 & 2236 & 2040 & 68 & 128 & 0.081 \\
+C1035 & 40 & 2165 & 2032 & 33 & 100 & 0.090 \\
+C1024 & 80 & 2261 & 2141 & 46 & 74 & 0.130 \\
+C1025 & 160 & 2218 & 2088 & 24 & 106 & 0.158 \\
+\bottomrule
+\end{tabular}
+\end{center}
+Between 91 and 96\,\% of pixels are called white on every pad, and what the
+model leaves unexplained (0.05--0.16) is 7--21 times the noise ($\approx
+0.0075$).
+The other 11 pads are similar.  These numbers mean nothing about the pads;
+they show the fit has failed.
+
+The same function also runs on each pad alone inside \code{cell\_PCA} (its
+default).  \file{pca\_study} step~1 found that it fails there too on pale
+pads (e.g.\ C1034: $+152^\circ$ and $+149^\circ$) and works on some dark
+ones (C1021: $-36^\circ$ and $+24^\circ$).
+
+\paragraph{How close a fix is.}  Only the ``stronger half'' cutoff is at
+fault.  Keeping only pixels with strength above 0.1 instead (13 times the
+noise) puts the two edges at
+$-40^\circ$ and $+27^\circ$, where the data are; above 0.2, at $-32^\circ$
+and $+27^\circ$.  A different route, fixing the two reference colors once
+from chosen pixels, is the plan already in
+\file{docs/pca\_study\_2026-09-27.md}.
+
+%======================================================================
+\section{Step 4: split each pixel (\code{unmix})}
+\label{sec:unmix}
+%======================================================================
+
+\src{386}{406}{The body of \code{unmix}.}
+
+\subsection{What is being solved}
+
+For each pixel, find the recipe $(g, y, b)$ whose spectrum comes closest to
+the measured one, with $y, b \ge 0$:
+\begin{equation}
+\min_{g,\ y\ge0,\ b\ge0}\ \bigl\|\va - g\vone - y\epsy - b\epsb\bigr\|^2 .
+\label{eq:lsq}
+\end{equation}
+``Closest'' means the smallest sum of squared differences over the channels
+(least squares).  Every channel counts equally.
+
+\subsection{Getting rid of $g$}
+
+Split every spectrum into its flat part and its contrast
+(Section~\ref{sec:contrast}): $\va = (\vu\T\va)\vu + \vx$ and $\epsy =
+(\vu\T\epsy)\vu + \ey$, and the same for brown.  Then the misfit inside
+\eqref{eq:lsq} is
+\[
+\underbrace{\bigl[\vu\T\va - \sqrt n\,g - y\,\vu\T\epsy -
+b\,\vu\T\epsb\bigr]\vu}_{\text{flat part}}
+\;+\;
+\underbrace{\bigl[\vx - y\ey - b\eb\bigr]}_{\text{contrast part}} .
+\]
+(The $\sqrt n$ appears because $\vone = \sqrt n\,\vu$.)  The two parts are
+perpendicular, so the squared length of the sum is the sum of their squared
+lengths.  $g$ appears only in the flat part, and whatever $y$ and $b$ are,
+$g$ can be chosen to make the flat part exactly zero.  So the problem
+becomes:
+\begin{equation}
+\min_{y\ge0,\ b\ge0}\ \bigl\|\vx - y\ey - b\eb\bigr\|^2
+\;=\; \min_{\bm\beta\ge0}\ \|\vx - \mE\bm\beta\|^2,
+\qquad
+\mE = \begin{pmatrix}\ey & \eb\end{pmatrix}\ (n\times 2),\
+\bm\beta = \begin{pmatrix} y\\ b\end{pmatrix}.
+\label{eq:lsq2}
+\end{equation}
+This is lines 386--389 of the code: \code{Xc} is $\mX$, and \code{ey},
+\code{eb} are the reference colors with their flat parts removed.
+
+Note what this says: $g$ takes up not only shading but also the flat part of
+each dye.  That is the ``cost'' of Section~\ref{sec:contrast} again, now seen
+from the fitting side.
+
+\subsection{The best $y$ and $b$, ignoring the ``$\ge 0$''}
+
+At the best $\bm\beta$, the leftover $\vx - \mE\bm\beta$ must be
+perpendicular to both reference colors; otherwise a little more of one of
+them would fit better.  Written out:
+\begin{equation}
+\mE\T(\vx - \mE\bm\beta) = \mathbf 0
+\quad\Longrightarrow\quad
+\underbrace{\mE\T\mE}_{\mM}\,\bm\beta = \underbrace{\mE\T\vx}_{\vr}
+\quad\Longrightarrow\quad
+\bm\beta = \mM\inv\vr .
+\label{eq:normal}
+\end{equation}
+The meaning of each product:
+\begin{itemize}
+\item $\vr = \mE\T\vx = \begin{pmatrix}\ey\T\vx\\ \eb\T\vx\end{pmatrix}$
+  (\code{rhs}): the dot product of the pixel with each reference.
+  \emph{Meaning:} a raw score for how much the pixel resembles yellow, and
+  how much it resembles brown.
+\item $\mM = \mE\T\mE = \begin{pmatrix}\ey\T\ey & \ey\T\eb\\ \ey\T\eb &
+  \eb\T\eb\end{pmatrix}$ (\code{M}): the dot products of the references
+  with each other.  \emph{Meaning:} how much the two references resemble
+  each other.  The diagonal holds each one's squared length (1 for unit
+  references); the off-diagonal is their overlap.
+\item $\mM\inv\vr$: \emph{meaning:} the raw scores, untangled.  The two
+  references overlap (on these pads their angle is $49^\circ$, overlap
+  $\cos 49^\circ = 0.65$), so a brown pixel also scores on yellow, and vice
+  versa.  Multiplying by $\mM\inv$ removes that double counting.  If the
+  references were perpendicular, $\mM$ would be the identity and the scores
+  would already be the amounts.
+\end{itemize}
+For two unit-length references with overlap $c = \ey\T\eb$, the $2\times2$
+inverse gives explicitly:
+\begin{equation}
+y = \frac{r_y - c\,r_b}{1 - c^2},\qquad
+b = \frac{r_b - c\,r_y}{1 - c^2}.
+\label{eq:explicit}
+\end{equation}
+In words: each score, minus the share of it that the other color explains,
+scaled back up.
+
+For all pixels at once, the code stacks the scores as rows of an $N\times2$
+matrix $\mathbf R = \mX\mE$ and computes $\mathbf R\,(\mM\inv)\T$ (line 393).
+Since $\mM$ is symmetric, that is $\mM\inv\vr$ for every row.
+
+\subsection{A worked example}
+\label{sec:worked}
+
+Take as references the unit contrast spectra of the yellow and brown example
+pixels (Figure~\ref{fig:spectra}, red):
+\[
+\ey = \begin{pmatrix} 0.748\\ 0.343\\ -0.144\\ -0.289\\ -0.292\\ -0.366
+\end{pmatrix},\quad
+\eb = \begin{pmatrix} 0.339\\ 0.333\\ 0.177\\ 0.010\\ 0.004\\ -0.862
+\end{pmatrix},\quad
+c = \ey\T\eb = 0.654 .
+\]
+Take as the pixel the median of the 319 pixels at least 3~px inside the dot
+of C1017 (10~ppb), whose hue on the map is $0^\circ$, between yellow
+($-30^\circ$) and brown ($+20^\circ$):
+\[
+\va = \begin{pmatrix} 0.659\\ 0.616\\ 0.453\\ 0.290\\ 0.295\\ 0.004
+\end{pmatrix},\ \bar a = 0.386,\quad
+\vx = \va - \bar a\vone = \begin{pmatrix} 0.273\\ 0.230\\ 0.067\\ -0.096\\
+-0.092\\ -0.382 \end{pmatrix}.
+\]
+Scores: $r_y = \ey\T\vx = 0.468$, $r_b = \eb\T\vx = 0.509$.  By
+\eqref{eq:explicit}:
+\[
+y = \frac{0.468 - 0.654 \times 0.509}{1 - 0.654^2} = 0.237,\qquad
+b = \frac{0.509 - 0.654 \times 0.468}{1 - 0.654^2} = 0.354 .
+\]
+The leftover $\vx - y\ey - b\eb$ has an RMS of 0.028 per channel, four
+times the single-pixel noise, even though it is the median of 319 pixels
+(which should have almost no noise left).  So a 10~ppb dot center is
+\emph{not} exactly a mix of these two references; this is the ``bend'' of
+the cloud visible in Figure~\ref{fig:plane}.  It is a fact about the pads to
+keep in mind, not a fault in the code.
+
+\subsection{Keeping the amounts non-negative}
+
+If $\bm\beta = \mM\inv\vr$ has a negative entry, the pixel lies outside the
+wedge between the two references.  The code (lines 395--402) then sets that
+amount to zero and refits the other one alone: for example, if $y < 0$,
+$y = 0$ and $b = \max(r_b / \eb\T\eb,\ 0)$, the amount of brown that fits
+best by itself.  Figure~\ref{fig:unmix} shows the four regions this creates
+on the plane of the two references.
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.62\linewidth]{duotone-unmix}
+\caption{Schematic of \code{unmix} on the plane of the two reference colors
+(directions as on the map: yellow $-30^\circ$, brown $+20^\circ$; lengths
+arbitrary).  Inside the wedge (pixel P) the amounts are read off by the
+parallelogram rule: go $y$ along yellow, then $b$ along brown.  Outside it,
+one amount is set to zero and the pixel is dropped at right angles onto the
+other reference (pixel Q).  Beyond the dashed lines, at right angles to the
+references, both amounts are zero and the pixel is called white.}
+\label{fig:unmix}
+\end{figure}
+
+This gives the exact best non-negative answer when the two references are
+less than $90^\circ$ apart ($c \ge 0$), as they are on these pads
+($49^\circ$).  When they are more than $90^\circ$ apart it can be wrong
+(finding~F2, Section~\ref{sec:findings}).
+
+\subsection{What is returned}
+
+\code{unmix} returns $(g, y, b)$ for every pixel.  $y$ and $b$ are in
+``contrast absorbance'': with unit-length references, $y$ is the length
+along the yellow direction, the same scale as strength on the map.  (The
+yellow example pixel itself gives $y = 0.435$; its strength on the map is
+0.433.)
+
+The returned $g$ is computed as $\vu\T(\va - y\ey - b\eb)$ (line 405).
+Because $\ey$ and $\eb$ have no flat part, this is just $\vu\T\va =
+\sqrt n\,\bar a$: $\sqrt6 \approx 2.45$ times the pixel's average absorbance.
+It is \emph{not} the $g$ of the model~\eqref{eq:model}, which would be $\bar
+a - y\,\bar\varepsilon_y - b\,\bar\varepsilon_b$.  Nothing uses $g$ today
+(finding~F3).
+
+\paragraph{\code{residual\_rms}} (lines 409--416) repeats the calculation of
+the leftover $\vx - y\ey - b\eb$ for every pixel and returns the root mean
+square over all pixels and channels: the typical size of what the two colors
+do not explain, to compare with the noise.
+
+%======================================================================
+\section{Step 5: label each pixel (\code{classify})}
+\label{sec:classify}
+%======================================================================
+
+\src{444}{450}{The body of \code{classify}.}
+
+Two cuts, both chosen by the caller:
+\begin{itemize}[nosep]
+\item \textbf{white} if $y + b <$ \code{floor}.  The caller should use a
+  multiple of the noise on $y+b$ (Section~\ref{sec:noise});
+  \code{\_\_main\_\_} uses three times it.
+\item otherwise \textbf{brown} if the brown fraction $b/(y+b) \ge$
+  \code{brown\_at} (default 0.5), else \textbf{yellow}.
+\end{itemize}
+As the docstring says, yellow and brown are ends of a continuum
+(Figure~\ref{fig:plane}), so where to cut is a choice, not a discovery.
+
+%======================================================================
+\section{How noisy are the amounts?}
+\label{sec:noise}
+%======================================================================
+
+Here ``noise'' means the pixel scatter of Section~\ref{sec:padnoise}, which
+is mostly the paper's own texture.
+
+\subsection{\code{amount\_sigma}: carrying channel noise into $y$ and $b$}
+
+\src{469}{479}{The body of \code{amount\_sigma}.}
+
+Inside the wedge, \code{unmix} is a fixed linear recipe.  From
+\eqref{eq:contrast} and \eqref{eq:normal}:
+\begin{equation}
+\bm\beta = \mM\inv\mE\T\vx = \underbrace{\mM\inv\mE\T}_{\mL}\,\mP\,\va .
+\end{equation}
+\emph{Meaning of $\mL$} (\code{pinv}, a $2\times n$ matrix): its first row is
+a set of weights, one per channel, whose weighted sum of a pixel's contrast
+is $y$; the second row does the same for $b$.  For the worked example's
+references:
+\[
+\mL = \begin{pmatrix}
+0.919 & 0.219 & -0.452 & -0.516 & -0.514 & 0.344\\
+-0.261 & 0.189 & 0.473 & 0.347 & 0.340 & -1.087
+\end{pmatrix}.
+\]
+Each row adds up to zero, so adding the same number to every channel
+(shading) cannot change $y$ or $b$.
+
+If the pixel's absorbances have random errors with covariance matrix $\mC$
+($n\times n$: channel variances on the diagonal, and off the diagonal how
+much two channels' errors tend to move together), then any fixed linear
+recipe $\mathbf W$ applied to them produces errors with covariance
+$\mathbf W\mC\mathbf W\T$.  Here $\mathbf W = \mL\mP$, so
+\begin{equation}
+\operatorname{Cov}\begin{pmatrix}y\\b\end{pmatrix}
+= \mL\,(\mP\mC\mP\T)\,\mL\T .
+\label{eq:sandwich}
+\end{equation}
+Meaning of the pieces: $\mP\mC\mP\T$ is the noise that survives the removal
+of the flat part (the code's \code{C}); the outer $\mL \dots \mL\T$ carries
+it onto the two amounts.  The result is $2\times2$: the diagonal holds the
+variances of $y$ and $b$, and the off-diagonal how their errors move
+together.  For the total,
+\[
+\sigma_{y+b}^2 = \operatorname{var} y + \operatorname{var} b +
+2\operatorname{cov}(y, b),
+\]
+which is line 478.  (The $\mP$ is in fact redundant, since the rows of $\mL$
+already add to zero, so $\mL\mP = \mL$; it does no harm.)
+
+\code{amount\_sigma} uses a \emph{diagonal} $\mC$, $\operatorname{diag}
+(\sigma_1^2, \dots, \sigma_n^2)$: it assumes the channels' errors are
+unrelated.  With the worked example's references and the pooled $\sigma$s
+it gives $\sigma_y = 0.0086$, $\sigma_b = 0.0096$, $\sigma_{y+b} = 0.0076$.
+
+\subsection{\code{noise\_cov}: do the channels' errors move together?}
+
+\src{506}{512}{The body of \code{noise\_cov}.}
+
+This builds the full $\mC$.  The correlation $\rho_{jk}$ between channels $j$
+and $k$ (a number from $-1$ to $1$: 0 means unrelated, 1 means always moving
+together) is measured from the neighbor differences \code{dnoise}; the
+sizes $\sigma_j$ from the robust per-channel values.  Then
+\[
+C_{jk} = \sigma_j\,\sigma_k\,\rho_{jk}
+\qquad\text{(code: \code{np.outer(sigma, sigma) * corr})}.
+\]
+Pooled over the 18 dry pads:
+\begin{center}\small
+\begin{tabular}{@{}lrrrrrr@{}}
+\toprule
+ & violet & r.\ blue & cyan & green Gb & green Gr & p.\ red \\
+\midrule
+violet    & 1 & 0.20 & 0.17 & 0.01 & 0.11 & 0.02 \\
+royal blue&   & 1    & 0.33 & 0.06 & 0.16 & 0.03 \\
+cyan      &   &      & 1    & 0.13 & 0.22 & 0.05 \\
+green Gb  &   &      &      & 1    & 0.11 & 0.16 \\
+green Gr  &   &      &      &      & 1    & 0.12 \\
+photo red &   &      &      &      &      & 1    \\
+\midrule
+$\sigma$ (A) & 0.0062 & 0.0066 & 0.0073 & 0.0064 & 0.0064 & 0.0075 \\
+\bottomrule
+\end{tabular}
+\end{center}
+The correlations are weak (0.01 to 0.33).  With this full $\mC$ in
+\eqref{eq:sandwich}, $\sigma_{y+b}$ becomes 0.0079 instead of 0.0076: the
+diagonal shortcut makes little difference here.
+
+The \code{noise\_cov} docstring used to say that most pixel-to-pixel
+variation dims every channel together, so the correlations are ``the
+point''.  That was measured on the bare paper.  On the dry pad the answer
+depends on the scale.  Neighbor differences, as used here, correlate only
+weakly between channels (the table above).  But texture 1--4~px across
+agrees between different LEDs at 0.5--0.8 (shading study, step~1a).  The
+docstring now says both (reworded 2026-09-29; finding~F4).
+
+%======================================================================
+\section{Choosing channels: \code{j\_hue}, \code{j\_amounts},
+\code{subset\_sigma}, \code{subset\_unmix}}
+\label{sec:subsets}
+%======================================================================
+
+These four answer: if only some of the channels were measured, how well
+could yellow and brown still be told apart and measured?  Today only
+\file{report14.py} (a record that no longer runs) calls them.  They are the
+natural tools for step~4 of the suggested order in
+\file{docs/pca\_study\_2026-09-27.md} (rank channel subsets and choose the
+channels), which is why they are explained in full.  In all four, \code{idx} picks the channels and
+$\mC$ is the full noise covariance, restricted to those channels.  Below,
+$\vone$ is all ones on the chosen channels.
+
+\subsection{Weighted least squares}
+
+\code{unmix} counts every channel equally.  These functions instead weight
+by the noise: they minimize
+\begin{equation}
+(\va - \mF\bm\theta)\T\,\mC\inv\,(\va - \mF\bm\theta).
+\label{eq:wls}
+\end{equation}
+\emph{Meaning of the $\mC\inv$ in the middle:} a channel with twice the noise
+counts a quarter as much, and two channels whose errors move together are not
+counted as two independent witnesses.  With plain least squares, $\mC\inv$
+is replaced by the identity.  The same argument as \eqref{eq:normal} gives
+\begin{equation}
+\hat{\bm\theta} = (\mF\T\mC\inv\mF)\inv\,\mF\T\mC\inv\va,
+\qquad
+\operatorname{Cov}(\hat{\bm\theta}) = (\mF\T\mC\inv\mF)\inv .
+\label{eq:wlssol}
+\end{equation}
+$\mF\T\mC\inv\mF$ is called the \emph{information matrix}.  \emph{Meaning:}
+how sharply the data pin down each amount.  More information means smaller
+errors; its inverse is the error covariance of the estimates.
+
+\subsection{\code{j\_hue}: can the channels tell yellow from brown?}
+
+\src{541}{549}{The body of \code{j\_hue}.}
+
+Take any weighted sum of the channels, $t = \vw\T\va$, as an index.  Ask
+three things of it:
+\begin{itemize}[nosep]
+\item \textbf{Shading-proof:} adding the same amount to every channel must
+  not change it: $\vw\T\vone = 0$.
+\item \textbf{Signal:} how much it differs between a unit amount of pure
+  brown and a unit amount of pure yellow: $\vw\T(\epsb - \epsy) = \vw\T\vd$,
+  with $\vd = \epsb - \epsy$.
+\item \textbf{Noise:} its random error, $\sqrt{\vw\T\mC\vw}$ (the sandwich
+  rule again, for one row).
+\end{itemize}
+$J$ is the best achievable signal-to-noise ratio:
+\[
+J = \max_{\vw:\ \vw\T\vone = 0}\ \frac{|\vw\T\vd|}{\sqrt{\vw\T\mC\vw}} .
+\]
+\textbf{Derivation.}  Scaling $\vw$ does not change the ratio, so fix the
+noise at $\vw\T\mC\vw = 1$ and maximize $\vw\T\vd$ with $\vw\T\vone = 0$.
+Using Lagrange multipliers $\mu$ and $\lambda$ for the two conditions, the
+best $\vw$ satisfies
+\[
+\vd - \mu\,\mC\vw - \lambda\vone = \mathbf 0
+\quad\Longrightarrow\quad
+\vw \propto \mC\inv(\vd - \lambda\vone) .
+\]
+The shading condition $\vone\T\vw = 0$ fixes $\lambda$:
+\[
+\vone\T\mC\inv\vd - \lambda\,\vone\T\mC\inv\vone = 0
+\quad\Longrightarrow\quad
+\lambda = \frac{\vone\T\mC\inv\vd}{\vone\T\mC\inv\vone} .
+\]
+Let $\vz = \vd - \lambda\vone$, so $\vw \propto \mC\inv\vz$ and $\vone\T
+\mC\inv\vz = 0$.  Then $\vw\T\vd \propto \vz\T\mC\inv\vd = \vz\T\mC\inv(\vz +
+\lambda\vone) = \vz\T\mC\inv\vz$, and $\vw\T\mC\vw \propto \vz\T\mC\inv\vz$
+also.  So
+\begin{equation}
+J^2 = \frac{(\vz\T\mC\inv\vz)^2}{\vz\T\mC\inv\vz} = \vz\T\mC\inv\vz
+= \vd\T\mC\inv\vd - \frac{(\vone\T\mC\inv\vd)^2}{\vone\T\mC\inv\vone} .
+\label{eq:jhue}
+\end{equation}
+This is lines 546--549 (\code{a - b*b/c}).  \emph{Meaning of the two terms:}
+$\vd\T\mC\inv\vd$ is how many noise-sizes separate brown from yellow if
+shading could be ignored (the difference measured in units of noise).  The
+subtracted term is the part of that separation that lies along the shading
+direction, as seen through the noise, and is given up to stay shading-proof.
+With a single channel the two terms are equal and $J = 0$: one channel alone
+cannot tell a lot of yellow from a little brown.
+
+With all six channels and the example references, $J = 130$ per unit amount;
+at a typical dot strength of 0.5, pure yellow and pure brown differ by about
+65 noise-sizes in a single pixel.
+
+\subsection{\code{j\_amounts} and \code{subset\_sigma}: how precisely is
+each amount known?}
+
+\src{575}{587}{The body of \code{j\_amounts}.}
+
+Here the full model is used, $\mF = (\epsy\ \epsb\ \vone)$, with amounts
+$(y, b, g)$.  The information matrix \eqref{eq:wlssol} splits into blocks,
+with $\mE = (\epsy\ \epsb)$:
+\[
+\mF\T\mC\inv\mF =
+\begin{pmatrix}
+\mE\T\mC\inv\mE & \mE\T\mC\inv\vone\\
+\vone\T\mC\inv\mE & \vone\T\mC\inv\vone
+\end{pmatrix}
+\quad
+\begin{matrix} \leftarrow\ (y, b)\ \text{rows}\\ \leftarrow\ g\ \text{row}
+\end{matrix}
+\]
+We want only the error covariance of $(y, b)$, i.e.\ the top-left
+$2\times2$ block of the \emph{inverse}.  The standard formula for the inverse
+of a block matrix gives it as the inverse of
+\begin{equation}
+\mM = \mE\T\mC\inv\mE \;-\;
+\frac{(\mE\T\mC\inv\vone)(\vone\T\mC\inv\mE)}{\vone\T\mC\inv\vone}
+\label{eq:schur}
+\end{equation}
+(called the \emph{Schur complement}), which is line 583.  \emph{Meaning:}
+the information about $(y,b)$, minus the part of it that has to be spent on
+pinning down the unknown shading $g$.  It has the same shape as
+\eqref{eq:jhue} for the same reason.  Then $\mM\inv$ is the $2\times2$ error
+covariance of $(y,b)$; \code{j\_amounts} returns $1/\sigma_y$ and
+$1/\sigma_b$, and \code{subset\_sigma} returns $\sigma_y$, $\sigma_b$ and
+$\sigma_{y+b}$.  With all six channels and the example references,
+\code{subset\_sigma} gives $\sigma_y = 0.0082$, $\sigma_b = 0.0092$,
+$\sigma_{y+b} = 0.0078$, close to \code{amount\_sigma}'s.
+
+\paragraph{Why at least three channels.}  Removing the shading uses up one
+channel's worth of information (Section~\ref{sec:contrast}), and two amounts
+need two more.  With two channels $\mM$ cannot be inverted; the functions
+return zero precision (\code{j\_amounts}) or infinite error
+(\code{subset\_sigma}).  \code{subset\_sigma(..., shading=False)} drops the
+subtracted term of \eqref{eq:schur}, which assumes the shading is known,
+so that two channels can be priced.
+
+\subsection{\code{subset\_unmix}}
+
+\src{648}{663}{The body of \code{subset\_unmix}.}
+
+This applies \eqref{eq:wlssol} to every pixel at once, using only the chosen
+channels.  \code{np.linalg.pinv(M) @ (E.T @ Ci @ X.T)} is
+$(\mF\T\mC\inv\mF)\inv\mF\T\mC\inv$ applied to every pixel's spectrum (the
+columns of $\mX\T$).  Unlike \code{unmix}, it does not remove the flat part
+first; it fits $g$ as a third amount, which comes to the same thing.  It then
+sets negative amounts to zero \emph{without} refitting the other amount, so
+it is not the same as \code{unmix}'s clamp (finding~F5).
+
+%======================================================================
+\section{The other pieces}
+\label{sec:helpers}
+%======================================================================
+
+\begin{description}
+\item[\code{build(names)}] makes one \code{PadCube} per pad and keeps only
+  the channels every pad has.  A matrix with a hole in it is worse than a
+  narrower one.
+\item[\code{fit(cubes)}] stacks the contrast of every pad's pixels into one
+  tall $\mX$, then runs \code{hue\_plane} and \code{endmembers} on it, so
+  that ``brown'' means the same spectrum on every pad.  (Today it inherits
+  the failure of Section~\ref{sec:endmembersfail}.)
+\item[\code{render\_rgb}] makes a picture for people to look at.  For each
+  camera color layer it picks the brightest white-LED exposure that does not
+  clip on the pad or the gray chip, divides by the gray chip's mean (so the
+  gray chip comes out neutral), stacks red, green (the average of the two
+  green layers) and blue, scales so the 99.5th percentile is full white, and
+  applies a display gamma.  It plays no part in any measurement.
+\item[\code{cell\_name}, \code{cell\_nm}, \code{NM}] spell a channel as
+  \code{"led.layer"} and give the LED's nominal wavelength.
+\item[\code{HUE\_SPLIT\_NM} = 500] the dividing line used to name the two
+  reference colors (Section~\ref{sec:endmembers}, step 8).  With the six
+  channels, ``below'' is violet and royal blue; ``500 and above'' is cyan,
+  both greens and photo red.
+\item[\code{SATURATED\_DN} = 1000] the clipping level for
+  \code{render\_rgb} only.
+\item[\code{\_\_main\_\_}] builds all 18 pads, fits one pair of reference
+  colors, and prints each pad's white/yellow/brown counts and residual
+  (the table in Section~\ref{sec:endmembersfail}).
+\end{description}
+
+%======================================================================
+\section{Limits of the model}
+\label{sec:limits}
+%======================================================================
+
+These are properties of the approach, not bugs.
+
+\begin{enumerate}
+\item \textbf{A color that absorbs evenly is invisible.}  Removing the flat
+  part removes shading, and with it the even part of every dye.  Brown
+  absorbs fairly evenly from violet to green (Figure~\ref{fig:split}), so
+  much of its darkness is discarded; what survives is mostly its drop at
+  photo red.
+  That is why, in \file{pca\_study} step~2b, the strength inside the dot is
+  0.44--0.59 on every pad from 2.2 to 160~ppb, and concentration shows up as
+  a change of hue rather than of strength.  For estimating arsenic, the
+  discarded flat part may carry information that is worth recovering some
+  other way (for example, shading measured on the dry pad in the pre-image
+  and subtracted, rather than fitted).  This has since been tried
+  (\file{docs/shading\_study\_2026-09-29.md}): the pre-image removes about two
+  thirds of the rim's shadow in each channel, and about four fifths on the
+  six-channel average, but only 10\,\% of the pixel-scale texture inside the
+  pad.  Whether the dot's strength then follows concentration, once the flat
+  part is no longer removed, is that study's step~2, not yet done.
+\item \textbf{Absorbances add only approximately in paper.}  Light
+  scattered back out of paper does not obey Beer--Lambert exactly.
+  Kubelka--Munk theory says $K/S = (1 - R_\infty)^2 / 2R_\infty$ is the
+  quantity that adds, and \file{padphot.py} already computes it.  At the
+  strongest dots ($A \approx 0.66$, $R_\infty \approx 0.22$) the difference
+  is not small.  Whether $A$ or $K/S$ makes the two colors add better can be
+  tested on these pads.
+\item \textbf{Two colors, fixed spectra.}  The model has exactly two
+  colors, the same on every pixel.  The residual of the worked example
+  (Section~\ref{sec:worked}) and the bend in Figure~\ref{fig:plane} show the
+  real pads are not exactly that; the chemistry allows at least two, perhaps
+  three, products.
+\item \textbf{Six channels, five usable directions.}  Removing the flat part
+  leaves five independent directions.  Two colors need two of them; the other
+  three hold noise and model misfit, and are what \code{residual\_rms}
+  measures.
+\end{enumerate}
+
+%======================================================================
+\section{Review findings}
+\label{sec:findings}
+%======================================================================
+
+Most serious first.  None has been changed; each is for you to decide.
+
+\begin{enumerate}[label=\textbf{F\arabic*}, leftmargin=2.4em]
+\item \textbf{\code{endmembers} returns reversed colors} (lines 328--330).
+  The ``stronger half'' of the pixels is mostly noise, so the edges land
+  behind the origin (Section~\ref{sec:endmembersfail}).  This breaks
+  \code{fit}, \code{\_\_main\_\_}, and \code{cell\_PCA}'s default per-pad
+  fit on pale pads.  \emph{Proposal:} either replace the median cutoff by a
+  strength cutoff tied to the noise (e.g.\ 10--20 times $\sigma$; 0.1 gives
+  $-40^\circ$ and $+27^\circ$), or stop fitting and use fixed reference
+  colors (the plan in \file{pca\_study}).  Also, \code{endmembers} could
+  check that the two edges are less than $180^\circ$ apart and lie on the
+  data's side of the origin, and refuse otherwise.
+\item \textbf{\code{unmix}'s clamp is exact only when the references are less
+  than $90^\circ$ apart} (lines 397--402).  If both unconstrained amounts
+  are negative and the references are more than $90^\circ$ apart, the true
+  best answer may be ``yellow only'', but the code returns zero.  On random
+  test data with references $128^\circ$ apart, 198 of 2000 pixels disagreed
+  with a standard non-negative solver; with the real references ($49^\circ$
+  apart), none did.  \emph{Proposal:} evaluate all candidates (both, yellow
+  only, brown only, none) and keep the best, or assert $c \ge 0$.
+\item \textbf{The returned $g$ is not the model's $g$} (line 405).  It is
+  $\sqrt n$ times the pixel's average absorbance, including the dyes' flat
+  parts.  Nothing uses it.  \emph{Proposal:} correct the docstring to say
+  what it is, or return $\bar a$ and call it that.
+\item \textbf{Noise statements out of date --- reworded 2026-09-29.}
+  \code{amount\_sigma}'s comment on line 471 mixed up ``between pixels'' and
+  ``between channels''; it now says the channels are taken as unrelated.
+  \code{noise\_cov}'s docstring said most variation is common to all
+  channels, which was measured on the bare paper; it now gives both dry-pad
+  measurements (Section~\ref{sec:noise}).  \code{PadCube.sigma} and
+  \code{\_pair\_noise} now call $\sigma$ what it is, mostly the paper's
+  texture (Section~\ref{sec:scatterwhat}).  What remains:
+  \code{amount\_sigma} still uses the diagonal covariance, a small effect
+  (0.0076 against 0.0079).  \emph{Proposal:} optionally let it take the full
+  covariance.
+\item \textbf{\code{subset\_unmix}'s clamp does not refit} (lines 659--663),
+  unlike \code{unmix}.  Only \file{report14} uses it.  \emph{Proposal:} fix
+  when channel selection (\file{pca\_study} step~4) needs it.
+\item \textbf{Small documentation slips.}
+  \code{subset\_sigma}'s docstring mentions ``all 26 cells'' (now 6) and has
+  a stray ``Args (continued):'' heading.  \file{analysis\_1.py} line 800 and
+  \file{padphot.py} line 57 point to \code{duotone.PadCube.\_reflectance},
+  which no longer exists.  \code{hue\_plane} calls its output a
+  ``variance fraction''; it is a share of the sum of squares about the
+  origin (Section~\ref{sec:plane}).
+\item \textbf{\code{unmix} weights all channels equally}, while the
+  \code{subset\_*} functions weight by noise.  With six channels of similar
+  noise (0.0062--0.0075) this hardly matters; it would matter if channels
+  with very different noise were added.  No action needed now.
+\end{enumerate}
+
+%======================================================================
+\appendix
+\section{Symbols}
+%======================================================================
+
+\begin{center}\small
+\begin{tabular}{@{}lL{11cm}@{}}
+\toprule
+$n$, $N$ & number of channels (6); number of pad pixels \\
+$\va$ & one pixel's absorbances, a column of $n$ \\
+$\mA$ & all pixels, $N\times n$, one row per pixel (\code{PadCube.A}) \\
+$\vone$, $\vu$ & all ones; the same scaled to length 1 (\code{flat\_direction}) \\
+$\bar a$ & a pixel's average over channels \\
+$\mP = \mI - \vu\vu\T$ & removes a spectrum's average (projector) \\
+$\vx = \mP\va$, $\mX = \mA\mP$ & contrast of one pixel; of all pixels (\code{contrast}) \\
+$g, y, b$ & amounts of shading, yellow, brown \\
+$\epsy, \epsb$ & yellow and brown spectra \\
+$\ey, \eb$ & the same with their average removed; unit length when from \code{endmembers} \\
+$\mE = (\ey\ \eb)$ & the two references side by side, $n\times2$ \\
+$\mM = \mE\T\mE$ & how much the references overlap, $2\times2$ \\
+$\vr = \mE\T\vx$ & a pixel's raw resemblance to each reference \\
+$c = \ey\T\eb$ & overlap of unit references (cosine of the angle between them) \\
+$\mL = \mM\inv\mE\T$ & weights turning contrast into amounts (\code{pinv}) \\
+$\mB$ & the two map directions, $2\times n$ (\code{basis}) \\
+$\vs = \mB\vx$ & a pixel's position on the map \\
+$\sigma_k$ & pixel scatter of channel $k$ (mostly the paper's texture) \\
+$\mC$ & noise covariance between channels, $n\times n$ (\code{noise\_cov}) \\
+$\mF = (\vone\ \epsy\ \epsb)$ & all three ingredients, $n\times3$ \\
+$J$ & best signal-to-noise for telling brown from yellow (\code{j\_hue}) \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\paragraph{Reproducing the figures and numbers.}  The figures come from
+\file{desktop/padanalysis/duotone\_guide.py} (\code{run()}), which writes
+\file{tex/figs/duotone-*.pdf}.  The table in
+Section~\ref{sec:endmembersfail} is the output of running
+\file{duotone.py} by itself.  Line numbers in the listings are those of
+\file{duotone.py} on 2026-09-28.
+
+\end{document}
