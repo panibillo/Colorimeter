@@ -50,7 +50,9 @@ Method, all in bound-crop Bayer-layer coordinates:
              `depth` is an exact distance to the rectangle boundary rather
              than a distance transform of a ragged blob.
 
-Two holder layouts (`layout`, decided from the image by `_detect_layout`):
+Two holder layouts (`layout`).  The caller may give it -- `analysis_1.pad_of`
+takes it from the sample's `cap_style` -- otherwise it is decided from the
+image by `_detect_layout`:
 
   'channel'  the strip lies in an open channel and runs off the bottom of
              the crop, so there is a long band of bare strip below the pad.
@@ -71,6 +73,31 @@ Two holder layouts (`layout`, decided from the image by `_detect_layout`):
              composite R, far below half of any pad level.  The ends are
              found exactly as in the channel layout, with the window's top
              edge playing the part of the strip's end.
+
+Sides guided by a prior fit (`prior=`, `guide_sides`; 2026-11-11):
+
+  In the cassette holders (cap_style F, G1, H1) the strip can't move far
+  between the pre-image and the post-image: over the 26 repeat files of
+  C1038-C1045 whose post-image fitted normally, its sides sat -1.23 to
+  +1.20 px from the same file's pre-image sides (top -0.15 to +0.84 px,
+  tilt within 0.19 deg).  So the post-image's sides are looked for only
+  within SIDE_SEARCH_PX of the pre-image's, and each side is placed where
+  the composite changes most steeply between neighboring columns -- the
+  drop from the pad to the dark frame, which is where the paper ends
+  however dark the paper is.  The pre-image is refitted the same way
+  around its own first fit, so both photos' sides mean the same thing.
+  Evidence: `align_study.py` step 1d (`compare_guided`, align_out/guided.json):
+  the leftover misalignment across the pad, measured from the paper
+  texture, fell from a median of 0.18 px (worst 0.72) to 0.11 px (worst
+  0.40), and C1045rep3/rep4, which the unguided finder could not fit, fit.
+
+  DROPPED for those holders' final sides: the "outermost crossing of half
+  the pad level" described under 'window' above.  Where dye darkens the
+  paper next to the edge, that crossing slides outward, so a stained pad
+  fitted 0.5-0.8 px wider than its own pre-image (C1041, C1044).  It is
+  still used for the pre-image's first fit (the guide), and unchanged for
+  every capture without a cassette cap_style.  The last commit before this
+  change is 50b70a9 (padrect.py there lacks only the `minrows` argument).
 
 Constants below are for bound roi 39 with the strip upright in the channel;
 the pad's size is the same in cassette 01.
@@ -128,6 +155,19 @@ FLOOR_ROWS = 4
 #: band, with room to spare).
 WINDOW_END_CLEARANCE = 3
 WINDOW_SIDE_SEARCH = 40
+
+#: Guided sides: how far (layer px) either side of the prior fit's side the
+#: edge is looked for.  The limit applies only between a post-image and the
+#: pre-image of the *same* capture file: the strip is not reseated between
+#: those two photos, and the measured movement in the cassette holders is
+#: at most 1.23 px (see the module docstring), so 2 px covers it with room
+#: to spare.  Pre-images of different repeats (strip reseated) can differ
+#: from each other by more (Bill, 2026-11-11); that does no harm, because a
+#: pre-image is guided only by its own first fit, never by another file.
+#: A cassette not fully inserted moves the pad *vertically* by more than
+#: this, which does no harm either: the ends are found independently, and
+#: the side prediction follows the pad's own top.
+SIDE_SEARCH_PX = 2.0
 
 
 def _detect_layout(rowprof) -> str:
@@ -216,7 +256,7 @@ class PadRect:
     """The pad as a rotated rectangle, plus the edge fits behind it."""
 
     def __init__(self, c: Capture, rung: str = "e1", fixed_size: bool = False,
-                 label: str = None):
+                 label: str = None, layout: str = None, prior=None):
         """
         Args:
             c: The capture to segment.
@@ -227,6 +267,12 @@ class PadRect:
                 against a channel wall and one edge may be clipped.
             label: Accepted as a synonym for `rung`, for callers written
                 against the earlier signature.
+            layout: LAYOUT_WINDOW or LAYOUT_CHANNEL when the holder is
+                known (from cap_style); None to decide from the image.
+            prior: Optional fitted `PadRect` -- for a post-image, the same
+                file's pre-image.  When given, the sides are found by
+                `_find_sides_guided` within SIDE_SEARCH_PX of the prior's
+                sides, instead of by the layout's own side finder.
         """
         self.capture = c
         self.comp, self.cells = composite(c, label or rung)
@@ -236,7 +282,7 @@ class PadRect:
         self.xseed = strip_column(c)
         self.rowprof = np.median(
             self.comp[:, self.xseed - 8:self.xseed + 9], axis=1)
-        self.layout = _detect_layout(self.rowprof)
+        self.layout = layout or _detect_layout(self.rowprof)
         if self.layout == LAYOUT_WINDOW:
             # No bare strip below the pad: take the level from the window
             # itself, which is mostly pad.  The rows between the first and
@@ -252,20 +298,41 @@ class PadRect:
             self.paper_level = float(np.median(self.rowprof[95:118]))
 
         self._find_ends()
-        if self.layout == LAYOUT_WINDOW:
+        if prior is not None:
+            self._find_sides_guided(w, prior)
+        elif self.layout == LAYOUT_WINDOW:
             self._find_sides_on_pad(w)
+            self.side_rule = "half-level"
         else:
             self._find_sides(w)
+            self.side_rule = "half-level"
 
-        if fixed_size:
+        self.fixed_size = fixed_size
+        self._set_frame()
+
+    def _set_frame(self):
+        """Snap to WIDTH_FIXED if asked, then build the (u, v) strip frame."""
+        if self.fixed_size:
             cu = 0.5 * (self.aL + self.aR)
             self.aL, self.aR = cu - WIDTH_FIXED / 2, cu + WIDTH_FIXED / 2
             self.width = WIDTH_FIXED
-        self.fixed_size = fixed_size
-
+        h, w = self.comp.shape
         yy, xx = np.mgrid[0:h, 0:w]
         self.u = xx - (self.aL + self.m * (yy - self.yc))
         self.v = yy.astype(np.float64)
+
+    def guide_sides(self, prior=None):
+        """
+        Refit the sides by the guided rule, in place.
+
+        Args:
+            prior: The fit whose sides guide the search; None (the usual
+                case, for a pre-image) to use this fit's own current sides.
+        """
+        if prior is None:               # a snapshot, since the refit overwrites
+            prior = _SideGuide(self)
+        self._find_sides_guided(self.comp.shape[1], prior)
+        self._set_frame()
 
     # -- ends: the pad's own edges, found without reference to its colour ---
     def _find_ends(self):
@@ -365,7 +432,7 @@ class PadRect:
         self.bot_source = "height"
 
     # -- sides: the strip's edges below the pad, as two parallel lines ------
-    def _find_sides(self, w):
+    def _find_sides(self, w, minrows=8):
         thr = EDGE_FRACTION * self.paper_level
         rows, L, R = [], [], []
         y0 = int(np.ceil(self.bot)) + 4
@@ -382,12 +449,12 @@ class PadRect:
             rows.append(y)
             L.append(_cross(self.comp[y], a - 1, thr))
             R.append(_cross(self.comp[y], b, thr))
-        if len(rows) < 8:
-            raise RuntimeError(f"{self.capture.name}: only {len(rows)} usable "
-                               f"strip rows below the pad")
+        if len(rows) < minrows:
+            raise RuntimeError(f"{self.capture.name}: only {len(rows)} "
+                               f"usable strip rows below the pad")
         self._fit_sides(rows, L, R)
 
-    def _find_sides_on_pad(self, w):
+    def _find_sides_on_pad(self, w, minrows=8):
         """
         The pad's sides in the window layout, measured on the pad's own rows.
 
@@ -403,7 +470,7 @@ class PadRect:
             w: Width of the layer grid.
 
         Raises:
-            RuntimeError: Fewer than 8 rows gave two edges.
+            RuntimeError: minrows fewer than 8 rows gave two edges.
         """
         thr = EDGE_FRACTION * self.paper_level
         lo = max(self.xseed - WINDOW_SIDE_SEARCH, 1)
@@ -421,10 +488,62 @@ class PadRect:
             rows.append(y)
             L.append(_cross(self.comp[y], a - 1, thr))
             R.append(_cross(self.comp[y], b, thr))
-        if len(rows) < 8:
+        if len(rows) < minrows:
             raise RuntimeError(f"{self.capture.name}: only {len(rows)} usable "
                                f"pad rows in the window")
         self._fit_sides(rows, L, R)
+
+    def _find_sides_guided(self, w, prior, minrows=8):
+        """
+        The pad's sides, looked for only near a prior fit's sides.
+
+        On each pad row y between the ends (kept WINDOW_END_CLEARANCE rows
+        clear of them):
+          1. predict each side's column from the prior, at the same depth
+             below the top edge: y_prior = y - (top - top_prior);
+          2. within SIDE_SEARCH_PX of each prediction, take the column where
+             the composite changes most steeply -- rising going right for
+             the left side (frame to pad), falling for the right side --
+             refined to a fraction of a pixel by a parabola through the
+             three values around it (`_peak`);
+          3. fit both sides as parallel lines (`_fit_sides`).
+        See the module docstring for why, and for the rule it replaces.
+
+        Args:
+            w: Width of the layer grid.
+            prior: A fitted `PadRect` (or `_SideGuide`) with aL, aR, m, yc,
+                top.
+
+        Raises:
+            RuntimeError: Fewer than `minrows` rows gave both sides.
+        """
+        aL, aR, m, yc = prior.aL, prior.aR, prior.m, prior.yc
+        dtop = self.top - prior.top              # how far the pad moved down
+        y0 = int(np.ceil(self.top)) + WINDOW_END_CLEARANCE
+        y1 = int(np.floor(self.bot)) - WINDOW_END_CLEARANCE + 1
+        rows, L, R = [], [], []
+        for y in range(max(y0, 0), min(y1, self.comp.shape[0])):
+            g = np.gradient(self.comp[y].astype(np.float64))  # per column
+            y_prior = y - dtop
+            found = []
+            # sign +1: left side, rising going right; -1: right side.
+            for x0, sign in ((aL + m * (y_prior - yc), 1.0),
+                             (aR + m * (y_prior - yc), -1.0)):
+                i0 = int(np.floor(x0 - SIDE_SEARCH_PX))
+                i1 = int(np.ceil(x0 + SIDE_SEARCH_PX)) + 1
+                if i0 < 1 or i1 > w - 1:
+                    break                       # search runs off the crop
+                i = i0 + int(np.argmax(sign * g[i0:i1]))
+                found.append(_peak(g, i))
+            if len(found) == 2:
+                rows.append(y)
+                L.append(found[0])
+                R.append(found[1])
+        if len(rows) < minrows:
+            raise RuntimeError(f"{self.capture.name}: only {len(rows)} pad "
+                               f"rows gave both guided sides")
+        self._fit_sides(rows, L, R)
+        self.side_rule = "guided"
 
     def _fit_sides(self, rows, L, R):
         """
@@ -449,6 +568,7 @@ class PadRect:
                 R - (sol[2] + sol[0] * (rows - self.yc))]))
             scale = max(1.4826 * float(np.median(r[np.tile(keep, 2)])), 0.05)
             bad = (r > OUTLIER_SIGMA * scale).reshape(2, -1).any(axis=0)
+            # Here is a HARDCODE value 8, I wonder if this should be 'minrows'?
             if not (bad & keep).any() or (keep & ~bad).sum() < 8:
                 break
             keep &= ~bad
@@ -570,7 +690,15 @@ class PadRect:
                 f"| tilt={self.angle_deg:+5.2f} deg  rms={self.edge_rms:.3f} px "
                 f" n={len(self.rows_used):2d}-{self.n_rejected:<2d} "
                 f"top_resid={tr}  clr={self.top_clearance:+5.2f}  "
-                f"{self.layout}")
+                f"{self.layout}/{self.side_rule}")
+
+
+class _SideGuide:
+    """A frozen copy of a fit's side lines and top, to guide a refit."""
+
+    def __init__(self, pad):
+        self.aL, self.aR, self.m = pad.aL, pad.aR, pad.m
+        self.yc, self.top = pad.yc, pad.top
 
 
 def pooled_size(names, max_softness: float = 2.5):

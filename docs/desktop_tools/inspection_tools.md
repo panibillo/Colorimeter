@@ -114,8 +114,16 @@ geometry the holder guarantees: the pad is a rectangle of fixed size, tilted
 no more than about a degree. It finds the strip's two side edges and fits
 them as two parallel lines. It then places the pad's bottom edge on the
 shadow line where the pad stands proud of the strip, and puts the top one
-fixed pad height above. Since cassette 01 (C1038 onward) it detects the
-"window" holder layout and measures the sides on the pad's own rows. The
+fixed pad height above. Since cassette 01 (C1038 onward) it uses the
+"window" holder layout and measures the sides on the pad's own rows. From
+2026-11-11, for the cassette holders (`samples.cap_style` F, G1, H1),
+`analysis_1.pad_of` takes the layout from `cap_style` (`CAP_LAYOUT`) instead
+of guessing it from the image. It also finds the sides *guided*: each side
+is the steepest drop to the dark frame within 2 px of a prior fit. The
+pre-image is guided by its own first fit, and the post-image by the
+pre-image. The older "half the pad level" side rule is no longer the final
+side in those holders (dye at the edge made it fit wide); the last commit
+before the change is 50b70a9. The
 search image is `fields.composite`: each LED photo divided by the gray-chip
 level, then averaged over every LED. That makes it work whichever LEDs a
 capture holds.
@@ -127,7 +135,7 @@ capture holds.
 | `padrect.pooled_size()`, `padrect.edge_softness()` | Current | Re-derive the fixed pad width and height for a new strip lot; measure how sharp each strip edge is. | Returned numbers. |
 | `fields.composite()`, `fields.reflectance()`, `fields.chip_levels()` | **Engine** | The all-LED search image the pad finder works on. | — |
 | `analysis_1.locate_pad(samp_no, write=True)` | **Current** | Fits the pad in both sections of a capture and records it. `write=False` fits without writing. | Database: one row per section in `sample_roi` (`src/colorimeter.sqlite`). Terminal report. |
-| `analysis_1.pad_of()` | Engine | Cached `PadRect` for one section. | — |
+| `analysis_1.pad_of()` | Engine | Cached `PadRect` for one section. For cassette cap_styles: layout from `CAP_LAYOUT`, sides guided (`describe()` ends `window/guided`). | — |
 | `analysis_1.roi_overlay(samp_no)` | **Current** | **The pad-finding check figure.** The crop as measured, beside the same crop with the pad, the gray chips and the paper region drawn on. Look at it before believing any number. | Figure: `desktop/padanalysis/fig/analysis1_<samp_no>_roi.png` (or `_roi_pre.png`). |
 | `analysis_1.pre_post_overlay(samp_no, led, layer)` | **Current** | The lined-up pre-image beside the post-image, and their ratio. Structure that follows the pad outline means the lining up is wrong. Prints the corner mismatch (should be well under one pixel). | Figure: `fig/analysis1_<samp_no>_prepost.png`. |
 | `archive/segment.py` (`segment.Pad`) | **Superseded** by `padrect` | The earlier free-form finder: thresholds and grows a region. Needs the white LED. Kept as the comparison arm for `report7` and `report8`. | Self-test report on the terminal. |
@@ -135,8 +143,11 @@ capture holds.
 | `archive/look2.py` | **Superseded**, runs | The free-form segmentation drawn on the first five captures. | Figure: `archive/fig/look2.png`. |
 | `padregistration.py` | **Parked**, see the chain document, step 4 | Lining up by edge correlation (shelved). | — |
 
-Note: on 2026-11-11 `padrect.py` has uncommitted edits (a `minrows`
-argument on the side finders).
+Note: since 2026-11-11 `padrect.py` has a `minrows` argument on the side
+finders and the guided side finder (`prior=`, `layout=`, `guide_sides()`,
+`SIDE_SEARCH_PX`). `sample_roi` holds rows for C1016–C1025 (August, labeled
+channel/half-level) and for the 28 C1038–C1045 repeat files (window/guided,
+written by `locate_pad` on 2026-11-11).
 
 ---
 

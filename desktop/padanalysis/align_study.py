@@ -71,6 +71,14 @@ THE STEPS (each is a guarded block in `run()`)
                            measure what is left in another channel, and the
                            false change at the edge before and after.
     figure `show_split`:   the edge-fit errors from 1b.
+    figures `show_poor`:   one check figure per pair whose post-image pad
+                           fit is poor (`poor_pairs`), showing both fits,
+                           the post / pre absorbance, and why the pad finder
+                           chose its layout.
+    1d `compare_guided`:   a side finder guided by the pre-image
+                           (`GuidedPad`), judged by the texture residual of
+                           each file's own pre/post pair.
+    figures `show_guided`: padrect's post-image fit beside the guided one.
 
 RESULTS SO FAR (2026-11-09, before C1045rep3 and rep4 were added)
     - Pre-image edge fits agree with each other to about 0.1 px.
@@ -89,6 +97,28 @@ RESULTS SO FAR (2026-11-09, before C1045rep3 and rep4 were added)
     correlation `corr` is about 0.0-0.1, against 0.6 elsewhere: the
     texture match failed, so their residuals are not measurements.
 
+    STEP 1d, 2026-11-11: sides guided by the pre-image (search +/-2 px,
+    steepest drop to the frame) fit C1045rep3 and rep4, and cut the
+    leftover across the pad from a median of 0.18 px (worst 0.72) to 0.11
+    px (worst 0.40); C1044 from -0.65/-0.70 to -0.15 px.  Down the pad
+    (dy, set by the ends) is unchanged: refining the ends is deferred
+    (Bill).  Adopted into padrect/analysis_1 the same day.
+
+    RE-RUN OF 1a-1c ON THE GUIDED FITS, 2026-11-11 (the current
+    align_out/*.json and step1_edgefit_error.png):
+    - All 124 pairs match (texture correlation 0.45 or more); no poor pairs.
+    - Post-image edge-fit error across the pad: within +/-0.1 px except
+      C1041rep4/rep5 (-0.28, -0.25) and C1039rep5 (+0.19).  Down the pad
+      still -0.1 to -0.3 px (the ends; deferred).
+    - Post width - pre width: -0.27 to -0.01 px (was up to +0.8).
+    - Band-1 false change, median |dA| per sample, without any texture
+      correction: 0.005-0.008 A (C1041 was 0.031).  Applying the texture
+      correction no longer helps (0.004-0.010 A after), so the empirical
+      refinement is not worth adding.  Interior under 0.0003 A.
+    - Pre-images of one sample's repeats (strip reseated) differ by up to
+      0.90 px across and 0.44 px down; the 2 px guide limit applies only
+      between a post-image and its own file's pre-image.
+
 Run with:  timeout -k 10 1800 ../../.venv/bin/python3 -u align_study.py
 """
 import json
@@ -100,11 +130,13 @@ from scipy import ndimage as ndi
 from scipy import optimize
 
 import analysis_1 as a1
+import padrect
 import shading_review as sr
 
 HERE = Path(__file__).resolve().parent
 OUT = HERE / "align_out"                       # the .json tables of results
 FIGS = HERE.parents[1] / "tex" / "figs"        # figures for the write-up
+CHECK_FIGS = HERE / "fig"                      # check figures, not for the write-up
 
 #: The repeat files used, by holder and sample.  Only files that hold both a
 #: pre-image and a post-image are listed; files with only a pre-image
@@ -139,6 +171,14 @@ CORNER_PX = 3
 #: The 'inner' region of `false_change`: at least this far (layer px) from
 #: every edge.
 INNER_EDGE_PX = 4
+#: A post-image's pad fit counts as poor when the texture match `corr`,
+#: taken as the median over all its pairs, is below this.  Good fits give
+#: 0.51-0.80 (pairs.json, 2026-11-10); the failed C1045rep3 and rep4
+#: post-images give 0.0-0.1.
+CORR_MIN = 0.2
+#: Fewest side rows accepted when a fit has to be rebuilt for a check
+#: figure (`_pad_or_loose`).  padrect's own limit is 8 (`minrows`).
+LOOSE_MINROWS = 6
 
 #: Results of `texture`, kept so a photo is read only once per run.
 #: Key (file, cell, sec); value as `texture` returns.
@@ -700,6 +740,523 @@ def show_split(split, rows, savefigs=True):
     return fig
 
 
+# ── check figures for poor post-image fits ─────────────────────────────
+
+class _LoosePad(padrect.PadRect):
+    """
+    A `padrect.PadRect` that accepts as few as LOOSE_MINROWS side rows.
+
+    Only for drawing a fit that padrect's own 8-row limit now refuses, so
+    that we can see what that fit looked like.  Never use it to measure.
+    """
+
+    def _find_sides(self, w, minrows=8):
+        super()._find_sides(w, minrows=LOOSE_MINROWS)
+
+    def _find_sides_on_pad(self, w, minrows=8):
+        super()._find_sides_on_pad(w, minrows=LOOSE_MINROWS)
+
+
+def _pad_or_loose(samp, sec):
+    """
+    padrect's own *unguided* fit of one photo, with the looser row limit
+    if needed.
+
+    Goal: let the check figures draw the fit padrect makes without the
+    pre-image's guidance and without cap_style (its layout guessed from the
+    image, sides at half the pad level) -- including one padrect refuses
+    for too few side rows.  `a1.pad_of` no longer returns this fit for
+    the cassette holders (2026-11-11), so it is built here directly.  The
+    fit is placed in `analysis_1`'s own store of fits, so `texture`,
+    `edge_map` and the rest use it too, until `a1.close_all()` clears the
+    store.
+
+    Args:
+        samp: scalar str, repeat file name.
+        sec: '' for the post-image, `a1.PRE` for the pre-image.
+
+    Returns:
+        (pad, loose): pad, the `PadRect`; loose, True when it had to be
+        rebuilt with LOOSE_MINROWS.
+    """
+    pad = a1._pads.get((samp, sec))
+    if pad is None or getattr(pad, "side_rule", "") == "guided":
+        c = a1.open_sample(samp, sec)
+        try:
+            pad = padrect.PadRect(c, rung=a1.PAD_RUNG)
+        except RuntimeError:
+            pad = _LoosePad(c, rung=a1.PAD_RUNG)
+        a1._pads[(samp, sec)] = pad
+    return pad, isinstance(pad, _LoosePad)
+
+
+def poor_pairs(rows, corr_min=CORR_MIN):
+    """
+    The pairs whose post-image has a poor pad fit.
+
+    Goal: pick out the pairs for the check figures.  A pad fit that is
+    wrong by more than the 2 px the texture search covers leaves the two
+    textures unmatched, so `corr` stays near 0.  To blame the post-image
+    rather than one pair, take each post-image's median `corr` over all its
+    pairs (all pre-images); if that is below `corr_min`, every pair with
+    that post-image is returned.
+
+    Args:
+        rows: list of dicts from `all_pairs`.
+        corr_min: scalar, the median texture correlation below which a
+            post-image's fit counts as poor.
+
+    Returns:
+        list of the `rows` entries whose post-image is poor, in their
+        original order.
+    """
+    by_post = {}
+    for r in rows:
+        by_post.setdefault(r["post"], []).append(r["corr"])
+    bad = {p for p, c in by_post.items() if np.median(c) < corr_min}
+    return [r for r in rows if r["post"] in bad]
+
+
+def _draw_fit(ax, pad, title):
+    """
+    One photo's composite with its fitted pad drawn on.
+
+    The composite is the image the pad finder works on: the mean, over the
+    channels, of signal / gray-chip level (nearly blind to the dye).  Drawn
+    on it: the fitted rectangle (red), the side-edge points the fit used
+    (cyan dots) and those it rejected as outliers (yellow crosses).
+    """
+    ax.imshow(pad.comp, cmap="gray", origin="upper", vmin=0,
+              vmax=np.percentile(pad.comp, 99.5))
+    xy = pad.corners() + pad.corners()[:1]
+    ax.plot([p[0] for p in xy], [p[1] for p in xy], "-", color="tab:red",
+            lw=1.4)
+    ax.plot(pad.L_obs, pad.rows_used, ".", color="tab:cyan", ms=3)
+    ax.plot(pad.R_obs, pad.rows_used, ".", color="tab:cyan", ms=3)
+    used = set(np.asarray(pad.rows_used).tolist())
+    rej = np.array([y not in used for y in np.asarray(pad.rows_all)])
+    if rej.any():
+        ax.plot(pad.L_all[rej], pad.rows_all[rej], "x", color="gold", ms=4)
+        ax.plot(pad.R_all[rej], pad.rows_all[rej], "x", color="gold", ms=4)
+    ax.set_title(title, fontsize=8, loc="left")
+    ax.set_xlabel("column, layer px")
+    ax.set_ylabel("row, layer px")
+
+
+def show_poor(rows, cell=CELL, savefigs=True):
+    """
+    Check figures, one per pair whose post-image pad fit is poor.
+
+    Goal: see, by eye, what went wrong with a post-image fit that the
+    texture match rejected, and so whether the fault is the layout choice,
+    the side edges, or the ends.  Raw beside interpreted: each photo is
+    shown as measured, with its fit drawn on.
+
+    Panels (one figure per pair from `poor_pairs`):
+        top left    pre-image composite, its fitted pad and side-edge
+                    points (`_draw_fit`);
+        top middle  the same for the post-image;
+        top right   A = -log10(post R / pre R), in `cell`, with the
+                    pre-image lined up on the post-image by the edge fits
+                    (`edge_map`).  Bigger (red) means the post-image reads
+                    darker.  The dye barely absorbs photo_red, so a good
+                    lining up looks nearly flat; a ring or a band along an
+                    edge means the fits disagree about where the pad is.
+                    The post-image's fitted pad is drawn on.
+        bottom      the composite down the strip's center column (the
+                    profile the pad finder uses to choose its layout), pre
+                    and post.  The finder chooses "window" when the median
+                    of the last FLOOR_ROWS rows is below EDGE_FRACTION x the
+                    95th percentile (the dashed lines), else "channel".
+
+    Fits refused by padrect's 8-row limit are rebuilt with LOOSE_MINROWS
+    (`_pad_or_loose`) and marked "loose" in the title.
+
+    Both photos are drawn with padrect's unguided fits (`_pad_or_loose`),
+    the fits pairs.json was measured with before 2026-11-11.  Once steps
+    1a-1c are rerun on the guided fits, `poor_pairs` should find none.
+
+    Args:
+        rows: list of dicts from `all_pairs`.
+        cell: (LED, Bayer layer) for the absorbance panel.
+        savefigs: True to save fig/align_poor_<pre>_<post>.png.
+
+    Returns:
+        list of the figures, one per pair.
+    """
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    figs = []
+    for r in poor_pairs(rows):
+        pre_f, post_f = r["pre"], r["post"]
+        pre, pre_loose = _pad_or_loose(pre_f, a1.PRE)
+        post, post_loose = _pad_or_loose(post_f, "")
+
+        # Absorbance of the post-image against the lined-up pre-image.
+        _, _, Rpre = texture(pre_f, cell, a1.PRE)
+        _, _, Rpost = texture(post_f, cell, "")
+        y_pre, x_pre = edge_map(post_f, pre_f)
+        Wmap = ndi.map_coordinates(Rpre, [y_pre, x_pre], order=1,
+                                   mode="nearest", cval=np.nan)
+        with np.errstate(invalid="ignore", divide="ignore"):
+            A = -np.log10(Rpost / Wmap)
+        # Crop: the post pad plus 6 px all round.
+        cx = [p[0] for p in post.corners()]
+        cy = [p[1] for p in post.corners()]
+        y0, y1 = max(int(min(cy)) - 6, 0), int(max(cy)) + 7
+        x0, x1 = max(int(min(cx)) - 6, 0), int(max(cx)) + 7
+
+        fig = plt.figure(figsize=(13, 7.4), layout="constrained")
+        gs = fig.add_gridspec(2, 3, height_ratios=(1.6, 1))
+        ax1, ax2, ax3 = (fig.add_subplot(gs[0, i]) for i in range(3))
+        ax4 = fig.add_subplot(gs[1, :])
+
+        def tag(p, loose):
+            return (f"{p.layout}{', loose' if loose else ''}: "
+                    f"{len(p.rows_used)} side rows, side-fit rms "
+                    f"{p.edge_rms:.2f} px, width {p.width:.2f} px")
+
+        _draw_fit(ax1, pre, f"{pre_f} pre-image, composite R, fitted pad\n"
+                  + tag(pre, pre_loose))
+        _draw_fit(ax2, post, f"{post_f} post-image, composite R, fitted pad\n"
+                  + tag(post, post_loose))
+        im = ax3.imshow(A[y0:y1, x0:x1], cmap="RdBu_r", vmin=-0.15,
+                        vmax=0.15, origin="upper",
+                        extent=(x0 - .5, x1 - .5, y1 - .5, y0 - .5))
+        xy = post.corners() + post.corners()[:1]
+        ax3.plot([p[0] for p in xy], [p[1] for p in xy], "-", color="k",
+                 lw=1.0)
+        ax3.set_title(f"{post_f} post / {pre_f} pre, {a1.cell_name(cell)}\n"
+                      f"A = -log10(post / pre), red = darker\n"
+                      f"black = post-image fitted pad", fontsize=8,
+                      loc="left")
+        ax3.set_xlabel("column, layer px")
+        fig.colorbar(im, ax=ax3, shrink=0.8, label="A")
+
+        for p, name, col in ((pre, "pre-image", "#2a78d6"),
+                             (post, "post-image", "#eb6834")):
+            prof = p.rowprof
+            ax4.plot(np.arange(len(prof)), prof, "-", color=col, lw=1.4,
+                     label=f"{name} ({p.layout})")
+            ax4.axhline(padrect.EDGE_FRACTION * np.percentile(prof, 95),
+                        color=col, ls="--", lw=0.8)
+        n = len(pre.rowprof)
+        ax4.axvspan(n - padrect.FLOOR_ROWS - 0.5, n - 0.5, color="#e8e7e2",
+                    zorder=0, label=f"last {padrect.FLOOR_ROWS} rows (floor)")
+        ax4.set_xlabel("row, layer px (down the strip)")
+        ax4.set_ylabel("composite R")
+        ax4.set_title("Composite down the strip's center column: the layout "
+                      "test (dashed = threshold for each photo)",
+                      fontsize=8, loc="left")
+        ax4.legend(fontsize=8, frameon=False)
+        for sp in ("top", "right"):
+            ax4.spines[sp].set_visible(False)
+
+        fig.suptitle(f"{r['sample']} pad alignment check, {pre_f} pre-image "
+                     f"-> {post_f} post-image: texture match corr "
+                     f"{r['corr']:.2f}, residual dy {r['dy']:+.2f}, dx "
+                     f"{r['dx']:+.2f} layer px (from pairs.json)",
+                     fontsize=10, x=0.01, ha="left")
+        if savefigs:
+            CHECK_FIGS.mkdir(parents=True, exist_ok=True)
+            out = CHECK_FIGS / f"align_poor_{pre_f}_{post_f}.png"
+            fig.savefig(out, dpi=110)
+            print(f"fig saved to {out}")
+        figs.append(fig)
+    a1.close_all()          # drop the loose fits from analysis_1's store
+    return figs
+
+
+# ── step 1d: sides guided by the pre-image ─────────────────────────────
+#
+# DONE 2026-11-11: Bill approved this method, and it is now in the chain:
+# `padrect.PadRect(prior=..., layout=...)`, `PadRect.guide_sides()`, used by
+# `analysis_1.pad_of` for the cassette cap_styles (`analysis_1.CAP_LAYOUT`).
+# The code below is the record of how it was tested.  Since `a1.pad_of`
+# now returns guided fits for F, G and H, a fresh run of `compare_guided`
+# would compare guided with guided: its "old" columns hold padrect's
+# earlier fits only in align_out/guided.json (2026-11-11).  To redo the
+# comparison, check out padrect.py and analysis_1.py from commit 50b70a9.
+
+#: How far (layer px) either side of the predicted side the guided finder
+#: looks for the edge.  Over the 26 repeat files whose post-image fitted
+#: normally, the post-image sides sat -1.23 to +1.20 px from the same
+#: file's pre-image sides (top -0.15 to +0.84 px, tilt within 0.19 deg),
+#: so 2 px covers every one of them with room to spare.
+SIDE_SEARCH_PX = 2.0
+
+
+class _layout_as:
+    """
+    Make padrect choose a given layout while a fit is built.
+
+    `padrect.PadRect` decides the layout from the last FLOOR_ROWS rows of
+    the crop.  In holder G1 those rows are the window's bottom edge, half
+    way down to the frame, so the choice is a coin toss.  The holder is
+    known, so the guided fit takes the layout from the pre-image instead.
+    Use as `with _layout_as("window"): ...`.
+    """
+
+    def __init__(self, layout):
+        self.layout = layout
+
+    def __enter__(self):
+        self.saved = padrect._detect_layout
+        padrect._detect_layout = lambda rowprof: self.layout
+
+    def __exit__(self, *exc):
+        padrect._detect_layout = self.saved
+
+
+class GuidedPad(padrect.PadRect):
+    """
+    A pad fit whose sides are looked for only near a known prior fit.
+
+    Goal: in holders F, G and H the strip can't move far between the
+    pre-image and the post-image, so the pre-image's sides say where the
+    post-image's sides must be, to within SIDE_SEARCH_PX.  Searching only
+    there stops the finder from wandering off the pad (C1045rep3, rep4:
+    it fitted the bottom of the window instead).
+
+    How the sides are found, on each pad row y between the ends (kept
+    WINDOW_END_CLEARANCE rows clear of them, as padrect does):
+        1. Predict each side's column from the prior fit, at the same depth
+           below the top edge: y_prior = y - (top - top_prior).
+        2. Within SIDE_SEARCH_PX of each prediction, find where the
+           composite falls most steeply toward the dark window frame
+           (largest change from one column to the next: rising, for the
+           left side; falling, for the right).  Refine to a fraction of a
+           pixel with a parabola through the three steepest values
+           (`padrect._peak`).
+        3. Fit the two sides as parallel lines, rejecting outlier rows
+           (`padrect.PadRect._fit_sides`, unchanged).
+
+    Why the steepest point and not padrect's "half the pad level": when
+    dye reaches the edge, the pad just inside the edge is darker, so the
+    half-level crossing slides outward and the pad fits wide (C1041 and
+    C1044 fitted 0.5-0.8 px wider after exposure than before).  The
+    steepest point is where the paper ends, however dark the paper is.
+    The pre-image is refitted with the same rule, so both photos' sides
+    mean the same thing.
+
+    The ends (top and bottom) are found as padrect always finds them.
+    """
+
+    def __init__(self, c, prior, **kw):
+        """
+        Args:
+            c: the capture section to fit (`a1.open_sample(file, sec)`).
+            prior: a fitted `PadRect` whose sides guide the search: for a
+                post-image, the same file's guided pre-image fit; for a
+                pre-image, its own normal fit.
+            **kw: passed on to `padrect.PadRect` (use rung=a1.PAD_RUNG).
+        """
+        self._prior = prior
+        with _layout_as(prior.layout):
+            super().__init__(c, **kw)
+
+    def _find_sides(self, w, minrows=8):
+        self._find_sides_guided(w, minrows)
+
+    def _find_sides_on_pad(self, w, minrows=8):
+        self._find_sides_guided(w, minrows)
+
+    def _find_sides_guided(self, w, minrows=8):
+        """Steps 1-3 above.  `w`: width of the layer grid."""
+        p = self._prior
+        dtop = self.top - p.top                  # how far the pad moved down
+        y0 = int(np.ceil(self.top)) + padrect.WINDOW_END_CLEARANCE
+        y1 = int(np.floor(self.bot)) - padrect.WINDOW_END_CLEARANCE + 1
+        rows, L, R = [], [], []
+        for y in range(max(y0, 0), min(y1, self.comp.shape[0])):
+            g = np.gradient(self.comp[y].astype(float))   # change per column
+            y_prior = y - dtop
+            xl = p.aL + p.m * (y_prior - p.yc)   # predicted left side
+            xr = p.aR + p.m * (y_prior - p.yc)   # predicted right side
+            found = []
+            # sign +1: left side, composite rises going right (frame -> pad);
+            # sign -1: right side, composite falls going right.
+            for x0, sign in ((xl, 1.0), (xr, -1.0)):
+                i0 = int(np.floor(x0 - SIDE_SEARCH_PX))
+                i1 = int(np.ceil(x0 + SIDE_SEARCH_PX)) + 1
+                if i0 < 1 or i1 > w - 1:
+                    break                        # search runs off the crop
+                i = i0 + int(np.argmax(sign * g[i0:i1]))
+                found.append(padrect._peak(g, i))
+            if len(found) == 2:
+                rows.append(y)
+                L.append(found[0])
+                R.append(found[1])
+        if len(rows) < minrows:
+            raise RuntimeError(f"{self.capture.name}: only {len(rows)} pad "
+                               f"rows gave two guided sides")
+        self._fit_sides(rows, L, R)
+
+
+def guided_fits(samp):
+    """
+    Guided fits for one repeat file: the pre-image, then the post-image.
+
+    Args:
+        samp: scalar str, repeat file name.
+
+    Returns:
+        (pre, post): two `GuidedPad`s.  pre is guided by the pre-image's
+        normal fit (which is good in every F, G, H file); post is guided by
+        that guided pre.
+    """
+    pre = GuidedPad(a1.open_sample(samp, a1.PRE), a1.pad_of(samp, a1.PRE),
+                    rung=a1.PAD_RUNG)
+    post = GuidedPad(a1.open_sample(samp, ""), pre, rung=a1.PAD_RUNG)
+    return pre, post
+
+
+def compare_guided(sets=SETS):
+    """
+    Step 1d: are the guided fits better than padrect's own?
+
+    Goal: judge the guided side finder by the paper texture, which does not
+    depend on any edge fit.  For each repeat file, take the pair of its own
+    pre-image and post-image and measure the residual (`residual`) twice:
+    with padrect's normal fits, and with the guided fits.  Better fits leave
+    a smaller residual.  dy is not expected to change (the ends are found
+    the same way); dx should.
+
+    The guided fits are put into `analysis_1`'s store of fits for the second
+    measurement, and the texture store is emptied before and after, so each
+    measurement reads its own fits.
+
+    Args:
+        sets: dict, holder -> sample -> list of repeat files (as SETS).
+
+    Returns:
+        list of dicts, one per repeat file:
+            holder, sample, file      names;
+            old_dy, old_dx, old_corr  residual with the normal fits (NaN if
+                                      the normal post-image fit fails);
+            new_dy, new_dx, new_corr  residual with the guided fits;
+            w_pre, w_post             guided pad widths, layer px;
+            dtilt                     guided post tilt - pre tilt, degrees;
+            rms_post, n_post          guided post side-fit scatter (layer
+                                      px) and number of rows it used.
+    """
+    out = []
+    for hold, samples in sets.items():
+        for samp, files in samples.items():
+            for f in files:
+                try:
+                    ro = residual(f, f)
+                except RuntimeError:
+                    ro = dict(dy=np.nan, dx=np.nan, corr=np.nan)
+                _tex_cache.clear()
+                pre, post = guided_fits(f)
+                a1._pads[(f, a1.PRE)], a1._pads[(f, "")] = pre, post
+                rn = residual(f, f)
+                _tex_cache.clear()
+                a1.close_all()                   # drop the guided fits
+                d = dict(holder=hold, sample=samp, file=f,
+                         old_dy=ro["dy"], old_dx=ro["dx"],
+                         old_corr=ro["corr"], new_dy=rn["dy"],
+                         new_dx=rn["dx"], new_corr=rn["corr"],
+                         w_pre=pre.width, w_post=post.width,
+                         dtilt=post.angle_deg - pre.angle_deg,
+                         rms_post=post.edge_rms, n_post=len(post.rows_used))
+                out.append(d)
+                print(f"  {f:12s} old ({d['old_dy']:5.2f},{d['old_dx']:5.2f})"
+                      f"  guided ({d['new_dy']:5.2f},{d['new_dx']:5.2f})"
+                      f"  widths {d['w_pre']:.2f} / {d['w_post']:.2f}")
+    return out
+
+
+def show_guided(samp, cell=CELL, savefigs=True):
+    """
+    Check figure for one repeat file: padrect's post-image fit beside the
+    guided one.
+
+    Goal: see by eye that the guided sides sit on the pad's edges, raw
+    beside interpreted.
+
+    Panels:
+        left    pre-image composite with its guided fit (red), the side
+                points used (cyan) and rejected (yellow crosses);
+        middle  post-image composite with its guided fit drawn the same way,
+                and padrect's normal fit as a dashed orange line (rebuilt
+                with LOOSE_MINROWS if padrect now refuses it);
+        right   A = -log10(post R / pre R) in `cell`, the pre-image lined
+                up by the guided fits (`edge_map`).  Bigger (red) means the
+                post-image reads darker.  A ring along an edge would mean
+                the fits still disagree.  Black: the guided post pad.
+
+    Args:
+        samp: scalar str, repeat file name.
+        cell: (LED, Bayer layer) for the absorbance panel.
+        savefigs: True to save fig/align_guided_<samp>.png.
+
+    Returns:
+        The matplotlib figure.
+    """
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    old_post, old_loose = _pad_or_loose(samp, "")
+    a1.close_all()
+    _tex_cache.clear()
+    pre, post = guided_fits(samp)
+    a1._pads[(samp, a1.PRE)], a1._pads[(samp, "")] = pre, post
+
+    _, _, Rpre = texture(samp, cell, a1.PRE)
+    _, _, Rpost = texture(samp, cell, "")
+    y_pre, x_pre = edge_map(samp, samp)
+    Wmap = ndi.map_coordinates(Rpre, [y_pre, x_pre], order=1, mode="nearest")
+    with np.errstate(invalid="ignore", divide="ignore"):
+        A = -np.log10(Rpost / Wmap)
+    cx = [p[0] for p in post.corners()]
+    cy = [p[1] for p in post.corners()]
+    y0, y1 = max(int(min(cy)) - 6, 0), int(max(cy)) + 7
+    x0, x1 = max(int(min(cx)) - 6, 0), int(max(cx)) + 7
+
+    fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(13, 4.6),
+                                        layout="constrained")
+
+    def tag(p):
+        return (f"{len(p.rows_used)} side rows, side-fit rms "
+                f"{p.edge_rms:.2f} px, width {p.width:.2f} px, "
+                f"tilt {p.angle_deg:+.2f} deg")
+
+    _draw_fit(ax1, pre, f"{samp} pre-image, composite R, guided fit\n"
+              + tag(pre))
+    _draw_fit(ax2, post, f"{samp} post-image, composite R, guided fit\n"
+              + tag(post))
+    xy = old_post.corners() + old_post.corners()[:1]
+    ax2.plot([p[0] for p in xy], [p[1] for p in xy], "--", color="tab:orange",
+             lw=1.2, label=f"padrect fit ({old_post.layout}"
+                           f"{', loose' if old_loose else ''}, width "
+                           f"{old_post.width:.2f})")
+    ax2.legend(fontsize=7, loc="lower left", frameon=False,
+               labelcolor="white")
+    im = ax3.imshow(A[y0:y1, x0:x1], cmap="RdBu_r", vmin=-0.15, vmax=0.15,
+                    origin="upper", extent=(x0 - .5, x1 - .5, y1 - .5, y0 - .5))
+    xy = post.corners() + post.corners()[:1]
+    ax3.plot([p[0] for p in xy], [p[1] for p in xy], "-", color="k", lw=1.0)
+    ax3.set_title(f"{samp} post / pre, {a1.cell_name(cell)}, lined up by the "
+                  f"guided fits\nA = -log10(post / pre), red = darker; "
+                  f"black = guided post pad", fontsize=8, loc="left")
+    ax3.set_xlabel("column, layer px")
+    fig.colorbar(im, ax=ax3, shrink=0.8, label="A")
+    fig.suptitle(f"{samp} pad sides guided by the pre-image "
+                 f"(search +/-{SIDE_SEARCH_PX:g} px, steepest drop to the "
+                 f"frame)", fontsize=10, x=0.01, ha="left")
+    _tex_cache.clear()
+    a1.close_all()
+    if savefigs:
+        CHECK_FIGS.mkdir(parents=True, exist_ok=True)
+        out = CHECK_FIGS / f"align_guided_{samp}.png"
+        fig.savefig(out, dpi=110)
+        print(f"fig saved to {out}")
+    return fig
+
+
 def _save(name, obj):
     """Write `obj` to align_out/<name>.json."""
     OUT.mkdir(exist_ok=True)
@@ -723,6 +1280,9 @@ def run():
         1b  split_errors      -> align_out/split.json
         1c  check_correction  -> align_out/check.json
         fig show_split        -> tex/figs/step1_edgefit_error.png
+        figs show_poor        -> fig/align_poor_<pre>_<post>.png
+        1d  compare_guided    -> align_out/guided.json
+        figs show_guided      -> fig/align_guided_<file>.png
     """
     if 0:   # 1a: residual for all n x n pre x post pairs
         rows = all_pairs()
@@ -733,6 +1293,13 @@ def run():
         _save("check", check_correction(_load("pairs")))
     if 1:   # figure for 1b
         show_split(_load("split"), _load("pairs"))
+    if 1:   # check figures for pairs whose post-image pad fit is poor
+        show_poor(_load("pairs"))
+    if 0:   # 1d: sides guided by the pre-image, judged by the texture
+        _save("guided", compare_guided())
+    if 0:   # check figures for the guided fits
+        for f in ("C1045rep3", "C1045rep4", "C1044rep2-b", "C1041rep4"):
+            show_guided(f)
 
 
 if __name__ == "__main__":

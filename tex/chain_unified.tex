@@ -29,6 +29,8 @@
 \usepackage[hidelinks]{hyperref}
 \usepackage{cleveref}
 \usepackage{setspace}
+\usepackage{graphicx}
+\graphicspath{{figs/}}
 \setstretch{1.15}
 \setlength{\emergencystretch}{3em}
 \newcolumntype{L}[1]{>{\RaggedRight\arraybackslash}p{#1}}
@@ -539,6 +541,86 @@ which is \eqref{eq:counts} for the pre-image, now on the post-image's
 pixels.  The averaging in \eqref{eq:W} also blurs the texture slightly;
 that is one reason the texture does not carry over perfectly, and it is
 counted with the texture in \sref{sec:white}.
+
+\subsection{How well lining up works (proof-of-concept study, 2026-11-11)}
+\label{sec:lineupcheck}
+
+\textbf{Question.}  Does lining up by the fitted edges put the same paper on
+the same pixel in holders F, G and H, and how much does what is left over
+matter at the edge?  Stop when the false change is under 0.002\,A beyond the
+outermost band (work plan, step~1).
+
+\textbf{The measuring stick: the paper's texture.}  The paper has its own
+fixed pixel-to-pixel pattern, which moves with the strip.  Take
+$\Lten R$ in photo\_red.R (which the yellow dye barely absorbs) and subtract
+its 2-pixel smooth; what is left is the texture.  If the post-image's
+texture matches the lined-up pre-image's best after an extra shift
+$(\Delta y, \Delta x)$, the edge fits were off by that much.  This measure
+does not depend on any edge fit.
+
+\textbf{Each photo's own error.}  The strip is reseated between repeats, so
+every pre-image of a sample can be paired with every post-image (124 pairs
+over C1038--C1045).  For pre-image $i$ and post-image $j$ the leftover shift
+is modeled as $r_{ij} = a_j - b_i$ plus measurement noise, where $a_j$ and
+$b_i$ are each photo's own edge-fit error (fitted position minus the
+position the texture says).  Least squares gives $a$ and $b$, with the mean of
+$b$ set to zero, since only differences are seen.
+
+\textbf{What was found, and fixed.}  The post-image sides were fitted
+0.5--0.8\,px too wide in C1041 and C1044, and two G1 post-images
+(C1045rep3, rep4) could not be fitted at all.  Two causes:
+\begin{itemize}
+  \item padrect put each side where the brightness crosses half the pad's
+    level.  Where dye darkens the paper next to the edge, that crossing
+    slides outward.
+  \item padrect guessed the holder from the last rows of the crop, which in
+    holder G1 are the window's lower edge, so the guess could go either way.
+\end{itemize}
+The fix (Bill, 2026-11-11), now in \file{padrect.py} and
+\file{analysis\_1.pad\_of}: for the cassette holders the layout comes from
+the sample's \texttt{cap\_style}, and each side is placed where the
+brightness falls most steeply to the dark frame, looked for only within
+2\,px of a guide.  A post-image is guided by its own file's pre-image (the
+measured movement between them is at most 1.23\,px); a pre-image is guided
+by its own first fit.  The half-level rule stays for older holders; the
+last commit before the change is 50b70a9.
+
+\textbf{Result, with the guided fits} (\cref{fig:step1_edgefit_error}):
+\begin{itemize}
+  \item Across the pad, every post-image fit is within $\pm 0.1$\,px of the
+    texture except C1041rep4, rep5 ($-0.28$, $-0.25$\,px) and C1039rep5
+    ($+0.19$\,px); before the fix the worst was $-0.67$\,px.
+  \item Down the pad, the post-image fits sit 0.1--0.3\,px too high.  This
+    comes from the ends (top and bottom), not the sides; refining the ends
+    is deferred (Bill, 2026-11-11).
+  \item The left and right halves of the pad shift by the same amount
+    (median difference under 0.1\,px): the paper does not stretch.
+  \item False change (positive reads darker than it should): under
+    0.0003\,A in the interior; in band~1, a median of 0.005--0.008\,A per
+    sample.  Band~1 changes by about 0.1\,A per pixel of misalignment, so
+    the stop rule would need about 0.02\,px, finer than the texture can
+    measure.  Correcting by the texture shift no longer helps
+    (0.004--0.010\,A after), so it is not added.
+\end{itemize}
+\textbf{Conclusion.}  Lining up is good enough away from the edge.  The
+false change left in bands 0 and~1 is handled by the edge bands of
+\sref{sec:white}, which take each photo's edges from that photo.
+Script: \file{desktop/padanalysis/align\_study.py}, steps 1a--1d; tables in
+\file{align\_out/}.
+
+\begin{figure}[h!]
+    \centering
+    \includegraphics[scale=0.57]{step1_edgefit_error}
+    \caption{
+    Each photo's edge-fit error, measured against the paper texture, in
+    photo\_red.R, with the guided side fits.  Open markers: pre-images;
+    filled: post-images.  Top: down the pad; bottom: across the pad.
+    Layer pixels, measured from the sample's average pre-image; negative
+    means the fit put the pad too high or too far left.  Shaded band
+    $\pm 0.1$\,px.  Made by \texttt{align\_study.show\_split}.
+    }
+\label{fig:step1_edgefit_error}
+\end{figure}
 
 %======================================================================
 \section{Step 5: the white, one value per pixel}
@@ -1080,7 +1162,8 @@ F: factor form; dye changes only $D_p$ & \S\ref{sec:factors},
 G: same shape of light in both photos & \sno{sec:phi} & test: do the two
   chips agree? \open{op:phi} \\
 L: lining up places the same paper on the same pixel & \sno{sec:lineup}
-  & in use; accuracy at the edge to be checked \\
+  & checked: $\pm0.1$\,px across, ends 0.1--0.3\,px (deferred); band~1
+  false change 0.005--0.008\,A, left to step~5 \\
 N: noise random and unrelated & \sno{sec:white} & in use \\
 C: two dyes plus brightness, adding in absorbance & \sno{sec:color},
   \sno{sec:mass} & $\mM$ needs only the endpoints, no PCA; PCA is a check:
@@ -1117,6 +1200,23 @@ C: two dyes plus brightness, adding in absorbance & \sno{sec:color},
   \item \label{op:brown} \textbf{What makes the brown?}  The fully bound
     form, a neutral dark product, or both: a chemistry question that
     decides the shape of $F$.
+  \item \label{op:bayer} \textbf{The color layers do not sample the same
+    spot.}  Found in the edge bands of the pre-images (proof-of-concept
+    step~2a, 2026-11-11): the same edge band reads differently in each Bayer
+    layer, and the difference follows the layer's place in the Bayer
+    pattern.  photo\_red.R and green.Gb agree; green.Gr and the blue layers
+    agree with them only after a shift across the pad, and green.Gb and the
+    blue layers only after a shift down it.  The camera runs at half
+    resolution, so each layer pixel is the average of a group of four
+    sensor pixels of its color; the offset between layers is therefore
+    $\tfrac14$ or $\tfrac34$ of a layer pixel, not $\tfrac12$ (Bill).  The
+    pad fit and the lining up are shared by all layers, which is harmless
+    for each channel's own ratio (the offset is the same in both photos),
+    but at the pad's edge the channels of one pixel look at slightly
+    different spots, which matters for the per-pixel color of
+    \sref{sec:color}.  To do: measure the offsets (the edge model's
+    amplitudes per layer give them), and decide whether to shift each layer
+    before step~8.
 \end{enumerate}
 
 %======================================================================

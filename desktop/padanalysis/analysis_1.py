@@ -68,6 +68,7 @@ R_white (the white reference)
 
 """
 import json
+import re
 import sqlite3
 import sys
 from datetime import datetime
@@ -80,8 +81,9 @@ SP = Path(__file__).resolve().parent
 sys.path.insert(0, str(SP))
 
 import padphot                                              # noqa: E402
-from probe import BAYER, PRE, RAW_MAX, Capture, sections    # noqa: E402
-from padrect import PadRect                                 # noqa: E402
+from probe import (BAYER, PRE, RAW_MAX, Capture,             # noqa: E402
+                   archive_path, sections)
+from padrect import LAYOUT_WINDOW, PadRect                  # noqa: E402
 from whitecorr import load_models, rect_mask                # noqa: E402
 from fields import rung_for                                 # noqa: E402
 from chemistry import cell_name                             # noqa: E402
@@ -216,7 +218,26 @@ MAX_SAT_FRACTION = 0.001
 #: Then "+ff_union" on 2026-11-02, when the flat field was refitted over the
 #: union bound (roi rowid 61, analysisref 'bound_union_a') after the gray
 #: chips moved on 2026-10-28.
-CHAIN = "dark_level+divisor_map+hot_mask+pre_white+ff_union"
+#: Then "+guided_sides" on 2026-11-11, when the pad's sides in the cassette
+#: holders (cap_style F, G1, H1) began to be found guided by the pre-image
+#: (`pad_of`, `padrect` module docstring).
+CHAIN = "dark_level+divisor_map+hot_mask+pre_white+ff_union+guided_sides"
+
+#: Holder layout for each cassette `samples.cap_style`.  A sample whose
+#: cap_style is listed gets this layout instead of padrect's guess from the
+#: image (the guess reads the last rows of the bound, which in holder G1 are
+#: the window's lower edge, and so can go either way), and its pad sides are
+#: found guided: the pre-image around its own first fit, the post-image
+#: around the pre-image (`pad_of`).  Any other cap_style, or none, keeps
+#: padrect's own fit, unchanged.
+#: Bill, 2026-11-11: cap_style will later also give the pad's location in
+#: whole-image coordinates (the camera and stage are fixed; the bound is
+#: editable).  A cassette not fully inserted can sit more than a few px
+#: lower, so that location is a starting point, not a tight limit, down
+#: the strip.
+CAP_LAYOUT = {"F-cassette": LAYOUT_WINDOW,
+              "G1-cassette": LAYOUT_WINDOW,
+              "H1-cassette": LAYOUT_WINDOW}
 
 _STRIP_ROIS = (ROISAMPLE, ROIWHITE)     # move with the strip; see registration
 _ROI_NAMES = (ROIBOUND, ROIWHITE, ROIGRAY1, ROIGRAY2, ROISAMPLE)
@@ -225,6 +246,7 @@ _captures = {}      # (samp_no, section) -> Capture
 _pads = {}          # (samp_no, section) -> PadRect
 _models = None      # {(led, layer): whitecorr.LayerModel}
 _manual_reads = {}  # samp_no -> str or None
+_cap_styles = {}    # samp_no -> str or None
 
 
 # ── opening, caching, closing ──────────────────────────────────────────
@@ -254,7 +276,7 @@ def open_sample(samp_no, sec="") -> Capture:
     """
     key = (samp_no, sec)
     if key not in _captures:
-        path = CAPTURES / f"{samp_no}.h5"
+        path = archive_path(samp_no)            # captures/, then test_image/
         with Hdf5Reader(str(path)) as r:
             problem = version.check_archive(r.attrs("/"))
         if problem:
@@ -467,6 +489,16 @@ def pad_of(samp_no, sec="") -> PadRect:
     as on a heavily stained one -- which is what makes the pre-image and the
     measurement comparable.
 
+    For a sample whose `cap_style` is in CAP_LAYOUT (the cassette holders),
+    the layout comes from the cap_style and the sides are found guided
+    (`padrect.PadRect._find_sides_guided`):
+      - pre-image: fitted as usual, then its sides refitted around that
+        first fit;
+      - post-image: sides looked for only within `padrect.SIDE_SEARCH_PX`
+        of the same file's pre-image sides.  If the file has no pre-image,
+        it is fitted like a pre-image instead.
+    Every other sample is fitted exactly as before 2026-11-11.
+
     Args:
         samp_no: Capture name.
         sec: Which sweep -- '' measurement, 'pre' pre-image.
@@ -474,14 +506,53 @@ def pad_of(samp_no, sec="") -> PadRect:
     Returns:
         The cached `PadRect`.  `.describe()` is its one-line QC summary;
         read it before believing any number that depends on the geometry.
+        Its `side_rule` says 'guided' or 'half-level'.
 
     Example:
         >>> print(pad_of("C1020").describe())            # doctest: +SKIP
     """
     key = (samp_no, sec)
-    if key not in _pads:
-        _pads[key] = PadRect(open_sample(samp_no, sec), rung=PAD_RUNG)
-    return _pads[key]
+    if key in _pads:
+        return _pads[key]
+    c = open_sample(samp_no, sec)
+    layout = CAP_LAYOUT.get(_cap_style(samp_no))
+    if layout is None:                       # not a cassette: as before
+        pad = PadRect(c, rung=PAD_RUNG)
+    elif sec == "" and PRE in sections(samp_no):
+        pad = PadRect(c, rung=PAD_RUNG, layout=layout,
+                      prior=pad_of(samp_no, PRE))
+    else:
+        pad = PadRect(c, rung=PAD_RUNG, layout=layout)
+        pad.guide_sides()
+    _pads[key] = pad
+    return pad
+
+
+def _cap_style(samp_no):
+    """
+    The holder (`samples.cap_style`) of a capture, or None.
+
+    A repeat or restarted capture file ("C1045rep3", "C1042-b",
+    "C1044rep2-b") has no row of its own, so when the name has none, the
+    row of its leading letters and digits ("C1045") is used.
+    """
+    if samp_no not in _cap_styles:
+        names = [samp_no]
+        m = re.match(r"[A-Za-z]+\d+", samp_no)
+        if m and m.group(0) != samp_no:
+            names.append(m.group(0))
+        conn = sqlite3.connect(f"file:{DB}?mode=ro", uri=True)
+        try:
+            row = None
+            for n in names:
+                row = conn.execute("SELECT cap_style FROM samples "
+                                   "WHERE samp_no = ?", (n,)).fetchone()
+                if row is not None:
+                    break
+        finally:
+            conn.close()
+        _cap_styles[samp_no] = row[0] if row and row[0] else None
+    return _cap_styles[samp_no]
 
 
 def _region(samp_no, roi, sec="", erode=ERODE) -> np.ndarray:
@@ -518,16 +589,33 @@ CREATE TABLE IF NOT EXISTS sample_roi (
   top_residual REAL, top_clearance REAL, bot_source TEXT,
   bound_x   INTEGER, bound_y INTEGER,-- the crop these coords are inside
   bound_w   INTEGER, bound_h INTEGER,
+  layout    TEXT,                    -- holder layout: 'window' | 'channel'
+  side_rule TEXT,                    -- how the sides were found:
+                                     -- 'half-level' | 'guided'
   PRIMARY KEY (samp_no, section)
 )
 """
+
+#: Columns added to `sample_roi` after it was first created, with their
+#: types; `_sample_roi_upgrade` adds any an older table lacks.
+#: layout, side_rule: 2026-11-11, when guided sides began (`pad_of`).
+_SAMPLE_ROI_ADDED = (("layout", "TEXT"), ("side_rule", "TEXT"))
 
 _SAMPLE_ROI_COLS = (
     "samp_no", "section", "add_dt", "rung", "aL", "aR", "width", "height",
     "m", "yc", "angle_deg", "top", "bot", "strip_top", "edge_rms",
     "n_rows", "n_rejected", "top_residual", "top_clearance", "bot_source",
-    "bound_x", "bound_y", "bound_w", "bound_h",
+    "bound_x", "bound_y", "bound_w", "bound_h", "layout", "side_rule",
 )
+
+
+def _sample_roi_upgrade(conn):
+    """Create `sample_roi` if missing, and add any _SAMPLE_ROI_ADDED column."""
+    conn.execute(_SAMPLE_ROI_DDL)
+    have = {r[1] for r in conn.execute("PRAGMA table_info(sample_roi)")}
+    for col, typ in _SAMPLE_ROI_ADDED:
+        if col not in have:
+            conn.execute(f"ALTER TABLE sample_roi ADD COLUMN {col} {typ}")
 
 
 def locate_pad(samp_no, write=True) -> dict:
@@ -561,8 +649,9 @@ def locate_pad(samp_no, write=True) -> dict:
     """
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     rows = {}
-    for sec in sections(samp_no):
-        _pads.pop((samp_no, sec), None)          # always a fresh fit
+    for sec in sections(samp_no):                # always fresh fits; drop both
+        _pads.pop((samp_no, sec), None)          # first, since a post-image
+    for sec in sections(samp_no):                # fit can lean on the pre's
         p = pad_of(samp_no, sec)
         bx, by, bw, bh = open_sample(samp_no, sec).bound
         tr = None if np.isnan(p.top_residual) else float(p.top_residual)
@@ -579,6 +668,7 @@ def locate_pad(samp_no, write=True) -> dict:
             n_rejected=int(p.n_rejected), top_residual=tr,
             top_clearance=float(p.top_clearance), bot_source=p.bot_source,
             bound_x=bx, bound_y=by, bound_w=bw, bound_h=bh,
+            layout=p.layout, side_rule=p.side_rule,
         )
         print(f"  {samp_no}/{sec or 'post':<4} {p.describe().strip()}")
     if not write:
@@ -586,7 +676,7 @@ def locate_pad(samp_no, write=True) -> dict:
 
     conn = sqlite3.connect(DB)
     try:
-        conn.execute(_SAMPLE_ROI_DDL)
+        _sample_roi_upgrade(conn)
         for row in rows.values():
             conn.execute(
                 f"INSERT OR REPLACE INTO sample_roi "
