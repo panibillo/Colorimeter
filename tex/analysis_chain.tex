@@ -1,0 +1,977 @@
+\documentclass[11pt,letter]{article}
+
+\usepackage[margin=2.5cm]{geometry}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{bm}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{ragged2e}
+\usepackage{seqsplit}
+\usepackage{enumitem}
+\usepackage{xcolor}
+\usepackage[hidelinks]{hyperref}
+\usepackage{setspace}
+\setstretch{1.15}
+
+\setlength{\emergencystretch}{3em}
+\newcolumntype{L}[1]{>{\RaggedRight\arraybackslash}p{#1}}
+
+%----------------------------------------------------------------------
+%  Text helpers
+%----------------------------------------------------------------------
+\newcommand{\file}[1]{\texttt{\seqsplit{#1}}}
+\newcommand{\code}[1]{\texttt{#1}}
+\newcommand{\SCALAR}{\textbf{scalar}}
+\newcommand{\ToClaude}[1]{[\textbf{CLAUDE}: {#1}]}
+\newcommand{\status}[1]{\par\noindent\textit{Status:} #1\par}
+
+%----------------------------------------------------------------------
+%  Notation (Section 2).  Arrays bold, tables blackboard bold, scalars
+%  plain.  Accents: \bar = mean over a region, \widetilde = smoothed,
+%  \widehat = fitted or estimated.
+%----------------------------------------------------------------------
+% images on the pixel grid, one channel (bold uppercase)
+\newcommand{\mE}{\mathbf{E}}   % lit layer as read, DN
+\newcommand{\mF}{\mathbf{F}}   % dark-corrected signal, DN
+\newcommand{\mP}{\mathbf{P}}   % flat-field polynomial shape
+\newcommand{\mG}{\mathbf{G}}   % gray-chip level map, DN
+\newcommand{\mR}{\mathbf{R}}   % post-image reflectance vs gray chips
+\newcommand{\mS}{\mathbf{S}}   % pre-image reflectance, lined up
+\newcommand{\mT}{\mathbf{T}}   % shading-corrected reflectance
+\newcommand{\mA}{\mathbf{A}}   % post-image absorbance
+\newcommand{\mB}{\mathbf{B}}   % pre-image absorbance
+\newcommand{\mC}{\mathbf{C}}   % stain absorbance (chain output)
+\newcommand{\mU}{\mathbf{U}}   % yellow amount image
+\newcommand{\mV}{\mathbf{V}}   % brown amount image
+\newcommand{\tB}{\widetilde{\mathbf{B}}}   % B smoothed
+\newcommand{\hB}{\widehat{\mathbf{B}}}     % estimated shading of the pad
+\newcommand{\hS}{\widehat{\mathbf{S}}}     % per-pixel white
+% pixel x channel tables (blackboard bold)
+\newcommand{\tA}{\mathbb{A}}
+\newcommand{\tC}{\mathbb{C}}
+% 1-D arrays (bold lowercase)
+\newcommand{\vc}{\mathbf{c}}           % one pixel's spectrum
+\newcommand{\vone}{\mathbf{1}}
+\newcommand{\epsu}{\bm{\varepsilon}_u} % yellow spectrum
+\newcommand{\epsv}{\bm{\varepsilon}_v} % brown spectrum
+% regions: a text identifier set under the symbol
+\newcommand{\reg}[2]{\underset{\text{#1}}{#2}}
+\newcommand{\avg}[2]{\overline{\reg{#1}{#2}}}
+% shading methods
+\newcommand{\MA}{\mathcal{A}}
+\newcommand{\MB}{\mathcal{B}}
+\newcommand{\MC}{\mathcal{C}}
+\newcommand{\MD}{\mathcal{D}}
+
+\title{The analysis chain, from photo to arsenic\\
+\large The steps that make the number, one notation for all of them,\\
+and what is inspection or research}
+\author{Colorimeter project --- pad analysis}
+\date{Draft for Bill's review, 2026-10-03.  Branch \file{preimage-capture},
+commit \file{4962604} plus uncommitted work.  No chain code is changed by
+this document.}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+\noindent
+The chain that turns a photo of an indicator strip into an arsenic
+estimate has a few simple steps.  The research behind them has left
+long code and mixed names.  This document is the spine for the rest of the
+write-ups.  It states the steps that make the number, one short section
+each, in a single notation where an array can't be mistaken for a single
+number.  It lists every other piece of code as inspection, research or
+history.  And it lists what is still to be settled.  The worked numbers
+follow two pixels of C1032, channel royal\_blue.B, through every step.
+\end{abstract}
+
+\tableofcontents
+\newpage
+
+%======================================================================
+\section{What this document is for}
+
+Three things, in this order:
+\begin{enumerate}
+  \item \textbf{The chain} (Section~\ref{sec:chain}): the steps needed to get
+    from the stored photo to an arsenic concentration, and nothing else.
+    Each step has a short description in words, one equation, a worked
+    number, the code that does it today, and every scalar it uses.
+  \item \textbf{The notation} (Section~\ref{sec:notation}): one symbol per
+    quantity, used in every later write-up.  Tangential studies may reuse
+    letters; the chain may not.
+  \item \textbf{What is not the chain} (Section~\ref{sec:inventory}) and
+    \textbf{what is still open} (Section~\ref{sec:open}).
+\end{enumerate}
+
+\noindent The exposure geometry (how the strip meets the arsine) is not
+final.  Early strips were exposed over the whole pad, recent ones in a dot,
+and the dot may change.  Each geometry shows a different fraction of the
+total exposure, so the calibration found now may not carry over.  The chain
+below avoids depending on the dot's size or shape until the spatial step.
+
+%======================================================================
+\section{Light adds; factors multiply}
+\label{sec:rules}
+
+Two kinds of operation run through the chain: \emph{combining} light, and
+\emph{removing} an influence on it.  A simple thought experiment shows which
+arithmetic each needs.  The letters $n$, $a$, $b$, $d$ are used in this
+section only.
+
+\subsection{The thought experiment}
+
+Follow the photons that end up in one pixel:
+\begin{itemize}[nosep]
+  \item the LEDs emit $n$ photons toward the pad (set by the exposure time
+    and the lamp's brightness);
+  \item a fraction $b$ of that illumination reaches this spot.  The pad is
+    lit by four LEDs, one beyond each corner, and their light adds, so $b$
+    is the sum of what the LEDs that can see the spot deliver.  $b = 1$ when
+    the spot is fully lit; a \emph{shadow} is $b < 1$: light never added,
+    because one or more LEDs are blocked from the spot;
+  \item a fraction $a$ of the light that arrives is sent back into the
+    sensor.  $a$ belongs to the surface: the paper, and any dye on it, which
+    lowers $a$.  A shadow does not change $a$.
+\end{itemize}
+The photons captured are
+\begin{equation}
+  d = a\, b\, n .
+\end{equation}
+Now take the same spot in the two photos.  The strip and the LEDs are in
+the same places, so the shadow is the same, $b$; the surface changed from
+$a_\text{pre}$ to $a_\text{post}$; the exposures differ, $n_\text{pre}$
+and $n_\text{post}$:
+\begin{equation}
+  d_\text{pre} = a_\text{pre}\, b\, n_\text{pre}, \qquad
+  d_\text{post} = a_\text{post}\, b\, n_\text{post}.
+\end{equation}
+
+\noindent\textbf{The ratio} cancels the shadow, whatever the dye:
+\begin{equation}
+  \frac{d_\text{post}}{d_\text{pre}}
+  = \frac{a_\text{post}}{a_\text{pre}} \cdot
+    \frac{n_\text{post}}{n_\text{pre}} .
+\end{equation}
+$b$ is gone.  $n_\text{post}/n_\text{pre}$ is the exposure and lamp
+difference, which the gray chips measure (step 3, and step 6, ``What the
+gray-chip level does'').  What is left, $a_\text{post}/a_\text{pre}$, is the
+stain.
+
+\noindent\textbf{The difference} does not:
+\begin{equation}
+  d_\text{post} - d_\text{pre}
+  = b\,\bigl(a_\text{post}\, n_\text{post} - a_\text{pre}\, n_\text{pre}\bigr).
+\end{equation}
+$b$ stays as a multiplier, so the shadow stays in the answer.
+
+\noindent\textbf{Worked example.}  Equal exposures; the stain halves the
+light ($a_\text{pre} = 1$, $a_\text{post} = 0.5$); in the shadow one of the
+four LEDs is blocked ($b = 0.75$):
+
+\medskip
+\begin{center}
+\begin{tabular}{@{}lrrrr@{}}
+\toprule
+ & $d_\text{pre}$ & $d_\text{post}$ & ratio & difference \\
+\midrule
+fully lit ($b = 1$)    & 1.00 & 0.50  & \textbf{0.50} & 0.50 \\
+in shadow ($b = 0.75$) & 0.75 & 0.375 & \textbf{0.50} & 0.375 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent The ratio reads the same stain in and out of the shadow; the
+difference of counts reads the shadowed spot as 25\,\% less stained.
+
+\subsection{The two rules}
+
+\textbf{Rule 1: combining light is an ordinary (arithmetic) average or sum
+of counts or reflectance.}  Light adds: from different LEDs (that is what
+$b$ is), from different places, and from different moments.  A pixel
+records the light collected over its area, so a pixel half in shadow
+records the average of $b$ over the pixel.  Any step that stands for ``the
+light over a larger or a shifted area'' --- averaging neighboring pixels,
+lining up the pre-image (step 4), smoothing --- is therefore an arithmetic
+average of counts, or of reflectance, which is counts divided by a smooth
+gray level.  Averaging absorbances instead amounts to a geometric mean of
+the reflectances, which gives the darker pixels more weight than the light
+they actually collected.
+
+\textbf{Rule 2: removing an influence that enters as a factor, as the
+shadow $b$, the exposure $n$ and the dye's $a$ do in $d = a\,b\,n$, is a
+division in counts or reflectance, which is exactly a subtraction in
+absorbance.}  Because the logarithm of a product is the sum of the
+logarithms,
+\begin{equation}
+  -\log_{10} d = -\log_{10} a - \log_{10} b - \log_{10} n ,
+\end{equation}
+dividing by $b$ and subtracting $-\log_{10} b$ give identical numbers.  So
+the shadow \emph{is} removed in reflectance and in absorbance at the same
+time; the chain writes it as a subtraction from step 5 on only because it
+works in absorbance there.  The same is true of the exposure (through the
+gray chips) and of the stain.
+
+\textbf{One limit.}  The thought experiment treats one spot.  A pixel
+averages over its area (rule 1), so it records the average of $a\,b$, which
+equals (average of $a$)$\times$(average of $b$) only if the dye or the shadow
+is even across that pixel.  The two differ only where a shadow's edge and a
+stain's edge fall in the same pixel.  On the current dot samples the dot
+lies in the unshaded inner pad, so the ratio and the difference of counts
+would give nearly the same answer there; the difference matters for
+whole-pad exposure, or for a dot that reaches the rim.
+
+\subsection{Why work in absorbance after step 5}
+
+With every factor turned into a term, the stain becomes a sum: a shading
+term, plus a yellow term, plus a brown term (dyes add approximately in
+absorbance; step 8).  The yellow/brown split solves sums.  A shadow blocks
+every LED color alike, so its term is the same in every channel, while each
+dye's term changes from channel to channel; that is how the split tells
+them apart.
+
+\subsection{Where the domain matters: only in averages}
+
+Division and subtraction do not care which domain they are written in;
+averaging does.  The chain averages in two places.  Lining up (step 4)
+averages reflectance, as rule 1 says.  Smoothing the pre-image (step 6) is
+at present an average of absorbances.  On C1032 royal\_blue.B the
+difference between the two is under 0.0002 more than 4 pixels in from the
+pad's edge ($\sigma = 1$ px), but up to 0.008 (median 0.0004--0.0008)
+within 4 pixels of the edge, where the shadow changes quickly
+(\file{chain\_example.smooth\_mean\_check}).  The smoothed pre-image stands
+for the illumination over a larger area, so by rule 1 it should be an
+average of reflectance; see step 6 and Section~\ref{sec:open}.
+
+%======================================================================
+\section{Notation}
+\label{sec:notation}
+
+\subsection{Conventions}
+
+\begin{tabular}{@{}L{4.6cm}L{10.2cm}@{}}
+\toprule
+Style & Meaning \\
+\midrule
+$\mA$ (bold uppercase) & An \emph{image}: one value per pixel on the
+  photo's pixel grid, for one channel.  130 rows by 183 columns for the
+  current crop. \\
+$A_{ij}$ (plain, subscripted) & One element of that image: the pixel in row
+  $i$, column $j$.  A single number. \\
+$\tA$ (blackboard bold) & A \emph{table}: one row per pixel, one column per
+  channel ($N \times K$).  Same letter as the image it is made from. \\
+$\vc_n$ (bold lowercase) & A list of numbers, e.g.\ one row of a table: one
+  pixel's values over the $K$ channels. \\
+$e$, $\lambda$ (plain) & A \SCALAR: one number.  Every scalar the chain
+  applies to many pixels is flagged in bold in the text, because it assumes
+  those pixels are alike. \\
+$\reg{pad}{\mA}$ & The image restricted to a region; the region's name is
+  written under the symbol. \\
+$\avg{g1}{\mF}$ & Overline: the mean over that region.  A scalar. \\
+$\tB$ & Tilde: smoothed.  An image. \\
+$\hB$ & Hat: fitted or estimated.  An image. \\
+$\MA, \MB, \MC, \MD$ & Calligraphic: the four shading-removal methods of
+  \file{shading\_removal.tex}. \\
+\bottomrule
+\end{tabular}
+
+\medskip
+\noindent Arithmetic between images is done pixel by pixel.  So
+``$\mR = \mF / \mG$'' means $R_{ij} = F_{ij} / G_{ij}$ at every pixel; no
+matrix product is meant.  Equations below give the element form.
+
+\subsection{Indices and regions}
+
+\begin{tabular}{@{}L{2.4cm}L{12.4cm}@{}}
+\toprule
+$i$, $j$ & Row and column of a pixel. \\
+$k$ & Channel: one LED and one Bayer layer, e.g.\ royal\_blue.B.  $K$
+  channels in all. \\
+$n$ & Pixel number in a list (a row of a table), $1 \dots N$. \\
+$\ell$ & Strip (sample), $1 \dots L$. \\
+\midrule
+pad & The fitted pad rectangle, hot pixels left out. \\
+inner, rim & Pad pixels more than, and within, $w$ pixels of the pad's edge. \\
+dot, free & Inside the dot's edge; at least 6 pixels outside it (dye-free).
+  Geometry not final. \\
+g1, g2 & The left and right gray chips. \\
+\bottomrule
+\end{tabular}
+
+\subsection{The symbols, by group}
+
+Letters come in groups, so the group tells what kind of quantity it is:
+digital number (DN) $E, F, G, P$; 
+reflectance $R, S, T$; 
+absorbance $A, B, C$; 
+yellow and brown $U, V$.
+
+\medskip
+\begin{tabular}{@{}L{1.5cm}L{7.3cm}L{1.6cm}L{3.6cm}@{}}
+\toprule
+Symbol & Meaning & Kind & Code name today \\
+\midrule
+\multicolumn{4}{@{}l}{\emph{Counts (DN, the camera's raw unit, 0--1023)}} \\
+$\mE$ & the lit layer as read from the .h5 file & image & \code{raw}, \code{lit} \\
+$e$ & dark level: the camera's reading with no light & \SCALAR & \code{dark\_level} \\
+$\mF$ & dark-corrected signal, $F_{ij} = E_{ij} - e$ & image & \code{sig} \\
+$\mP$ & flat-field polynomial: the shape of the light on the stage, mean 1, measured once & image & \code{gain\_at(...)} \\
+$\gamma_1$, $\gamma_2$ & light level at each gray chip: mean of $\mF$ over the chip / mean of $\mP$ there & \SCALAR{}s & \code{s1/g1}, \code{s2/g2} \\
+$\gamma_j$ & the level blended between the chips, one per column & 1-D & \code{level} \\
+$\mG$ & gray-chip level, $G_{ij} = P_{ij}\gamma_j$ & image & \code{div} \\
+\midrule
+\multicolumn{4}{@{}l}{\emph{Reflectance (no units; bigger = lighter)}} \\
+$\mR$ & post-image, divided by the gray-chip level & image & \code{R} \\
+$\mS$ & pre-image, the same steps, lined up on $\mR$'s grid & image & \code{R} (pre, registered) \\
+$\hS$ & the per-pixel white: $10^{-\hB}$ & image & (new) \\
+$\mT$ & shading-corrected reflectance, $T_{ij} = R_{ij} / \widehat S_{ij}$ & image & (new) \\
+\midrule
+\multicolumn{4}{@{}l}{\emph{Absorbance (no units; bigger = darker)}} \\
+$\mA$ & post-image, $A_{ij} = -\log_{10} R_{ij}$ & image & (A without \code{R\_white}) \\
+$\mB$ & pre-image, $B_{ij} = -\log_{10} S_{ij}$ & image & \code{A\_pre} \\
+$\tB$ & $\mB$ smoothed, width $\sigma$ & image & \code{smooth(A\_pre)} \\
+$\hB$ & estimated shading: $\lambda\mB + (1-\lambda)\tB$ & image & \code{corr} (method D) \\
+$\mC$ & the stain: $C_{ij} = A_{ij} - \widehat B_{ij}$.  \textbf{The chain's
+  photometric output.} & image & \code{A\_after} \\
+$\tC$ & $\mC$ for all channels, pad pixels only & table & \code{PadCube.A} \\
+\midrule
+\multicolumn{4}{@{}l}{\emph{Yellow and brown (under review)}} \\
+$\epsu$, $\epsv$ & the yellow and brown reference spectra, one value per channel & list & \code{eps\_y}, \code{eps\_b} \\
+$\mU$, $\mV$ & yellow and brown amounts at each pixel & image & \code{y}, \code{b} \\
+\midrule
+\multicolumn{4}{@{}l}{\emph{Settings and calibration}} \\
+$\lambda$ & weight on the unsmoothed pre-image & \SCALAR & \code{wt} \\
+$\sigma$ & smoothing width, pixels & \SCALAR & \code{R3\_D\_PX} \\
+$w$ & rim width, pixels & \SCALAR & \code{INNER\_PX} \\
+$x_\ell$ & arsenic concentration of strip $\ell$'s standard, ppb & \SCALAR & \code{manual\_read} \\
+\bottomrule
+\end{tabular}
+
+\medskip
+\noindent Two pairs are worth remembering: $\mR \leftrightarrow \mA$ and
+$\mS \leftrightarrow \mB$ (the same photo in reflectance and in
+absorbance), and $\mT \leftrightarrow \mC$ (the corrected result,
+$\mT = 10^{-\mC}$).
+
+%======================================================================
+\section{The chain}
+\label{sec:chain}
+
+Everything in this section is needed to get from the stored photo to an
+arsenic concentration.  Steps 1--6 are done one channel at a time.  The
+worked numbers are for C1032, royal\_blue.B, at two pixels, each followed
+through both photos (post-image and pre-image):
+\begin{itemize}[nosep]
+  \item \textbf{a dye-free pixel}, row 55, column 78: 8.8 pixels in from the
+    pad's edge and 7.3 pixels outside the dot;
+  \item \textbf{a dot pixel}, row 66, column 91: near the dot's center.
+\end{itemize}
+They are printed by \file{chain\_example.worked\_example()}
+(\file{desktop/padanalysis/chain\_example.py}).
+
+\subsection*{Before step 1: where things are (geometry)}
+
+Three things are found once per photo and used by every channel:
+\begin{itemize}
+  \item \textbf{Hot pixels}: positions whose dark reading is reliably high.
+    They are left out, not repaired (\code{probe.Capture.hot\_mask}, from
+    the \code{hotpixels} database table).  C1032: 8 hot pixels on the pad, leaving 2215 usable pad pixels.
+  \item \textbf{The pad}: a rotated rectangle of fixed size, found from the
+    strip's edges (\file{padrect.PadRect}).  It gives each pixel's depth
+    into the pad, which defines the inner pad and the rim.
+  \item \textbf{The dot}: its edge, from the post-image
+    (\code{pca\_study.dot\_geometry}).  Needed only for the spatial step and
+    for choosing the dye-free region in studies.  Geometry not final.
+\end{itemize}
+
+%----------------------------------------------------------------------
+\subsection{Step 1: read the layer and choose the exposure}
+
+\textbf{In words.}  The camera took each LED's photo at one or more
+exposure times.  For each channel, use the brightest exposure that is not
+clipped anywhere on the pad or the two gray chips and that carries more
+than read noise.
+
+\textbf{Equation.}  $\mE$ = the stored layer for (LED, Bayer layer,
+chosen exposure).
+
+\textbf{Worked numbers.}  Post-image: rung e1, 2193\,\textmu s.  Pre-image:
+rung e0, 1000\,\textmu s.  In every table of this section the left column is
+the dye-free pixel and the right column the dot pixel.  The pre-image's
+values are taken where that post-image pixel came from (step 4), by the
+same 4-pixel average the chain uses.
+
+\medskip
+\begin{center}
+\begin{tabular}{@{}lrr@{}}
+\toprule
+ & dye-free (55, 78) & dot (66, 91) \\
+\midrule
+post-image $E$, DN & 782.00 & 266.00 \\
+pre-image $E$, DN  & 396.99 & 394.06 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent The pre-image reads about half the post-image's counts at the
+dye-free pixel because its exposure is less than half as long.
+
+\textbf{Code today.}  \code{probe.Capture.layer}; the choice is
+\code{analysis\_1.rung\_verdict}.  Clipped means $\ge 1000$\,DN
+(\code{SATURATED\_DN}); read noise means a mean below 25\,DN
+(\code{MIN\_SIGNAL\_DN}).
+
+\textbf{Scalars.}  The two thresholds.  The pre-image and post-image may be
+at different exposures; step 3 removes that.
+
+\status{in use.  Open: blending several exposures into one (Bill to
+review; Section~\ref{sec:open}).}
+
+%----------------------------------------------------------------------
+\subsection{Step 2: subtract the dark level}
+
+\textbf{In words.}  Take away what the sensor reads with no light.
+
+\textbf{Equation.}
+\begin{equation}
+  F_{ij} = E_{ij} - e
+\end{equation}
+$e$ is a \SCALAR: the average of one dark frame, one number per Bayer
+layer per photo (\file{tex/dark\_signal\_characterization.tex}).
+
+\textbf{Worked numbers.}  $e = 64.028$\,DN (post-image), $64.021$\,DN
+(pre-image).
+
+\medskip
+\begin{center}
+\begin{tabular}{@{}lrr@{}}
+\toprule
+ & dye-free & dot \\
+\midrule
+post-image $F$, DN & 717.97 & 201.97 \\
+pre-image $F$, DN  & 332.96 & 330.04 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\textbf{Code today.}  \code{probe.Capture.layer} returns $\mE - e$;
+$e$ comes from \code{capture\_h5.dark\_level}.
+
+\status{settled (dark-signal report).}
+
+%----------------------------------------------------------------------
+\subsection{Step 3: divide by the gray-chip level (reflectance)}
+
+\textbf{In words.}  The light is not the same everywhere on the stage, and
+the lamp's brightness and the exposure time change from photo to photo.
+The flat-field polynomial $\mP$ gives the light's \emph{shape}, measured
+once.  The two gray chips, read in this same photo, give its \emph{level}.
+Dividing by the result, $\mG$, makes each pixel's brightness relative to the
+gray reference at that place.  The lamp's brightness and the exposure time
+scale $\mF$ and $\mG$ alike, so they drop out of the ratio.  $\mG$ is a
+smooth surface (a low-order polynomial set by two chip means), so it adds
+almost no pixel noise, but it removes none either: all of $\mF$'s pixel
+noise and paper texture stay in $\mR$.
+
+\textbf{Equations.}  First the light level at each chip, then a level for
+each column, blended in a straight line from the left chip (center column
+$j_1$) to the right chip (center column $j_2$):
+\begin{align}
+  \gamma_1 &= \frac{\avg{g1}{\mF}}{\avg{g1}{\mP}}, \qquad
+  \gamma_2 = \frac{\avg{g2}{\mF}}{\avg{g2}{\mP}}
+    && \text{(\SCALAR{}s, one pair per photo)} \\
+  t_j &= \frac{j - j_1}{j_2 - j_1}, \qquad
+  \gamma_j = (1 - t_j)\,\gamma_1 + t_j\,\gamma_2
+    && \text{(one value per column)} \\
+  G_{ij} &= P_{ij}\,\gamma_j, \qquad R_{ij} = F_{ij} / G_{ij}
+\end{align}
+$\gamma_1$ is ``how many counts per unit of the polynomial at the left
+chip''.  The chip means of $\mP$ are the same in every photo (the polynomial
+and the chip rectangles are fixed); the chip means of $\mF$ are new in each
+photo, two for the post-image and two for the pre-image.  $R = 1$ means ``as
+bright as the gray chips would be here''.  The pad reads about 2, because
+it is about twice as bright as the chips.
+
+\textbf{Worked numbers.}  Chip means of $\mP$: $\avg{g1}{\mP} = 1.0052$,
+$\avg{g2}{\mP} = 0.9933$; $j_1 = 26.5$, $j_2 = 160.5$.
+
+\medskip
+\begin{center}
+\begin{tabular}{@{}lrr@{}}
+\toprule
+ & left chip (g1) & right chip (g2) \\
+\midrule
+post-image $\avg{g}{\mF}$, DN & 331.62 & 331.39 \\
+post-image $\gamma$, DN       & 329.92 & 333.61 \\
+pre-image $\avg{g}{\mF}$, DN  & 149.46 & 149.47 \\
+pre-image $\gamma$, DN        & 148.70 & 150.47 \\
+\bottomrule
+\end{tabular}
+\qquad
+\begin{tabular}{@{}lrr@{}}
+\toprule
+ & dye-free & dot \\
+\midrule
+$P_{ij}$          & 1.0160 & 1.0172 \\
+$t_j$             & 0.3844 & 0.4814 \\
+post $\gamma_j$, DN & 331.34 & 331.69 \\
+post $G_{ij}$, DN   & 336.65 & 337.40 \\
+post $R_{ij}$       & 2.1327 & 0.5986 \\
+pre $\gamma_j$, DN  & 149.38 & 149.55 \\
+pre $G$, DN         & 151.77 & 152.12 \\
+pre $R$             & 2.1939 & 2.1696 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent Check, post-image dye-free pixel:
+$\gamma_{78} = 0.6156 \times 329.92 + 0.3844 \times 333.61 = 331.34$;
+$G = 1.0160 \times 331.34 = 336.65$; $R = 717.97 / 336.65 = 2.1327$.
+The polynomial values $P$ for the pre-image are the same to four digits,
+because the strip moved less than a pixel.
+
+\textbf{Why two chips (a choice to revisit).}  Two chips allow the level
+to differ from left to right, in the column direction only.  The choice can
+be revisited once the final reference color chips are installed and
+calibrated: a single gray value, averaged from the left and right chips, may
+be enough; or gray could be measured at more than two places around the pad
+and the polynomial adjusted with a higher-order correction.  For the stain
+$\mC$, what matters is set out in step 6: on C1032 a single averaged chip
+would change $\mC$ by at most 0.0003.
+
+\textbf{Code today.}  \code{padphot.divisor\_map} ($\mG$),
+\code{padphot.reflectance} ($\mR$); $\mP$ is
+\file{whitecorr.LayerModel.gain\_at}.
+
+\status{in use (\file{tex/colorimeter\_flatfield.tex}).  That report uses
+older letters; see Section~\ref{sec:open}.}
+
+%----------------------------------------------------------------------
+\subsection{Step 4: the pre-image, the same way, lined up}
+
+\textbf{In words.}  The pre-image (the same strip, photographed before
+exposure to arsine) goes through steps 1--3 \emph{in its own frame}, with
+its own gray chips, because the light belongs to the stage, not to the
+strip.  Only then is it moved onto the post-image's grid, because the strip
+was taken out and put back between the two photos.
+\underline{Each lined-up value is a weighted average of the 4 nearest}
+\underline{pre-image pixels.}
+
+\textbf{Equation.}  $\mS$ = the pre-image's $\mR$, lined up on the
+post-image's grid.
+
+\textbf{Worked numbers.}  Larger is brighter; the dot pixel was as bright as
+the dye-free one before exposure.
+
+\medskip
+\begin{center}
+\begin{tabular}{@{}lrr@{}}
+\toprule
+ & dye-free & dot \\
+\midrule
+taken from pre-image position $(i, j)$ & (54.83, 78.00) & (65.83, 91.03) \\
+$S_{ij}$ & 2.1939 & 2.1696 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\textbf{Is it right to average reflectances?}  Yes.  A pixel collects
+light over its area, and reflectance is light, so the light a pixel at an
+in-between position would have collected is the weighted average of the
+reflectances around it.  Averaging absorbances instead would be a geometric
+mean of the reflectances, which gives less weight to the bright pixels.  The
+difference only shows where neighbors differ a lot: on C1032 it is at most
+0.0002 in absorbance more than 1 pixel in from the pad's edge, and up to
+0.013 (median 0.0008) at the outermost pixel, where the edge shadow changes
+by up to 30\,\% from one pixel to the next
+(\file{chain\_example.lineup\_mean\_check}).
+
+\textbf{The averaging lowers the pixel-to-pixel scatter.}  Measured on 18
+pads and six channels, the lined-up pre-image keeps a median 0.61 of its
+scatter (range 0.43--0.96), depending on where each pad landed between
+pixels (\file{shading\_removal.tex}, Section 4).  So noise is measured on
+the pre-image's own grid.
+
+\textbf{Code today.}  \code{analysis\_1.get\_balanced\_cell\_data(...,
+sec='pre')}; the move is \code{analysis\_1.pre\_to\_post} and
+\code{\_register} (from the two fitted pad rectangles; no image
+matching).
+
+\status{in use.  Open: how to allow for the pad-to-pad difference in
+averaging.  Bill (2026-10-04): compare (a) recording each pad's fractional
+position and allowing for it when setting $\sigma$ and $\lambda$, with (b)
+lining up by nearest pixel; decide in the rim and edge-smoothing step.}
+
+%----------------------------------------------------------------------
+\subsection{Step 5: absorbance}
+
+\textbf{In words.}  Change to a scale where a shadow, and a dye, add rather
+than multiply.  The minus sign makes darker give a bigger number: a
+reflectance below 1 has a negative logarithm, and the minus turns it
+positive.\footnote{The form comes from light passing through a dye: the
+fraction that gets through is $10^{-\alpha}$, where $\alpha$ grows in
+proportion to the amount of dye (the Beer--Lambert law), so
+$\alpha = -\log_{10}(\text{fraction through})$ measures the amount of dye.  For light scattered back out of
+paper this holds only roughly.  See \file{duotone\_guide.tex}, ``Why
+absorbance, not reflectance?''.}
+
+\textbf{Equations.}
+\begin{equation}
+  A_{ij} = -\log_{10} R_{ij}, \qquad B_{ij} = -\log_{10} S_{ij}
+\end{equation}
+On the pad these are negative, because $R$ and $S$ are measured against the
+gray chips and the pad is brighter than the chips.  That is expected: only
+their difference, in step 6, is the stain.
+
+\textbf{Worked numbers.}
+
+\medskip
+\begin{center}
+\begin{tabular}{@{}lrr@{}}
+\toprule
+ & dye-free & dot \\
+\midrule
+$A_{ij} = -\log_{10} R_{ij}$ & $-0.3289$ & $+0.2228$ \\
+$B_{ij} = -\log_{10} S_{ij}$ & $-0.3412$ & $-0.3364$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\textbf{Why convert here and not earlier?}  Every step from here on is a
+subtraction.  The post-image could be converted right after step 3.  The
+pre-image has to wait until after step 4, because lining up averages light,
+which is reflectance (see step 4).  So the chain converts both here, once,
+and works only in absorbance after this point.
+
+\textbf{Code today.}  \code{padphot.absorbance}, but applied today after a
+division by \code{R\_white} (see Section~\ref{sec:open}).
+
+\status{in use.}
+
+%----------------------------------------------------------------------
+\subsection{Step 6: remove the shading to reveal the stain \texorpdfstring{$\mC$}{C}}
+
+\textbf{In words.}  The pre-image holds the pad's own shading: the shadow
+at its edge and the paper's fiber pattern.  Subtracting it, in absorbance,
+leaves the stain.  The method expected (method $\MD$): mix the pre-image
+with a smoothed copy of itself, and subtract the mix.
+
+\textbf{Equations.}
+\begin{align}
+  \widehat B_{ij} &= \lambda\, B_{ij} + (1 - \lambda)\, \widetilde B_{ij} \\
+  C_{ij} &= A_{ij} - \widehat B_{ij}
+\end{align}
+$\tB$ is $\mB$ smoothed over width $\sigma$.  By rule 1
+(Section~\ref{sec:rules}) the smoothing should average reflectance:
+smooth $\mS$, then take $-\log_{10}$.  The study code so far averages
+absorbance; the two differ by up to 0.008 within 4 pixels of the pad's edge
+on C1032.
+The intended smoothing:
+two-dimensional (a bell-shaped weighted average) on the inner pad, and
+along rows or columns only, at width $2\sigma$, near the pad's edges.
+$\lambda$ is a \SCALAR{} between 0 and 1.
+How $\lambda$ is set is open: it may be found once and stored, or set
+for each photo from measures of its noise and of how well the two photos
+line up (Bill, 2026-10-03).
+The weights $\lambda$ and $1 - \lambda$ sum to 1,
+so the same quantity can be written in reflectance with a \emph{per-pixel white}:
+\begin{equation}
+  \widehat S_{ij} = 10^{-\widehat B_{ij}}, \qquad T_{ij} = R_{ij} / \widehat S_{ij},
+  \qquad C_{ij} = -\log_{10} T_{ij}.
+\end{equation}
+There is no single white number anywhere in this step.  Every pixel is
+divided by its own white value $\widehat S_{ij}$, taken from the same strip
+before exposure.  $C = 0$ means ``as the pad was before exposure, here''.
+
+\textbf{What the gray-chip level does in $\mC$.}  Take $\lambda = 1$ for
+clarity ($\mC = \mA - \mB$; the smoothing changes nothing below, because
+$\mG$ is itself smooth).  Write $'$ for the pre-image's value at the
+position the pixel came from.  From steps 3 and 5,
+$A_{ij} = -\log_{10} F_{ij} + \log_{10} G_{ij}$ and
+$B_{ij} \approx -\log_{10} F'_{ij} + \log_{10} G'_{ij}$, so
+\begin{equation}
+  C_{ij} = -\log_{10}\frac{F_{ij}}{F'_{ij}}
+          + \log_{10}\frac{G_{ij}}{G'_{ij}},
+  \qquad
+  \frac{G_{ij}}{G'_{ij}} = \frac{P_{ij}}{P'_{ij}} \cdot
+                           \frac{\gamma_j}{\gamma'_j}.
+\end{equation}
+\begin{itemize}
+  \item \textbf{The polynomial's part}, $P_{ij}/P'_{ij}$, is the light's
+    shape at two places a fraction of a pixel apart.  On C1032,
+    $\log_{10}(P/P')$ is 0.00001 (range 0.00004 over the pad): it cancels.
+  \item \textbf{The chips' part}, $\gamma_j/\gamma'_j$, is how much more
+    light the post-image's chips collected than the pre-image's: the
+    exposure time and the lamp's brightness together.  On C1032 it is 2.218
+    ($\log_{10}$: $+0.346$), the same over the whole pad within 0.0001.  The
+    exposure times alone give 2193/1000 = 2.193 ($+0.341$); the other 1.1\,\%
+    ($+0.005$) is the lamp.
+  \item So for the stain, \textbf{the gray chips act as a monitor of
+    exposure and lamp between the two photos}.  Without them, every pixel's
+    $\mC$ would be 0.346 too low on C1032, more than half the dot's stain.
+    Neither the chips' own gray value nor the polynomial's shape reaches
+    $\mC$, provided the strip moves less than a pixel.  The chips'
+    left-to-right balance matters only through the ratio of the two photos:
+    post/pre is 2.2188 at the left chip and 2.2172 at the right, so a single
+    averaged chip would change $\mC$ by at most 0.0003 here.
+  \item The shape $\mP$ does matter for anything that compares one place on
+    the stage with another \emph{within one photo}.  In the chain, nothing
+    after step 6 does.
+\end{itemize}
+
+\textbf{Worked numbers} (provisional settings: $\lambda = 0.81$, the value
+fitted on C1032 in \file{shading\_removal.tex}; plain 1-pixel smoothing
+everywhere, not yet the edge-aware smoothing).
+
+\medskip
+\begin{center}
+\begin{tabular}{@{}lrr@{}}
+\toprule
+ & dye-free & dot \\
+\midrule
+$\widetilde B_{ij}$ ($\sigma = 1$) & $-0.3418$ & $-0.3399$ \\
+$\widehat B_{ij} = 0.81\,B_{ij} + 0.19\,\widetilde B_{ij}$ & $-0.3413$ & $-0.3370$ \\
+$C_{ij} = A_{ij} - \widehat B_{ij}$ & $+0.0124$ & $+0.5599$ \\
+$\widehat S_{ij} = 10^{-\widehat B_{ij}}$ & 2.1945 & 2.1729 \\
+$T_{ij} = 10^{-C_{ij}}$ & 0.9718 & 0.2755 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent The dye-free pixel is 2.8\,\% darker than before exposure; the
+dot pixel returns about a quarter of the light it did.  Check, dot pixel:
+$\widehat B = 0.81(-0.3364) + 0.19(-0.3399) = -0.3370$, and
+$C = 0.2228 + 0.3370 = 0.5599$ (rounding in the last digit).
+
+\textbf{Code today.}  Study code only: \code{shading\_review.r3\_methods}
+and \code{smooth}.  Not yet in the chain.
+
+\textbf{Scalars.}  $\lambda$, $\sigma$, $w$.  Whether one $\lambda$ suits the
+whole pad is open: on C1032 the best value was 0.24 on the inner pad and
+0.85 at the rim; but that used an older smoothing algorithm.
+
+\status{under study (\file{shading\_removal.tex}).  The method, the
+smoothing near the edge, and $\lambda$ are to be verified.}
+
+%----------------------------------------------------------------------
+\subsection{Step 7: the table of all channels}
+
+\textbf{In words.}  Put every channel's stain side by side: one row per pad
+pixel, one column per channel.  Only channels the pre-image holds can have
+a $\mC$ (six shared by all 18 dot strips: violet.B, royal\_blue.B, cyan.B,
+green.Gb, green.Gr, photo\_red.R).
+
+\textbf{Equation.}  $\tC$ ($N \times K$), with element $C_{n,k}$ = the
+stain of pad pixel $n$ in channel $k$.  Row $n$ is $\vc_n$, that pixel's
+spectrum.  A region's table is written $\reg{inner}{\tC}$.
+
+\textbf{Code today.}  \code{duotone.PadCube} (today built from
+\code{R\_white}-referenced absorbance, not $\mC$).
+
+\status{in use, to be rebuilt on $\mC$.}
+
+%----------------------------------------------------------------------
+\subsection{Step 8: yellow and brown}
+
+\textbf{In words.}  Each pixel's spectrum is taken to be a mix of a yellow
+and a brown product, plus noise.  Find how much of each.
+
+\textbf{Equation} (the model of \file{duotone\_guide.tex}, in this
+notation):
+\begin{equation}
+  \vc_n = h_n \vone + u_n \epsu + v_n \epsv + \text{noise},
+  \qquad u_n, v_n \ge 0
+\end{equation}
+$\epsu$, $\epsv$: the yellow and brown spectra (lists over channels, the
+same for every pixel).  $u_n$, $v_n$: the amounts at pixel $n$, painted back
+as images $\mU$, $\mV$.  $h_n$: an amount that is the same in every channel.
+Once step 6 has removed the shading, $h_n$ should be small; whether the
+model still needs it is a question for the duotone review.
+Decisions remaining:
+Whether to store a single transformation matrix for use on all images (probable), or whether to recompute the transformation matrix per sample.
+
+\textbf{Code today.}  \code{duotone.unmix}, \code{endmembers},
+\code{contrast}.
+
+\status{in code with known faults; Bill's review pending.  No worked
+number until then.}
+
+%----------------------------------------------------------------------
+\subsection{Step 9: where the yellow and brown are}
+
+\textbf{In words.}  The sizes and shapes of the yellow and brown areas may
+carry more information than their amounts alone.
+
+\status{not started.  Depends on the exposure geometry.}
+
+%----------------------------------------------------------------------
+\subsection{Step 10: relate the measures to arsenic}
+
+\textbf{In words.}  Fit the per-strip measures from steps 8--9 against the
+known concentrations $x_\ell$ of the calibration standards, then invert the
+fit to estimate an unknown.
+
+\status{not started.  The fit found with the current geometry may not carry
+over to the final one.}
+
+%======================================================================
+\section{What is not the chain}
+\label{sec:inventory}
+
+Files in \file{desktop/padanalysis/}, sorted by role.  ``Chain'' means it
+does a step of Section~\ref{sec:chain} today (often among other things).
+
+\medskip
+\begin{tabular}{@{}L{2.6cm}L{12.2cm}@{}}
+\toprule
+Role & Files and functions \\
+\midrule
+Chain &
+  \code{probe.Capture} (\code{layer}, \code{dark\_level}, \code{hot\_mask});
+  \code{analysis\_1}: \code{open\_sample}, \code{rung\_verdict},
+  \code{\_region}, \code{\_hot}, \code{pad\_of}, \code{pre\_to\_post},
+  \code{\_register}, \code{get\_balanced\_cell\_data} (up to $\mR$);
+  \code{padphot}: \code{divisor\_map}, \code{reflectance},
+  \code{absorbance};
+  \code{whitecorr.LayerModel}, \code{load\_models};
+  \code{padrect.PadRect} and \code{fields} (pad finding);
+  \code{duotone}: \code{PadCube}, \code{unmix}, \code{endmembers},
+  \code{contrast} (step 8, under review);
+  \code{pca\_study.dot\_geometry}, \code{dot\_study.dot\_edge} (dot, provisional).
+  In \file{src/}: \code{capture\_h5.dark\_level}, \code{hotpixel\_repo},
+  \code{darkframe}. \\
+\midrule
+Inspection &
+  \code{analysis\_1}: \code{roi\_overlay}, \code{contact\_sheet},
+  \code{cell\_table}, \code{pre\_post\_overlay}, \code{inventory},
+  \code{cell\_PCA}, the interim store (\code{writeh5\_sampcell} \ldots);
+  \code{colorview}; \code{chain\_example}; \code{duotone.render\_rgb}. \\
+\midrule
+Research &
+  \code{shading\_review}, \code{shading\_study}, \code{dot\_study},
+  \code{pca\_study}, \code{pca}, \code{padregistration},
+  \code{analysis\_2}, \code{hotpixel\_analysis}, \code{duotone\_guide},
+  \code{R\_guide}, \code{R\_inf\_guide};
+  \code{analysis\_1.pre\_white} (\code{R\_white}) and the $R_\infty$,
+  K/S quantities in \code{padphot}
+  (\code{reflectance\_infinity}, \code{km\_remission} \ldots); duotone's
+  noise and channel-choice tools (\code{amount\_sigma}, \code{noise\_cov},
+  \code{j\_hue}, \code{j\_amounts}, \code{subset\_*}). \\
+\midrule
+History &
+  \code{report1}--\code{report14}, \code{measure}, \code{chemistry},
+  \code{sweep}, \code{look1}--\code{look3}, \code{segment}.  Built for the
+  whole-pad strips C1002--C1014, most of which have no pre-image. \\
+\bottomrule
+\end{tabular}
+
+\medskip
+\noindent The plan (agreed 2026-10-03) is a new, small chain module with one
+function per step above, named by these symbols and reusing \code{probe},
+\code{padrect} and \code{padphot}.  \code{analysis\_1} stays as the
+inspection and research workbench.
+
+%======================================================================
+\section{Open points, with recommendations}
+\label{sec:open}
+
+\noindent Bill accepted these recommendations on 2026-10-03, except where a
+point says otherwise.
+
+\begin{enumerate}[leftmargin=1.5em]
+  \item \textbf{The single white value \code{R\_white} is not part of the
+    chain.}  Today the code divides every pixel by one number per channel:
+    the median of the pre-image pad (\code{analysis\_1.pre\_white}).  In
+    step 6 the white is an image, $\hS$, so that number cancels exactly and
+    is not needed.  It stays only in displays and side studies that use it.
+    The current workbench (\code{analysis\_1}, \code{duotone.PadCube}) keeps
+    it until the new chain module replaces it.  If shading removal ever
+    settled on a method that needs a single white value (method $\MA$),
+    this would come back to Bill.  \emph{Recommendation:} after the rewrite,
+    check together that no single white value remains in the chain, and
+    look at $\hS$ on a pad (map and histogram).
+  \item \textbf{Dark level, wording.}  The code subtracts one number per
+    Bayer layer per photo: the mean of that photo's \emph{shortest-exposure}
+    dark frame.  Dark frames are shared by exposure time, not by LED.  Your
+    outline said ``a current matching dark image channel (LED + Bayer
+    layer)''.  The two agree in effect, because the dark level depends on
+    neither the LED nor the exposure (64.02--64.04\,DN).
+    \emph{Decided:} the chain is stated as ``one dark-frame mean per Bayer
+    layer per photo''.
+  \item \textbf{Blending several exposures} (step 1).  Mentioned long ago,
+    never examined.  \emph{Bill to review the idea first.}
+  \item \textbf{Noise lowered by lining up} (step 4).  The 4-pixel average
+    makes the pre-image look less noisy than it is.
+    \emph{Measured 2026-10-03} (\file{shading\_removal.tex}, Section 4):
+    over 18 pads and six channels the lined-up pre-image keeps a median
+    0.61 of its pixel-to-pixel scatter (range 0.43--0.96, set by where each
+    pad landed between pixels); lining up by nearest pixel keeps all of it.
+    Noise must be measured on the pre-image's own grid (the yellow/brown
+    code already does).
+  \item \textbf{One $\lambda$ for the whole pad} (step 6).  C1032 wants 0.24
+    inside and 0.85 at the rim.  \emph{Bill's position:} a $\lambda$ that varies
+    risks being confused with the stain.  First try to make one $\lambda$
+    work through the right smoothing near the edge.  Only if the outermost
+    one to three rows along each pad edge are shaded in a fundamentally
+    different way, let $\lambda$ vary there, and only there.
+  \item \textbf{Two sources of concentrations} (step 10).
+    \file{samples.py} holds $x_\ell$ for C1002--C1014; the dot strips'
+    concentrations are in the database (\code{samples.manual\_read}).
+    \emph{Decided:} the chain reads only the database.  Bill asks that
+    every other small, special-purpose data store be called out, because
+    that is not the desired practice.  Found in
+    \file{desktop/padanalysis/}:
+    \begin{itemize}[nosep]
+      \item \file{samples.py}: a hand-written table of strips, concentrations
+        and preparation flags (C1002--C1014);
+      \item \code{probe.FILES}: a second copy of concentrations for
+        X15 and C1002--C1005, used by old reports and \code{segment};
+      \item \file{records.json}, \file{records\_blob.json},
+        \file{ratios\_by\_erode.json}: results files written and read by
+        the old reports (\code{measure}, \code{chemistry}, \code{report*});
+      \item \code{duotone.NM}: LED peak wavelengths, copied by hand from
+        \file{src/lighting\_cal8.py};
+      \item \code{analysis\_1.GRAYCELLS} and \code{PRECELLS}: channel lists
+        typed in from two captures (\code{cells\_present} can regenerate
+        them);
+      \item \file{analysis/samples/<sample>.h5}: an interim cache of
+        computed arrays, stamped with the chain version.
+    \end{itemize}
+    The first three belong to the history pipeline.  The new chain module
+    should read concentrations, wavelengths and channel lists from the
+    database or the capture file itself, and keep any cache only as a
+    cache.
+  \item \textbf{Older reports use other letters.}
+    \file{colorimeter\_flatfield.tex} uses $A$ for reflectance and $S$ for
+    signal, and \file{duotone\_guide.tex} uses $y$, $b$, $g$ for the amounts.
+    \emph{Recommendation:} leave settled reports as they are, with a
+    one-line pointer to this notation; rewrite only reports still being
+    worked on (\file{shading\_removal.tex}, then \file{duotone\_guide.tex}
+    at its review).
+  \item \textbf{K/S} is computed for every channel but used by no step of
+    the chain.  \emph{Recommendation:} research only; leave it out of the
+    chain module.
+  \item \textbf{Smoothing the pre-image in reflectance} (step 6, rule 1).
+    The study code smooths $\mB$ (absorbance); rule 1 says smooth $\mS$
+    (reflectance) and then take $-\log_{10}$.  They agree inside the pad and
+    differ by up to 0.008 within 4 pixels of the edge on C1032.
+    \emph{Recommendation:} switch to smoothing $\mS$ in the edge-smoothing
+    step, and compare.
+\end{enumerate}
+
+%======================================================================
+\section{How to reproduce}
+
+\begin{verbatim}
+cd desktop/padanalysis
+timeout -k 10 300 ../../.venv/bin/python3 -u chain_example.py
+\end{verbatim}
+
+\noindent prints every worked number in Section~\ref{sec:chain}.  It uses
+the chain's current functions, removes \code{R\_white} from $\mA$ and $\mB$
+(by adding back $\log_{10}$\code{R\_white}), and applies step 6 with the
+provisional settings stated there.
+
+\end{document}
