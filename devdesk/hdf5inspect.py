@@ -4,7 +4,7 @@ hdf5inspect.py — quick desktop inspection of a capture-suite HDF5 archive.
 Desktop-only developer tool (matplotlib dependency). Not synced to the Pi
 (see sync_pi_files.txt).
 
-Four focused modes, more compact than Hdf5Reader.summary():
+Five focused modes, more compact than Hdf5Reader.summary():
 
   -s / --summary       Inventory table: color_name, e#, exposure_us,
                         roi_shape, layers, jpegsize -- one row per
@@ -29,6 +29,12 @@ Four focused modes, more compact than Hdf5Reader.summary():
                         Gb, and it says which layers the capture stored.
                         With --layers, -o saves the whole figure (panels,
                         titles and colorbar), not a bare image.
+  -c / --check         Compare the whole archive (measurement and /pre)
+                        with capture_h5's layout and list every object
+                        that is missing (a reader needs it and it isn't
+                        there) or unrecognized (not part of the layout).
+                        The summary ends with the same check for the
+                        section it shows.
   -w / --write_db      Dark-subtract every LED color/exposure/Bayer-layer
                         (R, Gr, Gb, B), compute mean/stdev over each
                         TEST_ROI box, and write the results to a sqlite
@@ -42,7 +48,10 @@ Four focused modes, more compact than Hdf5Reader.summary():
                         next to the archive showing where they fell.
 
 If no mode flag is given, -s/--summary runs by default. Modes may be
-combined in one invocation.
+combined in one invocation.  Each mode runs on its own: if one fails on an
+archive it doesn't expect, it says why and the others still run (exit code
+1).  FILE may be a path or a bare name with or without .h5; bare names are
+looked for in captures/ and then test_image/.
 
 --pre reads the pre-image instead of the measurement. From software 0.7.0
 an archive can hold two sweeps of one strip: the measurement at the root,
@@ -92,6 +101,8 @@ from hdf5read import Hdf5Reader  # noqa: E402
 
 DEFAULT_CAPTURES_DIR = Path(__file__).resolve().parent.parent / "captures"
 DEFAULT_DB_PATH = Path(__file__).resolve().parent / "devdesk.sqlite"
+#: Test-image suites (IMG0001.h5, ...) saved from the Test Image screen.
+DEFAULT_TEST_IMAGE_DIR = Path(__file__).resolve().parent.parent / "test_image"
 RAW_MAX = 1023  # 10-bit sensor ceiling, even though stored as uint16
 BAYER_CHANNELS = ("R", "Gr", "Gb", "B")
 
@@ -107,10 +118,14 @@ def resolve_h5_path(filename: str, captures_dir: Path) -> Path:
     """
     Resolve a user-supplied filename/path to an existing .h5 file.
 
+    Tried in order: the name as a path; then the name, and the name with
+    ".h5" added, under captures_dir and then under test_image/.  So "C1048",
+    "C1048.h5" and "IMG0014" all work.
+
     Args:
-        filename: Bare filename (resolved against captures_dir) or a
-            relative/absolute path used as-is if it exists.
-        captures_dir: Directory bare filenames resolve against.
+        filename: Bare name (with or without .h5) or a relative/absolute
+            path used as-is if it exists.
+        captures_dir: Directory bare filenames resolve against first.
 
     Returns:
         Resolved, existing Path to the .h5 file.
@@ -123,16 +138,23 @@ def resolve_h5_path(filename: str, captures_dir: Path) -> Path:
         PosixPath('.../captures/20260802_1404.h5')
     """
     direct = Path(filename)
-    if direct.exists():
+    if direct.is_file():
         return direct.resolve()
 
-    candidate = captures_dir / filename
-    if candidate.exists():
-        return candidate.resolve()
+    names = [filename]
+    if not filename.lower().endswith(".h5"):
+        names.append(filename + ".h5")
+    tried = []
+    for folder in (captures_dir, DEFAULT_TEST_IMAGE_DIR):
+        for name in names:
+            candidate = folder / name
+            tried.append(str(candidate))
+            if candidate.is_file():         # not the extracted-JPEG folder
+                return candidate.resolve()
 
     raise FileNotFoundError(
-        f"'{filename}' not found as a path, nor as '{candidate}' "
-        f"under captures dir '{captures_dir}'"
+        f"'{filename}' not found as a path, nor as any of: "
+        + ", ".join(tried)
     )
 
 
@@ -399,10 +421,20 @@ def lit_exposure_us(reader: "Hdf5Reader | SectionView", color: str, label: str) 
     """
     Return the exposure_us attr for one LED's lit exposure label.
 
-    Reads R unconditionally, and correctly so: an omitted layer keeps every
-    attribute a stored one has, exposure_us included.  Only pixels go missing.
+    An omitted layer keeps every attribute a stored one has, exposure_us
+    included; only pixels go missing.  Reads the first layer present, so a
+    layer that is absent altogether (a damaged or unexpected archive) does
+    not stop the report.
+
+    Raises:
+        KeyError: no layer of this exposure carries exposure_us.
     """
-    return reader.attrs(f"/leds/{color}/lit/{label}/R")["exposure_us"]
+    for ch in BAYER_CHANNELS:
+        try:
+            return reader.attrs(f"/leds/{color}/lit/{label}/{ch}")["exposure_us"]
+        except KeyError:
+            continue
+    raise KeyError(f"no exposure_us on any layer of /leds/{color}/lit/{label}")
 
 
 def find_dark_link(reader: "Hdf5Reader | SectionView", color: str, label: str) -> str:
@@ -547,7 +579,12 @@ def cmd_summary(reader: "Hdf5Reader | SectionView", h5_path: Path) -> None:
 
     all_rows = []
     for color in colors:
-        all_rows.extend(summary_rows(reader, color))
+        try:
+            all_rows.extend(summary_rows(reader, color))
+        except Exception as e:      # an archive the tool doesn't expect
+            print(f"  {color}: could not read ({type(e).__name__}: {e}); "
+                  f"see the layout check below")
+            all_rows.append((color, "?", "-", "-", "-", "-"))
 
     col_w = max(len("color_name"), max(len(r[0]) for r in all_rows)) + 1
     header = (
@@ -564,7 +601,11 @@ def cmd_summary(reader: "Hdf5Reader | SectionView", h5_path: Path) -> None:
     print(f"\n{len(colors)} LEDs, {lit} lit exposures "
           f"({lit / len(colors):g} per LED on average).")
 
-    darks = dark_rows(reader)
+    try:
+        darks = dark_rows(reader)
+    except Exception as e:
+        print(f"\nDark frames: could not read ({type(e).__name__}: {e})")
+        return
     print(f"\nDark frames ({len(darks)}), mean DN per layer:")
     if not darks:
         print("  (none)")
@@ -576,6 +617,226 @@ def cmd_summary(reader: "Hdf5Reader | SectionView", h5_path: Path) -> None:
     for name, exp, stored, *means in darks:
         print(f"{name:<18}{exp:>12}  {stored:<12}"
               + "".join(f"{m:>8}" for m in means))
+
+
+# ── Mode 5: layout check ────────────────────────────────────────────
+#
+# What capture_h5 writes, as patterns on a path relative to a section's
+# root (see capture_h5's "Layout").  Anything else in the archive is
+# "unrecognized"; anything a reader needs that is not there is "missing".
+# The check never raises: a damaged archive is what it is for.
+
+_LED = r"[a-z_]+"
+_CH = r"(R|Gr|Gb|B)"
+#: (pattern, kind) for every object capture_h5 may write in one section.
+#: kind is "group", "dataset" or "link" (a soft link).
+LAYOUT = [
+    (r"meta", "dataset"),
+    (r"photo", "dataset"),
+    (r"leds", "group"),
+    (rf"leds/{_LED}", "group"),
+    (rf"leds/{_LED}/(led_metadata|capture_info|jpeg_e3)", "dataset"),
+    (rf"leds/{_LED}/jpeg", "group"),
+    (rf"leds/{_LED}/jpeg/e\d+_(whole|bound)", "dataset"),
+    (rf"leds/{_LED}/(lit|lit_whole)", "group"),
+    (rf"leds/{_LED}/(lit|lit_whole)/e\d+", "group"),
+    (rf"leds/{_LED}/(lit|lit_whole)/e\d+/{_CH}", "dataset"),
+    (rf"leds/{_LED}/(dark|dark_whole)", "group"),
+    (rf"leds/{_LED}/(dark|dark_whole)/((before|after)_)?e\d+", "link"),
+    (r"(dark|dark_whole)", "group"),
+    (r"(dark|dark_whole)/(before|after)_\d+us", "group"),
+    (rf"(dark|dark_whole)/(before|after)_\d+us/{_CH}", "dataset"),
+]
+#: Root attributes every archive carries (capture_h5.CaptureSuiteWriter).
+ROOT_ATTRS_REQUIRED = ("suite_id", "schema_version")
+#: LED color names the instrument uses (config capture.led_color_order).
+#: A name outside this list is reported, since a typo would hide an LED.
+KNOWN_LEDS = ("photo_red", "red", "red_orange", "amber", "green", "cyan",
+              "blue", "royal_blue", "violet", "white")
+
+
+def _kind(f, path):
+    """'link', 'group', 'dataset' or 'other' for one archive path."""
+    import h5py
+    link = f.get(path, getlink=True)
+    if isinstance(link, (h5py.SoftLink, h5py.ExternalLink)):
+        return "link"
+    obj = f.get(path)
+    if isinstance(obj, h5py.Group):
+        return "group"
+    if isinstance(obj, h5py.Dataset):
+        return "dataset"
+    return "other"
+
+
+def _walk(f, root):
+    """
+    Every path below `root` ('' or 'pre'), relative to it, with its kind.
+    Soft links are listed, not followed.  A section group met at the top
+    level ('pre') is left for its own walk.
+    """
+    out = []
+    stack = [root]
+    while stack:
+        g = stack.pop()
+        try:
+            names = list(f[g or "/"].keys())
+        except Exception as e:                       # unreadable group
+            out.append((g, f"unreadable ({type(e).__name__})"))
+            continue
+        for name in names:
+            full = f"{g}/{name}" if g else name
+            rel = full[len(root) + 1:] if root else full
+            if not root and rel == PRE:
+                continue
+            kind = _kind(f, full)
+            out.append((rel, kind))
+            if kind == "group":
+                stack.append(full)
+    return sorted(out)
+
+
+def check_layout(h5_path: Path, section: str = "") -> tuple:
+    """
+    Compare one section of an archive with capture_h5's layout.
+
+    Unrecognized: any object whose path matches no LAYOUT pattern, or
+    matches one of a different kind; an LED name not in KNOWN_LEDS; a soft
+    link whose target is gone.
+
+    Missing: what a reader needs and does not find -- /meta (schema 2 on),
+    /leds and at least one LED; for each LED its led_metadata and at least
+    one lit exposure; for each lit exposure all four Bayer layers (a layer
+    stored empty, "omitted", counts as present: capture_h5 does that on
+    purpose), each with exposure_us and captured_dt; the stored layers of
+    one exposure the same shape; a /dark group with at least one dark frame
+    holding all four layers; at the archive root, suite_id and
+    schema_version.
+
+    Args:
+        h5_path: The archive.
+        section: '' for the measurement, PRE for the pre-image.
+
+    Returns:
+        (missing, unrecognized): two lists of one-line descriptions.
+        Never raises; a failure to open or read is itself reported.
+    """
+    import h5py
+    missing, unknown = [], []
+    no_attr = {}                     # attribute -> layers lacking it
+    root = section.strip("/")
+    try:
+        f = h5py.File(h5_path, "r")
+    except Exception as e:
+        return [f"cannot open the archive: {type(e).__name__}: {e}"], []
+    with f:
+        at = f"/{root}" if root else "/"
+        if root and root not in f:
+            return [f"/{root} section"], []
+        if not root:
+            for a in ROOT_ATTRS_REQUIRED:
+                if a not in f.attrs:
+                    missing.append(f"root attribute '{a}'")
+        try:
+            schema = int(f.attrs.get("schema_version", 0))
+        except Exception:
+            schema = 0
+        objs = _walk(f, root)
+        present = {p for p, _ in objs}
+        for rel, kind in objs:
+            want = [k for pat, k in LAYOUT if re.fullmatch(pat, rel)]
+            if not want:
+                unknown.append(f"{at.rstrip('/')}/{rel} ({kind})")
+            elif kind not in want:
+                unknown.append(f"{at.rstrip('/')}/{rel}: a {kind}, "
+                               f"expected a {want[0]}")
+            elif kind == "link":
+                full = f"{root}/{rel}" if root else rel
+                if f.get(full) is None:
+                    unknown.append(f"{at.rstrip('/')}/{rel}: link to "
+                                   f"'{f.get(full, getlink=True).path}', "
+                                   f"which is not there")
+        pre = f"{at.rstrip('/')}/"
+        if schema >= 2 and "meta" not in present:
+            missing.append(f"{pre}meta")
+        if "leds" not in present:
+            missing.append(f"{pre}leds")
+        leds = sorted(p.split("/")[1] for p in present
+                      if re.fullmatch(rf"leds/{_LED}", p))
+        if "leds" in present and not leds:
+            missing.append(f"{pre}leds: no LED groups")
+        for led in leds:
+            if led not in KNOWN_LEDS:
+                unknown.append(f"{pre}leds/{led}: LED name not in KNOWN_LEDS")
+            base = f"leds/{led}"
+            if f"{base}/led_metadata" not in present:
+                missing.append(f"{pre}{base}/led_metadata")
+            labels = sorted(p.split("/")[3] for p in present
+                            if re.fullmatch(rf"{base}/lit/e\d+", p))
+            if not labels:
+                missing.append(f"{pre}{base}/lit: no exposures")
+            for lab in labels:
+                shapes = {}
+                for ch in BAYER_CHANNELS:
+                    rel = f"{base}/lit/{lab}/{ch}"
+                    if rel not in present:
+                        missing.append(f"{pre}{rel}")
+                        continue
+                    full = f"{root}/{rel}" if root else rel
+                    try:
+                        d = f[full]
+                        for a in ("exposure_us", "captured_dt"):
+                            if a not in d.attrs:
+                                no_attr.setdefault(a, []).append(rel)
+                        if not capture_h5.is_omitted(dict(d.attrs)):
+                            shapes[ch] = d.shape
+                    except Exception as e:
+                        missing.append(f"{pre}{rel}: unreadable "
+                                       f"({type(e).__name__})")
+                if len(set(shapes.values())) > 1:
+                    unknown.append(f"{pre}{base}/lit/{lab}: layer shapes "
+                                   f"differ {shapes}")
+        for a, rels in no_attr.items():
+            # One line per attribute: older archives lack captured_dt on
+            # every layer, and 40 identical lines would hide the rest.
+            missing.append(f"attribute '{a}' on {len(rels)} lit layer(s), "
+                           f"e.g. {pre}{rels[0]}")
+        darks = sorted(p for p in present
+                       if re.fullmatch(r"dark/(before|after)_\d+us", p))
+        if not darks:
+            missing.append(f"{pre}dark: no dark frames")
+        for dk in darks:
+            for ch in BAYER_CHANNELS:
+                if f"{dk}/{ch}" not in present:
+                    missing.append(f"{pre}{dk}/{ch}")
+    return missing, unknown
+
+
+def cmd_check(h5_path: Path, sections: list, limit: int = 25) -> bool:
+    """
+    Print the layout check for the given sections.
+
+    Args:
+        h5_path: The archive.
+        sections: e.g. ["", PRE].
+        limit: Most lines printed per list; the rest are counted.
+
+    Returns:
+        True if nothing is missing or unrecognized.
+    """
+    ok = True
+    for sec in sections:
+        name = f"{h5_path.name}/{sec}" if sec else h5_path.name
+        missing, unknown = check_layout(h5_path, sec)
+        print(f"Layout check, {name}: {len(missing)} missing, "
+              f"{len(unknown)} unrecognized.")
+        for title, items in (("missing", missing), ("unrecognized", unknown)):
+            for line in items[:limit]:
+                print(f"  {title}: {line}")
+            if len(items) > limit:
+                print(f"  ... and {len(items) - limit} more {title}")
+        ok = ok and not missing and not unknown
+    return ok
 
 
 # ── Mode 2: jpeg extraction ──────────────────────────────────────────
@@ -608,11 +869,6 @@ def cmd_jpeg_extract(reader: "Hdf5Reader | SectionView", h5_path: Path) -> None:
 
 
 # ── Mode 3: ROI plot ─────────────────────────────────────────────────
-
-def _combine_gray(r: np.ndarray, gr: np.ndarray, b: np.ndarray) -> np.ndarray:
-    """Unweighted mean of R/Gr/B raw counts (linear data; no luma bias)."""
-    return (r + gr + b) / 3.0
-
 
 def cmd_roi_plot(
     reader: "Hdf5Reader | SectionView",
@@ -654,32 +910,48 @@ def cmd_roi_plot(
             f"{archive}. Available: {', '.join(labels) or '(none)'}"
         )
 
+    # A layer may be stored empty (omitted: too little signal) or be absent.
+    # Read only the ones that hold pixels; a missing one is drawn as zero in
+    # the color picture and left out of the gray mean, and the title says so.
     base = f"/leds/{color}/lit/{label}"
-    r = reader.read_array(f"{base}/R").astype(np.float32)
-    gr = reader.read_array(f"{base}/Gr").astype(np.float32)
-    b = reader.read_array(f"{base}/B").astype(np.float32)
+    kept = [ch for ch in lit_stored_channels(reader, color, label)
+            if ch in ("R", "Gr", "B")]
+    if not kept:
+        raise SystemExit(
+            f"{archive} {color} {label}: none of R, Gr, B holds pixels "
+            f"(all omitted or absent); try --layers or -s")
+    planes = {ch: reader.read_array(f"{base}/{ch}").astype(np.float32)
+              for ch in kept}
+    shape = planes[kept[0]].shape
+    missing = [ch for ch in ("R", "Gr", "B") if ch not in planes]
+    r, gr, b = (planes.get(ch, np.zeros(shape, np.float32))
+                for ch in ("R", "Gr", "B"))
     exp_us = lit_exposure_us(reader, color, label)
+    note = f"  ({'+'.join(missing)} not stored)" if missing else ""
 
     import matplotlib.pyplot as plt  # deferred; only this mode needs it
 
     fig, ax = plt.subplots(figsize=(6, 8))
     if gray:
-        image = np.clip(_combine_gray(r, gr, b) / RAW_MAX, 0, 1)
+        image = np.clip(np.mean([planes[ch] for ch in kept], axis=0)
+                        / RAW_MAX, 0, 1)
         im = ax.imshow(
             image, cmap="gray", vmin=0, vmax=1,
             aspect="equal", interpolation="nearest", origin="upper",
         )
         plt.colorbar(im, ax=ax, label="normalized intensity")
-        mode_desc = "grayscale mean(R,Gr,B)"
+        mode_desc = f"grayscale mean({','.join(kept)})"
     else:
         image = np.clip(np.stack([r, gr, b], axis=-1) / RAW_MAX, 0, 1)
         ax.imshow(image, aspect="equal", interpolation="nearest", origin="upper")
-        mode_desc = "RGB (R, Gr, B)"
+        mode_desc = "RGB (R, Gr, B)" + (", missing shown as 0" if missing
+                                        else "")
 
     draw_test_rois(ax, image.shape[1], image.shape[0])
 
     ax.set_title(
         f"{archive}  {color} {label}  {mode_desc}\nexposure={exp_us} us"
+        f"{note}"
     )
     ax.set_xlabel("column (channel px)")
     ax.set_ylabel("row (channel px)")
@@ -1215,6 +1487,11 @@ def _parse_args(argv=None) -> argparse.Namespace:
         help="print a compact lit-exposure summary table",
     )
     parser.add_argument(
+        "-c", "--check", action="store_true",
+        help="compare the whole archive (both sections) with capture_h5's "
+             "layout: list missing and unrecognized objects",
+    )
+    parser.add_argument(
         "-j", "--jpeg_extract", action="store_true",
         help="extract embedded JPEGs to <stem>/<color>.jpg",
     )
@@ -1257,9 +1534,11 @@ def _parse_args(argv=None) -> argparse.Namespace:
             )
         color = args.roi_plot[0] if len(args.roi_plot) >= 1 else "white"
         exp_raw = args.roi_plot[1] if len(args.roi_plot) >= 2 else "0"
+        exp_raw = exp_raw[1:] if exp_raw[:1].lower() == "e" else exp_raw
         if not exp_raw.isdigit():
             parser.error(
-                f"exposure index must be a plain digit (0-6), got {exp_raw!r}"
+                f"exposure must be a digit or e-label (1 or e1), "
+                f"got {args.roi_plot[1]!r}"
             )
         args.roi_color = color
         args.roi_label = f"e{int(exp_raw)}"
@@ -1299,47 +1578,80 @@ def main() -> int:
         return 1
 
     run_summary = args.summary
+    run_check = args.check
     run_jpeg = args.jpeg_extract
     run_roi = args.roi_plot is not None
     run_write_db = args.write_db
-    if not (run_summary or run_jpeg or run_roi or run_write_db):
+    if not (run_summary or run_check or run_jpeg or run_roi or run_write_db):
         run_summary = True  # default when no mode flag given
 
-    with Hdf5Reader(str(h5_path)) as reader:
-        # Fail at the door rather than somewhere deep in a mode. `software_ver`
-        # says which build wrote the archive; the format versions say whether
-        # these tools can read it. See src/version.py.
-        problem = version.check_archive(reader.attrs("/"))
-        if problem:
-            print(f"ERROR: {h5_path.name}: {problem}", file=sys.stderr)
-            return 1
+    # Each mode runs on its own: one that fails prints why and the others
+    # still run.  The exit code is 1 if any failed or the check found
+    # anything.
+    failed = []
 
-        # Ask before reading rather than let each mode fail its own way: an
-        # archive with no /pre is a strip that was not pre-imaged, which is
-        # a normal archive and worth saying plainly.
+    def _run(name, fn, *a):
+        try:
+            fn(*a)
+        except SystemExit as e:      # a mode's own plain-language refusal
+            if e.code not in (None, 0):
+                print(f"{name}: {e.code}", file=sys.stderr)
+                failed.append(name)
+        except Exception as e:
+            print(f"ERROR in {name}: {type(e).__name__}: {e}\n"
+                  f"  (run with -c to list missing or unrecognized objects)",
+                  file=sys.stderr)
+            failed.append(name)
+
+    try:
+        reader_cm = Hdf5Reader(str(h5_path))
+    except Exception as e:
+        print(f"ERROR: cannot open {h5_path.name}: {type(e).__name__}: {e}",
+              file=sys.stderr)
+        return 1
+    with reader_cm as reader:
+        # `software_ver` says which build wrote the archive; the format
+        # versions say whether these tools can read it (src/version.py).
+        # A version problem is reported, then the modes still try: the
+        # layout check is the way to see what an unexpected archive holds.
+        try:
+            problem = version.check_archive(reader.attrs("/"))
+        except Exception as e:
+            problem = f"version check failed ({type(e).__name__}: {e})"
+        if problem:
+            print(f"WARNING: {h5_path.name}: {problem}", file=sys.stderr)
+            failed.append("version check")
+
+        # An archive with no /pre is a strip that was not pre-imaged, which
+        # is a normal archive and worth saying plainly.
         view = SectionView(reader, PRE if args.pre else "")
         if args.pre and not reader.exists(f"/{PRE}"):
             print(f"ERROR: {h5_path.name} holds no /{PRE} section "
                   f"(this strip was not pre-imaged)", file=sys.stderr)
             return 1
+        sec = PRE if args.pre else ""
 
         if run_summary:
-            cmd_summary(view, h5_path)
+            _run("summary", cmd_summary, view, h5_path)
+            print()
+            if not run_check and not cmd_check(h5_path, [sec]):
+                failed.append("layout check")
+        if run_check:
+            secs = [""] + ([PRE] if reader.exists(f"/{PRE}") else [])
+            if not cmd_check(h5_path, secs):
+                failed.append("layout check")
         if run_jpeg:
-            cmd_jpeg_extract(view, h5_path)
+            _run("jpeg extract", cmd_jpeg_extract, view, h5_path)
         if run_roi and args.layers is not None:
-            cmd_layer_plot(
-                view, h5_path, args.roi_color, args.roi_label, args.layers,
-                args.output,
-            )
+            _run("layer plot", cmd_layer_plot, view, h5_path,
+                 args.roi_color, args.roi_label, args.layers, args.output)
         elif run_roi:
-            cmd_roi_plot(
-                view, h5_path, args.roi_color, args.roi_label, args.gray,
-                args.output,
-            )
+            _run("roi plot", cmd_roi_plot, view, h5_path, args.roi_color,
+                 args.roi_label, args.gray, args.output)
         if run_write_db:
-            cmd_write_db(view, h5_path, Path(args.db).expanduser().resolve())
-    return 0
+            _run("write db", cmd_write_db, view, h5_path,
+                 Path(args.db).expanduser().resolve())
+    return 1 if failed else 0
 
 
 if __name__ == "__main__":
