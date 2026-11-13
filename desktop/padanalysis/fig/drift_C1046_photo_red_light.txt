@@ -1,0 +1,26 @@
+drift_C1046_photo_red_light.png -- what the axes mean
+(made by drift_study.py, show_light_test)
+
+Across (all panels): minutes after reagent 2 ended, from the samples
+table (reagent2_end) and the time stamp of each channel's photo in its
+file.
+
+Up (all panels): how much darker the pad's interior reads than in the
+strip's first post-image, in A (absorbance).  A = -log10(R), where R is
+the pixel divided by the gray chips at that pixel.  Up means darker; 0.01
+A is about 2.3 % less light.  Each point is the middle value over the
+pad's interior (8 or more pixels from every edge), after lining the first
+post-image up onto the later photo's pixels.
+
+Gray bands: when the extra photo_red light was on, 10, 20, 60 and 180 s.
+Each band is drawn ending when the next photo's suite began; the exact
+switch-off time is not recorded.
+
+Top three panels: C1046, one line per LED channel (LED name, then the
+camera layer).  "dye" in the legend is how dark the dye is in that channel
+in the first post-image, against the undyed strip C1039 (rough, good to
+about 0.01 A).
+
+Bottom panel: photo_red.R only.  C1046 (black, solid) beside the repeat captures
+of other strips (dashed), which got about 2 s of every LED per capture and
+no extra light.  Each strip starts at 0 at its own first post-image.
