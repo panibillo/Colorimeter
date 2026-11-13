@@ -768,16 +768,24 @@ texture costs $0.434 \times 0.1 \times (1/0.98 - 1) = 0.0009$\,A here, as
     (the texture left after the bands), and the resulting $\lambda$.
     (Done, \cref{sec:whitecheck}.)
   \item Side effect: the blended white must not change the pad's mean.
-    (Checked: under 0.0001\,A, \cref{sec:whitecheck}.)
+    (Checked: under 0.0001\,A on reseated pre-images, and at most
+    0.00004\,A on the real post-images, \cref{sec:whitecheck}.)
 \end{evidence}
+
+\textbf{Step 5 is closed for the proof of concept} (Bill, 2026-11-13).
+The blend changes a pad's mean $A$ hundreds of times less than replicate
+strips differ, so steps~8 and~9 may start on the plain pre-image divisor;
+the blend by zone stays the decided form, and its production code waits
+until after step~8.
 
 \subsection{What the measurements say (proof-of-concept study, 2026-11-11)}
 \label{sec:whitecheck}
 
 \textbf{Question.}  How large are the camera noise and the texture the
 model white lacks, what is the best $\lambda$, and does the blend matter?
-Script: \file{desktop/padanalysis/white\_study.py}, steps 2a--2c; tables in
-\file{white\_out/}.
+Script: \file{desktop/padanalysis/white\_study.py}, steps 2a--2e; tables in
+\file{white\_out/}, each with an ``about'' block defining its fields and
+units.
 
 \textbf{Camera noise.}  Measured three ways: three photos taken a minute
 apart without moving the cartridge (\texttt{test\_image/IMG0005}--0007,
@@ -835,6 +843,66 @@ the white changes steeply.
 in photo\_red.R on each repeat a minute apart, after a little over 2\,s of
 each LED per capture; the C1034 pad did not change (0.001\,A or less)
 \open{op:drift}.
+
+\textbf{Does the paper's grain show through the dye?}  (Step 2d-i, first
+pass, \cref{fig:step2d_grain}.)  The \emph{grain} is the paper's fine
+pattern of lighter and darker pixels: a photo minus a smoothed copy of
+itself.  Two photos are \emph{matched} by lining them up, multiplying
+their grain pixel by pixel and averaging over the interior; camera noise
+averages away, and each match is taken at the small extra shift (up to
+1\,px) that makes it largest.  The share of the grain a post-image shows
+is
+\[
+  c = \frac{\text{match of the pre-images with this post-image}}
+           {\text{match of the pre-images with each other}},
+\]
+so $c = 1$ means the post-image shows all of it.  In holder~F, $c$ is near
+1 (0.74--1.10) in the first post-image and falls to about 0.5 by the
+fifth, \emph{with or without dye}: the undyed C1039 (1\,\textmu g/L) does
+it too.  Over the same repeats the photos get blurrier: the steepest drop
+at the pad's sides falls by 10--15\,\%.  So the dye does not obviously hide
+the grain; a post-image blurrier than its pre-image does.  Heavy dye adds a
+fine pattern of its own (0.017--0.029\,A in green.B, shared by all
+post-images of one strip), which is signal.  Use the first post-image: it
+is the sharpest and has had the least light.  The cause of the blur is not
+yet known (deferred, Bill, 2026-11-13) \open{op:texture}.
+
+\textbf{The closing number.}  (Step 2e, 2026-11-13.)  For the first
+post-image of every F, G and H sample, each pad's mean $A$ was found twice:
+with the pre-image pixel itself as the white ($\lambda = 1$), and with the
+blend by zone ($\lambda$ from the table above; corners $\lambda = 1$).
+\begin{center}
+\begin{tabular}{@{}lcc@{}}
+\toprule
+ & photo\_red.R & green.B \\
+\midrule
+blend minus plain, largest over the pads & 0.00003\,A & 0.00004\,A \\
+spread of the four 100\,\textmu g/L strips (standard deviation) &
+  0.011\,A & 0.026\,A \\
+their pad means & 0.019--0.045\,A & 0.286--0.343\,A \\
+\bottomrule
+\end{tabular}
+\end{center}
+The blend is polish: it moves a pad's mean several hundred times less than
+replicate strips differ.  Dye at the edge \open{op:dyededge} no longer
+matters for the white either: in the outer bands $\lambda$ is 0.85--1.0, so
+the model white hardly enters there.
+
+\begin{figure}[h!]
+    \centering
+    \includegraphics[scale=0.57]{step2d_grain_carryover}
+    \caption{
+    How much of the paper's grain each photo shows, holders F, G and H,
+    by repeat (1 = first photo of the series).  Top two panels: the share
+    $c$ in each post-image, photo\_red.R and green.B (1 = all of it).
+    Bottom panel: how sharp each photo is, photo\_red.R: the steepest step
+    at the pad's sides as a fraction of the pad's level (lower means
+    blurrier); post-images solid, pre-images dashed.  Plain-language notes:
+    \texttt{figs/step2d\_grain\_carryover.txt}.  Made by
+    \texttt{white\_study.show\_carryover}.
+    }
+\label{fig:step2d_grain}
+\end{figure}
 
 \begin{figure}[h!]
     \centering
@@ -1264,7 +1332,8 @@ L: lining up places the same paper on the same pixel & \sno{sec:lineup}
   & checked: $\pm0.1$\,px across, ends 0.1--0.3\,px (deferred); band~1
   false change 0.005--0.008\,A, left to step~5 \\
 N: noise random and unrelated & \sno{sec:white} & in use; noise
-  measured 0.004--0.012\,A, formula for $\lambda$ matches trial \\
+  measured 0.004--0.012\,A, formula for $\lambda$ matches trial; the
+  blend moves pad means $\le 0.00004$\,A (polish) \\
 C: two dyes plus brightness, adding in absorbance & \sno{sec:color},
   \sno{sec:mass} & $\mM$ needs only the endpoints, no PCA; PCA is a check:
   two directions hold 99.8\,\%, a real third exists \open{op:third} \\
@@ -1286,11 +1355,19 @@ C: two dyes plus brightness, adding in absorbance & \sno{sec:color},
     the dark level is mirror light.
   \item \label{op:dyededge} \textbf{Does dye change the edge factor?}
     Compare the band profiles $\ell_k$ in the pre-image and the post-image
-    of pads whose edges were and were not reached by dye.
+    of pads whose edges were and were not reached by dye.  Not needed for
+    the white: with $\lambda$ 0.85--1.0 in the outer bands the model white
+    hardly enters there (step~2e, 2026-11-13).  Still open for
+    Assumption~F at the edge: C1047 (400\,\textmu g/L) has dye at every
+    edge, with a lighter rim 2--5\,px wide (most at the top); it is the
+    strip to test it on.
   \item \label{op:texture} \textbf{How much texture carries into the
     dye?}  $\sigma_{\delta'}$ and $\sigma_\eta$ are measured and $\lambda$
-    is set for clean paper (\cref{sec:whitecheck}).  Still to measure: the
-    carry-over slope by distance from the dot's edge (step~2d).
+    is set for clean paper (\cref{sec:whitecheck}).  First pass (step
+    2d-i, 2026-11-11): the share of grain falls from about 1 in the first
+    post-image to about 0.5 by the fifth, with or without dye, as the
+    photos get blurrier.  Use the first post-image.  The cause of the blur
+    (focus, warming, the pad swelling) is deferred (Bill, 2026-11-13).
   \item \label{op:third} \textbf{Is the third color direction worth
     keeping?}  Fit the arsenic calibration with two and with three amounts
     and compare with the replicate scatter.
@@ -1325,7 +1402,13 @@ C: two dyes plus brightness, adding in absorbance & \sno{sec:color},
     come later (Bill, 2026-11-11): a timed series of captures, with the
     LEDs off between them, to tell a stain still developing from one
     darkened by the light.  It bears on Bill's concern about how much
-    light the pad receives.
+    light the pad receives.  First look (\file{drift\_study.py},
+    2026-11-11): dyed pads darken mostly in the red channels, 0.002--0.017\,A
+    per capture, violet and blue barely; undyed pads not at all.  On C1046,
+    extra photo\_red light of 10, 20, 60 and 180\,s changed photo\_red.R
+    by about the same 0.013--0.017\,A per capture, so photo\_red light is
+    not the main cause.  Deferred (Bill, 2026-11-13); reopen with a
+    dark-wait control strip and single-LED doses.
 \end{enumerate}
 
 %======================================================================
@@ -1415,6 +1498,12 @@ Camera noise 0.004--0.012\,A; texture the model lacks; best $\lambda$
   & \file{desktop/padanalysis/white\_study.py} (2026-11-11),
   \file{white\_out/noise\_still.json}, \file{texture\_pre.json},
   \file{lambda\_reseated.json} \\
+Grain share $c$, sharpness by repeat; the closing number
+  & \file{white\_study.py} steps 2d-i (2026-11-11) and 2e (2026-11-13),
+  \file{white\_out/carryover.json}, \file{sharpness.json},
+  \file{closing.json} \\
+Stain change per capture; C1046 light test & \file{desktop/padanalysis/drift\_study.py},
+  \file{drift\_out/repeats.json}, \file{light\_test.json} \\
 Texture 0.006--0.008\,A (earlier) & \file{How\_best\_to\_help\_Bill.md}
   \S6; \file{docs/shading\_study\_2026-09-29.md} \\
 Edge up to 30\,\%, 2--3 px; $L = 0.10$\,mm & \file{docs/pad\_light\_physics\_2026-10-25.md}

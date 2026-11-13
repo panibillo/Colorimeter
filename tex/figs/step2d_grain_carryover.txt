@@ -24,7 +24,8 @@ HORIZONTAL AXIS (all panels): "repeat number"
 The order in which the strip's photos were taken: 1 is the first photo of
 the series, 5 the fifth.  The post-images of one strip were taken about a
 minute apart, starting 2-22 s after reagent 2 ended (samples table).
-The order is assumed from the file names (rep2, rep3, ...).
+The order follows the file names (rep2, rep3, ...); the time stamps in
+the files confirm it (drift_study.photo_time, 2026-11-13).
 
 TOP TWO PANELS, VERTICAL AXIS: "c (1 = all of it)"
 The share of the paper's grain that shows in that post-image:

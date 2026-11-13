@@ -68,6 +68,11 @@ for each sample.
   - The band profiles with dye at the edge, against without (open item 3).
 - **Ends with** one number: how much the blend and bands change each pad's
   mean A, compared with the replicate spread.
+- **Status (Bill, 2026-11-13): closed.** The blend changes a pad's mean A by
+  at most 0.00004 A; the four 100 µg/L strips differ by 0.011 A (photo_red.R)
+  and 0.026 A (green.B) standard deviation. The white is polish. 2d-ii (dyed
+  edges) is not needed for the white. Blur, exposures and stain drift are
+  deferred. See `tex/chain_unified.tex`, step 5.
 
 ## 3. Yellow and brown (step 8)
 
