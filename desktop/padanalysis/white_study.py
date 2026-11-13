@@ -28,9 +28,12 @@ THE PARTS (each is a guarded block in `run()`)
     2c  `texture_still`, `texture_pre`, `lambda_still`, `lambda_reseated`:
         texture the model white lacks, sigma_eta, and the best blend weight
         lambda, by the formula and by direct trial.       (done 2026-11-11)
-    2d  post-images: edge bands with dye at the edge against without (open
-        item 3), and how much texture carries into the dye (open item 4).
-                                                             (not yet)
+    2d-i  `carryover`, `sharpness`: how much of the paper's grain shows
+        in each post-image (open item 4).                  (first pass
+        2026-11-11)
+    2d-ii post-images: edge bands with dye at the edge against without
+        (open item 3).  Waits for Bill's new trials (the dark interior
+        area reaches near the edge at high concentration).
 
 WORDS AND SYMBOLS
     W       the pre-image's reflectance R at a pixel: signal divided by the
@@ -119,6 +122,16 @@ RESULTS, 2026-11-11 (tables in white_out/; A = absorbance, bigger = darker)
         capture's consistency as it is taken.
         Plain-language notes on the figure axes: tex/figs/
         step2c_lambda_<cell>.txt.
+    2d-i, grain through the dye (first pass).  c = share of the paper's
+        grain showing in a post-image, from matches at the best shift so
+        that noise and lining-up misfit do not bias it.  In holder F
+        (C1038-C1041) c falls from 0.8-1.1 at the first post-image to about
+        0.5 at the fifth, WITH OR WITHOUT DYE, while the post-images' sides
+        get 10-15 % less steep: later photos are blurrier.  Heavy dye adds
+        its own fine pattern (0.017-0.029 A in green.B, shared by all
+        post-images of a strip), which is signal.  C1045 (holder G1) stays
+        sharp but its c is also 0.5-0.9.  C1042 and C1044 have two files
+        each, too few.  Figure tex/figs/step2d_grain_carryover.png (+ .txt).
 
 Run with:  timeout -k 10 1800 ../../.venv/bin/python3 -u white_study.py
 """
@@ -1093,23 +1106,43 @@ def noise_reseated(sample="C1040", files=None, cells=(("photo_red", "R"),
     return out
 
 
-def _onto(fa, fb, arr, shape):
+def _onto(fa, fb, arr, shape, sec=a1.PRE):
     """
-    Carry an array in pre-image fa's pixels onto pre-image fb's pixels,
-    lining up by the two guided pad fits.  Each fb pixel takes the
-    weighted average of the four nearest fa pixels (bilinear, as
-    `a1.pre_to_post` does).  A result that leans on a NaN pixel is NaN.
+    Carry an array in fa's pixels onto fb's pixels, lining up by the two
+    guided pad fits of the same section (two pre-images, or two
+    post-images).  See `_carry`.
 
     Args:
         fa, fb: scalar str, repeat file names.
         arr: array in fa's pixels.
         shape: (rows, cols) of fb's arrays.
+        sec: a1.PRE (default) for pre-images, '' for post-images.
+
+    Returns:
+        array of `shape`.
+    """
+    return _carry(fa, sec, fb, sec, arr, shape)
+
+
+def _carry(src, sec_src, dst, sec_dst, arr, shape):
+    """
+    Carry an array from one photo's pixels onto another's, lining up by the
+    two guided pad fits (any two photos: pre onto pre, pre onto post, ...).
+    Each destination pixel takes the weighted average of the four nearest
+    source pixels (bilinear, as `a1.pre_to_post` does).  A result that
+    leans on a NaN pixel is NaN.
+
+    Args:
+        src, sec_src: the source photo (file name, a1.PRE or '').
+        dst, sec_dst: the destination photo.
+        arr: array in the source photo's pixels.
+        shape: (rows, cols) of the destination photo's arrays.
 
     Returns:
         array of `shape`.
     """
     from scipy import ndimage as ndi
-    pa, pb = a1.pad_of(fa, a1.PRE), a1.pad_of(fb, a1.PRE)
+    pa, pb = a1.pad_of(src, sec_src), a1.pad_of(dst, sec_dst)
     rows, cols = shape
     yy, xx = np.mgrid[0:rows, 0:cols].astype(float)
     u = xx - (pb.aL + pb.m * (yy - pb.yc))
@@ -1443,6 +1476,240 @@ def summarize_2c(tex_still, tex_pre, lam_still, lam_res):
         curves([r for r in lam_res if r["holder"] == hold], "reseated " + hold)
 
 
+# ── 2d-i: does the paper's grain show through the dye? ─────────────────
+#
+# In plain words.  The paper has a fine grain: a fixed pixel-to-pixel
+# pattern of slightly lighter and darker spots, about 0.007 A in size.  It
+# is found by subtracting a smoothed copy of the photo from the photo
+# (`align_study.texture`, smoothing 2 px), which removes the slow changes
+# (shading, the dye's broad darkening) and keeps the fine pattern.
+#
+# The chain divides the post-image by the pre-image so that this grain
+# cancels.  That works only if the grain shows in the post-image at full
+# strength.  If the dye hides part of it, the share that shows, c, is
+# below 1, and the best blend weight inside the dye is about c times the
+# clean-paper weight.
+#
+# How strongly two photos "match" is measured by how they rise and fall
+# together from pixel to pixel: the average of (photo 1's grain) times
+# (photo 2's grain) over the pad's interior (the covariance).  Camera noise
+# differs between photos, so it does not add to the match; it averages
+# away.  This is why the test does not need the noise to be taken out.
+#
+#   full-strength match  D: one pre-image against another pre-image of the
+#       same strip (taken after reseating).  Both carry the whole grain.
+#   post-image match     N: the post-image against a pre-image of the
+#       strip.
+#   share of grain showing through the dye:  c = N / D.
+#
+# In both, one photo stays in its own pixels and the other is moved onto
+# them (bilinear, by the pad fits), so the slight blur and any lining-up
+# misfit affect N and D alike.  On a strip with no dye, c should be 1.
+
+def _cov(x, y, region):
+    """Average of (x - mean x) * (y - mean y) over `region` where both are
+    finite; and the pixel count."""
+    m = region & np.isfinite(x) & np.isfinite(y)
+    if m.sum() < 50:
+        return float("nan"), int(m.sum())
+    a, b = x[m] - x[m].mean(), y[m] - y[m].mean()
+    return float(np.mean(a * b)), int(m.sum())
+
+
+def _coords(src, sec_src, dst, sec_dst, shape):
+    """For every destination pixel, the source position the two pad fits
+    say holds the same paper: (rows, cols) arrays (as in `_carry`)."""
+    pa, pb = a1.pad_of(src, sec_src), a1.pad_of(dst, sec_dst)
+    rows, cols = shape
+    yy, xx = np.mgrid[0:rows, 0:cols].astype(float)
+    u = xx - (pb.aL + pb.m * (yy - pb.yc))
+    ya = pa.top + (yy - pb.top)
+    xa = pa.aL + u + pa.m * (ya - pa.yc)
+    return ya, xa
+
+
+#: How far (layer px) the best-match search may move the source grain.
+MATCH_SEARCH_PX = 1.0
+
+
+def best_match(Tdst, region, Tsrc, src, sec_src, dst, sec_dst):
+    """
+    The match (covariance) between the destination photo's grain and the
+    source photo's grain moved onto it, at the extra shift that makes the
+    match largest.
+
+    Why: a lining-up misfit of a few tenths of a pixel already weakens
+    the match of a 1-2 px grain.  Searching for the best shift, the same way
+    for every pair, keeps the misfit from looking like hidden grain.
+
+    How: the pad fits give each destination pixel's source position
+    (`_coords`).  For a trial extra shift q = (dy, dx) the source grain is
+    read there (bilinear; off its pad it counts as 0) and matched.  Coarse
+    grid of q within +-MATCH_SEARCH_PX in 0.25 px steps, then refined by
+    the Nelder-Mead search (a shrinking triangle of trial points).
+
+    Returns:
+        (match, n, dy, dx): the largest match, the pixel count, and the
+        shift (layer px) that gave it.
+    """
+    from scipy import ndimage as ndi, optimize
+    ya, xa = _coords(src, sec_src, dst, sec_dst, Tdst.shape)
+    m = region & np.isfinite(Tdst)
+    yy, xx = np.nonzero(m)
+    a = Tdst[yy, xx] - Tdst[yy, xx].mean()
+    P = np.nan_to_num(Tsrc)
+    ys, xs = ya[yy, xx], xa[yy, xx]
+
+    def match(q):
+        b = ndi.map_coordinates(P, [ys + q[0], xs + q[1]], order=1,
+                                mode="nearest")
+        return float(np.mean(a * (b - b.mean())))
+
+    g = np.arange(-MATCH_SEARCH_PX, MATCH_SEARCH_PX + 1e-9, 0.25)
+    start = max(((dy, dx) for dy in g for dx in g), key=match)
+    r = optimize.minimize(lambda q: -match(q), start, method="Nelder-Mead",
+                          options=dict(xatol=0.01, fatol=1e-14))
+    return -float(r.fun), int(m.sum()), float(r.x[0]), float(r.x[1])
+
+
+def carryover(cells=(("photo_red", "R"), ("green", "B")), sets=SETS):
+    """
+    Step 2d-i: the share c of the paper's grain that shows in each
+    post-image, and the grain shared by the post-images alone.
+
+    How, for each sample and channel (files whose pre- and post-image are
+    both usable in that channel), every match taken at its best shift
+    (`best_match`):
+        1. Grain of every pre-image P_j and post-image Q_f
+           (`align_study.texture`).
+        2. D (pre with pre): mean over pairs j != k of the match of P_j
+           moved onto P_k.  The full strength of the paper's grain.
+        3. For each post-image Q_f: N_f (post with pre) = mean over all
+           pre-images j of the match of P_j moved onto Q_f; c_f = N_f / D.
+        4. E (post with post): mean over pairs of post-images of their
+           match.  This holds the grain they share: the paper's grain as
+           it shows after the test, plus the dye's own fine pattern.
+        5. dye_A: interior median of A = -log10(R_post / R_pre), the file's
+           own pre-image moved onto the post-image.
+
+    Returns:
+        list of dicts: holder, sample, file, rep (0 = first in the
+        series), cell, D, N, c, E, dye_A, shift (mean |dy|, |dx| of the
+        post-with-pre matches, layer px).
+    """
+    import align_study as al
+    out = []
+    for cell in cells:
+        name = a1.cell_name(cell)
+        for hold, samples in sets.items():
+            for smp, files in samples.items():
+                ok = []
+                for f in files:
+                    try:
+                        al.texture(f, cell, a1.PRE)
+                        al.texture(f, cell, "")
+                        ok.append(f)
+                    except Exception:
+                        pass
+                if len(ok) < 2:
+                    continue
+                P = {f: al.texture(f, cell, a1.PRE) for f in ok}
+                Q = {f: al.texture(f, cell, "") for f in ok}
+                zpre = {f: zones_of(f, a1.PRE)[0]["interior"] for f in ok}
+                zpost = {f: zones_of(f, "")[0]["interior"] for f in ok}
+                D = float(np.mean([best_match(P[k][0], zpre[k], P[j][0], j,
+                                              a1.PRE, k, a1.PRE)[0]
+                                   for k in ok for j in ok if j != k]))
+                E = float(np.mean([best_match(Q[k][0], zpost[k], Q[j][0], j,
+                                              "", k, "")[0]
+                                   for k in ok for j in ok if j != k]))
+                for f in ok:
+                    m = [best_match(Q[f][0], zpost[f], P[j][0], j, a1.PRE,
+                                    f, "") for j in ok]
+                    Nf = float(np.mean([x[0] for x in m]))
+                    Rp = _carry(f, a1.PRE, f, "", P[f][2], Q[f][2].shape)
+                    with np.errstate(invalid="ignore", divide="ignore"):
+                        A = -np.log10(Q[f][2] / Rp)
+                    out.append(dict(holder=hold, sample=smp, file=f,
+                                    rep=files.index(f), cell=name, D=D,
+                                    N=Nf, c=Nf / D, E=E,
+                                    dye_A=float(np.nanmedian(A[zpost[f]])),
+                                    shift=(float(np.mean([abs(x[2]) for x in m])),
+                                           float(np.mean([abs(x[3]) for x in m])))))
+                a1.close_all()
+                al._tex_cache.clear()
+                print(f"  {name} {smp}: done")
+    return out
+
+
+def summarize_carryover(rows):
+    """
+    Print step 2d-i's numbers, per channel and sample: the paper's grain at
+    full strength as a spread (sqrt D, A); the post-images' shared grain
+    as a spread (sqrt E, A); the dye level; and c for each post-image in
+    capture order.
+    """
+    print("SHARE OF THE PAPER'S GRAIN SHOWING IN EACH POST-IMAGE, c = N / D"
+          " (1 = all of it), in capture order")
+    for cell in sorted({r["cell"] for r in rows}):
+        for smp in sorted({r["sample"] for r in rows if r["cell"] == cell}):
+            rs = sorted([r for r in rows if r["cell"] == cell
+                         and r["sample"] == smp], key=lambda r: r["rep"])
+            print(f"  {cell:12s} {smp} ({rs[0]['holder']})"
+                  f"  paper grain {np.sqrt(rs[0]['D']):.4f} A"
+                  f"  post shared {np.sqrt(max(rs[0]['E'], 0)):.4f} A"
+                  f"  dye A {np.median([r['dye_A'] for r in rs]):+.3f}"
+                  f"  c: " + " ".join(f"{r['c']:.2f}" for r in rs)
+                  + f"  (median {np.median([r['c'] for r in rs]):.2f})")
+
+
+def sharpness(cell=("photo_red", "R"), sets=SETS):
+    """
+    Step 2d-i check: how sharp each photo is, in capture order.
+
+    Two plain measures, for every pre-image and post-image:
+        grain_sd    the spread of the grain over the interior, A (grain
+                    plus camera noise).  A blurrier photo shows less grain.
+        steepness   how steeply the brightness drops at the pad's left and
+                    right sides: the largest step between neighboring
+                    pixels within 3 px of each fitted side, as a fraction
+                    of the interior level, median over the interior rows.
+                    A blurrier photo has softer, less steep sides.  The
+                    sides are used because they are the same physical edge
+                    in every photo.
+
+    Returns:
+        list of dicts: holder, sample, file, rep, sec ('pre' or 'post'),
+        grain_sd, steepness.
+    """
+    import align_study as al
+    out = []
+    for hold, samples in sets.items():
+        for smp, files in samples.items():
+            for sec, lab in ((a1.PRE, "pre"), ("", "post")):
+                for n, f in enumerate(files):
+                    try:
+                        T, _, R = al.texture(f, cell, sec)
+                    except Exception:
+                        continue
+                    z = zones_of(f, sec)[0]["interior"]
+                    lvl = np.nanmedian(R[z])
+                    g = np.abs(np.diff(R, axis=1)) / lvl
+                    p = a1.pad_of(f, sec)
+                    vals = []
+                    for r in np.unique(np.nonzero(z)[0]):
+                        for x0 in (p.aL, p.aL + p.width):
+                            x = int(round(x0 + p.m * (r - p.yc)))
+                            vals.append(np.nanmax(g[r, x - 3:x + 3]))
+                    out.append(dict(holder=hold, sample=smp, file=f, rep=n,
+                                    sec=lab,
+                                    grain_sd=float(np.nanstd(T[z])),
+                                    steepness=float(np.nanmedian(vals))))
+            a1.close_all()
+            al._tex_cache.clear()
+    return out
+
+
 # ── figures ────────────────────────────────────────────────────────────
 
 def _band_axes(title):
@@ -1605,6 +1872,75 @@ def show_lambda(lam_still, lam_res, tex_still, cell="photo_red.R",
     return fig
 
 
+#: Fixed color and marker per sample (categorical, in a fixed order).
+SAMPLE_STYLE = {"C1038": ("#2a78d6", "o"), "C1039": ("#eb6834", "s"),
+                "C1040": ("#1baf7a", "^"), "C1041": ("#eda100", "D"),
+                "C1042": ("#e87ba4", "v"), "C1044": ("#008300", "P"),
+                "C1045": ("#6250d6", "X")}
+
+
+def show_carryover(carry, sharp, savefigs=True):
+    """
+    Figure for step 2d-i: how much of the paper's grain shows in each
+    post-image, and how sharp the photos are, against the repeat number.
+
+    Three stacked panels sharing the repeat axis (1 = first photo of the
+    series): c in photo_red.R, c in green.B (1 = the whole grain shows;
+    gray line), and the side steepness in photo_red.R (post-images solid,
+    pre-images dashed and lighter).  One line per sample; its label gives
+    the dye level in that channel.
+    """
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    fig, axs = plt.subplots(3, 1, figsize=(7.4, 9.6), sharex=True)
+    for ax, cell in zip(axs[:2], ("photo_red.R", "green.B")):
+        for smp, (col, mk) in SAMPLE_STYLE.items():
+            rs = sorted([r for r in carry if r["cell"] == cell
+                         and r["sample"] == smp], key=lambda r: r["rep"])
+            if not rs:
+                continue
+            dye = np.median([r["dye_A"] for r in rs])
+            ax.plot([r["rep"] + 1 for r in rs], [r["c"] for r in rs], "-",
+                    marker=mk, color=col, lw=1.6, ms=6, mec="white", mew=0.8,
+                    label=f"{smp} ({rs[0]['holder']}), dye {dye:.2f} A")
+        ax.axhline(1, color="#a3a29b", lw=1)
+        ax.set_title(f"{cell}: share c of the paper's grain showing in the "
+                     f"post-image", loc="left", fontsize=9)
+        ax.set_ylabel("c (1 = all of it)")
+        ax.legend(fontsize=7, frameon=False, ncol=2, loc="upper right")
+    ax = axs[2]
+    for smp, (col, mk) in SAMPLE_STYLE.items():
+        for sec, ls, a in (("post", "-", 1.0), ("pre", "--", 0.45)):
+            rs = sorted([r for r in sharp if r["sample"] == smp
+                         and r["sec"] == sec], key=lambda r: r["rep"])
+            if rs:
+                ax.plot([r["rep"] + 1 for r in rs],
+                        [r["steepness"] for r in rs], ls, marker=mk,
+                        color=col, alpha=a, lw=1.4, ms=5, mec="white",
+                        mew=0.8, label=smp if sec == "post" else None)
+    ax.set_title("photo_red.R: steepness of the pad's sides (post-images "
+                 "solid, pre-images dashed); lower = blurrier",
+                 loc="left", fontsize=9)
+    ax.set_ylabel("steepest step / pad level")
+    ax.legend(fontsize=7, frameon=False, ncol=4, loc="lower left")
+    ax.set_xlabel("repeat number, in capture order (1 = first photo of the "
+                  "series)")
+    ax.set_xticks(range(1, 6))
+    for ax in axs:
+        ax.grid(axis="y", color="#ecebe6", lw=0.8)
+        for sp in ("top", "right"):
+            ax.spines[sp].set_visible(False)
+    fig.suptitle("C1038-C1045 repeat files, pre- and post-images: does the "
+                 "paper's grain show through the dye?\nc = (post-image "
+                 "matched with pre-images) / (pre-image matched with "
+                 "pre-image), at the best shift", fontsize=10, x=0.02,
+                 ha="left")
+    fig.tight_layout(rect=(0, 0, 1, 0.95))
+    _savefig(fig, "step2d_grain_carryover", savefigs)
+    return fig
+
+
 def _savefig(fig, name, savefigs):
     if savefigs:
         FIGS.mkdir(parents=True, exist_ok=True)
@@ -1613,15 +1949,75 @@ def _savefig(fig, name, savefigs):
         print(f"fig saved to {out}")
 
 
+#: Definitions and units written into an output file as its "about" block,
+#: so the file can be read on its own (How_best_to_help_Bill.md 3.2).
+ABOUT = {
+    "carryover": {
+        "what": "Step 2d-i: the share of the paper's grain (its fine "
+                "pattern of lighter and darker pixels, the photo minus a "
+                "smoothed copy, in A) that shows in each post-image.  "
+                "white_study.carryover().",
+        "A": "absorbance, -log10 of a reflectance ratio; bigger means "
+             "darker.  0.001 A is about 0.23 % of the light.",
+        "match": "the mean, over the pad's interior, of one photo's grain "
+                 "times another's, pixel by pixel, after lining them up, "
+                 "taken at the extra shift (up to 1 px) that makes it "
+                 "largest.  Units A^2.  Large when the two show the same "
+                 "pattern; near 0 when unrelated.",
+        "holder, sample, file": "cassette holder, sample number, repeat "
+                                "file name",
+        "rep": "repeat number in the series, 0 = first (capture order, "
+               "confirmed from the photo time stamps)",
+        "cell": "channel: LED name . Bayer layer",
+        "D": "pre with pre: mean match between different pre-images of "
+             "the strip.  The full strength of the paper's grain.  A^2.",
+        "N": "post with pre: mean match of the pre-images with this "
+             "post-image.  A^2.",
+        "c": "N / D, no units.  1 = the post-image shows the whole grain.",
+        "E": "post with post: mean match between different post-images of "
+             "the strip (paper grain as it shows after the test, plus the "
+             "dye's own fine pattern).  A^2; sqrt(E) is in A.",
+        "dye_A": "how dark the dye is in this channel: interior median of "
+                 "-log10(R_post / R_pre), the file's own pre-image lined up "
+                 "onto the post-image.  A.",
+        "shift": "mean |row shift|, |column shift| of the best matches, "
+                 "layer pixels (one layer pixel = 2 sensor pixels).",
+    },
+    "sharpness": {
+        "what": "Step 2d-i check: how sharp each photo is, by repeat.  "
+                "white_study.sharpness(), channel photo_red.R.",
+        "holder, sample, file, rep": "as in carryover.json",
+        "sec": "'pre' pre-image, 'post' post-image",
+        "grain_sd": "standard deviation of the grain over the pad's "
+                    "interior, A (grain plus camera noise).  A blurrier "
+                    "photo shows less grain.",
+        "steepness": "how steeply brightness drops at the pad's left and "
+                     "right sides: the largest step between neighboring "
+                     "layer pixels within 3 px of each fitted side, as a "
+                     "fraction of the interior brightness, median over the "
+                     "interior rows.  No units; a blurrier photo has a "
+                     "smaller value.",
+    },
+}
+
+
 def _save(name, obj):
-    """Write `obj` to white_out/<name>.json."""
+    """
+    Write `obj` to white_out/<name>.json.  If ABOUT has an entry for
+    `name`, the file holds {"about": definitions and units, "rows": obj}.
+    """
     OUT.mkdir(exist_ok=True)
+    if name in ABOUT:
+        obj = {"about": ABOUT[name], "rows": obj}
     (OUT / f"{name}.json").write_text(json.dumps(obj, indent=1))
 
 
 def _load(name):
-    """Read white_out/<name>.json back."""
-    return json.loads((OUT / f"{name}.json").read_text())
+    """Read white_out/<name>.json back (the rows, without the about block)."""
+    obj = json.loads((OUT / f"{name}.json").read_text())
+    if isinstance(obj, dict) and set(obj) == {"about", "rows"}:
+        return obj["rows"]
+    return obj
 
 
 def run():
@@ -1636,6 +2032,10 @@ def run():
                test_models     -> white_out/edge_test.json (about 25 min)
         2b     noise_still, noise_rungs, noise_reseated
                                -> white_out/noise_*.json
+        2d-i   carryover, sharpness -> white_out/carryover.json,
+                                  sharpness.json
+               summarize_carryover -> terminal
+               show_carryover  -> tex/figs/step2d_grain_carryover.png
         2c     texture_still, texture_pre, lambda_still, lambda_reseated
                                -> white_out/texture_*.json, lambda_*.json
                summarize_2c    -> terminal
@@ -1659,17 +2059,23 @@ def run():
         _save("noise_still", noise_still())
         _save("noise_rungs", noise_rungs())
         _save("noise_reseated", noise_reseated())
-    if 1:   # 2c: texture and the blend weight (needs noise_still.json)
+    if 0:   # 2c: texture and the blend weight (needs noise_still.json)
         _save("texture_still", texture_still())
         _save("texture_pre", texture_pre())
         _save("lambda_still", lambda_still())
         _save("lambda_reseated", lambda_reseated())
-    if 1:   # 2c: numbers and figures
+    if 0:   # 2c: numbers and figures
         ts, tp = _load("texture_still"), _load("texture_pre")
         ls, lr = _load("lambda_still"), _load("lambda_reseated")
         summarize_2c(ts, tp, ls, lr)
         show_lambda(ls, lr, ts, "photo_red.R")
         show_lambda(ls, lr, ts, "green.B")
+    if 1:   # 2d-i: grain through the dye, and sharpness by repeat
+        _save("carryover", carryover())
+        _save("sharpness", sharpness())
+    if 1:   # 2d-i: numbers and figure
+        summarize_carryover(_load("carryover"))
+        show_carryover(_load("carryover"), _load("sharpness"))
 
 
 if __name__ == "__main__":

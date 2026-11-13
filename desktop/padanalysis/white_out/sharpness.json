@@ -1,0 +1,515 @@
+{
+ "about": {
+  "what": "Step 2d-i check: how sharp each photo is, by repeat.  white_study.sharpness(), channel photo_red.R.",
+  "holder, sample, file, rep": "as in carryover.json",
+  "sec": "'pre' pre-image, 'post' post-image",
+  "grain_sd": "standard deviation of the grain over the pad's interior, A (grain plus camera noise).  A blurrier photo shows less grain.",
+  "steepness": "how steeply brightness drops at the pad's left and right sides: the largest step between neighboring layer pixels within 3 px of each fitted side, as a fraction of the interior brightness, median over the interior rows.  No units; a blurrier photo has a smaller value."
+ },
+ "rows": [
+  {
+   "holder": "F",
+   "sample": "C1038",
+   "file": "C1038",
+   "rep": 0,
+   "sec": "pre",
+   "grain_sd": 0.0075954208716256175,
+   "steepness": 0.4033564614133128
+  },
+  {
+   "holder": "F",
+   "sample": "C1038",
+   "file": "C1038rep2",
+   "rep": 1,
+   "sec": "pre",
+   "grain_sd": 0.007260608233117882,
+   "steepness": 0.40407055563668887
+  },
+  {
+   "holder": "F",
+   "sample": "C1038",
+   "file": "C1038rep3",
+   "rep": 2,
+   "sec": "pre",
+   "grain_sd": 0.006980337088084793,
+   "steepness": 0.40023279465688555
+  },
+  {
+   "holder": "F",
+   "sample": "C1038",
+   "file": "C1038rep4",
+   "rep": 3,
+   "sec": "pre",
+   "grain_sd": 0.006963599208696205,
+   "steepness": 0.36873039438351685
+  },
+  {
+   "holder": "F",
+   "sample": "C1038",
+   "file": "C1038rep5",
+   "rep": 4,
+   "sec": "pre",
+   "grain_sd": 0.006364163892181332,
+   "steepness": 0.3773387597158629
+  },
+  {
+   "holder": "F",
+   "sample": "C1038",
+   "file": "C1038",
+   "rep": 0,
+   "sec": "post",
+   "grain_sd": 0.007135727668721703,
+   "steepness": 0.37359779956476
+  },
+  {
+   "holder": "F",
+   "sample": "C1038",
+   "file": "C1038rep2",
+   "rep": 1,
+   "sec": "post",
+   "grain_sd": 0.0063693555723429605,
+   "steepness": 0.36336004665482546
+  },
+  {
+   "holder": "F",
+   "sample": "C1038",
+   "file": "C1038rep3",
+   "rep": 2,
+   "sec": "post",
+   "grain_sd": 0.0059648551098402435,
+   "steepness": 0.3550524417064685
+  },
+  {
+   "holder": "F",
+   "sample": "C1038",
+   "file": "C1038rep4",
+   "rep": 3,
+   "sec": "post",
+   "grain_sd": 0.00576781700733507,
+   "steepness": 0.35077637928833616
+  },
+  {
+   "holder": "F",
+   "sample": "C1038",
+   "file": "C1038rep5",
+   "rep": 4,
+   "sec": "post",
+   "grain_sd": 0.005706643009595671,
+   "steepness": 0.3385807059086652
+  },
+  {
+   "holder": "F",
+   "sample": "C1039",
+   "file": "C1039",
+   "rep": 0,
+   "sec": "pre",
+   "grain_sd": 0.009437988082519812,
+   "steepness": 0.331560047854936
+  },
+  {
+   "holder": "F",
+   "sample": "C1039",
+   "file": "C1039rep2",
+   "rep": 1,
+   "sec": "pre",
+   "grain_sd": 0.009069509822918242,
+   "steepness": 0.33860653244016536
+  },
+  {
+   "holder": "F",
+   "sample": "C1039",
+   "file": "C1039rep3",
+   "rep": 2,
+   "sec": "pre",
+   "grain_sd": 0.008500670230064122,
+   "steepness": 0.3220286170551217
+  },
+  {
+   "holder": "F",
+   "sample": "C1039",
+   "file": "C1039rep4",
+   "rep": 3,
+   "sec": "pre",
+   "grain_sd": 0.008368779613509082,
+   "steepness": 0.31035120431287505
+  },
+  {
+   "holder": "F",
+   "sample": "C1039",
+   "file": "C1039rep5",
+   "rep": 4,
+   "sec": "pre",
+   "grain_sd": 0.007672287044894699,
+   "steepness": 0.30794472063354605
+  },
+  {
+   "holder": "F",
+   "sample": "C1039",
+   "file": "C1039",
+   "rep": 0,
+   "sec": "post",
+   "grain_sd": 0.008007824538241927,
+   "steepness": 0.3086782496242476
+  },
+  {
+   "holder": "F",
+   "sample": "C1039",
+   "file": "C1039rep2",
+   "rep": 1,
+   "sec": "post",
+   "grain_sd": 0.007057252604080196,
+   "steepness": 0.3061039397975084
+  },
+  {
+   "holder": "F",
+   "sample": "C1039",
+   "file": "C1039rep3",
+   "rep": 2,
+   "sec": "post",
+   "grain_sd": 0.005968618606320493,
+   "steepness": 0.2771316515603972
+  },
+  {
+   "holder": "F",
+   "sample": "C1039",
+   "file": "C1039rep4",
+   "rep": 3,
+   "sec": "post",
+   "grain_sd": 0.006049051003377232,
+   "steepness": 0.2813725984569083
+  },
+  {
+   "holder": "F",
+   "sample": "C1039",
+   "file": "C1039rep5",
+   "rep": 4,
+   "sec": "post",
+   "grain_sd": 0.005509601686067993,
+   "steepness": 0.2810452500182608
+  },
+  {
+   "holder": "F",
+   "sample": "C1040",
+   "file": "C1040",
+   "rep": 0,
+   "sec": "pre",
+   "grain_sd": 0.0066003851936576536,
+   "steepness": 0.3173676689414657
+  },
+  {
+   "holder": "F",
+   "sample": "C1040",
+   "file": "C1040rep2",
+   "rep": 1,
+   "sec": "pre",
+   "grain_sd": 0.006784907384861344,
+   "steepness": 0.32136226212438646
+  },
+  {
+   "holder": "F",
+   "sample": "C1040",
+   "file": "C1040rep3",
+   "rep": 2,
+   "sec": "pre",
+   "grain_sd": 0.006776856614069241,
+   "steepness": 0.32040611800990265
+  },
+  {
+   "holder": "F",
+   "sample": "C1040",
+   "file": "C1040rep4",
+   "rep": 3,
+   "sec": "pre",
+   "grain_sd": 0.006854714384406859,
+   "steepness": 0.3263993304840743
+  },
+  {
+   "holder": "F",
+   "sample": "C1040",
+   "file": "C1040rep5",
+   "rep": 4,
+   "sec": "pre",
+   "grain_sd": 0.006523964001602804,
+   "steepness": 0.3107376097378275
+  },
+  {
+   "holder": "F",
+   "sample": "C1040",
+   "file": "C1040",
+   "rep": 0,
+   "sec": "post",
+   "grain_sd": 0.007220959060213775,
+   "steepness": 0.32793476499499385
+  },
+  {
+   "holder": "F",
+   "sample": "C1040",
+   "file": "C1040rep2",
+   "rep": 1,
+   "sec": "post",
+   "grain_sd": 0.005842469708578714,
+   "steepness": 0.30902324134069337
+  },
+  {
+   "holder": "F",
+   "sample": "C1040",
+   "file": "C1040rep3",
+   "rep": 2,
+   "sec": "post",
+   "grain_sd": 0.005679651016530317,
+   "steepness": 0.30877435026794164
+  },
+  {
+   "holder": "F",
+   "sample": "C1040",
+   "file": "C1040rep4",
+   "rep": 3,
+   "sec": "post",
+   "grain_sd": 0.0052423883378601745,
+   "steepness": 0.2983802643007535
+  },
+  {
+   "holder": "F",
+   "sample": "C1040",
+   "file": "C1040rep5",
+   "rep": 4,
+   "sec": "post",
+   "grain_sd": 0.005341780859265605,
+   "steepness": 0.2943488407272583
+  },
+  {
+   "holder": "F",
+   "sample": "C1041",
+   "file": "C1041",
+   "rep": 0,
+   "sec": "pre",
+   "grain_sd": 0.0071313034737735,
+   "steepness": 0.37980267532417544
+  },
+  {
+   "holder": "F",
+   "sample": "C1041",
+   "file": "C1041rep2",
+   "rep": 1,
+   "sec": "pre",
+   "grain_sd": 0.006725313380907857,
+   "steepness": 0.39957751804886565
+  },
+  {
+   "holder": "F",
+   "sample": "C1041",
+   "file": "C1041rep3",
+   "rep": 2,
+   "sec": "pre",
+   "grain_sd": 0.007227261370217061,
+   "steepness": 0.3996057946103935
+  },
+  {
+   "holder": "F",
+   "sample": "C1041",
+   "file": "C1041rep4",
+   "rep": 3,
+   "sec": "pre",
+   "grain_sd": 0.00682285957729355,
+   "steepness": 0.3849024541444332
+  },
+  {
+   "holder": "F",
+   "sample": "C1041",
+   "file": "C1041rep5",
+   "rep": 4,
+   "sec": "pre",
+   "grain_sd": 0.006871673476580137,
+   "steepness": 0.4068990220208535
+  },
+  {
+   "holder": "F",
+   "sample": "C1041",
+   "file": "C1041",
+   "rep": 0,
+   "sec": "post",
+   "grain_sd": 0.009166475659179394,
+   "steepness": 0.4510938364875688
+  },
+  {
+   "holder": "F",
+   "sample": "C1041",
+   "file": "C1041rep2",
+   "rep": 1,
+   "sec": "post",
+   "grain_sd": 0.008001772768329132,
+   "steepness": 0.407787951120551
+  },
+  {
+   "holder": "F",
+   "sample": "C1041",
+   "file": "C1041rep3",
+   "rep": 2,
+   "sec": "post",
+   "grain_sd": 0.0075026767561641805,
+   "steepness": 0.41039846681319175
+  },
+  {
+   "holder": "F",
+   "sample": "C1041",
+   "file": "C1041rep4",
+   "rep": 3,
+   "sec": "post",
+   "grain_sd": 0.007611562453672132,
+   "steepness": 0.38613475334648845
+  },
+  {
+   "holder": "F",
+   "sample": "C1041",
+   "file": "C1041rep5",
+   "rep": 4,
+   "sec": "post",
+   "grain_sd": 0.008008257100387843,
+   "steepness": 0.38107934091536844
+  },
+  {
+   "holder": "F",
+   "sample": "C1042",
+   "file": "C1042-b",
+   "rep": 0,
+   "sec": "pre",
+   "grain_sd": 0.006266677490564066,
+   "steepness": 0.3637373387928109
+  },
+  {
+   "holder": "F",
+   "sample": "C1042",
+   "file": "C1042rep2-a",
+   "rep": 1,
+   "sec": "pre",
+   "grain_sd": 0.006653159075585943,
+   "steepness": 0.36145511809814007
+  },
+  {
+   "holder": "F",
+   "sample": "C1042",
+   "file": "C1042-b",
+   "rep": 0,
+   "sec": "post",
+   "grain_sd": 0.007537926242512076,
+   "steepness": 0.38639017177442947
+  },
+  {
+   "holder": "F",
+   "sample": "C1042",
+   "file": "C1042rep2-a",
+   "rep": 1,
+   "sec": "post",
+   "grain_sd": 0.00682254027899906,
+   "steepness": 0.3673332104106837
+  },
+  {
+   "holder": "H",
+   "sample": "C1044",
+   "file": "C1044-e",
+   "rep": 0,
+   "sec": "pre",
+   "grain_sd": 0.0074898530744036095,
+   "steepness": 0.38911557220116744
+  },
+  {
+   "holder": "H",
+   "sample": "C1044",
+   "file": "C1044rep2-b",
+   "rep": 1,
+   "sec": "pre",
+   "grain_sd": 0.00780740192783984,
+   "steepness": 0.3824314755602833
+  },
+  {
+   "holder": "H",
+   "sample": "C1044",
+   "file": "C1044-e",
+   "rep": 0,
+   "sec": "post",
+   "grain_sd": 0.009487276893794801,
+   "steepness": 0.38595631600897295
+  },
+  {
+   "holder": "H",
+   "sample": "C1044",
+   "file": "C1044rep2-b",
+   "rep": 1,
+   "sec": "post",
+   "grain_sd": 0.00799176934486726,
+   "steepness": 0.39860710630381063
+  },
+  {
+   "holder": "G",
+   "sample": "C1045",
+   "file": "C1045-a",
+   "rep": 0,
+   "sec": "pre",
+   "grain_sd": 0.007785110884747534,
+   "steepness": 0.3632584072599312
+  },
+  {
+   "holder": "G",
+   "sample": "C1045",
+   "file": "C1045rep2-a",
+   "rep": 1,
+   "sec": "pre",
+   "grain_sd": 0.0075928315147804305,
+   "steepness": 0.3640917469566807
+  },
+  {
+   "holder": "G",
+   "sample": "C1045",
+   "file": "C1045rep3",
+   "rep": 2,
+   "sec": "pre",
+   "grain_sd": 0.007659440906197419,
+   "steepness": 0.36237287696688003
+  },
+  {
+   "holder": "G",
+   "sample": "C1045",
+   "file": "C1045rep4",
+   "rep": 3,
+   "sec": "pre",
+   "grain_sd": 0.006906902726508036,
+   "steepness": 0.34355958356527905
+  },
+  {
+   "holder": "G",
+   "sample": "C1045",
+   "file": "C1045-a",
+   "rep": 0,
+   "sec": "post",
+   "grain_sd": 0.01040349412613046,
+   "steepness": 0.40835934503891713
+  },
+  {
+   "holder": "G",
+   "sample": "C1045",
+   "file": "C1045rep2-a",
+   "rep": 1,
+   "sec": "post",
+   "grain_sd": 0.010117375055904963,
+   "steepness": 0.42559271493593487
+  },
+  {
+   "holder": "G",
+   "sample": "C1045",
+   "file": "C1045rep3",
+   "rep": 2,
+   "sec": "post",
+   "grain_sd": 0.01030797482230884,
+   "steepness": 0.42894430383764615
+  },
+  {
+   "holder": "G",
+   "sample": "C1045",
+   "file": "C1045rep4",
+   "rep": 3,
+   "sec": "post",
+   "grain_sd": 0.01065176124886336,
+   "steepness": 0.4262278820428304
+  }
+ ]
+}
