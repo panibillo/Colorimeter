@@ -34,6 +34,10 @@ THE PARTS (each is a guarded block in `run()`)
     2d-ii post-images: edge bands with dye at the edge against without
         (open item 3).  Waits for Bill's new trials (the dark interior
         area reaches near the edge at high concentration).
+    2e  `closing`: the step's closing number (work plan, step 2): how
+        much the blend and bands change each pad's mean A against the
+        plain pre-image divisor, compared with the spread between
+        replicate strips (the 100 ug/L pads).            (2026-11-13)
 
 WORDS AND SYMBOLS
     W       the pre-image's reflectance R at a pixel: signal divided by the
@@ -1712,6 +1716,157 @@ def sharpness(cell=("photo_red", "R"), sets=SETS):
 
 # ── figures ────────────────────────────────────────────────────────────
 
+# ── 2e: the closing number ──────────────────────────────────────────
+
+#: Zones in which the blend weight is chosen (2c), and the corners, which
+#: always use the pixel alone.
+LAM_ZONES = ZONES
+
+
+def lam_by_zone(lam_res):
+    """
+    The blend weight lambda for each channel and zone, from the 2c trials
+    on reseated pre-images: the lambda whose spread, averaged over all
+    the reseated pairs, is smallest (Bill's decision: lambda by zone).
+
+    Args:
+        lam_res: rows of white_out/lambda_reseated.json.
+
+    Returns:
+        dict cell name -> dict zone -> lambda.
+    """
+    out = {}
+    for cell in sorted({r["cell"] for r in lam_res}):
+        rows = [r for r in lam_res if r["cell"] == cell]
+        out[cell] = {zn: LAMBDAS[int(np.nanargmin(np.nanmean(
+            [r[zn] for r in rows], axis=0)))] for zn in LAM_ZONES}
+    return out
+
+
+def closing(lams, sets=SETS, conc=None):
+    """
+    Step 2e: does the white matter?  For the first post-image of every
+    sample and each channel in `lams`, the pad's mean A two ways:
+
+        plain   A = -log10(R_post / W), W the pre-image pixel itself
+                (lambda = 1 everywhere): the divisor used so far.
+        blend   A = -log10(R_post / W-hat), W-hat = lam * W + (1 - lam) *
+                W-tilde by zone (lambda from `lam_by_zone`), W-tilde the
+                pre-image's model white (`model_white`: plane times its own
+                band means); corners use W alone.
+
+    W and W-tilde are made on the pre-image's pixels and lined up onto the
+    post-image's (`_carry`).  The mean is over every pad pixel where both
+    are finite: interior, bands and corners.  Also the mean over the
+    interior alone, and the number of pixels.
+
+    Args:
+        lams: from `lam_by_zone`.
+        sets: holder -> sample -> files (only the first file is used).
+        conc: optional dict sample -> arsenic, ug/L, for the table.
+
+    Returns:
+        list of dicts: holder, sample, file, cell, conc, A_plain, A_blend,
+        diff (blend - plain), A_interior, n.
+    """
+    out = []
+    for hold, samples in sets.items():
+        for smp, files in samples.items():
+            f = files[0]
+            for name, lam in lams.items():
+                cell = tuple(name.split("."))
+                try:
+                    Rpost = np.array(sr.frame(f, cell, "")["R"], float)
+                    Rpre = np.array(sr.frame(f, cell, a1.PRE)["R"], float)
+                except Exception as e:
+                    print(f"  {f} {name}: skipped ({e})")
+                    continue
+                Wt, _ = model_white(Rpre, f, a1.PRE)
+                W = _carry(f, a1.PRE, f, "", Rpre, Rpost.shape)
+                Wt = _carry(f, a1.PRE, f, "", Wt, Rpost.shape)
+                zone, _, _ = zones_of(f, "")
+                What = W.copy()
+                for zn in LAM_ZONES:
+                    z = zone[zn] & np.isfinite(Wt)
+                    What[z] = lam[zn] * W[z] + (1 - lam[zn]) * Wt[z]
+                pad = np.zeros(Rpost.shape, bool)
+                for zn in LAM_ZONES + ("corner",):
+                    pad |= zone[zn]
+                with np.errstate(invalid="ignore", divide="ignore"):
+                    Ap = -np.log10(Rpost / W)
+                    Ab = -np.log10(Rpost / What)
+                ok = pad & np.isfinite(Ap) & np.isfinite(Ab)
+                inner = zone["interior"] & ok
+                out.append(dict(holder=hold, sample=smp, file=f, cell=name,
+                                conc=(conc or {}).get(smp),
+                                A_plain=float(np.mean(Ap[ok])),
+                                A_blend=float(np.mean(Ab[ok])),
+                                diff=float(np.mean(Ab[ok]) - np.mean(Ap[ok])),
+                                A_interior=float(np.mean(Ap[inner])),
+                                n=int(ok.sum())))
+            a1.close_all()
+    return out
+
+
+def concentrations(samples):
+    """
+    Arsenic per sample, ug/L: treatments.standard_conc, else
+    samples.manual_read; None if neither is recorded.
+    """
+    import sqlite3
+    conn = sqlite3.connect(f"file:{a1.DB}?mode=ro", uri=True)
+    out = {}
+    for smp in samples:
+        r = conn.execute(
+            "select t.standard_conc, s.manual_read from samples s left join "
+            "treatments t on t.samp_no = s.samp_no where s.samp_no = ?",
+            (smp,)).fetchone()
+        v = None if r is None else (r[0] if r[0] is not None else r[1])
+        try:                         # manual_read is stored as text
+            out[smp] = None if v in (None, "") else float(v)
+        except ValueError:
+            out[smp] = None
+    conn.close()
+    return out
+
+
+def summarize_closing(rows, lams):
+    """
+    Print the closing table: each pad's mean A, plain and blended, the
+    difference, and the spread between replicate strips at the same
+    arsenic, for comparison.
+    """
+    print("Step 2e: pad mean A, plain pre-image divisor against the blend")
+    for name, lam in lams.items():
+        print(f"  {name}: lambda by zone " + ", ".join(
+            f"{zn} {v:.2f}" for zn, v in lam.items()) + ", corner 1.00")
+    print(f"  {'sample':8s}{'holder':>7s}{'ug/L':>7s}{'channel':>13s}"
+          f"{'A plain':>10s}{'A blend':>10s}{'blend-plain':>13s}{'pixels':>8s}")
+    for r in rows:
+        c = "-" if r["conc"] is None else f"{r['conc']:g}"
+        print(f"  {r['sample']:8s}{r['holder']:>7s}{c:>7s}{r['cell']:>13s}"
+              f"{r['A_plain']:>10.4f}{r['A_blend']:>10.4f}"
+              f"{r['diff']:>+13.5f}{r['n']:>8d}")
+    print("\n  Size of the effect, against the spread between replicate "
+          "strips:")
+    for name in lams:
+        d = np.array([abs(r["diff"]) for r in rows if r["cell"] == name])
+        print(f"  {name}: |blend - plain| largest {d.max():.5f} A, "
+              f"median {np.median(d):.5f} A over {len(d)} pads")
+        by = {}
+        for r in rows:
+            if r["cell"] == name and r["conc"] is not None:
+                by.setdefault(r["conc"], []).append(r)
+        for c, rs in sorted(by.items()):
+            if len(rs) < 2:
+                continue
+            a = np.array([r["A_plain"] for r in rs])
+            print(f"    {c:g} ug/L, {len(rs)} strips ("
+                  + ", ".join(r["sample"] for r in rs)
+                  + f"): pad mean A {a.min():.4f} to {a.max():.4f}, "
+                  f"standard deviation {a.std(ddof=1):.4f} A")
+
+
 def _band_axes(title):
     """Four stacked panels, one per edge, sharing the band axis."""
     import matplotlib
@@ -1983,6 +2138,24 @@ ABOUT = {
         "shift": "mean |row shift|, |column shift| of the best matches, "
                  "layer pixels (one layer pixel = 2 sensor pixels).",
     },
+    "closing": {
+        "what": "Step 2e: each pad's mean A with the plain pre-image "
+                "divisor and with the blend, first post-image of each "
+                "sample.  white_study.closing().",
+        "A": "absorbance, -log10(R_post / white); bigger means darker.",
+        "A_plain": "mean over the pad (interior, bands, corners) with the "
+                   "white = the pre-image pixel itself, lined up onto the "
+                   "post-image.  A.",
+        "A_blend": "the same with the white = lambda * pre-image pixel + "
+                   "(1 - lambda) * model white, lambda by zone "
+                   "(lam_by_zone, from 2c); corners lambda = 1.  A.",
+        "diff": "A_blend - A_plain, A",
+        "A_interior": "A_plain over the interior only (8 or more layer px "
+                      "from every edge), A",
+        "conc": "arsenic, ug/L: treatments.standard_conc, else "
+                "samples.manual_read; null if not recorded",
+        "n": "number of pad pixels in the mean",
+    },
     "sharpness": {
         "what": "Step 2d-i check: how sharp each photo is, by repeat.  "
                 "white_study.sharpness(), channel photo_red.R.",
@@ -2040,6 +2213,8 @@ def run():
                                -> white_out/texture_*.json, lambda_*.json
                summarize_2c    -> terminal
                show_lambda     -> tex/figs/step2c_lambda_<cell>.png
+        2e     closing         -> white_out/closing.json
+               summarize_closing -> terminal
     """
     if 0:   # 2a: band profiles from the pre-images (reads the photos)
         _save("bands", band_profiles())
@@ -2070,12 +2245,19 @@ def run():
         summarize_2c(ts, tp, ls, lr)
         show_lambda(ls, lr, ts, "photo_red.R")
         show_lambda(ls, lr, ts, "green.B")
-    if 1:   # 2d-i: grain through the dye, and sharpness by repeat
+    if 0:   # 2d-i: grain through the dye, and sharpness by repeat
         _save("carryover", carryover())
         _save("sharpness", sharpness())
-    if 1:   # 2d-i: numbers and figure
+    if 0:   # 2d-i: numbers and figure
         summarize_carryover(_load("carryover"))
         show_carryover(_load("carryover"), _load("sharpness"))
+    if 1:   # 2e: the closing number (needs lambda_reseated.json)
+        lams = lam_by_zone(_load("lambda_reseated"))
+        samples = [s for v in SETS.values() for s in v]
+        _save("closing", closing(lams, conc=concentrations(samples)))
+    if 1:   # 2e: numbers
+        summarize_closing(_load("closing"),
+                          lam_by_zone(_load("lambda_reseated")))
 
 
 if __name__ == "__main__":
