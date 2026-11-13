@@ -146,6 +146,7 @@ from pathlib import Path
 import numpy as np
 
 import analysis_1 as a1
+import chain_samples
 import shading_review as sr
 from align_study import SETS, HOLDER_STYLE
 
@@ -1810,24 +1811,10 @@ def closing(lams, sets=SETS, conc=None):
 
 def concentrations(samples):
     """
-    Arsenic per sample, ug/L: treatments.standard_conc, else
-    samples.manual_read; None if neither is recorded.
+    Arsenic per sample, ug/L (`chain_samples.concentration`): treatments.
+    standard_conc, else samples.manual_read; None if neither is recorded.
     """
-    import sqlite3
-    conn = sqlite3.connect(f"file:{a1.DB}?mode=ro", uri=True)
-    out = {}
-    for smp in samples:
-        r = conn.execute(
-            "select t.standard_conc, s.manual_read from samples s left join "
-            "treatments t on t.samp_no = s.samp_no where s.samp_no = ?",
-            (smp,)).fetchone()
-        v = None if r is None else (r[0] if r[0] is not None else r[1])
-        try:                         # manual_read is stored as text
-            out[smp] = None if v in (None, "") else float(v)
-        except ValueError:
-            out[smp] = None
-    conn.close()
-    return out
+    return {smp: chain_samples.concentration(smp) for smp in samples}
 
 
 def summarize_closing(rows, lams):

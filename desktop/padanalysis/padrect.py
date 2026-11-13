@@ -256,7 +256,8 @@ class PadRect:
     """The pad as a rotated rectangle, plus the edge fits behind it."""
 
     def __init__(self, c: Capture, rung: str = "e1", fixed_size: bool = False,
-                 label: str = None, layout: str = None, prior=None):
+                 label: str = None, layout: str = None, prior=None,
+                 cells=None):
         """
         Args:
             c: The capture to segment.
@@ -273,9 +274,12 @@ class PadRect:
                 file's pre-image.  When given, the sides are found by
                 `_find_sides_guided` within SIDE_SEARCH_PX of the prior's
                 sides, instead of by the layout's own side finder.
+            cells: Optional (led, layer) channels to locate the pad on,
+                instead of the average of every stored channel
+                (`fields.composite`; chain_samples.PAD_FIT_CELLS).
         """
         self.capture = c
-        self.comp, self.cells = composite(c, label or rung)
+        self.comp, self.cells = composite(c, label or rung, cells)
         self.tot = self.comp                 # name kept for older reports
         h, w = self.comp.shape
 
@@ -320,6 +324,29 @@ class PadRect:
         yy, xx = np.mgrid[0:h, 0:w]
         self.u = xx - (self.aL + self.m * (yy - self.yc))
         self.v = yy.astype(np.float64)
+
+    def shift_edges(self, dL=0.0, dR=0.0, dT=0.0, dB=0.0):
+        """
+        Move the fitted edges, in place, and rebuild the frame.
+
+        Used for a pad located on photo_red alone
+        (chain_samples.PAD_FIT_CELLS): the shifts are the offset of the
+        usual all-channel fit from a photo_red-only fit, measured on a
+        pre-image, so the pad lands where the all-channel fit would put
+        it (color_study.fit_basis_offsets, 2026-11-13).
+
+        Args:
+            dL, dR: Shifts of the left and right sides, layer px (+ right).
+            dT, dB: Shifts of the top and bottom, layer px (+ down).
+        """
+        self.aL += dL
+        self.aR += dR
+        self.width = self.aR - self.aL
+        self.top += dT
+        self.bot += dB
+        self.height = self.bot - self.top
+        self.edge_shift = (dL, dR, dT, dB)
+        self._set_frame()
 
     def guide_sides(self, prior=None):
         """

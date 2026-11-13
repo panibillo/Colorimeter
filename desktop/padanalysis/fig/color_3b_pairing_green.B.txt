@@ -1,0 +1,29 @@
+color_3b_pairing_green.B.png -- what the panels show
+(made by color_study.py, show_pairing, 2026-11-13)
+
+Two rows.  Top: strip C1047 (400 ug/L), its post-image divided by its own
+pre-image, as the chain normally does.  Bottom: C1048, the same strip after
+a second exposure to arsine (800 ug/L in all), divided by C1047's
+pre-image (Bill: the C1048 file's own pre-image shows the already-stained
+strip, so it is not a clean reference).
+
+Columns, left to right:
+  1. the pre-image, R: the photo divided by the gray chips at each pixel.
+     Lighter = more light back.  Gray scale shared by the first three
+     columns.
+  2. the post-image, R, same scale.
+  3. the pre-image moved onto the post-image's pixels ("lined up"), using
+     the two fitted pads (white_study._carry).  If lining up is right, its
+     pad sits exactly on the post-image's pad.
+  4. A = -log10(post / lined-up pre), absorbance: bigger means darker,
+     more dye.  Color scale shared by both rows.
+
+Red outline: the fitted pad of the photo in that panel.  C1048's pad is
+located on photo_red only (chain_samples.PAD_FIT_CELLS), because the dye
+is so dark that the usual average of all channels loses its edges; C1047's
+on all channels.  Axes: layer pixels (one layer pixel = 2 sensor pixels).
+
+What to look for: in column 4, a thin light or dark line along one side
+and not the opposite one means the two pads were not lined up exactly.
+The strip has a lighter rim, about 2-5 px wide, all round (less dye near
+the edges, most at the top); it shows in both rows and is real.

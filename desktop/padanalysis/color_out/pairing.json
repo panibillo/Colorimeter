@@ -1,0 +1,80 @@
+{
+ "about": {
+  "what": "Step 3b: C1048's post-image divided by C1047's pre-image, against C1047's own pairing.  color_study.pairing_check().",
+  "A": "absorbance, -log10(R_post / R_pre lined up onto the post-image); bigger means darker.",
+  "A_interior": "median A over the interior (8 or more layer px from every edge), A",
+  "edge_minus_interior": "per edge (L left, R right, T top, B bottom): median A over bands 0-1 of that edge (within 2 layer px) minus A_interior, A",
+  "width_post, width_pre": "fitted pad widths, layer pixels",
+  "fit_cells_post, fit_cells_pre": "number of channels the pad was located on"
+ },
+ "rows": [
+  {
+   "pairing": "C1047 own pre-image",
+   "post": "C1047",
+   "pre": "C1047",
+   "cell": "photo_red.R",
+   "A_interior": 0.07081010114210765,
+   "edge_minus_interior": {
+    "L": -0.018983967185428385,
+    "R": -0.07358838346314298,
+    "T": -0.048914486638629365,
+    "B": -0.002023356592093642
+   },
+   "width_post": 41.948777221210264,
+   "width_pre": 41.94073003004759,
+   "fit_cells_post": 28,
+   "fit_cells_pre": 12
+  },
+  {
+   "pairing": "C1047 own pre-image",
+   "post": "C1047",
+   "pre": "C1047",
+   "cell": "green.B",
+   "A_interior": 0.3858167415171048,
+   "edge_minus_interior": {
+    "L": -0.12693016673718654,
+    "R": -0.08358664649118347,
+    "T": -0.35708968020019505,
+    "B": -0.16538812899173064
+   },
+   "width_post": 41.948777221210264,
+   "width_pre": 41.94073003004759,
+   "fit_cells_post": 28,
+   "fit_cells_pre": 12
+  },
+  {
+   "pairing": "C1048 with C1047's pre-image",
+   "post": "C1048",
+   "pre": "C1047",
+   "cell": "photo_red.R",
+   "A_interior": 0.1430983669169533,
+   "edge_minus_interior": {
+    "L": -0.05772810269949934,
+    "R": -0.12119713340821518,
+    "T": -0.09218921436949395,
+    "B": -0.038700013807649425
+   },
+   "width_post": 42.23654995651765,
+   "width_pre": 41.94073003004759,
+   "fit_cells_post": 1,
+   "fit_cells_pre": 12
+  },
+  {
+   "pairing": "C1048 with C1047's pre-image",
+   "post": "C1048",
+   "pre": "C1047",
+   "cell": "green.B",
+   "A_interior": 0.49946665387210853,
+   "edge_minus_interior": {
+    "L": -0.16239501631830355,
+    "R": -0.13156157221440096,
+    "T": -0.46342273125842015,
+    "B": -0.1964310501431235
+   },
+   "width_post": 42.23654995651765,
+   "width_pre": 41.94073003004759,
+   "fit_cells_post": 1,
+   "fit_cells_pre": 12
+  }
+ ]
+}

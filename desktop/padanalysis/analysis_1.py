@@ -80,6 +80,7 @@ from scipy import ndimage
 SP = Path(__file__).resolve().parent
 sys.path.insert(0, str(SP))
 
+import chain_samples                                        # noqa: E402
 import padphot                                              # noqa: E402
 from probe import (BAYER, PRE, RAW_MAX, Capture,             # noqa: E402
                    archive_path, sections)
@@ -308,6 +309,7 @@ def close_all() -> None:
         c.close()
     _captures.clear()
     _pads.clear()
+    _cells_pads.clear()
 
 
 def layer_shape(samp_no, sec="") -> tuple:
@@ -498,6 +500,10 @@ def pad_of(samp_no, sec="") -> PadRect:
         of the same file's pre-image sides.  If the file has no pre-image,
         it is fitted like a pre-image instead.
     Every other sample is fitted exactly as before 2026-11-11.
+    A sample listed in chain_samples.PAD_FIT_CELLS is located on those
+    channels only, in both sections (2026-11-13: C1048, on photo_red), and
+    then moved by `fit_offset` (plus chain_samples.POST_OFFSET_STEADY for
+    a post-image), so it sits where an all-channel fit would.
 
     Args:
         samp_no: Capture name.
@@ -516,7 +522,15 @@ def pad_of(samp_no, sec="") -> PadRect:
         return _pads[key]
     c = open_sample(samp_no, sec)
     layout = CAP_LAYOUT.get(_cap_style(samp_no))
-    if layout is None:                       # not a cassette: as before
+    cells = chain_samples.pad_fit_cells(samp_no)   # None: every channel
+    if cells is not None:                    # located on a few channels
+        pad = _cells_fit(samp_no, sec, cells)
+        if chain_samples.APPLY_FIT_OFFSET:
+            off = np.array(fit_offset(samp_no))
+            if sec == "":
+                off = off + np.array(chain_samples.POST_OFFSET_STEADY)
+            pad.shift_edges(*off)
+    elif layout is None:                     # not a cassette: as before
         pad = PadRect(c, rung=PAD_RUNG)
     elif sec == "" and PRE in sections(samp_no):
         pad = PadRect(c, rung=PAD_RUNG, layout=layout,
@@ -526,6 +540,57 @@ def pad_of(samp_no, sec="") -> PadRect:
         pad.guide_sides()
     _pads[key] = pad
     return pad
+
+
+_cells_pads = {}    # (samp_no, section, cells) -> PadRect, before any shift
+
+
+def _cells_fit(samp_no, sec, cells):
+    """
+    A pad fit located on `cells` only, before any offset, cached: the
+    pre-image guided by itself, the post-image guided by this same kind
+    of fit of its own file's pre-image (as `pad_of` does with all
+    channels).  A new object each call is not needed: callers that shift
+    it get a copy.
+    """
+    import copy
+    key = (samp_no, sec, tuple(cells))
+    if key not in _cells_pads:
+        c = open_sample(samp_no, sec)
+        layout = CAP_LAYOUT.get(_cap_style(samp_no))
+        if sec == "" and PRE in sections(samp_no):
+            pad = PadRect(c, rung=PAD_RUNG, layout=layout,
+                          prior=_cells_fit(samp_no, PRE, cells), cells=cells)
+        else:
+            pad = PadRect(c, rung=PAD_RUNG, layout=layout, cells=cells)
+            if layout is not None:
+                pad.guide_sides()
+        _cells_pads[key] = pad
+    return copy.copy(_cells_pads[key])
+
+
+def fit_offset(samp_no):
+    """
+    The offset of the usual all-channel pad fit from a fit located on the
+    sample's PAD_FIT_CELLS, measured on the pre-image its post-image is
+    paired with (chain_samples.pre_source; C1048 -> C1047), as [left,
+    right, top, bottom] in layer px, left and right at the pad's middle
+    row.  If that pre-image is itself located on a few channels, the mean
+    over the F/G/H files, chain_samples.DEFAULT_PRE_OFFSET, is used.
+    (color_study.fit_basis_offsets; Bill, 2026-11-13.)
+    """
+    cells = chain_samples.pad_fit_cells(samp_no)
+    ref = chain_samples.pre_source(samp_no)
+    if chain_samples.pad_fit_cells(ref) is not None:
+        return chain_samples.DEFAULT_PRE_OFFSET
+    full = pad_of(ref, PRE)
+    part = _cells_fit(ref, PRE, cells)
+    y = 0.5 * (full.top + full.bot)
+
+    def sides(p):
+        return np.array([p.aL + p.m * (y - p.yc), p.aR + p.m * (y - p.yc),
+                         p.top, p.bot])
+    return tuple(float(v) for v in sides(full) - sides(part))
 
 
 def _cap_style(samp_no):

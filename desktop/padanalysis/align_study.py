@@ -130,6 +130,7 @@ from scipy import ndimage as ndi
 from scipy import optimize
 
 import analysis_1 as a1
+from chain_samples import sets_with_own_pre
 import padrect
 import shading_review as sr
 
@@ -138,27 +139,11 @@ OUT = HERE / "align_out"                       # the .json tables of results
 FIGS = HERE.parents[1] / "tex" / "figs"        # figures for the write-up
 CHECK_FIGS = HERE / "fig"                      # check figures, not for the write-up
 
-#: The repeat files used, by holder and sample.  Only files that hold both a
-#: pre-image and a post-image are listed; files with only a pre-image
-#: (runs that were restarted) are left out.  Holders: F (C1038-C1042),
-#: H1 (C1044, C1046), G1 (C1045).  Older holders are not used.
-#: C1047 (400 ug/L, 2026-11-11): stained evenly out to every edge.  C1048
-#: (strip C1047 re-exposed, 800 ug/L in total) is not listed: its pad fits
-#: are poor (tilted 5-8 deg), and it is to use C1047's pre-image (Bill).
-#: C1046 (100 ug/L, 2026-11-11) has one post-image in its file; its later
-#: photos, after long photo_red light, are test_image/IMG0011-0014 (no
-#: pre-image in them), so they are not listed here.
-SETS = {
-    "F": {"C1038": ["C1038", "C1038rep2", "C1038rep3", "C1038rep4", "C1038rep5"],
-          "C1039": ["C1039", "C1039rep2", "C1039rep3", "C1039rep4", "C1039rep5"],
-          "C1040": ["C1040", "C1040rep2", "C1040rep3", "C1040rep4", "C1040rep5"],
-          "C1041": ["C1041", "C1041rep2", "C1041rep3", "C1041rep4", "C1041rep5"],
-          "C1042": ["C1042-b", "C1042rep2-a"]},
-    "H": {"C1044": ["C1044-e", "C1044rep2-b"],
-          "C1046": ["C1046"],
-          "C1047": ["C1047"]},
-    "G": {"C1045": ["C1045-a", "C1045rep2-a", "C1045rep3", "C1045rep4"]},
-}
+#: The files used, by holder and sample: chain_samples.SETS, the one
+#: sample list, without the samples that take another sample's pre-image
+#: (C1048), which these studies do not handle.  Edit chain_samples.py,
+#: not this line, when the samples change.
+SETS = sets_with_own_pre()
 #: Channel the texture is matched in.  The yellow dye barely absorbs red
 #: light, so the paper texture survives in the post-image.
 CELL = ("photo_red", "R")
