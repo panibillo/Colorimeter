@@ -1,9 +1,8 @@
-# Operating the instrument with pad finding (detour stage 1)
+# Operating the instrument with pad finding and strip exposures (detour stages 1 and 3)
 
 Written 2026-11-14, for the code in the commit "Detour stage 1: find the pad
-on the Pi". This file grows with the detour. Stage 3, where exposures are set
-from the strip itself, will add its own section (see "Coming next" at the
-end). The plan is in the "Detour" section of
+on the Pi". This file grows with the detour; section 6 covers stage 3, where
+exposures are set from the strip itself. The plan is in the "Detour" section of
 `docs/work_plan_chain_poc_2026-11-09.md`.
 
 ## 1. What changed, in one paragraph
@@ -13,8 +12,8 @@ instrument now finds the pad by itself. It flashes the photo_red LED for one
 10 ms frame, with no warm-up, and fits the pad's edges after the LED is off.
 The measurement sweep's fit is guided by the pre-image's fit, read back from
 the same archive. The fit goes into the archive, in a `pad` group in each
-section. **The operator's steps don't change.** Nothing yet uses the fit to
-set exposures: that is stage 3.
+section. **The operator's steps don't change.** Stage 3 then sets each
+LED's exposure_us on the fitted pad and gray chips (section 6).
 
 What the operator will notice:
 
@@ -124,16 +123,37 @@ sudo systemctl start colorimeter
 `2` is the number of pre + post pairs. Afterwards, `pgrep -af padfind_pi_check`
 should list nothing (apart from the pgrep line itself).
 
-## 6. Coming next (stage 3 and 4, not built yet)
+## 6. Exposures set from the strip (stage 3, built 2026-11-14)
 
-- Each LED's exposure_us will be set from the strip: the top exposure (Tus)
-  re-aimed until nothing on the pad or gray chips is clipped, and a bottom
-  exposure (Bus) added when a pixel falls below the noise floor.
-- The trial yellow/brown strips are to be captured with
-  `protocol.multiple_exposure_count` = 3: three frames per LED at the same
-  exposure_us, kept for the deferred multiple-exposure study. The
-  instructions for setting it will go here when the config row exists.
+The pre-image and the measurement now choose each LED's exposure_us from the
+strip itself (`src/exposure_rule.py`). **The operator's steps still don't
+change.** What the operator will notice:
+
+- Each LED stays on about 3 s (2 s warm-up, then three frames). Green and
+  photo_red can take a fourth, longer frame (Bus) when part of the pad is
+  dim; that adds about 0.5–0.8 s.
+- The status line shows each try, e.g. "try 1: 16070 µs, accept (B max
+  892, 0 clipped)", and "Tus frame 2 (16070 µs)", "Bus 43685 µs ...".
+- **"STILL CLIPPED after 4 tries — LED marked failed"** means that LED's
+  frames are saved but clip on the pad or chips. Carry on and note it; it
+  should not happen on a normal strip.
+
+Checking a run afterwards: `dev/exposure_rule_pi_check.py` prints the same
+report for a test strip (see its docstring; run it like section 5's script,
+with the service stopped). For a sample's archive, each LED's
+`led_metadata` holds a `strip_rule` record with every try and every stored
+frame's statistics.
+
+Settings are still constants at the top of `src/exposure_rule.py` (three
+frames at Tus, one Bus frame) until stage 4 moves them into the config table.
+To go back to the old rule, set `CaptureConfig.exposure_rule` to "group" in
+code; there is no menu setting for it yet.
+
+## 7. Coming next (stage 4, not built yet)
+
+- The settings above become config rows: `protocol.multiple_exposure_count`
+  (3 for the trial yellow/brown strips, 1 in routine use) and
+  `protocol.bus_exposure_count` (1 while studying the exposure rule, N for
+  the yellow/brown trials), and the limits and re-aim factors.
 - Each frame will be logged in a new `exposure_log` table.
-
-Expect longer sweeps then: each extra frame keeps an LED on about 0.57 s
-longer.
+- Each LED's last accepted Tus becomes its seed for the next pre-image.

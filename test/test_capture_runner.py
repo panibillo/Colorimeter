@@ -726,6 +726,14 @@ class CalibratedExposures(RunnerTestCase):
         self._dbdir.cleanup()
         super().tearDown()
 
+    def make_runner(self, **kwargs):
+        """
+        These tests are about the stored exposure groups, so they run the
+        group rule unless a test asks for the strip rule (TestStripRule).
+        """
+        kwargs.setdefault("exposure_rule", capture_runner.RULE_GROUP)
+        return super().make_runner(**kwargs)
+
 
 class TestNormalMode(CalibratedExposures):
     """
@@ -1630,6 +1638,251 @@ class TestPadFinding(CalibratedExposures):
         self.assertIn("no photo_red", runner.pad_problem)
         with self.archive(runner) as f:
             self.assertNotIn("/pre/pad", f)
+
+
+
+# ---------------------------------------------------------------------------
+# The strip exposure rule (detour stage 3; src/exposure_rule.py)
+# ---------------------------------------------------------------------------
+
+import exposure_rule                              # noqa: E402
+
+
+class LinearCam(FakeCam):
+    """
+    FakeCam with a real dark level: raw = 64 + gain x exposure_us x _SCALE,
+    clipped at 1023, as the sensor is.  `dim`, when set, is a full-frame
+    array that multiplies the gain (to darken part of the scene).
+    """
+
+    DARK = 64.0
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.dim = None
+
+    def capture_frame(self):
+        rgb, _, meta = super().capture_frame()
+        g = self._gain if self.dim is None else self._gain * self.dim
+        bayer = np.clip(self.DARK + g * self._exposure_us * _SCALE,
+                        0, 1023).astype(np.uint16)
+        return rgb, bayer, meta
+
+
+def _sample_rect():
+    """The sample ROI, full-frame px, from the test database."""
+    rois = roi.load_active(FRAME_W, FRAME_H, None)
+    return roi.by_role(rois, roi.ROLE_SAMPLE)
+
+
+class TestStripRule(CalibratedExposures):
+    """
+    Each LED's exposure_us is re-aimed on the test region (pad + gray
+    chips) until nothing there clips and the brightest pixel is at least
+    80 % of 1023; then MULTIPLE_EXPOSURE_COUNT frames at that Tus, and Bus
+    frames only when an analysis channel falls below the noise floor.
+
+    With LinearCam the brightest test-region pixel is about
+    64 + exposure_us x 0.0175 raw DN, so amber's group-1 seed of 30000 us
+    reads about 590 (dim) and 90000 us clips.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.cam = LinearCam()
+        self.leds = LedsWithPhotoRed()
+        self.cam.leds = self.leds
+
+    def make_runner(self, **kwargs):
+        kwargs.setdefault("exposure_rule", capture_runner.RULE_STRIP)
+        kwargs.setdefault("led_colors", ["amber"])
+        return super().make_runner(**kwargs)
+
+    def led_record(self, runner, color="amber", section=""):
+        with self.archive(runner) as f:
+            return json.loads(
+                f[f"{section}/leds/{color}/led_metadata"][()])["strip_rule"]
+
+    def test_a_dim_seed_is_scaled_up_once(self):
+        runner = self.make_runner(mode="normal")
+        self.run_to_completion(runner)
+        rec = self.led_record(runner)
+        self.assertEqual(rec["seed_source"], "group 1")
+        self.assertEqual(rec["seed_us"], 30_000)
+        verdicts = [a["verdict"] for a in rec["attempts"]]
+        self.assertEqual(verdicts, ["dim", "accept"])
+        self.assertEqual(rec["tus_status"], "ok")
+        top = max(st["max_dn"] for st in rec["attempts"][-1]["stats"].values())
+        self.assertGreaterEqual(top, 0.80 * 1023)
+        self.assertLess(top, 1023)
+
+    def test_a_clipped_seed_steps_down_by_0_7(self):
+        self._er.write_all_groups("amber", {"1": [90_000]})
+        runner = self.make_runner(mode="normal")
+        self.run_to_completion(runner)
+        rec = self.led_record(runner)
+        tried = [a["exposure_us"] for a in rec["attempts"]]
+        self.assertEqual(tried[:2], [90_000, 63_000])
+        self.assertEqual(rec["attempts"][0]["verdict"], "clipped")
+        self.assertEqual(rec["tus_status"], "ok")
+
+    def test_still_clipped_after_four_tries_marks_the_led_failed(self):
+        self.cam.dim = np.full((FRAME_H, FRAME_W), 100.0)   # always clips
+        runner = self.make_runner(mode="normal")
+        progress = self.run_to_completion(runner)
+        rec = self.led_record(runner)
+        self.assertEqual(len(rec["attempts"]), exposure_rule.MAX_EXPOSURE_TRIES)
+        self.assertEqual(rec["tus_status"], "clipped")
+        self.assertTrue(any("STILL CLIPPED" in p.message for p in progress))
+        with self.archive(runner) as f:
+            self.assertEqual(f["/leds/amber"].attrs["tus_status"], "clipped")
+            self.assertIn("/leds/amber/lit/e0/R", f)       # still stored
+
+    def test_n_frames_at_tus_are_stored_with_their_role(self):
+        runner = self.make_runner(mode="normal")
+        self.run_to_completion(runner)
+        n = exposure_rule.MULTIPLE_EXPOSURE_COUNT
+        rec = self.led_record(runner)
+        with self.archive(runner) as f:
+            labels = sorted(f["/leds/amber/lit"])
+            self.assertEqual(labels, [f"e{i}" for i in range(n)])
+            us = {int(f[f"/leds/amber/lit/{lb}/R"].attrs["exposure_us"])
+                  for lb in labels}
+            self.assertEqual(us, {rec["tus_us"]})
+            self.assertEqual(
+                {f[f"/leds/amber/lit/{lb}"].attrs["role"] for lb in labels},
+                {"tus"})
+            self.assertEqual(int(f["/leds/amber"].attrs["tus_us"]),
+                             rec["tus_us"])
+            self.assertNotIn("bus_us", f["/leds/amber"].attrs)
+
+    def test_rejected_frames_are_not_stored(self):
+        runner = self.make_runner(mode="normal")
+        self.run_to_completion(runner)
+        rec = self.led_record(runner)
+        self.assertEqual(len(rec["attempts"]), 2)        # one rejected
+        with self.archive(runner) as f:
+            self.assertEqual(len(f["/leds/amber/lit"]),
+                             exposure_rule.MULTIPLE_EXPOSURE_COUNT)
+
+    def test_led_is_off_before_frames_are_written(self):
+        written = []
+        real = capture_h5.CaptureSuiteWriter.add_lit
+
+        def add_lit(writer, color, *args, **kwargs):
+            written.append(bool(self.leds.lit_channels()))
+            return real(writer, color, *args, **kwargs)
+
+        with unittest.mock.patch.object(capture_h5.CaptureSuiteWriter,
+                                        "add_lit", add_lit):
+            self.run_to_completion(self.make_runner(mode="normal"))
+        self.assertTrue(written)
+        self.assertFalse(any(written))
+
+    def test_a_dark_analysis_pixel_calls_for_bus(self):
+        """photo_red.R is an analysis channel: a dim pad there needs Bus."""
+        s = _sample_rect()
+        dim = np.ones((FRAME_H, FRAME_W))
+        dim[s.y:s.y + s.h, s.x:s.x + s.w] = 0.2
+        self.cam.dim = dim
+        runner = self.make_runner(mode="normal", led_colors=["photo_red"])
+        self.run_to_completion(runner)
+        rec = self.led_record(runner, "photo_red")
+        self.assertEqual(rec["decision_layers"], ["R"])
+        self.assertIsNotNone(rec["bus_us"])
+        self.assertGreater(rec["bus_us"], rec["tus_us"])
+        self.assertEqual(rec["bus_layer"], "R")
+        self.assertEqual(rec["frames_at_bus"],
+                         exposure_rule.BUS_EXPOSURE_COUNT)
+        self.assertEqual(rec["coverage"]["R"]["n_below_floor_both"], 0)
+        n = exposure_rule.MULTIPLE_EXPOSURE_COUNT
+        with self.archive(runner) as f:
+            self.assertEqual(f[f"/leds/photo_red/lit/e{n}"].attrs["role"],
+                             "bus")
+            self.assertEqual(int(f["/leds/photo_red"].attrs["bus_us"]),
+                             rec["bus_us"])
+        # The dark pair covers the longest exposure taken: Bus.
+        self.assertEqual(runner._dark_us, [capture_runner.DARK_SHORT_US,
+                                           rec["bus_us"]])
+
+    def test_analysis_channels_are_kept_even_where_bus_clips(self):
+        """
+        The Bus frame clips the bright pixels by design: photo_red.R, an
+        analysis channel, is stored anyway; the other layers, which clip
+        too on LinearCam, are left out.
+        """
+        s = _sample_rect()
+        dim = np.ones((FRAME_H, FRAME_W))
+        dim[s.y:s.y + s.h, s.x:s.x + s.w] = 0.2
+        self.cam.dim = dim
+        runner = self.make_runner(mode="normal", led_colors=["photo_red"])
+        self.run_to_completion(runner)
+        rec = self.led_record(runner, "photo_red")
+        bus = f"e{exposure_rule.MULTIPLE_EXPOSURE_COUNT}"
+        self.assertEqual(rec["layers_why"][bus]["R"], "analysis channel")
+        self.assertEqual(rec["layers_why"][bus]["Gb"], "clipped")
+        self.assertGreater(rec["frame_stats"][bus]["R"]["n_clip_top"], 0)
+        with self.archive(runner) as f:
+            self.assertGreater(f[f"/leds/photo_red/lit/{bus}/R"].size, 0)
+            self.assertEqual(f[f"/leds/photo_red/lit/{bus}/Gb"].size, 0)
+            # At Tus nothing clips, so every layer with signal is kept.
+            self.assertGreater(f["/leds/photo_red/lit/e0/Gb"].size, 0)
+
+    def test_no_bus_for_an_led_without_analysis_channels(self):
+        s = _sample_rect()
+        dim = np.ones((FRAME_H, FRAME_W))
+        dim[s.y:s.y + s.h, s.x:s.x + s.w] = 0.2
+        self.cam.dim = dim
+        runner = self.make_runner(mode="normal")         # amber
+        self.run_to_completion(runner)
+        rec = self.led_record(runner)
+        self.assertIsNone(rec["bus_us"])
+        self.assertEqual(rec["analysis_layers"], [])
+
+    def test_the_measurement_starts_from_its_pre_image_tus(self):
+        pre = self.make_runner(mode=capture_runner.MODE_PRE,
+                               led_colors=["photo_red"])
+        self.run_to_completion(pre)
+        pre_rec = self.led_record(pre, "photo_red", "/pre")
+        self.assertEqual(pre_rec["seed_source"], "D1 seed")
+        self.assertEqual(pre_rec["seed_us"],
+                         exposure_rule.SEED_US["photo_red"])
+        post = self.make_runner(mode="normal", archive_path=pre.out_path,
+                                led_colors=["photo_red", "amber"])
+        self.run_to_completion(post)
+        rec = self.led_record(post, "photo_red")
+        self.assertEqual(rec["seed_source"], "pre-image Tus")
+        self.assertEqual(rec["seed_us"], pre_rec["tus_us"])
+        self.assertEqual(rec["attempts"][0]["verdict"], "accept")
+        self.assertEqual(self.led_record(post)["seed_source"], "group 1")
+
+    def test_the_test_region_falls_back_to_the_sample_roi(self):
+        """LinearCam shows no cassette, so pad finding fails."""
+        runner = self.make_runner(mode="normal")
+        self.run_to_completion(runner)
+        self.assertTrue(runner.pad_problem)
+        rec = self.led_record(runner)
+        self.assertEqual(rec["test_region"]["pad_source"], "sample ROI")
+
+    def test_the_fitted_pad_is_the_region_when_found(self):
+        self.cam = CassetteCam()
+        self.cam.leds = self.leds
+        runner = self.make_runner(mode=capture_runner.MODE_PRE)
+        self.run_to_completion(runner)
+        self.assertEqual(runner.pad_problem, "")
+        rec = self.led_record(runner, section="/pre")
+        self.assertEqual(rec["test_region"]["pad_source"], "fit")
+
+    def test_the_group_rule_is_still_there(self):
+        runner = self.make_runner(mode="normal", exposure_group="3",
+                                  exposure_rule=capture_runner.RULE_GROUP)
+        self.run_to_completion(runner)
+        self.assertEqual(runner.results[0].exposures_us,
+                         self._er.read_exposures("amber", "3"))
+        with self.archive(runner) as f:
+            meta = json.loads(f["/leds/amber/led_metadata"][()])
+            self.assertNotIn("strip_rule", meta)
+            self.assertEqual(meta["exposure_group"], "3")
 
 
 if __name__ == "__main__":

@@ -17,6 +17,12 @@ document's step N. Its open items are numbered 1–8.
 - **Each study** starts with three lines: the question, the step it could
   change, and what result ends it. It ends with a figure for Bill to approve,
   the numbers, and a short note. Production code waits until Bill approves.
+- **The analysis covers the whole pad, out to its fitted edge.** Edge
+  darkening is handled by the edge bands from band 0, the outermost pixel
+  row (`tex/chain_unified.tex` step 5), and the arsenic is summed over every
+  pad pixel (step 9). The old chain's `analysis_1.ERODE` = 6 px (still listed
+  in `chain_samples.py`) does not apply to this chain. (Recorded 2026-11-14;
+  the decision came with the edge bands, 2026-11-09.)
 - **For scale:** camera noise is about 0.002 A, texture 0.007 A, and
   replicate strips disagree by an unknown factor (It was 1.9 earlier before 
   the procedure was tightned). An effect smaller than what is left over is 
@@ -149,9 +155,11 @@ tested. The full plan is `~/.claude/plans/velvety-roaming-pascal.md`.
   together leave every non-hot pixel unclipped at the top and above the floor
   in at least one of them.
 - **Exposures per LED:** `protocol.multiple_exposure_count` (int, default 1)
-  is the number of frames kept at Tus, all at the same exposure_us. Bus,
-  when needed, is one more frame. The Pi never combines frames; the desktop
-  decides how (2026-11-14, Bill: option B).
+  is the number of frames kept at Tus, all at the same exposure_us. Bus is
+  taken only when needed, `protocol.bus_exposure_count` frames of it: 1 while
+  the exposure rule itself is being studied, N for the yellow/brown trials.
+  The Pi never combines frames; the desktop decides how (2026-11-14, Bill:
+  option B).
 - **Post-images** start at the strip's own pre-image Tus. Dye only darkens the
   pad, so that cannot clip.
 - **Layer filter:** `capture.layer_keep_min_dn` / `max_dn` do not fit the new

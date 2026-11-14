@@ -64,6 +64,8 @@ import numpy as np
 import capture_meta
 import config_repo as config
 import exposure_repo
+import exposure_rule
+import hotpixel_repo
 import layermodel_repo
 import padfind
 import roi
@@ -170,6 +172,19 @@ MODE_CALIBRATION = "calibration"
 MODE_NORMAL      = "normal"
 MODE_PRE         = "pre"
 
+# How a pre-image or a measurement sets each LED's exposure_us
+# (CaptureConfig.exposure_rule; the calibration path ignores it):
+#   "strip"  (default, 2026-11-14) — from the strip itself: re-aimed on the
+#            fitted pad and gray chips until nothing there clips, then
+#            exposure_rule.MULTIPLE_EXPOSURE_COUNT frames at that exposure
+#            (Tus), plus a longer Bus frame when an analysis channel falls
+#            below the noise floor.  See src/exposure_rule.py.
+#   "group"  — the exposures stored in the `exposure` table for the chosen
+#            group, as every run did before 2026-11-14.  Kept so the two can
+#            be compared, and as a fallback if the strip rule misbehaves.
+RULE_STRIP = "strip"
+RULE_GROUP = "group"
+
 # The pre-image path
 # ------------------
 # A reagent pad is not white. It carries a colour of its own before anything
@@ -256,6 +271,10 @@ class CaptureConfig:
     # group to use — its name is the number of images per LED ('1'..'5').
     mode:           str = MODE_CALIBRATION
     exposure_group: str = "1"
+    # RULE_STRIP or RULE_GROUP: see the comment above RULE_STRIP.  With the
+    # strip rule the group is still read, for the seed of an LED that has no
+    # other (its group-1 exposure) and for the dark frames' estimate.
+    exposure_rule:  str = RULE_STRIP
     # An existing archive to add this run to, instead of creating one. Set by
     # the measurement run of a sample whose pre-image already opened the file,
     # so both sweeps of one strip land together. None (the default) creates a
@@ -794,6 +813,18 @@ class CaptureRunner:
         self._color_labels: "dict[str, list[str]]" = {}
         self._color_fallback: "dict[str, bool]" = {}
         self._color_group:    "dict[str, str]"  = {}   # group each LED actually used
+        # Strip rule only: {color: (seed exposure_us, where it came from)},
+        # the first exposure_us tried for each LED (_seed_exposure).
+        self._color_seed: "dict[str, tuple[int, str]]" = {}
+        # Strip rule only: the test region every frame of this sweep is
+        # judged on (_test_region), built once the pad is found.
+        self._region: "exposure_rule.TestRegion | None" = None
+        # The archive's root attributes (capture_meta.root_attrs), kept from
+        # _write_metadata: the camera model, frame size and serial that the
+        # hot-pixel lookup needs.
+        self._root_attrs: dict = {}
+        # Strip rule: every lit exposure_us the current sweep stored.
+        self._lit_us_taken: "list[int]" = []
         # Normal/pre path: the run's two dark exposures (DARK_SHORT_US and the
         # longest lit exposure), and the white LED's one frame — see
         # run_prefetch().  _white_us is None when no white frame is taken.
@@ -1038,7 +1069,8 @@ class CaptureRunner:
         """
         meta = capture_meta.collect(cam=self._cam, cfg=self.config,
                                     sample_rowid=self.config.sample_rowid)
-        w.add_metadata(meta, capture_meta.root_attrs(meta))
+        self._root_attrs = capture_meta.root_attrs(meta)
+        w.add_metadata(meta, self._root_attrs)
 
     # ── Focus ────────────────────────────────────────────────────────
 
@@ -1950,6 +1982,381 @@ class CaptureRunner:
             return None
         return prior
 
+    # ── The strip exposure rule (detour stage 3; src/exposure_rule.py) ───
+
+    def _strip_rule(self) -> bool:
+        """True when this pre-image or measurement uses RULE_STRIP."""
+        return (str(self.config.exposure_rule).lower() == RULE_STRIP
+                and str(self.config.mode).lower() in (MODE_PRE, MODE_NORMAL))
+
+    def _seed_exposure(self, color: str) -> "tuple[int, str]":
+        """
+        The first exposure_us the strip rule tries for one LED, and its source.
+
+        In order of preference:
+          1. a measurement: this strip's own pre-image Tus, read from the
+             `tus_us` attribute of /pre/leds/<color> in the same archive.
+             Dye only darkens the pad, so it should not clip there.
+          2. exposure_rule.SEED_US (the D1 study's safe values).
+          3. the LED's group-1 exposure from the `exposure` table.
+          4. the run's default exposure_us (CaptureConfig.exposure_ms).
+
+        Returns:
+            (exposure_us, source), source one of 'pre-image Tus', 'D1 seed',
+            'group 1', 'fallback'.
+        """
+        if not self._is_pre():
+            tus = self._writer.led_attrs(color, PRE_SECTION).get("tus_us")
+            if tus:
+                return int(tus), "pre-image Tus"
+        if color in exposure_rule.SEED_US:
+            return int(exposure_rule.SEED_US[color]), "D1 seed"
+        middle = exposure_repo.middle_exposure(color, "1")
+        if middle:
+            return int(middle), "group 1"
+        return int(self.config.initial_us), "fallback"
+
+    def _hot_mask(self, shape) -> np.ndarray:
+        """
+        Hot pixels on this sweep's layer grid (any Bayer layer), True where hot.
+
+        Read from the `hotpixels` table for this camera (model, frame size
+        and serial from the archive's root attributes), and moved from
+        whole-sensor layer coordinates onto the bound crop.  The union over
+        the four layers, as the desktop analysis uses (probe.hot_mask).  All
+        False, with a log line, when the table has nothing for this camera
+        or cannot be read: a missing hot-pixel map must not stop a capture.
+
+        Args:
+            shape: (rows, cols) of the crop's Bayer layers.
+        """
+        mask = np.zeros(shape, dtype=bool)
+        a = self._root_attrs
+        try:
+            rows = hotpixel_repo.read_active(
+                str(a.get("sensor_model", "")), int(a.get("frame_w", 0)),
+                int(a.get("frame_h", 0)), hardware_sn=a.get("hardware_sn"))
+        except Exception:                             # noqa: BLE001
+            log.exception("hot pixels could not be read; none left out")
+            return mask
+        if not rows:
+            log.warning("no hot pixels on record for %s %sx%s %s; none left "
+                        "out of the test region", a.get("sensor_model"),
+                        a.get("frame_w"), a.get("frame_h"),
+                        a.get("hardware_sn"))
+            return mask
+        bound = roi.by_role(self.rois, roi.ROLE_BOUND)
+        oy, ox = bound.y // 2, bound.x // 2
+        for r in rows:
+            y, x = r.y - oy, r.x - ox
+            if 0 <= y < shape[0] and 0 <= x < shape[1]:
+                mask[y, x] = True
+        return mask
+
+    def _test_region(self, shape) -> "exposure_rule.TestRegion":
+        """
+        The pixels every frame of this sweep is judged on.
+
+        The fitted pad (not eroded) when pad finding worked and passed its
+        checks, otherwise the sample ROI; plus the gray1 and gray2 chips;
+        hot pixels left out.  If the ROI table lacks the sample ROI or the
+        chips, the whole crop, with a warning.
+
+        Args:
+            shape: (rows, cols) of the crop's Bayer layers.
+        """
+        hot = self._hot_mask(shape)
+        try:
+            rects = self._padfind_rects()
+        except ValueError as exc:
+            log.warning("test region: %s; judging the whole crop", exc)
+            return exposure_rule.TestRegion(
+                parts={"pad": np.ones(shape, dtype=bool)}, hot=hot,
+                pad_source="whole crop")
+        if (self.pad is not None and not self.pad_problem
+                and tuple(self.pad.shape) == tuple(shape)):
+            pad_mask, source = self.pad.mask(), "fit"
+        else:
+            s = rects["sample"]
+            pad_mask = np.zeros(shape, dtype=bool)
+            pad_mask[max(s.y, 0):s.y + s.h, max(s.x, 0):s.x + s.w] = True
+            source = "sample ROI"
+            log.warning("test region: using the sample ROI (%s)",
+                        self.pad_problem or "no pad fit")
+        return exposure_rule.TestRegion.from_rects(
+            shape, pad_mask, rects["gray1"], rects["gray2"], hot, source)
+
+    def _strip_frame(self, exposure_us: int):
+        """
+        One frame at `exposure_us`, measured over the test region.
+
+        Also does the run's one neutral-rendering check on its first lit
+        frame, exactly as the group rule does (see run_capture).
+
+        Returns:
+            dict with rgb, bayer, meta, layers (bound crop, raw DN),
+            stats ({layer: LayerStats}), exposure_us (requested),
+            applied_us, captured_dt, and render_evidence (non-empty only on
+            the frame that did the check).
+        """
+        want = NEUTRAL_GAINS if self._neutral_unchecked else None
+        rgb, bayer, meta = self._settle(exposure_us, want_gains=want)
+        evidence: dict = {}
+        if want is not None:
+            self._neutral_unchecked = False
+            n, ok = self._settle_evidence
+            evidence = {"neutral_frames": n, "neutral_confirmed": ok}
+            if ok is False:
+                log.warning("neutral rendering not reported after %d frames "
+                            "— this LED's JPEG may be tinted", n)
+        layers = self._bound_layers(bayer, self._pattern)
+        if self._region is None:
+            self._region = self._test_region(next(iter(layers.values())).shape)
+        with self.prof.time("cpu.measure"):
+            stats = exposure_rule.measure(layers, self._region)
+        self._captures_done += 1
+        return {"rgb": rgb, "bayer": bayer, "meta": meta, "layers": layers,
+                "stats": stats, "exposure_us": int(exposure_us),
+                "applied_us": int(meta.get("ExposureTime", 0)) or int(exposure_us),
+                "captured_dt": self._frame_captured_dt,
+                "render_evidence": evidence}
+
+    def _strip_lit_frames(self, color: str) -> Iterator[Progress]:
+        """
+        Take one LED's frames by the strip rule.  The LED is already lit and
+        warmed up; this does not switch it, and stores nothing.
+
+        1. From the seed, take up to exposure_rule.MAX_EXPOSURE_TRIES frames,
+           re-aiming after each (exposure_rule.judge), until one is accepted.
+           The last frame is kept whatever it shows.  Rejected frames are
+           measured and recorded, not stored.
+        2. Take MULTIPLE_EXPOSURE_COUNT frames at Tus in all, the kept frame
+           being the first.
+        3. If an analysis channel has a test-region pixel below the noise
+           floor at Tus, take BUS_EXPOSURE_COUNT frames at Bus.
+        4. Count the pixels that are usable at neither (exposure_rule.coverage).
+
+        Returns (as the generator's return value, via `yield from`):
+            {"frames": [(role, frame dict), ...] in the order taken,
+             "record": the strip rule's JSON record for led_metadata}
+        """
+        R = exposure_rule
+        seed_us, seed_source = self._color_seed[color]
+        attempts: list = []
+        us = seed_us
+        for attempt in range(1, R.MAX_EXPOSURE_TRIES + 1):
+            frame = self._strip_frame(us)
+            decision = R.decision_layers(color, frame["layers"])
+            verdict, next_us, why = R.judge(frame["stats"], decision,
+                                            frame["applied_us"])
+            attempts.append({
+                "attempt": attempt, "exposure_us": frame["exposure_us"],
+                "applied_us": frame["applied_us"], "verdict": verdict,
+                "decided_by": why, "next_us": next_us,
+                "captured_dt": frame["captured_dt"],
+                "stats": {ch: st.to_dict()
+                          for ch, st in frame["stats"].items()}})
+            st = frame["stats"][why]
+            yield self._progress(
+                "capture",
+                f"    try {attempt}: {frame['exposure_us']} µs, {verdict} "
+                f"({why} max {st.max_dn:.0f}, {st.n_clip_top} clipped)",
+                step="tus")
+            if (verdict == R.ACCEPT or attempt == R.MAX_EXPOSURE_TRIES
+                    or next_us == frame["applied_us"]):
+                break
+            us = next_us
+        tus_status = "ok" if verdict == R.ACCEPT else verdict
+        tus_us = frame["exposure_us"]
+        if tus_status == R.CLIPPED:
+            log.warning("%s: still clipped after %d frames at %d µs — LED "
+                        "marked failed", color, attempt, tus_us)
+            yield self._progress(
+                "capture", f"    {color}: STILL CLIPPED after {attempt} "
+                           f"tries — LED marked failed", step="tus")
+        elif tus_status == R.DIM:
+            log.warning("%s: brightest pixel still under %.0f %% of %d after "
+                        "%d frames at %d µs; kept", color,
+                        100 * R.TOP_FLOOR_FRACTION, R.CLIP_TOP_DN, attempt,
+                        tus_us)
+
+        frames = [("tus", frame)]
+        first = frame
+        for _ in range(R.MULTIPLE_EXPOSURE_COUNT - 1):
+            frames.append(("tus", self._strip_frame(tus_us)))
+            yield self._progress("capture", f"    Tus frame {len(frames)} "
+                                 f"({tus_us} µs)", step="tus")
+
+        bus_us, bus_layer, bus_min = R.bus_exposure(
+            first["stats"], color, first["applied_us"])
+        bus_first = None
+        if bus_us is not None:
+            for _ in range(R.BUS_EXPOSURE_COUNT):
+                f = self._strip_frame(bus_us)
+                bus_first = bus_first or f
+                frames.append(("bus", f))
+            yield self._progress(
+                "capture", f"    Bus {bus_us} µs ({color}.{bus_layer} darkest "
+                           f"{bus_min:.0f} at Tus), {R.BUS_EXPOSURE_COUNT} "
+                           f"frame(s)", step="bus")
+
+        decision = R.decision_layers(color, first["layers"])
+        cover = R.coverage(first["layers"],
+                           bus_first["layers"] if bus_first else None,
+                           self._region, decision)
+        short = {ch: c["n_below_floor_both"] for ch, c in cover.items()
+                 if c["n_below_floor_both"]}
+        if short:
+            log.warning("%s: test-region pixels below the floor at Tus and "
+                        "Bus: %s", color, short)
+
+        record = {
+            "exposure_rule": RULE_STRIP,
+            "seed_us": seed_us, "seed_source": seed_source,
+            "tus_us": tus_us, "tus_applied_us": first["applied_us"],
+            "tus_status": tus_status, "tus_tries": attempt,
+            "bus_us": bus_us, "bus_layer": bus_layer or None,
+            "bus_min_dn": None if bus_us is None else round(bus_min, 2),
+            "frames_at_tus": R.MULTIPLE_EXPOSURE_COUNT,
+            "frames_at_bus": R.BUS_EXPOSURE_COUNT if bus_us else 0,
+            "decision_layers": decision,
+            "analysis_layers": R.analysis_layers(color, first["layers"]),
+            "test_region": {"pad_source": self._region.pad_source,
+                            "n_pixels": int(self._region.mask.sum()),
+                            "n_hot_left_out": self._region.n_hot_inside},
+            "attempts": attempts,
+            "coverage": cover,
+            "limits_dn": {"clip_top": R.CLIP_TOP_DN,
+                          "clip_bottom": R.CLIP_BOTTOM_DN,
+                          "noise_floor": R.NOISE_FLOOR_DN,
+                          "dark": R.DARK_DN},
+        }
+        return {"frames": frames, "record": record}
+
+    def _group_lit_frames(self, color: str, labels, exposures_us
+                          ) -> Iterator[Progress]:
+        """
+        Take and store one LED's frames at its stored exposure group
+        (RULE_GROUP, the rule before 2026-11-14).  The LED is lit and warmed
+        up already; this does not switch it off.
+
+        Returns (as the generator's return value, via `yield from`):
+            {labels, exposures_us, applied_us, kept, omitted,
+             render_evidence, mid_frame, mid_idx}, as _store_strip_frames.
+        """
+        w = self._writer
+        # ── Lit frames ────────────────────────────────────────
+        yield self._progress("capture", "Lit captures:")
+        mid_idx = len(exposures_us) // 2   # keep the middle frame's JPEG
+        mid_frame: "tuple | None" = None
+        applied_us: dict = {}
+
+        kept_layers: dict = {}
+        omitted_layers: dict = {}
+        render_evidence: dict = {}
+
+        for i, (label, exp_us) in enumerate(zip(labels, exposures_us)):
+            # The run's first lit frame also confirms the neutral
+            # rendering is in force (see _white_frame): a frame whose
+            # colour image is kept as this LED's JPEG must not carry
+            # the photo's gains.  Free when they are already neutral.
+            want = NEUTRAL_GAINS if self._neutral_unchecked else None
+            rgb, bayer, meta = self._settle(exp_us, want_gains=want)
+            if want is not None:
+                self._neutral_unchecked = False
+                n, ok = self._settle_evidence
+                render_evidence = {"neutral_frames": n,
+                                   "neutral_confirmed": ok}
+                if ok is False:
+                    log.warning("%s %s: neutral rendering not reported "
+                                "after %d frames — its JPEG may be "
+                                "tinted", color, label, n)
+            applied_us[label] = int(meta.get("ExposureTime", 0))
+            layers_out = self._bound_layers(bayer, self._pattern)
+
+            keep = self._keep_channels(color, exp_us, layers_out)
+            omit = [ch for ch in layers_out if ch not in keep]
+            kept_layers[label] = list(keep)
+            omitted_layers[label] = omit
+
+            with self.prof.time("io.hdf5"):
+                w.add_lit(color, label, layers_out, exposure_us=exp_us,
+                          captured_dt=self._frame_captured_dt,
+                          omit=omit)
+            if i == mid_idx:
+                mid_frame = (rgb, bayer, meta)
+            self._captures_done += 1
+            dropped = f", dropped {'+'.join(omit)}" if omit else ""
+            yield self._progress(
+                "capture",
+                f"    stored lit {label} ({exp_us // 1000}ms){dropped}",
+                step=label, image_index=i + 1,
+                image_total=len(exposures_us))
+
+        return {"labels": list(labels), "exposures_us": list(exposures_us),
+                "applied_us": applied_us, "kept": kept_layers,
+                "omitted": omitted_layers, "render_evidence": render_evidence,
+                "mid_frame": mid_frame, "mid_idx": mid_idx, "record": None}
+
+    def _store_strip_frames(self, color: str, result: dict) -> dict:
+        """
+        Store the strip rule's frames for one LED, with the LED already off.
+
+        Labels run e0, e1, ... in the order the frames were taken: the Tus
+        frames first, then any Bus frames.  Each label's group says its role
+        ('tus' or 'bus') and the exposure_us the camera applied.  Which
+        Bayer layers reach the file is the strip rule's own choice
+        (exposure_rule.keep_layers): every analysis channel, and any other
+        layer that is unclipped and above the noise floor on the test
+        region.  The layermodel screen (_keep_channels) is not used here.
+
+        Args:
+            color:  LED color name.
+            result: _strip_lit_frames()'s return value.
+
+        Returns:
+            {labels, exposures_us, applied_us, kept, omitted,
+             render_evidence, mid_frame, mid_idx, record}: the same keys as
+            _group_lit_frames, plus the strip rule's record.
+        """
+        w = self._writer
+        labels, exposures_us = [], []
+        applied_us, kept_layers, omitted_layers = {}, {}, {}
+        render_evidence: dict = {}
+        roles, frame_stats, layer_why = {}, {}, {}
+        for i, (role, f) in enumerate(result["frames"]):
+            label = f"e{i}"
+            keep, layer_why[label] = exposure_rule.keep_layers(
+                color, f["stats"])
+            omit = [ch for ch in f["layers"] if ch not in keep]
+            with self.prof.time("io.hdf5"):
+                w.add_lit(color, label, f["layers"],
+                          exposure_us=f["exposure_us"],
+                          captured_dt=f["captured_dt"], omit=omit,
+                          attrs={"role": role,
+                                 "applied_us": f["applied_us"]})
+            labels.append(label)
+            exposures_us.append(f["exposure_us"])
+            applied_us[label] = f["applied_us"]
+            kept_layers[label] = list(keep)
+            omitted_layers[label] = omit
+            roles[label] = role
+            frame_stats[label] = {ch: st.to_dict()
+                                  for ch, st in f["stats"].items()}
+            render_evidence = render_evidence or f["render_evidence"]
+        first = result["frames"][0][1]
+        # roles: {label: 'tus'|'bus'}; frame_stats: {label: {layer: the
+        # test-region statistics of that stored frame}}, every layer, kept
+        # or not (the rows stage 4 writes to exposure_log); layers_why:
+        # {label: {layer: why it was kept or left out}}.
+        record = dict(result["record"], roles=roles, frame_stats=frame_stats,
+                      layers_why=layer_why)
+        return {"labels": labels, "exposures_us": exposures_us,
+                "applied_us": applied_us, "kept": kept_layers,
+                "omitted": omitted_layers, "render_evidence": render_evidence,
+                "mid_frame": (first["rgb"], first["bayer"], first["meta"]),
+                "mid_idx": 0, "record": record}
+
     def _take_darks(self, when: str) -> Iterator[Progress]:
         """
         Take the run's dark frames and store their statistics only.
@@ -2159,18 +2566,32 @@ class CaptureRunner:
                 self._color_labels[color]    = [f"e{i}" for i in range(len(exposures_us))]
                 self._color_fallback[color]  = used_fallback
 
+            # Open the archive and write /meta now, before any photograph.
+            # The ROI geometry is what makes the stored arrays locatable, so a
+            # run that dies partway still leaves an interpretable file.  It is
+            # opened before the seeds because a measurement reads its seeds
+            # from its pre-image, in this same archive.
+            w = self._open_writer()
+            self._write_metadata(w)
+
+            if self._strip_rule():
+                self._color_seed = {c: self._seed_exposure(c)
+                                    for c in self._color_order}
+                # Until the sweep has run, the seeds are the best guess at
+                # its longest exposure.  A pre-image takes its darks before
+                # its sweep, so its pair uses this; a measurement's pair is
+                # worked out again from what it took (run_capture).  The dark
+                # level does not depend on exposure_us (64.02-64.04 DN from 1
+                # to 51 ms), so the guess costs nothing in accuracy.
+                for c in self._color_order:
+                    self._color_exposures[c] = [self._color_seed[c][0]]
+
             lit_us = [us for c in self._color_order for us in self._color_exposures[c]]
             if self._white_measure:
                 lit_us.append(self._white_us)
             # A set: when the longest lit exposure is DARK_SHORT_US itself,
             # one frame serves as both.
             self._dark_us = sorted({DARK_SHORT_US, max(lit_us, default=DARK_SHORT_US)})
-
-            # Open the archive and write /meta now, before any photograph.
-            # The ROI geometry is what makes the stored arrays locatable, so a
-            # run that dies partway still leaves an interpretable file.
-            w = self._open_writer()
-            self._write_metadata(w)
 
             log.info(f"=== Prefetch done: dark frames at {self._dark_us} µs, "
                      f"white {self._white_us} µs ({self._white_source}) ===")
@@ -2201,10 +2622,18 @@ class CaptureRunner:
         leds = self._leds
         w    = self._writer
         try:
+            rule = ("exposures from the strip" if self._strip_rule()
+                    else f"exposure group {self._group}")
             yield self._progress(
                 "capture",
                 f"{'Pre-image' if self._is_pre() else 'Normal capture'} — "
-                f"exposure group {self._group}")
+                f"{rule}")
+            # Every lit exposure_us this sweep stores, for a measurement's
+            # dark pair (taken after its sweep).
+            self._lit_us_taken = []
+            # The test region is built from this sweep's own pad fit, at its
+            # first strip-rule frame (_strip_frame).
+            self._region = None
 
             # A pre-image takes its dark frames first, before any LED of its
             # own has lit; a measurement takes them after its last coloured
@@ -2228,11 +2657,19 @@ class CaptureRunner:
                 self._captures_per_led = max(1, len(exposures_us))
                 led = leds.channel_of(color)
 
-                log.info(f"=== LED {led}: {color} (group {used_group}"
-                         f"{f' for {self._group}' if used_group != self._group else ''}"
-                         f"{', fallback' if used_fallback else ''}) ===")
+                if self._strip_rule():
+                    seed_us, seed_source = self._color_seed[color]
+                    self._captures_per_led = exposure_rule.MULTIPLE_EXPOSURE_COUNT
+                    log.info(f"=== LED {led}: {color} (strip rule, seed "
+                             f"{seed_us} µs from {seed_source}) ===")
+                else:
+                    log.info(f"=== LED {led}: {color} (group {used_group}"
+                             f"{f' for {self._group}' if used_group != self._group else ''}"
+                             f"{', fallback' if used_fallback else ''}) ===")
 
-                if used_fallback:
+                if self._strip_rule():
+                    note = ""
+                elif used_fallback:
                     note = "  [no calibration — fallback]"
                 elif used_group != self._group:
                     note = f"  [group {used_group}: {self._group} not calibrated]"
@@ -2243,57 +2680,27 @@ class CaptureRunner:
                 self._led_on(led)
                 yield from self._wait(LED_ON_WARMUP_S, f"{color} LED on, warming up")
 
-                # ── Lit frames ────────────────────────────────────────
-                yield self._progress("capture", "Lit captures:")
-                mid_idx = len(exposures_us) // 2   # keep the middle frame's JPEG
-                mid_frame: "tuple | None" = None
-                applied_us: dict = {}
-
-                kept_layers: dict = {}
-                omitted_layers: dict = {}
-                render_evidence: dict = {}
-
-                for i, (label, exp_us) in enumerate(zip(labels, exposures_us)):
-                    # The run's first lit frame also confirms the neutral
-                    # rendering is in force (see _white_frame): a frame whose
-                    # colour image is kept as this LED's JPEG must not carry
-                    # the photo's gains.  Free when they are already neutral.
-                    want = NEUTRAL_GAINS if self._neutral_unchecked else None
-                    rgb, bayer, meta = self._settle(exp_us, want_gains=want)
-                    if want is not None:
-                        self._neutral_unchecked = False
-                        n, ok = self._settle_evidence
-                        render_evidence = {"neutral_frames": n,
-                                           "neutral_confirmed": ok}
-                        if ok is False:
-                            log.warning("%s %s: neutral rendering not reported "
-                                        "after %d frames — its JPEG may be "
-                                        "tinted", color, label, n)
-                    applied_us[label] = int(meta.get("ExposureTime", 0))
-                    layers_out = self._bound_layers(bayer, self._pattern)
-
-                    keep = self._keep_channels(color, exp_us, layers_out)
-                    omit = [ch for ch in layers_out if ch not in keep]
-                    kept_layers[label] = list(keep)
-                    omitted_layers[label] = omit
-
-                    with self.prof.time("io.hdf5"):
-                        w.add_lit(color, label, layers_out, exposure_us=exp_us,
-                                  captured_dt=self._frame_captured_dt,
-                                  omit=omit)
-                    if i == mid_idx:
-                        mid_frame = (rgb, bayer, meta)
-                    self._captures_done += 1
-                    dropped = f", dropped {'+'.join(omit)}" if omit else ""
-                    yield self._progress(
-                        "capture",
-                        f"    stored lit {label} ({exp_us // 1000}ms){dropped}",
-                        step=label, image_index=i + 1,
-                        image_total=len(exposures_us))
-
-                # The dark frames come once, at the start or end of the run —
-                # no per-LED settle wait needed here.
-                self._led_off(led)
+                if self._strip_rule():
+                    result = yield from self._strip_lit_frames(color)
+                    # Everything is stored after the LED is off, so file
+                    # writing is not LED on-time.
+                    self._led_off(led)
+                    lit = self._store_strip_frames(color, result)
+                else:
+                    lit = yield from self._group_lit_frames(
+                        color, labels, exposures_us)
+                    # The dark frames come once, at the start or end of the
+                    # run — no per-LED settle wait needed here.
+                    self._led_off(led)
+                applied_us     = lit["applied_us"]
+                kept_layers    = lit["kept"]
+                omitted_layers = lit["omitted"]
+                render_evidence = lit["render_evidence"]
+                mid_frame      = lit["mid_frame"]
+                labels         = lit["labels"]
+                exposures_us   = lit["exposures_us"]
+                mid_idx        = lit["mid_idx"]
+                self._lit_us_taken.extend(exposures_us)
 
                 # ── Per-LED metadata, statistics and JPEG ──────────────
                 meta_json: dict = {
@@ -2318,9 +2725,14 @@ class CaptureRunner:
                     # The group this LED was shot with, and the one the run
                     # asked for: they differ when calibration could not fit
                     # the asked-for group for this LED (_stored_exposures).
-                    "exposure_group": used_group,
+                    # With the strip rule no group sets the exposures:
+                    # exposure_group is then None and exposure_source says
+                    # so; the rule's own record is under "strip_rule".
+                    "exposure_group": (None if lit["record"] else used_group),
                     "exposure_group_requested": self._group,
-                    "exposure_source": "fallback" if used_fallback else "exposure_table",
+                    "exposure_source": ("strip rule" if lit["record"] else
+                                        "fallback" if used_fallback
+                                        else "exposure_table"),
                     "exposures_us": {lbl: int(us) for lbl, us in zip(labels, exposures_us)},
                     "applied_exposures_us": applied_us,
                     # Which Bayer layers reached the file, per exposure, and
@@ -2335,8 +2747,19 @@ class CaptureRunner:
                     # Only on the run's first LED: the frames its first lit
                     # exposure took to report the neutral colour gains.
                     meta_json["render_evidence"] = render_evidence
+                led_attrs = {}
+                if lit["record"]:
+                    meta_json["strip_rule"] = lit["record"]
+                    # As attributes too, where a measurement reads its
+                    # pre-image's Tus back (_seed_exposure).  HDF5
+                    # attributes can't hold None, so bus_us only if taken.
+                    led_attrs["tus_us"] = lit["record"]["tus_us"]
+                    led_attrs["tus_status"] = lit["record"]["tus_status"]
+                    if lit["record"]["bus_us"] is not None:
+                        led_attrs["bus_us"] = lit["record"]["bus_us"]
                 with self.prof.time("io.hdf5"):
-                    w.add_led(color, meta_json, led_channel=led)
+                    w.add_led(color, meta_json, led_channel=led,
+                              attrs=led_attrs)
                 if mid_frame is not None:
                     rgb_m, bayer_m, meta_m = mid_frame
                     info = _build_capture_info(
@@ -2358,6 +2781,12 @@ class CaptureRunner:
                 ))
 
             if not self._is_pre():
+                if self._strip_rule() and self._lit_us_taken:
+                    # The pair is the shortest tested dark and the longest
+                    # exposure this sweep actually took (Bus can be longer
+                    # than any seed).
+                    self._dark_us = sorted({DARK_SHORT_US,
+                                            max(self._lit_us_taken)})
                 yield from self._take_darks("after")
                 yield from self._capture_white()
 

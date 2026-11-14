@@ -153,6 +153,11 @@ from hdf5write import Hdf5Writer
 # Optional and additive: a version-5 reader never looks for it and reads
 # everything else exactly as before; a reader that wants the Pi's pad calls
 # read_pad() and accepts None.
+# Also in 6 (not yet released when added, 2026-11-14): with the strip
+# exposure rule (src/exposure_rule.py) one LED's labels e0, e1, ... may share
+# an exposure_us (several frames at Tus), each lit/<label> group carries
+# attrs `role` ('tus' or 'bus') and `applied_us`, and the LED group carries
+# `tus_us` (and `bus_us`).  Labels still run e0, e1, ... in the order taken.
 SCHEMA_VERSION    = 6
 SUITE_DESCRIPTION = "Colorimeter camtest8 capture suite"
 METADATA_NAME     = "meta"
@@ -586,7 +591,8 @@ class CaptureSuiteWriter:
 
     # ── Per-LED content ──────────────────────────────────────────────
 
-    def add_led(self, color: str, led_metadata: dict, led_channel: int) -> None:
+    def add_led(self, color: str, led_metadata: dict, led_channel: int,
+                attrs: "dict | None" = None) -> None:
         """
         Create the group for one LED color and store its metadata.
 
@@ -594,13 +600,34 @@ class CaptureSuiteWriter:
             color:        LED color name (e.g. "amber").
             led_metadata: Full per-LED metadata dict, stored as JSON text.
             led_channel:  LEDBank channel number driving this LED.
+            attrs:        Extra attributes for the LED group, plain numbers
+                          and text.  The strip exposure rule stores tus_us
+                          (and bus_us when one was taken) here, where a
+                          measurement reads its pre-image's Tus back
+                          (led_attrs()).
         """
         group = self._led_group(color)
         self._w.write_metadata(group, "led_metadata", led_metadata)
         self._w.set_attrs(group, {
             "led_color":   color,
             "led_channel": led_channel,
+            **(attrs or {}),
         })
+
+    def led_attrs(self, color: str, section: "str | None" = None) -> dict:
+        """
+        The attributes of one LED's group, in this sweep or another section.
+
+        Args:
+            color:   LED color name.
+            section: "/pre" for the pre-image, "" for the measurement, None
+                     (the default) for this writer's own section.
+
+        Returns:
+            A plain dict; empty when that section has no such LED.
+        """
+        sec = self._section if section is None else section.rstrip("/")
+        return self._w.attrs_of(f"{sec}/leds/{color}")
 
     def add_capture_info(self, color: str, capture_info: dict) -> None:
         """Store the image-stats / picamera2-metadata dict for one LED."""
@@ -667,6 +694,7 @@ class CaptureSuiteWriter:
     def add_lit(
         self, color: str, label: str, layers: dict, exposure_us: int,
         captured_dt: str = "", omit=(), whole: bool = False,
+        attrs: "dict | None" = None,
     ) -> None:
         """
         Store the lit ROI crop for one LED at one exposure, all channels.
@@ -699,9 +727,14 @@ class CaptureSuiteWriter:
             whole:       True for whole-frame layers, which go to lit_whole/
                          beside the bound crops in lit/.  Only test images
                          store them.
+            attrs:       Extra attributes for the label's group, plain
+                         numbers and text.  The strip exposure rule stores
+                         `role` ('tus' or 'bus') and `applied_us` here.
         """
-        self._write_layers(self._lit_group(color, label, whole), layers,
-                           exposure_us, captured_dt, omit)
+        group = self._lit_group(color, label, whole)
+        self._write_layers(group, layers, exposure_us, captured_dt, omit)
+        if attrs:
+            self._w.set_attrs(group, attrs)
 
     # ── Shared dark frames ───────────────────────────────────────────
 

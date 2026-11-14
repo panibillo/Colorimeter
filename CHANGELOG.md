@@ -78,6 +78,32 @@ sqlite3 src/colorimeter.sqlite \
   `capture_h5.CaptureSuiteWriter.add_pad()` writes it and `read_pad()` reads it.
   The group is optional, so schema-5 readers' other paths are unchanged. This
   moves the next release to a MINOR bump.
+- **Exposures set from the strip itself** (`src/exposure_rule.py`, new;
+  detour stage 3). A pre-image and a measurement no longer take each LED's
+  exposure_us from the `exposure` table. Each LED starts from a seed (the
+  strip's own pre-image Tus for a measurement), and every frame is checked on
+  the fitted pad and the two gray chips, hot pixels left out:
+  - a pixel at 1023: the next try is 0.7 times as long;
+  - the brightest pixel under 80 % of 1023: the next try is scaled so it
+    lands at 85 %;
+  - otherwise the frame is accepted (at most 4 tries; still clipped after 4
+    marks the LED failed in its metadata and on screen).
+
+  Three frames are then kept at that exposure (Tus), and a longer Bus frame
+  is added when a pixel of an analysis channel falls below the noise floor
+  (164 raw DN). Every analysis channel is stored; any other layer only when
+  it is unclipped and has signal above the floor. The archive is written
+  after the LED is off. On rpizero3 (2026-11-14) every LED was accepted on
+  its first try, and LED on-time for three frames fell from 3.79 s to about
+  2.95 s.
+  - `CaptureConfig.exposure_rule`: "strip" (default) or "group", the old
+    rule, kept for comparison. Menu → Advanced → Capture Suite keeps
+    "group", since it shoots an exposure group's spread.
+  - In the archive (still schema 6): each LED's `led_metadata` has a
+    `strip_rule` record (every try, every stored frame's statistics, why
+    each layer was kept, Bus, coverage, the test region); its group has
+    `tus_us`, `tus_status` and `bus_us`; each frame's group has `role`
+    ('tus' or 'bus') and `applied_us`. Labels still run e0, e1, ....
 
 ### Removed
 

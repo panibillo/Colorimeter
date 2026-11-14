@@ -1822,7 +1822,7 @@ class Arbiter:
     def _suite_capture(self) -> None:
         """Run the measurement sweep and save it under the typed name."""
         import capture_image
-        from capture_runner import CaptureConfig, MODE_NORMAL
+        from capture_runner import CaptureConfig, MODE_NORMAL, RULE_GROUP
         self._suite_read_fields()
         if not self._ledtest_available():
             self._suite_hint("Camera busy - try again later")
@@ -1834,10 +1834,14 @@ class Arbiter:
         part = capture_image.suite_part_path(self._suite_name)
         capture_image.discard_suite(part)       # a leftover from a crashed run
         # The same configuration a sample's measurement gets (see
-        # _measurement_config), less the sample, and written to the part file.
+        # _measurement_config), less the sample, and written to the part file
+        # -- except the exposure rule: a suite shows and shoots the exposure
+        # group's spread ("Exposure spread N"), so it keeps the group rule
+        # rather than the strip rule a sample now uses (2026-11-14).
         cfg = CaptureConfig(mode=MODE_NORMAL,
                             exposure_group=self._initial_exposure_group(),
-                            archive_path=part)
+                            archive_path=part,
+                            exposure_rule=RULE_GROUP)
         session = self._new_session(cfg)
         if not session.start():
             log.error("Arbiter: image suite failed to start: %s", session.error)
