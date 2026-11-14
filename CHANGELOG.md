@@ -55,6 +55,29 @@ sqlite3 src/colorimeter.sqlite \
   come, on both the pre-image and the measurement capture, so the operator
   knows to reposition the cassette. The last set doesn't beep; the run moves
   on by itself.
+- **Pad finding on the instrument** (`src/padfind.py`, new). Before each
+  pre-image and measurement sweep, the pad is found from one 10 ms frame lit
+  by photo_red, with no warm-up. The LED is on for about 0.06–0.09 s, and
+  pad finding takes 0.5–1.0 s in all (rpizero3, 2026-11-14).
+  - It uses the same method as the desktop's `padrect.py` (cassette window
+    layout only) and gives the same fit on all 60 pre- and post-images of
+    the F/G/H archives. A photo_red offset moves the fit to where the
+    desktop's all-channel fit lands, to within 0.01 px on average.
+  - A post-image is guided by its pre-image's fit, read back from the same
+    archive, with the sides within ±2 px.
+  - A pad that cannot be found, or fails the quality checks (width ±2 px,
+    tilt 2°, edge scatter 0.5 px), is logged and stored, and the sweep goes
+    on.
+  - `BayerCam.capture_held()` / `bayer_of()` / `release_held()` let a frame be
+    captured with the LED on and converted after it is off.
+  - The pad finding is timed in the capture profile, section `padfind`.
+- **Archive schema 6.** Each sweep's section can hold a `pad` group: the
+  pad-finding frame's R layer (`R`, bound crop, raw DN), the fit before and
+  after the offset (`before_offset`, `after_offset`), and attributes for the
+  LED, exposure, frames, timings and quality checks.
+  `capture_h5.CaptureSuiteWriter.add_pad()` writes it and `read_pad()` reads it.
+  The group is optional, so schema-5 readers' other paths are unchanged. This
+  moves the next release to a MINOR bump.
 
 ### Removed
 

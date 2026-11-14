@@ -65,6 +65,7 @@ import capture_meta
 import config_repo as config
 import exposure_repo
 import layermodel_repo
+import padfind
 import roi
 import sample_repo
 from bayer_cam import BayerCam
@@ -200,6 +201,36 @@ MODE_PRE         = "pre"
 # file; the measurement run reopens it with mode="a", by way of
 # CaptureConfig.archive_path.
 PRE_SECTION = "/pre"
+
+# Pad finding  (detour stage 1, 2026-11-14; see src/padfind.py)
+# ------------
+# Before a sweep takes the photos it keeps, the pad is found from one frame
+# of its own, lit by PADFIND_LED.  That frame need not be a good exposure, so
+# the LED gets no warm-up: it is switched on, one fully lit frame is taken,
+# and it is switched off again before the fit is worked out.  The fit is
+# stored in the sweep's `pad` group (capture_h5.add_pad), and a post-image is
+# guided by the pre-image's fit, read back from the same archive.
+#
+# These four move to the config table in stage 4 of the work plan.
+#
+#   PADFIND_LED          The LED the frame is lit by.  photo_red changes the
+#                        pad least and its dye barely absorbs it, so the
+#                        pad's edges look the same before and after arsine.
+#   PADFIND_EXPOSURE_US  The frame's exposure_us.  About a quarter of
+#                        photo_red's safe pre-image exposure (~38 ms), which
+#                        puts the gray chips near 120 DN above dark: plenty
+#                        for edges, and well clear of clipping on any pad.
+#   PADFIND_MAX_FRAMES   Most frames taken with the LED on while waiting for
+#                        one that began after the LED was switched on.
+#   PADFIND_DARK_DN      Dark level subtracted before dividing by the chips,
+#                        DN.  The measured dark level is 64.00-64.05 in every
+#                        layer (C1038-C1047), and pad finding uses only ratios
+#                        and half-way levels, so a constant is enough; the
+#                        post-image's own dark frames come after its sweep.
+PADFIND_LED         = "photo_red"
+PADFIND_EXPOSURE_US = 10_000
+PADFIND_MAX_FRAMES  = 4
+PADFIND_DARK_DN     = 64.0
 
 # TODO(undecided): consider moving exposure calibration WHOLLY to the
 # Menu → Advanced → Calibrate Exposures screen as a standalone operation, run
@@ -776,6 +807,15 @@ class CaptureRunner:
         # {(color, exposure_us): channels to keep}, so a repeated exposure does
         # not re-query the database.
         self._keep_cache: dict = {}
+
+        # Where this sweep found the pad (_find_pad), in layer px of the bound
+        # crop.  pad: the fit after the photo_red offset, the one to measure
+        # on.  pad_before: the fit before it, which a post-image is guided by.
+        # Both None when pad finding failed or was not run; pad_problem then
+        # says why ('' when it worked and passed its quality check).
+        self.pad: "padfind.PadFit | None" = None
+        self.pad_before: "padfind.PadFit | None" = None
+        self.pad_problem: str = ""
 
         # Wall-clock profiler (on unless COLORIMETER_PROFILE is false-y). Records
         # every frame, wait, numpy block, and archive write; its summary is
@@ -1711,6 +1751,205 @@ class CaptureRunner:
                     self.config.initial_us)
         return int(self.config.initial_us), "fallback"
 
+    # ── Pad finding ──────────────────────────────────────────────────
+
+    def _find_pad(self) -> Iterator[Progress]:
+        """
+        Find the pad from one PADFIND_LED frame, and store where it is.
+
+        Sets self.pad, self.pad_before and self.pad_problem, and writes the
+        sweep's `pad` group.  Never raises for a pad it cannot find, and
+        never stops the run: a failure is logged, stored and reported in
+        pad_problem, and the sweep goes on without a pad.
+
+        Timings, in seconds, go to the archive and to the profile (section
+        'padfind').  Libraries are imported when this module loads, so no
+        timer includes loading them.
+          total_s    from the start of this step to the end of the fit
+                     (the archive write after it is timed as io.hdf5)
+          led_on_s   from switching the LED on to switching it off
+          fit_s      the fit alone, with the LED already off
+        """
+        section = (padfind.SECTION_PRE if self._is_pre()
+                   else padfind.SECTION_POST)
+        self.pad = self.pad_before = None
+        self.pad_problem = ""
+        try:
+            channel = self._leds.channel_of(PADFIND_LED)
+        except ValueError:
+            self.pad_problem = f"no {PADFIND_LED} LED on this bank"
+            log.warning("pad finding skipped: %s", self.pad_problem)
+            return
+
+        self.prof.set_section("padfind")
+        yield self._progress("capture", f"Finding the pad ({PADFIND_LED})",
+                             step="padfind")
+        # Attributes for the archive: plain numbers and text only.
+        info = {"led": PADFIND_LED, "section": section,
+                "exposure_us": PADFIND_EXPOSURE_US,
+                "dark_dn": PADFIND_DARK_DN}
+        layer = before = after = None
+        t_start = time.perf_counter()
+        try:
+            layer, frame_info = self._padfind_frame(channel)
+            info.update(frame_info)
+            prior = self._padfind_prior(layer.shape) if section == \
+                padfind.SECTION_POST else None
+            info["guided_by_pre"] = int(prior is not None)
+            t_fit = time.perf_counter()
+            with self.prof.time("padfind.fit"):
+                before, after = padfind.find_pad(
+                    layer, PADFIND_DARK_DN, self._padfind_rects(), section,
+                    prior)
+            info["fit_s"] = round(time.perf_counter() - t_fit, 4)
+            self.pad, self.pad_before = after, before
+            self.pad_problem = after.qc()
+            info["qc"] = self.pad_problem
+            info["describe"] = after.describe()
+        except (padfind.PadFindError, KeyError, ValueError) as exc:
+            # KeyError/ValueError: a ROI the fit needs is missing or bad.
+            self.pad_problem = f"pad not found: {exc}"
+            info["error"] = str(exc)
+        info["total_s"] = round(time.perf_counter() - t_start, 4)
+        self.prof.add("padfind.total", info["total_s"])
+
+        with self.prof.time("io.hdf5"):
+            self._writer.add_pad(
+                layer, before.to_attrs() if before else None,
+                after.to_attrs() if after else None, info)
+        if self.pad is not None and not self.pad_problem:
+            log.info("pad (%s): %s", section, self.pad.describe())
+        else:
+            log.warning("pad (%s): %s", section, self.pad_problem)
+        log.info("pad finding (%s): total %.3f s, LED on %.3f s, fit %s s, "
+                 "%s lit frame(s), rule %s", section, info["total_s"],
+                 info.get("led_on_s", float("nan")), info.get("fit_s", "-"),
+                 info.get("frames_lit", 0), info.get("lit_frame_rule", "-"))
+        yield self._progress(
+            "capture", f"    pad: {self.pad_problem or 'found'}",
+            step="padfind")
+
+    def _padfind_frame(self, channel: int) -> "tuple[np.ndarray, dict]":
+        """
+        Take the pad-finding frame: settle in the dark, flash, frame, off.
+
+        1. With every LED off, set PADFIND_EXPOSURE_US and capture until the
+           camera reports it (_settle_frames).  Those frames are dark and are
+           thrown away; doing this first keeps the settling out of the LED's
+           on-time.
+        2. Switch the LED on and capture until a frame *began* after that
+           moment.  A frame already being read out when the LED came on is
+           partly dark (the sensor reads its rows one after another), so it
+           must not be used.  Each frame's SensorTimestamp (libcamera: when
+           its first row started, in ns on the CLOCK_BOOTTIME clock) is
+           compared with the switch-on time on the same clock.  A camera that
+           reports no SensorTimestamp gets the second frame instead.
+           Frames are held unconverted (BayerCam.capture_held), so waiting
+           out a rejected frame costs only the frame itself.
+        3. Switch the LED off, in a `finally`, so it goes off however this
+           ends, and only then convert the kept frame to its raw Bayer array
+           (BayerCam.bayer_of).  On the Pi the conversion is the slow part.
+
+        Args:
+            channel: The LED bank channel of PADFIND_LED.
+
+        Returns:
+            (R layer of the bound crop in raw DN, {name: value} for the
+            archive: applied_us, frames_dark, frames_lit, lit_frame_rule,
+            led_on_s, captured_dt).
+        """
+        cam = self._cam
+        _, _, _, frames_dark, _ = _settle_frames(
+            cam, PADFIND_EXPOSURE_US, self.prof)
+
+        boottime = getattr(time, "CLOCK_BOOTTIME", None)
+        frames_lit, meta, rule = 0, {}, "frame budget ran out"
+        request = None          # the held frame not yet converted or dropped
+        try:
+            t_on = time.perf_counter()
+            self._led_on(channel)
+            on_ns = (time.clock_gettime_ns(boottime) if boottime is not None
+                     else None)
+            try:
+                # Frames are held, not converted, so a rejected frame costs
+                # only its wait, and the LED goes off before the slow part.
+                while frames_lit < PADFIND_MAX_FRAMES:
+                    if request is not None:
+                        cam.release_held(request)
+                        request = None
+                    request, meta = cam.capture_held()
+                    frames_lit += 1
+                    started_ns = meta.get("SensorTimestamp")
+                    if started_ns is not None and on_ns is not None:
+                        if int(started_ns) >= on_ns:
+                            rule = "SensorTimestamp"
+                            break
+                    elif frames_lit >= 2:
+                        rule = "second frame"
+                        break
+            finally:
+                self._led_off(channel)
+            led_on_s = time.perf_counter() - t_on
+            held, request = request, None
+            bayer = cam.bayer_of(held)          # releases the frame
+        finally:
+            if request is not None:             # an error left one held
+                cam.release_held(request)
+        self.prof.add("padfind.led_on", led_on_s)
+        if rule == "frame budget ran out":
+            log.warning("pad finding: no frame began after the LED came on "
+                        "within %d frames; using the last", frames_lit)
+        layer = self._bound_layers(bayer, self._pattern)["R"]
+        return layer, {"applied_us": int(meta.get("ExposureTime", 0)),
+                       "frames_dark": int(frames_dark),
+                       "frames_lit": frames_lit, "lit_frame_rule": rule,
+                       "led_on_s": round(led_on_s, 4),
+                       "captured_dt": capture_meta.timestamp_ms()}
+
+    def _padfind_rects(self) -> "dict[str, Rect]":
+        """
+        The sample ROI and the two gray chips, in layer px of the bound crop.
+
+        The chips are the white_balance ROIs, taken in name order as gray1
+        and gray2 (their names in every commissioned database).
+
+        Raises:
+            ValueError: there is no sample ROI or fewer than two gray chips.
+        """
+        bound = roi.by_role(self.rois, roi.ROLE_BOUND)
+        sample = roi.by_role(self.rois, roi.ROLE_SAMPLE)
+        chips = sorted(roi.all_by_role(self.rois, roi.ROLE_WHITE_BALANCE),
+                       key=lambda r: r.name)
+        if sample is None or len(chips) < 2:
+            raise ValueError("pad finding needs a sample ROI and two gray "
+                             "chips (white_balance ROIs)")
+        return {"sample": roi.to_layer_rect_within(sample, bound),
+                "gray1": roi.to_layer_rect_within(chips[0], bound),
+                "gray2": roi.to_layer_rect_within(chips[1], bound)}
+
+    def _padfind_prior(self, shape) -> "padfind.PadFit | None":
+        """
+        The pre-image's pad fit before its offset, to guide a post-image.
+
+        Read from the archive's /pre/pad group.  None when the archive holds
+        no pre-image fit, or when it was made on a crop of another size (the
+        bound ROI was edited between the two sweeps), in which case the
+        post-image is fitted on its own.
+
+        Args:
+            shape: (rows, columns) of this sweep's pad-finding layer.
+        """
+        stored = self._writer.read_pad(PRE_SECTION)
+        if not stored or not stored.get("before_offset"):
+            return None
+        prior = padfind.PadFit.from_attrs(stored["before_offset"])
+        if tuple(prior.shape) != tuple(shape):
+            log.warning("pad finding: the pre-image was fitted on a %s crop, "
+                        "this sweep is %s; fitting without it",
+                        prior.shape, tuple(shape))
+            return None
+        return prior
+
     def _take_darks(self, when: str) -> Iterator[Progress]:
         """
         Take the run's dark frames and store their statistics only.
@@ -1972,6 +2211,9 @@ class CaptureRunner:
             # LED and before white (see _capture_white).
             if self._is_pre():
                 yield from self._take_darks("before")
+
+            # Find the pad before any photo this sweep keeps.
+            yield from self._find_pad()
 
             for color in self._color_order:
                 self._led_index    += 1

@@ -34,6 +34,14 @@ Layout:
                                           statistics only in a schema-5 sweep
     /dark_whole/<when>_<us>us/<ch>        the whole frame  (test images only)
     /photo                                raw JPEG bytes  (optional)
+    /pad                                  attrs: how the pad was found (LED,
+                                          exposure_us, timings, QC); see
+                                          add_pad()  (schema 6 on; optional)
+    /pad/R                                the pad-finding frame's R layer
+    /pad/before_offset                    attrs: the fit before the photo_red
+                                          offset (padfind.PadFit.to_attrs)
+    /pad/after_offset                     attrs: the fit after it, the one
+                                          the analysis uses
     /pre/…                                the same shape again, for the
                                           pre-image of the unreacted strip
 
@@ -140,7 +148,12 @@ from hdf5write import Hdf5Writer
 # that subtracts a dark frame pixel by pixel, or follows a per-LED dark link,
 # finds neither in a version-5 sweep.  Test images (capture_image.py) still
 # store dark arrays and links when Dark frames is ticked.
-SCHEMA_VERSION    = 5
+# 5 -> 6: a sweep may carry a `pad` group: where the Pi found the pad before
+# the sweep's photos (src/padfind.py), from one photo_red frame of its own.
+# Optional and additive: a version-5 reader never looks for it and reads
+# everything else exactly as before; a reader that wants the Pi's pad calls
+# read_pad() and accepts None.
+SCHEMA_VERSION    = 6
 SUITE_DESCRIPTION = "Colorimeter camtest8 capture suite"
 METADATA_NAME     = "meta"
 
@@ -466,6 +479,70 @@ class CaptureSuiteWriter:
         }
         meta.update(attrs or {})
         self._w.write_bytes("/", "photo", jpeg_bytes, attrs=meta)
+
+    # ── Where the pad is (schema 6) ──────────────────────────────────
+
+    def _pad_group(self, section: "str | None" = None) -> str:
+        """Group path of the pad record, in this sweep or another section."""
+        sec = self._section if section is None else section.rstrip("/")
+        return f"{sec}/pad"
+
+    def add_pad(self, layer: "np.ndarray | None", before: "dict | None",
+                after: "dict | None", info: dict) -> None:
+        """
+        Store where the pad was found, and the frame it was found in.
+
+        Written once per sweep, before the sweep's own photos, by
+        CaptureRunner._find_pad().  A failed attempt is stored too (with
+        `before` and `after` None and the reason in `info`), so a reader can
+        tell "pad finding failed" from "pad finding was not run".
+
+        Args:
+            layer:  The pad-finding frame's R Bayer layer, bound crop, raw DN,
+                    or None if no frame was taken.  Stored so the fit can be
+                    checked on the desktop against the very pixels it used.
+            before: padfind.PadFit.to_attrs() of the fit before the photo_red
+                    offset (what a post-image is guided by), or None.
+            after:  The same for the fit after the offset (what the analysis
+                    uses), or None.
+            info:   Flat {name: number or text} about the attempt: LED,
+                    exposure_us, timings, QC message, error.  HDF5 attributes
+                    cannot hold None, so leave absent values out.
+        """
+        group = self._pad_group()
+        self._w.set_attrs(group, info)
+        if layer is not None:
+            self._w.write_array(group, "R", layer)
+        for name, attrs in (("before_offset", before),
+                            ("after_offset", after)):
+            if attrs is not None:
+                self._w.set_attrs(f"{group}/{name}", attrs)
+
+    def read_pad(self, section: str = "") -> "dict | None":
+        """
+        The pad fit stored for a section of this archive, or None.
+
+        How a post-image finds its pre-image's pad: the measurement run
+        appends to the archive the pre-image created, and reads
+        read_pad("/pre") before it fits its own pad.
+
+        Args:
+            section: "" for the measurement sweep, "/pre" for the pre-image.
+
+        Returns:
+            {"info": {...}, "before_offset": {...} or None,
+             "after_offset": {...} or None}, or None when the section has no
+            pad record.
+        """
+        group = self._pad_group(section)
+        info = self._w.attrs_of(group)
+        if not info:
+            return None
+        return {"info": info,
+                "before_offset": self._w.attrs_of(f"{group}/before_offset")
+                or None,
+                "after_offset": self._w.attrs_of(f"{group}/after_offset")
+                or None}
 
     # ── Path construction (the schema lives here) ────────────────────
     #

@@ -89,6 +89,9 @@ for each sample.
   brown (open item 7).
 - **Ends with** M saved, a map of yellow and brown amounts per pad, and the
   third component's size compared with its noise.
+- **Status (2026-11-14): paused** after 3b, for the detour below. It resumes
+  on a new set of strips Bill will capture once the exposure work is built
+  and tested.
 
 ## 4. Calibration to known concentrations (step 9)
 
@@ -105,6 +108,128 @@ for each sample.
     saturation matters.
 - **Ends with** a calibration curve with its replicate spread, and the
   working range in µg/L.
+
+## Detour (2026-11-13/14): pad finding on the Pi, and exposures set from the strip
+
+Step 3 (yellow and brown) needs at least three channels with a usable
+pre-image white. Since C1039 the dry pad is clipped (1023 DN raw) in
+violet.B, royal_blue.B, cyan.B, green.Gb and green.Gr. Cause: the pre-image
+takes each LED's group-1 exposure_us, and for every LED whose calibration was
+"spread" that is the middle rung, which calibration never checks for clipping
+(`exposure_fit._need` returns NEED_NONE). The post-images clip too (C1039:
+about 11 % of the stored region at the middle rung, 1-3 % at the shortest).
+
+Bill widened the fix into a detour (2026-11-14). Step 3 resumes after it, on a
+new set of strips Bill will capture once the exposure work is built and
+tested. The full plan is `~/.claude/plans/velvety-roaming-pascal.md`.
+
+### Decisions (Bill, 2026-11-13/14)
+
+- **Test region:** the fitted pad plus the gray1 and gray2 ROIs, non-hot
+  pixels only ("unscreened" = not hot). gray1 and gray2 need no finding.
+- **Limits, all in raw DN.** The dark level is 64.00-64.05 in every Bayer
+  layer (12 sweeps, C1038-C1047, pre and post, checked 2026-11-14):
+
+  | Config row | Raw DN | Meaning | Test |
+  |---|---|---|---|
+  | `capture.clip_top_dn` | 1023 | sensor ceiling | clipped if raw >= 1023 |
+  | `capture.clip_bottom_dn` | 65 | dark level + 1 | clipped if raw <= 65 (counted in the log only) |
+  | `capture.noise_floor_dn` | 164 | dark level + 100 | Bus needed if raw < 164 |
+
+  Formulas that scale signals still subtract the dark level, e.g.
+  Bus = Tus x (164 - 64) / (darkest raw - 64).
+- **Tus** (the top is not clipped): accept a frame when no test-region pixel
+  is at 1023 and the brightest is at least 80 % of 1023. Otherwise re-aim:
+  after a clipped frame shorten by a fixed factor (0.7); after an unclipped
+  one scale linearly so the brightest pixel lands at 85 % of 1023. At most 4
+  frames. If the last one still clips, save it, mark the LED failed, and say
+  so on screen.
+- **Bus** (the bottom is above the noise floor): taken only when a test-region
+  pixel of an analysis channel is below 164 at Tus. Check that Tus and Bus
+  together leave every non-hot pixel unclipped at the top and above the floor
+  in at least one of them.
+- **Exposures per LED:** `protocol.multiple_exposure_count` (int, default 1)
+  is the number of frames kept at Tus, all at the same exposure_us. Bus,
+  when needed, is one more frame. The Pi never combines frames; the desktop
+  decides how (2026-11-14, Bill: option B).
+- **Post-images** start at the strip's own pre-image Tus. Dye only darkens the
+  pad, so that cannot clip.
+- **Layer filter:** `capture.layer_keep_min_dn` / `max_dn` do not fit the new
+  rule and are retired from the pre/post path. An analysis channel is always
+  saved; any other layer only when it has no clipped pixel in the test region
+  and its brightest pixel is above the noise floor.
+- **Exposure table:** one seed row per LED (last accepted Tus, and Bus if
+  used). Groups 1-5 stay as history; nothing reads them for pre/post.
+- **Multiple exposures:** the test is whether combining frames makes the
+  yellow and brown amounts more accurate, so the study waits until those
+  amounts can be measured (Bill, 2026-11-14). Meanwhile the trial strips are
+  captured with `multiple_exposure_count` = 3, so their archives hold the
+  study's data, blue side included. The extra light (about 0.57 s of LED
+  on-time per extra frame) is accepted for the trials: a little stain drift
+  acts like ordinary noise, and this is not the final calibration.
+
+### What the archives already say
+
+- **D1, safe pre-image exposure_us** (`preexposure_study.py`, 2026-11-13):
+  the exposure_us predicted to put the brightest non-hot pixel on the pad and
+  gray chips at 0.85 x 1023 raw. The brightest pixel is always on the pad,
+  never on a chip. Per LED, set by its brightest layer: royal_blue ~2260
+  (B; now 4017), violet ~14850 (B; now 21431), cyan ~16070 (B; now 27412),
+  green ~8760 (Gb/Gr; now 14582), photo_red ~37900 (R; now 34909). The
+  blue-side values rest on C1038 alone, which reads about 5 % dimmer than the
+  other strips in the layers that can be compared.
+- **Delay between captures:** successive lit frames of one LED are 0.57 s
+  apart (median of 586 gaps, C1030-C1048); the exposures themselves are
+  3-44 ms. LED on to the first stored frame takes 2.53 s. LED on-time is
+  2.60 s with 1 frame and 3.79 s with 3, so each extra frame adds about 23 %
+  to the light on the pad. Nearly all of it is camera settling and file
+  writing, not exposure.
+- **Frame-to-frame brightness:** the gray chips' signal per microsecond
+  differs between the rungs of one LED by 0.3-2.6 % (cyan worst). Frames
+  can't be combined on raw counts alone; each must first be scaled by its own
+  chip level.
+- **Pi libraries:** numpy, OpenCV (`cv2`), picamera2, h5py. No scipy.
+
+### Stages
+
+- **Stage 1. Pad finding on the Pi** (`src/padfind.py`). Port the cassette
+  ("window") part of `padrect.py`, numpy and cv2 only. Find the pad once
+  before the pre-images and once before the post-images, on photo_red.R only
+  (it barely changes the pad and still works on stained pads). Shift the fit
+  by the photo_red.R offset so it matches the desktop's all-channel fit:
+  pre-image (left, right, top, bottom) = (+0.10, +0.44, +0.33, +0.33) layer
+  px; post-image (+0.13, +0.35, +0.11, +0.11). Light the LED only long
+  enough for one frame, with no warm-up, and fit after it is off. Profile the
+  whole step, the LED on-time and the fit, not counting library loading.
+  Check against `analysis_1.pad_of` on the 30 F/G/H files.
+  **Done 2026-11-14** (Bill approved). Parity: the port matches `padrect`
+  exactly (0.000 px, 60 fits); after the offsets every edge's mean is within
+  0.01 px of the all-channel fit, spread at most 0.13 px. On rpizero3: LED on
+  0.06-0.09 s (frames are held and converted after the LED is off), pad
+  finding 0.45-0.99 s in all, fit 0.02-0.09 s. Archive schema 6 stores the
+  fit in each section's `pad` group. QC tilt limit stays at 2 degrees.
+- **Stage 2. Multiple-exposure study. Deferred** (Bill, 2026-11-14) until
+  the yellow and brown amounts can be measured; it will be judged on their
+  accuracy, using the N = 3 trial archives. Original outline: does
+  combining 2-3 exposures change a pad's mean A by more than 0.5 % of its dye
+  signal, or cut per-pixel noise usefully? Compare one frame; Bill's average
+  of (DN - dark) / exposure_us over unclipped frames; and total signal /
+  total exposure_us over unclipped frames, each with and without scaling
+  every frame by its own gray-chip level.
+- **Stage 3. The exposure rule** in `capture_runner.py`: Tus, Bus and the
+  saved-layer rule above, for pre-images and post-images, keeping
+  `multiple_exposure_count` frames at Tus. Write the archive after the LED is
+  off, so file writing is not LED on-time.
+- **Stage 4. Database.** Seed rows in `exposure` (new columns `role` and
+  `samp_no`); the new `exposure_log` table (one row per frame per layer,
+  retries and the pad-finding frame included: sample, archive, pre/post,
+  purpose, attempt, accepted, stored, LED, Bayer layer, exposure_us
+  requested and applied, dark, min, max and mean raw DN, where the max sits,
+  pixel count, clipped at top, clipped at bottom, below the floor); and the
+  config rows above, plus `protocol.analysis_channels`, the re-aim settings,
+  the pad-finding LED and exposure_us, and the two photo_red offsets.
+
+Bill reviews after each stage. Nothing is committed without his go-ahead.
 
 ## Order and hand-off
 

@@ -149,6 +149,24 @@ class FakeCam:
         }
         return rgb, bayer, meta
 
+    # Held frames (BayerCam.capture_held / bayer_of / release_held): the
+    # frame is drawn when it is captured, so the LEDs lit at that moment
+    # decide what it shows, as on the camera.  `held` counts frames captured
+    # but not yet converted or released, so a test can check none leak.
+    held = 0
+
+    def capture_held(self):
+        _, bayer, meta = self.capture_frame()
+        self.held += 1
+        return bayer, meta
+
+    def bayer_of(self, request):
+        self.held -= 1
+        return request
+
+    def release_held(self, request) -> None:
+        self.held -= 1
+
     def focus(self, force: bool = False, leds=None) -> float:
         self.lens_position = self._af_result
         return self._af_result
@@ -1415,6 +1433,203 @@ class TestClosingPhoto(RunnerTestCase):
             self.assertNotIn("photo", f)
             self.assertIn("/leds/amber", f)   # the measurements survived
         self.assertFalse(self.leds.lit_channels())
+
+
+
+# ---------------------------------------------------------------------------
+# Pad finding (detour stage 1): one photo_red frame before the sweep
+# ---------------------------------------------------------------------------
+
+import padfind                                    # noqa: E402
+
+PHOTO_RED_CH = 4
+
+
+class LedsWithPhotoRed(FakeLeds):
+    """FakeLeds plus a photo_red LED, which pad finding lights."""
+
+    _COLORS = {1: "amber", 2: "blue", PHOTO_RED_CH: "photo_red", 10: "white"}
+
+
+def _coverage(rows, cols, x0, x1, y0, y1, sub=10):
+    """
+    Fraction of each layer pixel inside x0 <= x < x1, y0 <= y < y1, with
+    pixel (r, c) centered on (r, c) -- padfind's convention.
+    """
+    ys = (np.arange(rows * sub) + 0.5) / sub - 0.5
+    xs = (np.arange(cols * sub) + 0.5) / sub - 0.5
+    inside = (((ys >= y0) & (ys < y1))[:, None]
+              & ((xs >= x0) & (xs < x1))[None, :])
+    return inside.reshape(rows, sub, cols, sub).mean(axis=(1, 3))
+
+
+class CassetteCam(FakeCam):
+    """
+    FakeCam whose R pixels show a cassette with a pad while photo_red is lit.
+
+    The scene is drawn in the R Bayer layer of the bound crop, around the
+    sample ROI's middle column, the way the cassette holders put it: dark
+    frame (field 0.1), white window (1.6), dark bands beside the pad (0.2),
+    the pad (1.2), and the two gray chips (1.0).  `shift` moves the pad, to
+    stand for a strip that moved between the pre-image and the post-image.
+    """
+
+    WIN_TOP, WIN_ROWS = 20, 68           # window rows, layer px in the crop
+    PAD_DOWN = 4.4                       # pad top below the window top
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.shift = (0.0, 0.0)          # (right, down), layer px
+        self.truth = None                # (left, right, top, bottom)
+
+    def _scene(self):
+        rois = roi.load_active(FRAME_W, FRAME_H, None)
+        bound = roi.by_role(rois, roi.ROLE_BOUND)
+        rows, cols = bound.h // 2, bound.w // 2
+        sample = roi.to_layer_rect_within(roi.by_role(rois, roi.ROLE_SAMPLE),
+                                          bound)
+        xc = sample.x + sample.w // 2
+        left = xc - padfind.WIDTH_FIXED / 2 + 0.3 + self.shift[0]
+        top = self.WIN_TOP + self.PAD_DOWN + self.shift[1]
+        right, bot = left + padfind.WIDTH_FIXED, top + padfind.HEIGHT_FIXED
+        window = _coverage(rows, cols, xc - 30, xc + 30, self.WIN_TOP,
+                           self.WIN_TOP + self.WIN_ROWS)
+        f = (0.1 + 1.5 * window
+             - 1.4 * window * _coverage(rows, cols, 0, cols, top, bot)
+             + 1.0 * _coverage(rows, cols, left, right, top, bot))
+        for chip in roi.all_by_role(rois, roi.ROLE_WHITE_BALANCE):
+            c = roi.to_layer_rect_within(chip, bound)
+            f[c.y:c.y + c.h, c.x:c.x + c.w] = 1.0
+        self.truth = np.array([left, right, top, bot])
+        return bound, (64.0 + 300.0 * f).astype(np.uint16)
+
+    def capture_frame(self):
+        rgb, bayer, meta = super().capture_frame()
+        if self.leds is not None and PHOTO_RED_CH in self.leds.lit_channels():
+            bound, r_layer = self._scene()
+            crop = bayer[bound.y:bound.y + bound.h, bound.x:bound.x + bound.w]
+            crop[0::2, 0::2] = r_layer           # RGGB: R at even row/col
+        return rgb, bayer, meta
+
+
+def _edges(fit):
+    """(left, right, top, bottom), the sides at the pad's middle row."""
+    y = 0.5 * (fit.top + fit.bot)
+    return np.array([fit.aL + fit.m * (y - fit.yc),
+                     fit.aR + fit.m * (y - fit.yc), fit.top, fit.bot])
+
+
+class TestPadFinding(CalibratedExposures):
+    """
+    Each sweep finds the pad from one photo_red frame before its own photos:
+    the LED flashes once with no warm-up, the fit is stored in the sweep's
+    `pad` group, and a post-image is guided by the pre-image's fit.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.cam = CassetteCam()
+        self.leds = LedsWithPhotoRed()
+        self.cam.leds = self.leds
+
+    def make_runner(self, **kwargs):
+        kwargs.setdefault("led_colors", ["amber"])
+        kwargs.setdefault("exposure_group", "1")
+        return super().make_runner(**kwargs)
+
+    def test_pre_image_finds_and_stores_the_pad(self):
+        runner = self.make_runner(mode=capture_runner.MODE_PRE)
+        self.run_to_completion(runner)
+        self.assertEqual(runner.pad_problem, "")
+        np.testing.assert_allclose(_edges(runner.pad_before), self.cam.truth,
+                                   atol=0.15)
+        self.assertEqual(runner.pad.offset, padfind.OFFSET_PRE)
+        with self.archive(runner) as f:
+            g = f["/pre/pad"]
+            self.assertEqual(g.attrs["led"], "photo_red")
+            self.assertEqual(g["R"].shape, runner.pad.shape)
+            for name in ("total_s", "led_on_s", "fit_s"):
+                self.assertGreaterEqual(float(g.attrs[name]), 0.0)
+            self.assertIn("before_offset", g)
+            self.assertIn("after_offset", g)
+            self.assertNotIn("/pad", f)          # nothing at the root
+
+    def test_photo_red_flashes_once_before_the_sweep(self):
+        """On, off, then the sweep's own LED: no warm-up wait is needed."""
+        runner = self.make_runner(mode=capture_runner.MODE_PRE)
+        self.run_to_completion(runner)
+        switches = [h for h in self.leds.history if h[1]]
+        self.assertEqual(switches[0], (PHOTO_RED_CH, True))
+        self.assertEqual(sum(1 for h in switches if h[0] == PHOTO_RED_CH), 1)
+        i_off = self.leds.history.index((PHOTO_RED_CH, False))
+        i_amber = self.leds.history.index((1, True))
+        self.assertLess(i_off, i_amber)
+        # The exposure was settled in the dark, so every photo_red frame
+        # was taken at the pad-finding exposure_us.
+        lit = [fr for fr in self.cam.frames if PHOTO_RED_CH in fr[1]]
+        self.assertTrue(lit)
+        self.assertTrue(all(fr[0] == capture_runner.PADFIND_EXPOSURE_US
+                            for fr in lit))
+
+    def test_led_is_off_before_the_frame_is_converted(self):
+        """
+        The kept frame is converted only after photo_red is off, the frame
+        dropped while waiting is released unconverted, and none are left
+        held.  FakeCam reports no SensorTimestamp, so the second frame is
+        kept.
+        """
+        lit_at_convert = []
+        convert = self.cam.bayer_of
+
+        def bayer_of(request):
+            lit_at_convert.append(PHOTO_RED_CH in self.leds.lit_channels())
+            return convert(request)
+
+        self.cam.bayer_of = bayer_of
+        runner = self.make_runner(mode=capture_runner.MODE_PRE)
+        self.run_to_completion(runner)
+        self.assertEqual(lit_at_convert, [False])
+        self.assertEqual(self.cam.held, 0)
+        with self.archive(runner) as f:
+            g = f["/pre/pad"]
+            self.assertEqual(int(g.attrs["frames_lit"]), 2)
+            self.assertEqual(g.attrs["lit_frame_rule"], "second frame")
+
+    def test_post_image_is_guided_by_the_pre_image(self):
+        pre = self.make_runner(mode=capture_runner.MODE_PRE)
+        self.run_to_completion(pre)
+        self.cam.shift = (1.0, 0.6)              # the strip moved a little
+        post = self.make_runner(mode="normal", archive_path=pre.out_path)
+        self.run_to_completion(post)
+        self.assertEqual(post.pad_problem, "")
+        self.assertEqual(post.pad_before.side_rule, "guided")
+        np.testing.assert_allclose(_edges(post.pad_before), self.cam.truth,
+                                   atol=0.15)
+        self.assertEqual(post.pad.offset, padfind.OFFSET_POST)
+        with self.archive(post) as f:
+            self.assertEqual(int(f["/pad"].attrs["guided_by_pre"]), 1)
+            self.assertIn("/pre/pad/before_offset", f)
+
+    def test_a_pad_that_cannot_be_found_does_not_stop_the_run(self):
+        self.cam = FakeCam()                     # no cassette in the frame
+        self.cam.leds = self.leds
+        runner = self.make_runner(mode=capture_runner.MODE_PRE)
+        self.run_to_completion(runner)
+        self.assertIsNone(runner.pad)
+        self.assertTrue(runner.pad_problem.startswith("pad not found"))
+        with self.archive(runner) as f:
+            self.assertIn("error", f["/pre/pad"].attrs)
+            self.assertIn("/pre/leds/amber/lit/e0/R", f)   # sweep went on
+        self.assertFalse(self.leds.lit_channels())
+
+    def test_no_photo_red_led_skips_pad_finding(self):
+        self.leds = FakeLeds()
+        self.cam.leds = self.leds
+        runner = self.make_runner(mode=capture_runner.MODE_PRE)
+        self.run_to_completion(runner)
+        self.assertIn("no photo_red", runner.pad_problem)
+        with self.archive(runner) as f:
+            self.assertNotIn("/pre/pad", f)
 
 
 if __name__ == "__main__":

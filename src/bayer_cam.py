@@ -346,7 +346,65 @@ class BayerCam:
         except Exception as e:
             err.handle(e, "Frame capture", recoverable=True)
             raise
-    
+
+    # ── Held frames: capture now, convert later ─────────────────────────
+    # capture_frame() turns every frame into a BGR image and a 16-bit Bayer
+    # array before it returns, which takes about 0.2 s per frame on a Pi
+    # Zero 2 W.  When an LED is lit only for one frame (pad finding), that
+    # time is LED on-time for nothing.  These three split the capture:
+    # capture_held() returns as soon as the frame is complete, with its
+    # metadata but no arrays; the caller can switch the LED off, then call
+    # bayer_of() for the raw data, or release_held() to drop the frame.
+    # Every held frame must reach one of the two, or picamera2 runs out of
+    # buffers.
+
+    def capture_held(self) -> Tuple[object, Dict]:
+        """
+        Wait for the next complete frame and hold it, unconverted.
+
+        Requires setup_camera() to have been called first.
+
+        Returns:
+            (request, metadata): the picamera2 request holding the frame's
+            buffers, and its metadata dict (ExposureTime, SensorTimestamp,
+            ...).  Pass the request to bayer_of() or release_held().
+        """
+        if self.camera is None:
+            raise RuntimeError("Camera not initialized. Call setup_camera() first.")
+        request = self.camera.capture_request()
+        try:
+            metadata = request.get_metadata()
+        except Exception:
+            request.release()
+            raise
+        if self.has_autofocus and metadata.get("LensPosition") is not None:
+            self.lens_position = float(metadata["LensPosition"])
+        return request, metadata
+
+    def bayer_of(self, request) -> np.ndarray:
+        """
+        The raw Bayer array of a held frame, then release the frame.
+
+        Args:
+            request: From capture_held().
+
+        Returns:
+            uint16 array (H, W) of raw pixel values 0-1023, as capture_frame()
+            returns.  No BGR image is made.
+        """
+        try:
+            raw_bytes = request.make_array("raw")    # uint8 packed CSI-2 bytes
+        finally:
+            request.release()
+        return BayerCam.unpack_raw10(
+            raw_bytes, self.config_size[0], self.config["format"]  # type: ignore[index]
+        )
+
+    @staticmethod
+    def release_held(request) -> None:
+        """Drop a held frame without converting it."""
+        request.release()
+
     def autofocus_once(self, timeout_s: float = 5.0) -> float:
         """
         Trigger a single autofocus sweep, wait for completion, then lock focus.
