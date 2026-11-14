@@ -101,7 +101,8 @@ def report(path, section):
                       f"{a['decided_by']} max {st['max_dn']:.0f} "
                       f"({st['max_where']}), min {st['min_dn']:.0f}, "
                       f"clipped {st['n_clip_top']}, below floor "
-                      f"{st['n_below_floor']}")
+                      f"{st['n_below_floor']} (edge left out "
+                      f"{st.get('n_edge_left_out', 0)})")
             bus = (f"Bus {rec['bus_us']} µs on {rec['bus_layer']} "
                    f"(darkest {rec['bus_min_dn']})" if rec["bus_us"]
                    else "no Bus")

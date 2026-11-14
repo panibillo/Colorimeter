@@ -289,14 +289,28 @@ class PadFit:
         Returns:
             Array of `shape`, layer px.
         """
+        return np.minimum.reduce(list(self.edge_distances().values()))
+
+    def edge_distances(self) -> "dict[str, np.ndarray]":
+        """
+        Every pixel's distance in from each of the four edges.
+
+        The same frame as the desktop's `white_study.edge_distances`, so
+        the bands it defines are the bands of the edge study: band k of an
+        edge is the pixels with k <= distance < k + 1.
+
+        Returns:
+            {'L', 'R', 'T', 'B': array of `shape`}, layer px, positive
+            inside the pad, negative outside.
+        """
         rows, cols = self.shape
         yy, xx = np.mgrid[0:rows, 0:cols]
         # u: distance across the strip from the left side, measured along
         # the row; v: the row itself.  Same frame as desktop padrect.
         u = xx - (self.aL + self.m * (yy - self.yc))
         v = yy.astype(np.float64)
-        return np.minimum.reduce([u, self.width - u, v - self.top,
-                                  self.bot - v])
+        return {"L": u, "R": self.width - u, "T": v - self.top,
+                "B": self.bot - v}
 
     def mask(self, erode: float = 0.0) -> np.ndarray:
         """

@@ -50,7 +50,8 @@ How one LED's exposure_us is found (capture_runner does the frames)
      is the first).  The Pi stores them; it never combines them.
   5. If an analysis channel has a test-region pixel below the noise floor at
      Tus, work out Bus (bus_exposure()) and take BUS_EXPOSURE_COUNT frames
-     at it.
+     at it.  The floor test leaves out side-edge pixels that are mostly
+     outside the pad (edge_left_out(), below); the clipping test does not.
   6. Save every analysis channel of every frame, and any other layer only
      when it is unclipped and above the noise floor (keep_layers()).
   7. Check, pixel by pixel (coverage()), that every test-region pixel of
@@ -65,12 +66,13 @@ Public surface
     judge(stats, decision, exposure_us) -> (verdict, next_us, layer)
     bus_exposure(stats, color, tus_us) -> (bus_us or None, layer, min_dn)
     keep_layers(color, stats) -> (kept layers, {layer: why})
+    edge_left_out(layer, region) -> mask of edge pixels the floor test skips
     coverage(tus_layers, bus_layers, region, decision) -> {layer: counts}
 """
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 
 import numpy as np
 
@@ -172,6 +174,40 @@ ANALYSIS_CHANNELS = ("violet.B", "royal_blue.B", "cyan.B", "green.Gb",
 SEED_US = {"royal_blue": 2260, "violet": 14850, "cyan": 16070,
            "green": 8760, "photo_red": 37900}
 
+# ── Edge pixels in the noise-floor test (Bill, 2026-11-14) ───────────────
+# The fitted pad's outermost pixel row straddles the cut edge: a pixel there
+# can be mostly outside the pad, and then reads far darker than the paper
+# it is meant to measure.  Such pixels set off Bus for nothing (on the old
+# 1 ug/L pad, every below-floor pixel was one of them).  They stay in the
+# clipping test and in the analysis; only the floor test leaves them out.
+#
+# "Darkening" d is A relative to the pad's interior: d = -log10(signal /
+# interior mean signal), bigger = darker.  For one side of the pad:
+#   d_1      the darkening of band 1 (the row next in from the edge), from
+#            the band's mean signal, as the edge study computes it;
+#   rule     a band-0 (outermost row) pixel of that side is left out of the
+#            floor test when its own d > EDGE_DARKENING_FACTOR x d_1.
+#
+#   EDGE_DARKENING_FACTOR  5.0.  From the edge study
+#            (desktop/padanalysis/white_study.py step 2a,
+#            white_out/bands.json: 76 pre-image profiles, F/G/H holders, 7
+#            channels): on the left and right sides band 0 is 3.6-4.0 times
+#            as dark as band 1 (median), 90 % of profiles below 5.0, highest
+#            6.7.  Measured on undyed pads; a dyed edge may be darker.
+#   EDGE_RULE_SIDES        Only the left and right sides.  At the top band 0
+#            is not darker than band 1 (median d_0 = -0.014: the white paper
+#            above lights it), and at the bottom the ratio is about 0.8, so
+#            a ratio says nothing there; top and bottom pixels always stay.
+#   EDGE_INTERIOR_PX       The interior mean is over pad pixels at least
+#            this far (layer px) from every edge (white_study INTERIOR_PX).
+#   EDGE_BAND_CLEAR_PX     Band 1's mean leaves out pixels nearer than this
+#            to the top or bottom, so the corners don't count
+#            (white_study BAND_CLEAR_PX).
+EDGE_DARKENING_FACTOR = 5.0
+EDGE_RULE_SIDES       = ("L", "R")
+EDGE_INTERIOR_PX      = 8
+EDGE_BAND_CLEAR_PX    = 8
+
 # Verdicts judge() returns.
 ACCEPT  = "accept"
 CLIPPED = "clipped"
@@ -195,7 +231,11 @@ class LayerStats:
                        in: 'pad', 'gray1' or 'gray2'.
         n_clip_top:    Pixels at or above CLIP_TOP_DN.
         n_clip_bottom: Pixels at or below CLIP_BOTTOM_DN.
-        n_below_floor: Pixels below NOISE_FLOOR_DN.
+        n_below_floor: Pixels below NOISE_FLOOR_DN, not counting the edge
+                       pixels the floor test leaves out (edge_left_out).
+        floor_min_dn:  Darkest pixel the floor test looks at (the same
+                       pixels as n_below_floor).  Bus is worked out from it.
+        n_edge_left_out: Side-edge pixels the floor test left out.
     """
     layer: str
     n_pixels: int
@@ -206,11 +246,13 @@ class LayerStats:
     n_clip_top: int
     n_clip_bottom: int
     n_below_floor: int
+    floor_min_dn: float = float("nan")
+    n_edge_left_out: int = 0
 
     def to_dict(self) -> dict:
         """Plain values, for the archive's JSON record."""
         d = asdict(self)
-        for k in ("min_dn", "max_dn", "mean_dn"):
+        for k in ("min_dn", "max_dn", "mean_dn", "floor_min_dn"):
             d[k] = round(float(d[k]), 2)
         return d
 
@@ -227,11 +269,44 @@ class TestRegion:
         hot:   Boolean array, True at hot pixels (any Bayer layer), which
                are left out of every part.
         pad_source: 'fit' or 'sample ROI', for the record.
+        dist:  {'L', 'R', 'T', 'B': array}, each pixel's distance in from
+               each edge of the fitted pad (padfind.PadFit.edge_distances),
+               layer px; None when the pad was not fitted, and then the
+               edge rule (edge_left_out) is not applied.
     """
     __test__ = False                     # not a unittest class
     parts: dict
     hot: np.ndarray
     pad_source: str = "fit"
+    dist: "dict | None" = None
+    # The edge rule's pixel groups, built once per region (edge_masks()):
+    # they don't change between the frames of a sweep.
+    _edge: "dict | None" = field(default=None, repr=False, compare=False)
+
+    def edge_masks(self) -> "dict | None":
+        """
+        The pixel groups edge_left_out() needs, built on first use.
+
+        Returns:
+            None when there is no fitted pad (dist is None); otherwise
+            {"interior": mask, "sides": {side: (band0, band1)}}, where band0
+            is the pad pixels 0-1 px in from that side and band1 those 1-2
+            px in and at least EDGE_BAND_CLEAR_PX from the top and bottom.
+        """
+        if self.dist is None:
+            return None
+        if self._edge is None:
+            d = self.dist
+            pad = self.parts["pad"] & ~self.hot
+            near = np.minimum.reduce([d[e] for e in ("L", "R", "T", "B")])
+            clear = ((d["T"] >= EDGE_BAND_CLEAR_PX)
+                     & (d["B"] >= EDGE_BAND_CLEAR_PX))
+            self._edge = {
+                "interior": pad & (near >= EDGE_INTERIOR_PX),
+                "sides": {side: (pad & (d[side] >= 0) & (d[side] < 1),
+                                 pad & clear & (d[side] >= 1) & (d[side] < 2))
+                          for side in EDGE_RULE_SIDES}}
+        return self._edge
 
     @property
     def mask(self) -> np.ndarray:
@@ -251,7 +326,7 @@ class TestRegion:
 
     @classmethod
     def from_rects(cls, shape, pad_mask, gray1, gray2, hot=None,
-                   pad_source="fit") -> "TestRegion":
+                   pad_source="fit", dist=None) -> "TestRegion":
         """
         Build the region from the pad mask and the two chip rectangles.
 
@@ -261,6 +336,7 @@ class TestRegion:
             gray1, gray2: Rect (x, y, w, h) of each chip, layer px.
             hot:      Boolean array of `shape`, True at hot pixels, or None.
             pad_source: Recorded in the archive (see `pad_source`).
+            dist:     Edge distances of the fitted pad, or None (see `dist`).
         """
         parts = {"pad": np.asarray(pad_mask, dtype=bool)}
         for name, r in (("gray1", gray1), ("gray2", gray2)):
@@ -270,7 +346,58 @@ class TestRegion:
         if hot is None:
             hot = np.zeros(shape, dtype=bool)
         return cls(parts=parts, hot=np.asarray(hot, dtype=bool),
-                   pad_source=pad_source)
+                   pad_source=pad_source, dist=dist)
+
+
+def edge_left_out(layer, region: TestRegion) -> np.ndarray:
+    """
+    The side-edge pixels of one layer that the noise-floor test leaves out.
+
+    For each side in EDGE_RULE_SIDES:
+      1. signal = raw DN - DARK_DN; S = its mean over the pad's interior
+         (EDGE_INTERIOR_PX or more from every edge, hot pixels left out).
+      2. d_1 = -log10(mean signal of band 1 / S), band 1 being the pad
+         pixels 1 to 2 px in from that side, away from the corners.
+      3. A band-0 pixel (0 to 1 px in) is left out when
+         -log10(its signal / S) > EDGE_DARKENING_FACTOR x d_1.
+    A side whose d_1 is not positive (no darkening to compare with) leaves
+    nothing out.
+
+    Example: S = 700, band 1 mean 560 -> d_1 = 0.097; the limit is 0.485,
+    i.e. signal 229.  An edge pixel at raw 144 (signal 80, d = 0.94) is left
+    out; one at raw 400 (signal 336, d = 0.32) stays.
+
+    Args:
+        layer:  One Bayer layer of the bound crop, raw DN.
+        region: The test region; nothing is left out when region.dist is
+                None (the pad was not fitted).
+
+    Returns:
+        Boolean array of the layer's shape, True at the pixels left out.
+    """
+    a = np.asarray(layer)
+    out = np.zeros(a.shape, dtype=bool)
+    groups = region.edge_masks()
+    if groups is None or not groups["interior"].any():
+        return out
+    S = float(a[groups["interior"]].mean()) - DARK_DN
+    if S <= 0:
+        return out
+    for band0, band1 in groups["sides"].values():
+        if not band1.any():
+            continue
+        mean1 = float(a[band1].mean()) - DARK_DN
+        if mean1 <= 0:
+            continue
+        d1 = -np.log10(mean1 / S)
+        if d1 <= 0:
+            continue
+        # d > factor x d1  <=>  signal < S x 10^(-factor x d1): the same
+        # test without a logarithm at every pixel (and a signal at or below
+        # zero is always left out).
+        limit = S * 10.0 ** (-EDGE_DARKENING_FACTOR * d1)
+        out |= band0 & ((a - DARK_DN) < limit)
+    return out
 
 
 def measure(layers: dict, region: TestRegion) -> "dict[str, LayerStats]":
@@ -296,13 +423,18 @@ def measure(layers: dict, region: TestRegion) -> "dict[str, LayerStats]":
         where = next((part for part, m in keep.items()
                       if m.any() and float(np.asarray(arr)[m].max())
                       == brightest), "pad")
+        skipped = edge_left_out(arr, region) & every
+        floor_vals = np.asarray(arr)[every & ~skipped]
         out[name] = LayerStats(
             layer=name, n_pixels=int(vals.size),
             min_dn=float(vals.min()), max_dn=brightest,
             mean_dn=float(vals.mean()), max_where=where,
             n_clip_top=int((vals >= CLIP_TOP_DN).sum()),
             n_clip_bottom=int((vals <= CLIP_BOTTOM_DN).sum()),
-            n_below_floor=int((vals < NOISE_FLOOR_DN).sum()))
+            n_below_floor=int((floor_vals < NOISE_FLOOR_DN).sum()),
+            floor_min_dn=(float(floor_vals.min()) if floor_vals.size
+                          else float("nan")),
+            n_edge_left_out=int(skipped.sum()))
     return out
 
 
@@ -372,9 +504,11 @@ def bus_exposure(stats: dict, color: str,
     The Bus exposure_us, when an analysis channel needs one.
 
     Bus = Tus x (NOISE_FLOOR_DN - dark) / (darkest raw - dark) x BUS_MARGIN,
-    the darkest raw being the lowest test-region pixel among this LED's
-    analysis channels that have any pixel below the floor at Tus.  Both are
-    signals, so the dark level comes off before dividing.
+    the darkest raw being the lowest pixel the floor test looks at
+    (LayerStats.floor_min_dn: the test region less the edge pixels it
+    leaves out) among this LED's analysis channels that have any such pixel
+    below the floor at Tus.  Both are signals, so the dark level comes off
+    before dividing.
 
     Args:
         stats:  measure()'s result for the accepted Tus frame.
@@ -393,8 +527,8 @@ def bus_exposure(stats: dict, color: str,
              if stats[ch].n_below_floor > 0]
     if not short:
         return None, "", float("nan")
-    layer = min(short, key=lambda ch: stats[ch].min_dn)
-    darkest = stats[layer].min_dn
+    layer = min(short, key=lambda ch: stats[ch].floor_min_dn)
+    darkest = stats[layer].floor_min_dn
     signal = max(darkest - DARK_DN, 1.0)
     bus = tus_us * (NOISE_FLOOR_DN - DARK_DN) / signal * BUS_MARGIN
     return _clamp_us(max(bus, tus_us + 1)), layer, darkest
@@ -442,7 +576,8 @@ def coverage(tus_layers: dict, bus_layers: "dict | None",
 
     A pixel is usable at the top when it is below CLIP_TOP_DN at Tus; at the
     bottom when it is at or above NOISE_FLOOR_DN at Tus, or at Bus and below
-    CLIP_TOP_DN there.
+    CLIP_TOP_DN there.  The bottom check skips the edge pixels the floor
+    test leaves out at Tus (edge_left_out).
 
     Args:
         tus_layers: {layer: array} of the accepted Tus frame, raw DN.
@@ -461,7 +596,8 @@ def coverage(tus_layers: dict, bus_layers: "dict | None",
         if ch not in tus_layers:
             continue
         t = np.asarray(tus_layers[ch])[every]
-        low = t < NOISE_FLOOR_DN
+        skipped = edge_left_out(tus_layers[ch], region)[every]
+        low = (t < NOISE_FLOOR_DN) & ~skipped
         if bus_layers is not None and ch in bus_layers:
             b = np.asarray(bus_layers[ch])[every]
             low &= ~((b >= NOISE_FLOOR_DN) & (b < CLIP_TOP_DN))

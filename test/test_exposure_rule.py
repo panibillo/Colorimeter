@@ -150,5 +150,64 @@ class TestLayersAndBus(unittest.TestCase):
         self.assertEqual(none["n_below_floor_both"], 2)
 
 
+
+class TestEdgeRule(unittest.TestCase):
+    """
+    A 40 x 40 crop with a pad on columns 5-34 and rows 4-35.  Column 5 and
+    column 34 are band 0 of the left and right sides (0.5 px in), columns 6
+    and 33 band 1.  Interior signal 700 DN, band 1 560 DN (d_1 = 0.097, so
+    the limit for band 0 is d = 0.485, signal 229).
+    """
+
+    SH = (40, 40)
+
+    def setUp(self):
+        y, x = np.mgrid[0:self.SH[0], 0:self.SH[1]].astype(float)
+        self.dist = {"L": x - 4.5, "R": 34.5 - x, "T": y - 3.5, "B": 35.5 - y}
+        near = np.minimum.reduce(list(self.dist.values()))
+        self.pad = near > 0
+        self.raw = np.full(self.SH, 64.0 + 700)
+        for c in (6, 33):
+            self.raw[:, c] = 64 + 560
+        for c in (5, 34):
+            self.raw[:, c] = 64 + 400            # an ordinary edge pixel
+        self.raw[20, 5] = 144                    # mostly off the pad
+        self.raw[3 + 1, 20] = 144                # top edge: always kept
+
+    def region(self, dist="yes"):
+        return R.TestRegion.from_rects(
+            self.SH, self.pad, Rect(0, 0, 2, 2), Rect(38, 0, 2, 2),
+            pad_source="fit", dist=self.dist if dist == "yes" else None)
+
+    def test_only_the_off_pad_side_pixel_is_left_out(self):
+        out = R.edge_left_out(self.raw, self.region())
+        self.assertEqual(list(zip(*np.nonzero(out))), [(20, 5)])
+
+    def test_the_floor_counts_skip_it_and_the_clip_count_does_not(self):
+        st = R.measure({"R": self.raw}, self.region())["R"]
+        self.assertEqual(st.n_edge_left_out, 1)
+        self.assertEqual(st.n_below_floor, 1)        # the top-edge pixel
+        self.assertEqual(st.min_dn, 144)
+        self.assertEqual(st.floor_min_dn, 144)       # the top one stays
+        self.raw[4, 20] = 600
+        st = R.measure({"R": self.raw}, self.region())["R"]
+        self.assertEqual(st.n_below_floor, 0)
+        self.assertEqual(st.min_dn, 144)
+        self.assertEqual(st.floor_min_dn, 464)
+        self.assertIsNone(R.bus_exposure({"R": st}, "photo_red", 30_000)[0])
+
+    def test_no_band_1_darkening_leaves_nothing_out(self):
+        self.raw[:, 6] = self.raw[:, 33] = 64 + 700
+        self.assertFalse(R.edge_left_out(self.raw, self.region()).any())
+
+    def test_no_fitted_pad_leaves_nothing_out(self):
+        self.assertFalse(
+            R.edge_left_out(self.raw, self.region(dist=None)).any())
+
+    def test_coverage_skips_it(self):
+        self.raw[4, 20] = 600
+        c = R.coverage({"R": self.raw}, None, self.region(), ["R"])["R"]
+        self.assertEqual(c["n_below_floor_both"], 0)
+
 if __name__ == "__main__":
     unittest.main()

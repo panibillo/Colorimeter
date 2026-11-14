@@ -96,6 +96,13 @@ sqlite3 src/colorimeter.sqlite \
   after the LED is off. On rpizero3 (2026-11-14) every LED was accepted on
   its first try, and LED on-time for three frames fell from 3.79 s to about
   2.95 s.
+  - The noise-floor test (what calls for Bus) leaves out a left- or
+    right-edge pixel whose darkening is more than 5 times that of the row
+    next in: such a pixel is mostly outside the pad. The factor is from the
+    edge-band study (76 pre-images: band 0 is 3.6-4.0 times as dark as band
+    1, 90 % below 5). The clipping test keeps every pixel. On rpizero3 it
+    left out 1-10 pixels per layer, photo_red no longer took a Bus frame,
+    and green's Bus fell from about 42 to 32 ms.
   - `CaptureConfig.exposure_rule`: "strip" (default) or "group", the old
     rule, kept for comparison. Menu → Advanced → Capture Suite keeps
     "group", since it shoots an exposure group's spread.

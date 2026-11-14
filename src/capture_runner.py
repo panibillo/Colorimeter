@@ -2073,9 +2073,13 @@ class CaptureRunner:
             return exposure_rule.TestRegion(
                 parts={"pad": np.ones(shape, dtype=bool)}, hot=hot,
                 pad_source="whole crop")
+        dist = None
         if (self.pad is not None and not self.pad_problem
                 and tuple(self.pad.shape) == tuple(shape)):
             pad_mask, source = self.pad.mask(), "fit"
+            # For the edge rule of the noise-floor test (exposure_rule.
+            # edge_left_out): only a fitted pad has edges to measure from.
+            dist = self.pad.edge_distances()
         else:
             s = rects["sample"]
             pad_mask = np.zeros(shape, dtype=bool)
@@ -2084,7 +2088,8 @@ class CaptureRunner:
             log.warning("test region: using the sample ROI (%s)",
                         self.pad_problem or "no pad fit")
         return exposure_rule.TestRegion.from_rects(
-            shape, pad_mask, rects["gray1"], rects["gray2"], hot, source)
+            shape, pad_mask, rects["gray1"], rects["gray2"], hot, source,
+            dist)
 
     def _strip_frame(self, exposure_us: int):
         """
@@ -2230,6 +2235,11 @@ class CaptureRunner:
                           "clip_bottom": R.CLIP_BOTTOM_DN,
                           "noise_floor": R.NOISE_FLOOR_DN,
                           "dark": R.DARK_DN},
+            # The floor test's edge rule (exposure_rule.edge_left_out);
+            # LayerStats.n_edge_left_out counts what it left out.
+            "edge_rule": {"factor": R.EDGE_DARKENING_FACTOR,
+                          "sides": list(R.EDGE_RULE_SIDES),
+                          "applied": self._region.dist is not None},
         }
         return {"frames": frames, "record": record}
 
