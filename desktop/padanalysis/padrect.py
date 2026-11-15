@@ -42,9 +42,16 @@ Method, all in bound-crop Bayer-layer coordinates:
 
   top        the same feature at the upper edge is weaker, and on a strip
              whose dye is graded down the pad it can be absent entirely.
-             The top is therefore placed at `bottom - HEIGHT_FIXED`, and the
-             independently measured descent, where one is sharp enough to
-             trust, is kept as a check (`top_obs`, `top_residual`).
+             In the channel layout the top is therefore placed at
+             `bottom - HEIGHT_FIXED`, and the independently measured
+             descent, where one is sharp enough to trust, is kept as a check
+             (`top_obs`, `top_residual`).  In the window layout (from
+             2026-11-15) the top is measured: the steepest descent within
+             TOP_SEARCH_ROWS of `bottom - HEIGHT_WINDOW`, where the backing
+             strip above gives way to the pad (`_measure_top`); it is placed
+             from the height only when that descent is too faint.  Placing
+             it there with HEIGHT_FIXED had put it about one row too high
+             on every cassette sweep (`top_source` records which rule).
 
   rect       (u, v) coordinates in the strip frame -- u across, v down -- so
              `depth` is an exact distance to the rectangle boundary rather
@@ -128,8 +135,25 @@ REFIT_PASSES = 4
 OUTLIER_SIGMA = 4.0
 
 #: Pooled over the 2026-08-10 and 2026-08-13 sets.  See `pooled_size()`.
+#: HEIGHT_FIXED is the channel layout's pad height; the window layout uses
+#: HEIGHT_WINDOW.
 WIDTH_FIXED = 41.35
 HEIGHT_FIXED = 53.34
+
+#: Window layout (cassettes): the pad's height, layer px, as the distance
+#: from the steepest fall at its top to the steepest rise at its bottom,
+#: each measured on its own in photo_red: mean over 68 sweeps (the 30 F/G/H
+#: files' pre- and post-images and 8 Pi frames), sd 0.13, range
+#: 52.03-52.72 (review of 2026-11-15).  The same value as src/padfind.py's
+#: HEIGHT_FIXED, which must stay equal to it.  It says where to look for the
+#: top, and places the top only when the top can't be measured.
+HEIGHT_WINDOW = 52.3
+
+#: Window layout: the top is looked for this many whole rows either side of
+#: `bottom - HEIGHT_WINDOW`.  Measured heights stay within 0.4 rows of
+#: HEIGHT_WINDOW; 2 rows leaves room while keeping a dot or blotch on the
+#: pad from being taken for its top.
+TOP_SEARCH_ROWS = 2
 
 #: Re-seating (see `PadRect._reseat`).  A fitted top that misses the observed
 #: one by more than RESEAT_TOLERANCE px, or a lower edge shallower than
@@ -381,17 +405,57 @@ class PadRect:
         self.top_obs = _peak(g, it) if -g[it] >= MIN_EDGE_SLOPE else float("nan")
         self.top_slope = float(g[it])
 
-        self.top = self.bot - HEIGHT_FIXED
-        self.height = HEIGHT_FIXED
+        self.top = self.bot - self._height_fixed()
+        self.height = self._height_fixed()
         self.top_residual = self.top_obs - self.top
 
-        self._reseat(g)
+        # The window layout measures its top and never reseats: there a
+        # dark mark steeper than the pad's top edge would set the reseat
+        # off and move the bottom a pad height below the mark.  It never
+        # fired on a cassette sweep (bot_source 'window' on all 60 F/G/H
+        # sweeps, 2026-11-15); src/padfind.py has no reseat at all.
+        self.top_source = "height"
+        if self.layout == LAYOUT_WINDOW:
+            self._measure_top(g)
+        else:
+            self._reseat(g)
 
         # How much of the pad's upper end the stage mask hides.  Positive
         # means the whole pad is in view; negative means the first
         # |top_clearance| rows of the rectangle are mask, not pad, and the
         # erosion has to exceed that before the region is all pad.
         self.top_clearance = self.top - self.strip_top
+
+    def _height_fixed(self) -> float:
+        """The pad height the layout places the top with, layer px."""
+        return HEIGHT_WINDOW if self.layout == LAYOUT_WINDOW else HEIGHT_FIXED
+
+    def _measure_top(self, g):
+        """
+        Window layout: measure the top instead of placing it.
+
+        The steepest descent in whole rows within TOP_SEARCH_ROWS of
+        `bot - HEIGHT_WINDOW`, never above the window's top edge, refined to
+        a fraction of a row as the bottom is: the middle of the step from
+        the last row of backing strip to the first row of pad.  A descent
+        shallower than MIN_EDGE_SLOPE is not trusted and the top stays where
+        the height put it.  The same arithmetic as src/padfind.py
+        `_Fitter._measure_top` (checked by padfind_parity.py).
+
+        Args:
+            g: Row-gradient of the profile down the strip.
+        """
+        target = int(round(self.bot - HEIGHT_WINDOW))
+        lo = max(target - TOP_SEARCH_ROWS, int(self.strip_top) + 1)
+        hi = min(target + TOP_SEARCH_ROWS + 1, len(g) - 1)
+        if hi - lo < 1:
+            return
+        it = lo + int(np.argmin(g[lo:hi]))
+        if -g[it] >= MIN_EDGE_SLOPE:
+            self.top = _peak(g, it)
+            self.height = self.bot - self.top
+            self.top_residual = self.top_obs - self.top
+            self.top_source = "measured"
 
     def _reseat(self, g):
         """
@@ -426,12 +490,13 @@ class PadRect:
         if not (weak or disagrees):
             return
 
+        height = self._height_fixed()
         if disagrees:
-            target = self.top_obs + HEIGHT_FIXED
+            target = self.top_obs + height
         else:
             # No usable top edge: take the strongest rise anywhere a pad of
             # this height still fits below the strip's end.
-            lo = int(self.strip_top) + int(HEIGHT_FIXED) - 4
+            lo = int(self.strip_top) + int(height) - 4
             hi = len(g) - 2
             if hi - lo < 2:
                 return
@@ -454,7 +519,7 @@ class PadRect:
 
         self.bot = _peak(g, ib)
         self.bot_slope = slope
-        self.top = self.bot - HEIGHT_FIXED
+        self.top = self.bot - height
         self.top_residual = self.top_obs - self.top
         self.bot_source = "height"
 
@@ -717,7 +782,7 @@ class PadRect:
                 f"| tilt={self.angle_deg:+5.2f} deg  rms={self.edge_rms:.3f} px "
                 f" n={len(self.rows_used):2d}-{self.n_rejected:<2d} "
                 f"top_resid={tr}  clr={self.top_clearance:+5.2f}  "
-                f"{self.layout}/{self.side_rule}")
+                f"{self.layout}/{self.side_rule}/top {self.top_source}")
 
 
 class _SideGuide:

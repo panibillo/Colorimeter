@@ -75,14 +75,18 @@ ssh rpizero3 'grep -E "pad \((pre|post)\)|pad finding \(" ~/pi/Colorimeter/src/c
 For example:
 
 ```
-pad (pre): L= 81.80 R=122.67 W=40.87 | top= 40.00 bot= 93.34 | tilt=-1.60 deg rms=0.347 px n=48-0 top_resid=+0.89 guided/window
+pad (pre): L= 76.25 R=118.11 W=41.87 | top= 49.08 bot=100.98 | tilt=+0.41 deg rms=0.293 px n=46-0 top_resid=-0.43 guided/window/top measured
 pad finding (pre): total 0.992 s, LED on 0.078 s, fit 0.0874 s, 2 lit frame(s), rule SensorTimestamp
 ```
 
 L, R, top and bot are the pad's edges in layer px (one layer px is two
 sensor px) within the bound crop. W is the width, `rms` the scatter of the
 edge points about the fitted lines, and `rule SensorTimestamp` says the frame
-used was confirmed to have started after the LED came on.
+used was confirmed to have started after the LED came on. `top measured`
+says the top was found on the frame; `top height` would mean the step from
+backing to pad was too faint, and the top was placed 52.3 rows above the
+bottom instead (from 2026-11-15; before that the top was always placed,
+53.34 rows up, about one row too high).
 
 **On the desktop,** after pulling the archive (`./pull_captures.sh rpizero3
 C10xx`):
@@ -165,7 +169,7 @@ explains each value and where it came from.
 | `capture.edge_darkening_factor` | 5.0 | the edge rule of the floor test |
 | `capture.edge_signal_fraction` | 0.5 | the edge rule's second condition: an edge pixel is left out only if its signal is also below this fraction of the interior's |
 | `capture.padfind_led` / `padfind_exposure_us` | photo_red / 10000 | the pad-finding frame |
-| `capture.padfind_offset_pre` / `_post` | 0.10,0.44,0.33,0.33 / 0.13,0.35,0.11,0.11 | the photo_red offsets (left, right, top, bottom; layer px) |
+| `capture.padfind_offset_pre` / `_post` | 0.10,0.44,0.43,0.33 / 0.13,0.35,0.33,0.11 | the photo_red offsets (left, right, top, bottom; layer px) |
 
 - A value that makes no sense with the others (say a noise floor above
   1023) is shown as a warning on the start-up screen ("Exposure rule"),

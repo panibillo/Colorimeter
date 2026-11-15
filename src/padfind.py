@@ -53,10 +53,13 @@ How the pad is found  (field = photo_red R signal / gray-chip signal)
   4. The bottom edge.  The pad's lower edge casts a thin shadow, so the
      profile rises steeply where pad gives way to paper below.  The bottom
      is the steepest rise 40-78 rows below the window's top.
-  5. The top edge.  Placed exactly one pad height above the bottom (the pad
-     height is fixed).  The steepest fall near the top is measured too, as
-     a check, and if it disagrees by more than 3 px the bottom is looked for
-     again one pad height below it ("reseat").
+  5. The top edge.  The steepest fall within TOP_SEARCH_ROWS rows of one
+     pad height above the bottom, where the backing strip above gives way
+     to the pad.  Only when no fall there is steep enough is the top placed
+     one pad height above the bottom.  (Until 2026-11-15 the top was always
+     placed, and a steep fall anywhere above the bottom could "reseat" the
+     bottom one pad height below it; a dark mark on the pad could set that
+     off.  It never fired on a cassette sweep, and it was removed.)
   6. The sides, first pass.  On each pad row, the outermost columns brighter
      than half the pad level, refined to a fraction of a pixel.
   7. The sides, final.  On each pad row, the column where the field changes
@@ -108,26 +111,40 @@ MASK_MARGIN = 1.5
 REFIT_PASSES = 4
 OUTLIER_SIGMA = 4.0
 
-#: The pad's size in layer px, pooled over the 2026-08-10 and 2026-08-13
-#: captures (desktop padrect.pooled_size).  Only the height is used to place
-#: the rectangle; the width is measured, and checked against this (PadFit.qc).
+#: The pad's width in layer px, pooled over the 2026-08-10 and 2026-08-13
+#: captures (desktop padrect.pooled_size).  Not used to place the pad: the
+#: width is measured, and checked against this (PadFit.qc).
 WIDTH_FIXED = 41.35
-HEIGHT_FIXED = 53.34
 
-#: Step 5, reseating: a measured top more than RESEAT_TOLERANCE px from the
-#: placed top, or a bottom rise shallower than WEAK_EDGE_SLOPE, means step 4
-#: found something other than the pad's bottom.  The bottom is then looked
-#: for within RESEAT_SEARCH rows of where the pad height puts it.
-RESEAT_TOLERANCE = 3.0
-WEAK_EDGE_SLOPE = 0.05
-RESEAT_SEARCH = 6
+#: The pad's height in the cassette holders, layer px: the mean distance
+#: from the steepest fall at the pad's top to the steepest rise at its
+#: bottom, each measured on its own in photo_red, over 68 sweeps (the 30
+#: F/G/H files' pre- and post-images and 8 Pi frames; sd 0.13, range
+#: 52.03-52.72; review of 2026-11-15).  It says where to look for the top
+#: (step 5) and places the top only when the top cannot be measured.
+#: Until 2026-11-15 this was 53.34, the height on the old open-channel
+#: holder, and the top was always placed from it, about one row too high.
+HEIGHT_FIXED = 52.3
+
+#: Step 5: the top is looked for this many whole rows either side of one
+#: pad height above the bottom.  The measured heights stay within 0.4 rows
+#: of HEIGHT_FIXED, so 2 rows leaves room, while keeping a dark mark on
+#: the pad (a dot, a blotch) from being taken for the top.  The limit: a
+#: mark whose upper edge lies 1-3 rows below the top, and falls more
+#: steeply than the step from backing to pad, moves the top by up to
+#: 0.8 px, because the lens blur spreads its edge into the search (unit
+#: test test_dark_mark_is_not_the_top; a synthetic pad 1.2 on backing
+#: 1.6, mark 0.5).  In photo_red the dye darkens the pad too little for
+#: that: over the 120 fits of 2026-11-15 the height stayed within
+#: 52.11-52.68 rows.
+TOP_SEARCH_ROWS = 2
 
 #: Step 4: the bottom edge is looked for this many rows below the window's
 #: top edge (first and one-past-last row of the search).
 BOTTOM_SEARCH_ROWS = (40, 78)
 
-#: Step 5: the top edge is looked for from the window's top down to this
-#: many rows above the bottom edge.
+#: top_obs, a record only: the steepest fall from the window's top down to
+#: this many rows above the bottom edge.
 TOP_SEARCH_GAP = 30
 
 #: Step 2: half the number of columns the row profile is taken over
@@ -166,21 +183,27 @@ FLOOR_ROWS = 4
 #: The photo_red offsets, (left, right, top, bottom) in layer px, + meaning
 #: right or down.  Added to a photo_red-only fit so it lands where the
 #: desktop's all-channel fit would.
-#:   OFFSET_PRE:  mean over the 30 F/G/H pre-images (sd 0.13, 0.07, 0.08,
+#:   OFFSET_PRE:  mean over the 30 F/G/H pre-images (sd 0.14, 0.07, 0.14,
 #:                0.08); desktop chain_samples.DEFAULT_PRE_OFFSET (Bill,
 #:                2026-11-13).
 #:   OFFSET_POST: OFFSET_PRE plus the mean difference between a post-image's
-#:                offset and its own pre-image's, (+0.03, -0.09, -0.22,
-#:                -0.22), sd (0.09, 0.05, 0.07, 0.07), over the same 30
-#:                files (color_study.fit_basis_offsets).  The desktop applies
-#:                only the top and bottom terms (chain_samples
-#:                POST_OFFSET_STEADY); the Pi applies all four, because the
-#:                side terms are as steady as the others (Bill, 2026-11-14).
+#:                offset and its own pre-image's, (+0.03, -0.09, -0.10,
+#:                -0.22), sd (0.09, 0.05, 0.18, 0.07), over the same 30
+#:                files.  The desktop applies only the top and bottom terms
+#:                (chain_samples.POST_OFFSET_STEADY); the Pi applies all
+#:                four, because the side terms are as steady as the others
+#:                (Bill, 2026-11-14).
+#: Re-measured 2026-11-15, when the top began to be measured (step 5) on
+#: both the Pi and the desktop: only the top terms changed, pre 0.33 ->
+#: 0.43 and post 0.11 -> 0.33.  The top sits 0.43 px lower in the
+#: all-channel fit than in photo_red because the blue LEDs see the pad's
+#: ends about half a row to a row lower than red does.  Before 2026-11-15
+#: the values were (0.10, 0.44, 0.33, 0.33) and (0.13, 0.35, 0.11, 0.11).
 #: These are the factory values of the config rows capture.padfind_offset_pre
 #: and capture.padfind_offset_post, which the capture uses, so they can be
 #: re-measured on the final device (work plan, stage 4a).
-OFFSET_PRE = (0.10, 0.44, 0.33, 0.33)
-OFFSET_POST = (0.10 + 0.03, 0.44 - 0.09, 0.33 - 0.22, 0.33 - 0.22)
+OFFSET_PRE = (0.10, 0.44, 0.43, 0.33)
+OFFSET_POST = (0.10 + 0.03, 0.44 - 0.09, 0.43 - 0.10, 0.33 - 0.22)
 
 #: Quality limits (PadFit.qc).  A fit outside any of these is reported, and
 #: the capture falls back to the seeded sample rectangle.  Set generously;
@@ -218,6 +241,10 @@ class PadFit:
         yc:           The row aL and aR are given at: the mean of the rows
                       the sides were measured on.
         top, bot:     Row of the pad's top and bottom edge (fractional).
+        top_source:   'measured' when the top is the steepest fall near one
+                      pad height above the bottom (step 5; the normal case),
+                      'height' when it was too faint and the top was placed
+                      HEIGHT_FIXED above the bottom.
         shape:        (rows, columns) of the layer the fit was made on.
         strip_top:    First row of the cassette window (field above half
                       the pad level).  The pad mask starts MASK_MARGIN below.
@@ -225,11 +252,15 @@ class PadFit:
         pad_level:    Median field over the window, the "pad level" whose
                       half marks an edge.  About 1-2 (pad brighter than the
                       gray chips).
-        top_obs:      Row of the top edge as measured (step 5), or NaN when
-                      it was too faint to trust.
+        top_obs:      A record, not used by the fit: the row of the
+                      steepest fall anywhere from the window's top to
+                      TOP_SEARCH_GAP rows above the bottom, or NaN when it
+                      was too faint.  Far from `top` means something on the
+                      pad falls more steeply than its top edge.
         bot_slope:    Steepness of the bottom edge, field units per row.
-        bot_source:   'window' when step 4 placed the bottom, 'height' when
-                      step 5 had to reseat it.
+        bot_source:   Always 'window' (step 4 placed the bottom).  Archives
+                      before 2026-11-15 may hold 'height': the bottom was
+                      then reseated one pad height below `top_obs`.
         side_rule:    'guided' (step 7; the normal case) or 'half-level'
                       (step 6 only).
         n_rows:       Rows used for the final side fit.
@@ -257,6 +288,7 @@ class PadFit:
     n_rejected: int
     edge_rms: float
     offset: Tuple[float, float, float, float] = (0.0, 0.0, 0.0, 0.0)
+    top_source: str = "height"
 
     # -- sizes ---------------------------------------------------------------
     @property
@@ -397,9 +429,19 @@ class PadFit:
 
     @classmethod
     def from_attrs(cls, attrs: Dict[str, object]) -> "PadFit":
-        """Rebuild a PadFit from `to_attrs` output (extra keys ignored)."""
+        """
+        Rebuild a PadFit from `to_attrs` output.
+
+        Extra keys are ignored.  A field missing from `attrs` takes its
+        default if it has one (`top_source` is absent from archives written
+        before 2026-11-15); a missing field without a default raises
+        KeyError.
+        """
+        from dataclasses import MISSING
         kwargs = {}
-        for name in cls.__dataclass_fields__:
+        for name, spec in cls.__dataclass_fields__.items():
+            if name not in attrs and spec.default is not MISSING:
+                continue
             value = attrs[name]
             if isinstance(value, (list, np.ndarray)):
                 value = tuple(v.item() if hasattr(v, "item") else v
@@ -419,7 +461,7 @@ class PadFit:
                 f"top={self.top:6.2f} bot={self.bot:6.2f} | "
                 f"tilt={self.angle_deg:+5.2f} deg rms={self.edge_rms:.3f} px "
                 f"n={self.n_rows}-{self.n_rejected} top_resid={tr} "
-                f"{self.side_rule}/{self.bot_source}")
+                f"{self.side_rule}/{self.bot_source}/top {self.top_source}")
 
 
 # ---------------------------------------------------------------------------
@@ -485,26 +527,6 @@ def _peak(v: np.ndarray, i: int) -> float:
     return i + (0.0 if d == 0 else 0.5 * (a - c) / d)
 
 
-def _nearest_local_max(g: np.ndarray, w0: int, w1: int,
-                       target: float) -> int:
-    """
-    Row of the local maximum of `g` in rows [w0, w1) nearest `target`.
-
-    A graded stain can rise back to paper in more than one step; the step
-    nearest a position predicted from the fixed pad height is the true edge
-    more reliably than the tallest one.  Falls back to the tallest value
-    when there is no local maximum inside the window.
-    """
-    seg = g[w0:w1]
-    if len(seg) < 3:
-        return w0 + int(np.argmax(seg))
-    is_max = (seg[1:-1] >= seg[:-2]) & (seg[1:-1] >= seg[2:])
-    idx = np.flatnonzero(is_max) + 1 + w0
-    if len(idx) == 0:
-        return w0 + int(np.argmax(seg))
-    return int(idx[np.argmin(np.abs(idx - target))])
-
-
 def _parallel_fit(rows, left, right, yc):
     """
     Least-squares fit of two parallel lines to the left and right edges.
@@ -539,7 +561,7 @@ class _Fitter:
         xseed:      The strip column: middle column of the sample ROI.
         rowprof:    Step 2 profile, one value per row.
         pad_level, window_rows, strip_top:            step 3.
-        bot, bot_slope, bot_source, top, top_obs:     steps 4-5.
+        bot, bot_slope, bot_source, top, top_obs, top_source:  steps 4-5.
         aL, aR, m, yc, n_rows, n_rejected, edge_rms:  steps 6-7.
     """
 
@@ -586,46 +608,41 @@ class _Fitter:
         self.bot_slope = float(g[ib])
         self.bot_source = "window"
 
-        # Step 5: measure the top as a check; place it one height up.
+        # A record only (PadFit.top_obs): the steepest fall above the bottom.
         tlo = int(self.strip_top) + 1
         thi = max(tlo + 2, int(self.bot) - TOP_SEARCH_GAP)
         it = tlo + int(np.argmin(g[tlo:thi]))
         self.top_obs = (_peak(g, it) if -g[it] >= MIN_EDGE_SLOPE
                         else float("nan"))
         self.top = self.bot - HEIGHT_FIXED
-        self._reseat(g)
+        self._measure_top(g)
 
-    def _reseat(self, g: np.ndarray) -> None:
-        """Step 5's fallback: move the bottom when step 4 found a wrong rise."""
-        top_residual = self.top_obs - self.top
-        weak = self.bot_slope < WEAK_EDGE_SLOPE
-        disagrees = (not math.isnan(top_residual)
-                     and abs(top_residual) > RESEAT_TOLERANCE)
-        if not (weak or disagrees):
+    def _measure_top(self, g: np.ndarray) -> None:
+        """
+        Step 5, the top: the steepest fall near one pad height above the
+        bottom, where the backing strip gives way to the pad.
+
+        The search covers whole rows within TOP_SEARCH_ROWS of the predicted
+        row, and never reaches above the window's top (there the profile
+        rises, from frame to backing).  The fall is refined to a fraction of
+        a row as the bottom is, so both ends mean the same thing: the middle
+        of the step between the last row of backing and the first of pad.
+        A fall shallower than MIN_EDGE_SLOPE (field units per row) is not
+        trusted, and the top stays where the height put it.
+
+        Args:
+            g: Change in the row profile per row (np.gradient of rowprof).
+        """
+        target = int(round(self.bot - HEIGHT_FIXED))
+        lo = max(target - TOP_SEARCH_ROWS, int(self.strip_top) + 1)
+        hi = min(target + TOP_SEARCH_ROWS + 1, len(g) - 1)
+        self.top_source = "height"
+        if hi - lo < 1:
             return
-        if disagrees:
-            target = self.top_obs + HEIGHT_FIXED
-        else:
-            # No usable top: the steepest rise anywhere a pad of this height
-            # still fits below the window's top.
-            lo = int(self.strip_top) + int(HEIGHT_FIXED) - 4
-            hi = len(g) - 2
-            if hi - lo < 2:
-                return
-            target = lo + int(np.argmax(g[lo:hi]))
-        w0 = max(int(target) - RESEAT_SEARCH, int(self.strip_top) + 2)
-        w1 = min(int(target) + RESEAT_SEARCH + 1, len(g) - 2)
-        if w1 - w0 < 2:
-            return
-        ib = (_nearest_local_max(g, w0, w1, target) if disagrees
-              else w0 + int(np.argmax(g[w0:w1])))
-        slope = float(g[ib])
-        if slope <= self.bot_slope and not disagrees:
-            return                            # nothing better is in view
-        self.bot = _peak(g, ib)
-        self.bot_slope = slope
-        self.top = self.bot - HEIGHT_FIXED
-        self.bot_source = "height"
+        it = lo + int(np.argmin(g[lo:hi]))
+        if -g[it] >= MIN_EDGE_SLOPE:
+            self.top = _peak(g, it)
+            self.top_source = "measured"
 
     def _pad_rows(self) -> range:
         """Rows between the ends, END_CLEARANCE clear of each."""
@@ -745,7 +762,8 @@ class _Fitter:
                       pad_level=self.pad_level, top_obs=self.top_obs,
                       bot_slope=self.bot_slope, bot_source=self.bot_source,
                       side_rule=self.side_rule, n_rows=self.n_rows,
-                      n_rejected=self.n_rejected, edge_rms=self.edge_rms)
+                      n_rejected=self.n_rejected, edge_rms=self.edge_rms,
+                      top_source=self.top_source)
 
 
 def fit_pad(field: np.ndarray, sample: Rect,

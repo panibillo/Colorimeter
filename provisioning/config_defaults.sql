@@ -84,6 +84,30 @@ UPDATE config
    AND NOT EXISTS (SELECT 1 FROM config
                     WHERE role = 'capture' AND name = 'exposuregroup');
 
+-- ── Re-measured factory values ──────────────────────────────────────────────
+-- A seed whose factory value changed.  INSERT OR IGNORE alone cannot bring
+-- the new value in: the old seed row still holds the one isdefault slot
+-- (ux_config_one_default), so the new row would be skipped.  The old seed row
+-- is therefore demoted first, to an inactive 'history' row: the new seed row
+-- below then goes in, and the activation UPDATE puts it in force -- but only
+-- where the old factory value was the one in force.  An operator's own value
+-- stays in force.  A no-op once nothing matches.
+--
+-- capture.padfind_offset_pre / _post (2026-11-15).  Re-measured when pad
+-- finding began to measure the pad's top instead of placing it one fixed
+-- height above the bottom (src/padfind.py step 5): the top terms moved,
+-- pre 0.33 -> 0.43 and post 0.11 -> 0.33.
+UPDATE config
+   SET active = 0, isdefault = 0, source = 'history',
+       remark = 'pad finding offset before 2026-11-15, when the top was placed from a fixed height'
+ WHERE role = 'capture' AND name = 'padfind_offset_pre'
+   AND value = '0.10,0.44,0.33,0.33' AND source = 'seed';
+UPDATE config
+   SET active = 0, isdefault = 0, source = 'history',
+       remark = 'pad finding offset before 2026-11-15, when the top was placed from a fixed height'
+ WHERE role = 'capture' AND name = 'padfind_offset_post'
+   AND value = '0.13,0.35,0.11,0.11' AND source = 'seed';
+
 -- ── capture ─────────────────────────────────────────────────────────────────
 INSERT OR IGNORE INTO config (active, isdefault, editable, add_dt, role, name,
                               vtype, value, source, remark)
@@ -162,9 +186,9 @@ INSERT OR IGNORE INTO config (active, isdefault, editable, add_dt, role, name,
    'pad finding: the LED lighting the one frame the pad is located on'),
   (0, 1, 1, '2026-11-14 00:00:00', 'capture', 'padfind_exposure_us', 'int', '10000', 'seed',
    'pad finding: that frame''s exposure_us, in microseconds'),
-  (0, 1, 1, '2026-11-14 00:00:00', 'capture', 'padfind_offset_pre', 'str', '0.10,0.44,0.33,0.33', 'seed',
+  (0, 1, 1, '2026-11-15 00:00:00', 'capture', 'padfind_offset_pre', 'str', '0.10,0.44,0.43,0.33', 'seed',
    'pad finding: left,right,top,bottom shift (layer px, + = right/down) moving a pre-image photo_red fit to where the desktop all-channel fit puts it'),
-  (0, 1, 1, '2026-11-14 00:00:00', 'capture', 'padfind_offset_post', 'str', '0.13,0.35,0.11,0.11', 'seed',
+  (0, 1, 1, '2026-11-15 00:00:00', 'capture', 'padfind_offset_post', 'str', '0.13,0.35,0.33,0.11', 'seed',
    'pad finding: the same shift for a measurement (post-image)');
 
 -- ── calibration ─────────────────────────────────────────────────────────────

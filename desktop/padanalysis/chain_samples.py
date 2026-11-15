@@ -120,9 +120,11 @@ PAD_FIT_CELLS = {"C1048": (("photo_red", "R"),)}
 #: so it lands where the all-channel fit would (Bill, 2026-11-13).  A
 #: post-image gets this steady extra [left, right, top, bottom], layer px:
 #: the mean of (post-image offset - pre-image offset) over the 30 F/G/H
-#: files is +0.03, -0.09, -0.22, -0.22 (sd 0.09, 0.05, 0.07, 0.07); only
+#: files is +0.03, -0.09, -0.10, -0.22 (sd 0.09, 0.05, 0.18, 0.07); only
 #: the top and bottom term is used (color_study.fit_basis_offsets).
-POST_OFFSET_STEADY = (0.0, 0.0, -0.22, -0.22)
+#: Re-measured 2026-11-15, when the window layout's top began to be
+#: measured (padrect `_measure_top`); the top term was -0.22 before.
+POST_OFFSET_STEADY = (0.0, 0.0, -0.10, -0.22)
 #: Switch for the offset rule (Bill approved it 2026-11-13).  First
 #: result, C1048 (color_study 3b): the shift widens its pad to 42.24 px
 #: against 41.94 for the same strip in C1047, and its right edge band
@@ -132,8 +134,9 @@ POST_OFFSET_STEADY = (0.0, 0.0, -0.22, -0.22)
 APPLY_FIT_OFFSET = True
 #: The pre-image offset used when the paired pre-image cannot be fitted on
 #: all channels either: the mean over the 30 files, [left, right, top,
-#: bottom], layer px (sd 0.13, 0.07, 0.08, 0.08).
-DEFAULT_PRE_OFFSET = (0.10, 0.44, 0.33, 0.33)
+#: bottom], layer px (sd 0.14, 0.07, 0.14, 0.08).  Re-measured 2026-11-15
+#: (top measured, not placed): the top term was 0.33 before.
+DEFAULT_PRE_OFFSET = (0.10, 0.44, 0.43, 0.33)
 
 #: Studies that need a pre-image and a post-image in one file skip these
 #: samples until they handle PRE_FROM.

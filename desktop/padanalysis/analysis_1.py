@@ -222,7 +222,11 @@ MAX_SAT_FRACTION = 0.001
 #: Then "+guided_sides" on 2026-11-11, when the pad's sides in the cassette
 #: holders (cap_style F, G1, H1) began to be found guided by the pre-image
 #: (`pad_of`, `padrect` module docstring).
-CHAIN = "dark_level+divisor_map+hot_mask+pre_white+ff_union+guided_sides"
+#: Then "+measured_top" on 2026-11-15, when the cassette holders' pad top
+#: began to be measured instead of placed 53.34 rows above the bottom (it sat
+#: about one row too high, on the backing strip; `padrect._measure_top`).
+CHAIN = ("dark_level+divisor_map+hot_mask+pre_white+ff_union+guided_sides"
+         "+measured_top")
 
 #: Holder layout for each cassette `samples.cap_style`.  A sample whose
 #: cap_style is listed gets this layout instead of padrect's guess from the

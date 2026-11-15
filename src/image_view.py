@@ -54,6 +54,7 @@ Public surface
     compose(frame, view, overlays, canvas_size, channel_order, bg, masks)
         -> PIL.Image
     MaskOutline(mask, x0, y0, cell, colour)   a pixel-by-pixel region, outlined
+    layer_to_frame(layer, dark_dn, white_dn) -> BGR frame of one Bayer layer
     image_to_canvas(view, x, y)      -> (cx, cy)
     canvas_to_image(view, cx, cy)    -> (x, y)
     rect_to_canvas(view, r)          -> (left, top, right, bottom)
@@ -509,6 +510,42 @@ def compose(frame: np.ndarray,
     for m in masks:
         _draw_mask_outline(draw, view, (cw, ch), m)
     return canvas
+
+
+def layer_to_frame(layer: np.ndarray, dark_dn: float,
+                   white_dn: float) -> np.ndarray:
+    """
+    One Bayer layer as a gray frame the viewer can show, at full stream size.
+
+    Each layer pixel becomes a 2 x 2 block of image pixels, so the frame has
+    the stream's size and a MaskOutline with cell 2 lines up with it (layer
+    pixel (r, c) of the whole frame covers image pixels 2r..2r+1 down and
+    2c..2c+1 across, which is roi.to_layer_rect's convention).
+
+    Brightness: 0 at `dark_dn`, 255 at `white_dn`, straight line between,
+    clipped at both ends.  Gray, so the three channels are equal and the
+    channel order does not matter.
+
+    Args:
+        layer:    One Bayer layer of the whole frame, raw DN (e.g. 0-1023).
+        dark_dn:  Raw DN shown as black: the dark level (about 64).
+        white_dn: Raw DN shown as white, e.g. a high percentile of the area
+                  of interest.  A value at or below `dark_dn` is taken as
+                  dark_dn + 1, so a blank frame cannot divide by zero.
+
+    Returns:
+        uint8 array (2 * rows, 2 * columns, 3).
+
+    Example:
+        >>> f = layer_to_frame(np.full((2, 3), 600), 64.0, 600.0)
+        >>> f.shape, int(f[0, 0, 0])
+        ((4, 6, 3), 255)
+    """
+    span = max(float(white_dn) - float(dark_dn), 1.0)
+    gray = (np.asarray(layer, dtype=np.float64) - float(dark_dn)) / span
+    gray = np.clip(np.rint(255.0 * gray), 0, 255).astype(np.uint8)
+    gray = np.repeat(np.repeat(gray, 2, axis=0), 2, axis=1)
+    return np.repeat(gray[:, :, None], 3, axis=2)
 
 
 @dataclass(frozen=True)

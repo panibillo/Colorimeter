@@ -5607,9 +5607,16 @@ class Arbiter:
         from a fresh one, and a fresh pad is what it is mostly used on, so it
         always fits as a pre-image (no prior fit to be guided by).
 
-        The picture on the canvas is not replaced: the outline is drawn over
-        the white-LED frame already shown.  The name strip says what was
-        found; the full fit goes to the log.
+        The picture on the canvas becomes the flash's own frame: its photo_red
+        layer in gray (image_view.layer_to_frame), each layer pixel a 2 x 2
+        block, black at the dark level and white at the bound's brightest
+        half percent.  So the outline is judged against the pixels it was
+        fitted on, not the white-LED frame shown before, where the pad's
+        edges can sit a pixel or so elsewhere (Bill, 2026-11-15).  It is
+        shown even when the pad is not found, to see why.  The raw mosaic
+        kept for recapture saves (_view_bayer) is dropped, since it no longer
+        matches the picture; a recapture takes a fresh one.  The name strip
+        says what was found; the full fit goes to the log.
         """
         if not self.capture_available():
             self._toast("Capture running")
@@ -5645,8 +5652,9 @@ class Arbiter:
                 cam, exposure_us,
                 led_on=lambda: leds.set_channel(channel, True),
                 led_off=lambda: leds.set_channel(channel, False))
-            layer = capture_runner._roi_bound_layers(
-                bayer, getattr(cam, "bayer_pattern", "BGGR"), bound)["R"]
+            pattern = getattr(cam, "bayer_pattern", "BGGR")
+            layer = capture_runner._roi_bound_layers(bayer, pattern, bound)["R"]
+            self._view_show_layer(bayer, pattern, layer)
             _before, fit = padfind.find_pad(
                 layer, capture_runner.PADFIND_DARK_DN, rects,
                 padfind.SECTION_PRE, offset=offset)
@@ -5678,6 +5686,36 @@ class Arbiter:
         self._view_state.fit_to(Rect(x0, y0, math.ceil(max(xs)) - x0,
                                      math.ceil(max(ys)) - y0, name="pad"))
         self._repaint_canvas()
+
+    def _view_show_layer(self, bayer, pattern: str, bound_layer) -> None:
+        """
+        Show the R layer of a raw frame in gray, in place of the picture.
+
+        For Find/Pad (see _view_find_pad).  The view box is kept: the frame
+        has the stream's size, so where you were looking is unchanged.
+
+        Args:
+            bayer:       The whole raw mosaic, (H, W).
+            pattern:     The camera's Bayer pattern ("BGGR" or "RGGB").
+            bound_layer: The R layer of the bound crop, raw DN; its 99.5th
+                         percentile is shown as white.
+        """
+        import numpy as np
+        import capture_runner
+        import image_view
+        from bayer_cam import BayerCam
+        whole = BayerCam.extract_bayer_layers(bayer, pattern)["R"]
+        white = float(np.percentile(bound_layer, 99.5))
+        frame = image_view.layer_to_frame(
+            whole, capture_runner.PADFIND_DARK_DN, white)
+        if (self._view_frame is not None
+                and frame.shape != self._view_frame.shape):
+            log.warning("Arbiter: Find/Pad frame %s does not match the view "
+                        "%s; picture not replaced", frame.shape,
+                        self._view_frame.shape)
+            return
+        self._view_frame = frame
+        self._view_bayer = None
 
     def _view_fit(self) -> None:
         if self._view_state is None:
@@ -8145,6 +8183,14 @@ def _selftest() -> None:
               [config.capture_padfind_exposure_us()])
         check("the pad LED went on, then off", pleds.history,
               [(_ch, True), (_ch, False)])
+        check("the picture is now the flash's own frame, in gray",
+              (arb._view_frame.shape, bool(
+                  (arb._view_frame[..., 0] == arb._view_frame[..., 1]).all()
+                  and (arb._view_frame[..., 1]
+                       == arb._view_frame[..., 2]).all())),
+              ((1296, 2304, 3), True))
+        check("and the raw mosaic of the old picture is dropped",
+              arb._view_bayer, None)
         check("fitted on the bound crop's R layer, as a pre-image",
               _find_calls, [((_rows, _cols), _pf.SECTION_PRE,
                              {"sample", "gray1", "gray2"})])

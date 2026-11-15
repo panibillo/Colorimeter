@@ -169,6 +169,25 @@ sqlite3 src/colorimeter.sqlite \
   pad's pixels, and zooms to the pad. The name strip shows the pad's size,
   or the first quality check it failed. The − button still zooms out to the
   whole frame.
+- Pad finding measures the pad's top instead of placing it one fixed height
+  above the bottom (`src/padfind.py` step 5, and the desktop's
+  `padrect.py` for the cassette holders). The old height, 53.34 layer px,
+  came from the open-channel holder; in the cassettes the pad measures 52.3
+  (68 sweeps, sd 0.13), so the top sat about one row too high, on white
+  backing, on every sweep. The top now moves down 0.8–1.5 rows; the bottom
+  and sides do not move (sides by 0.09 px at most). The "reseat" fallback,
+  which a dark mark on the pad could set off, is gone from the cassette
+  layout. Fits record `top_source` ('measured' or 'height'); archives
+  written before it read back as 'height'. Older open-channel captures fit
+  exactly as before.
+- The pad-finding offsets were re-measured with the new top:
+  `capture.padfind_offset_pre` 0.10,0.44,0.43,0.33 (was 0.33 for the top)
+  and `_post` 0.13,0.35,0.33,0.11 (was 0.11). An instrument still on the old
+  factory values takes the new ones at its next launch; an operator's own
+  value is kept. Desktop `chain_samples` offsets changed to match.
+- View Image → Find/Pad now shows the photo_red frame it fitted (in gray)
+  under the outline, instead of the white-LED picture, so the outline is
+  judged against the pixels it was found on.
 - The strip rule now keeps one frame per LED at Tus unless
   `protocol.multiple_exposure_count` says otherwise. It kept three before
   stage 4a.

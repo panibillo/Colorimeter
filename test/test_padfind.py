@@ -67,7 +67,7 @@ def _blur(img, sigma=0.8):
     return np.apply_along_axis(lambda v: np.convolve(v, k, "valid"), 0, rows)
 
 
-def scene(dx=0.0, dy=0.0, open_channel=False):
+def scene(dx=0.0, dy=0.0, open_channel=False, height=None, dark_row=None):
     """
     The raw R layer (DN) of a synthetic cassette frame.
 
@@ -75,12 +75,17 @@ def scene(dx=0.0, dy=0.0, open_channel=False):
         dx, dy: Move the pad right / down by this many layer px.
         open_channel: Make the bottom rows bright paper, as in the old
             open-channel holder, which padfind must refuse.
+        height: The pad's height, layer px; None for padfind.HEIGHT_FIXED.
+        dark_row: Draw a dark mark across the pad, one row tall, starting
+            this many rows below the pad's top (a blotch or a dot's flank);
+            None for none.
 
     Returns:
         (raw layer, true (left, right, top, bottom) of the pad).
     """
     left, top = PAD_LEFT + dx, PAD_TOP + dy
-    right, bot = left + padfind.WIDTH_FIXED, top + padfind.HEIGHT_FIXED
+    right = left + padfind.WIDTH_FIXED
+    bot = top + (padfind.HEIGHT_FIXED if height is None else height)
     win_bot = ROWS if open_channel else WIN_BOT
     window = _box(ROWS, COLS, 20, 80, WIN_TOP, win_bot)
     pad_rows = _box(ROWS, COLS, 0, COLS, top, bot)      # the pad's rows
@@ -88,6 +93,9 @@ def scene(dx=0.0, dy=0.0, open_channel=False):
     f = 0.1 + 1.5 * window                              # frame or paper
     f = f - 1.4 * window * pad_rows                     # bands: 0.2
     f = f + 1.0 * pad                                   # pad: 1.2
+    if dark_row is not None:                            # mark: 0.5
+        f = f - 0.7 * _box(ROWS, COLS, left, right, top + dark_row,
+                           top + dark_row + 1)
     # No bottom shadow is drawn.  padfind places the bottom at the steepest
     # rise from pad to paper; a drawn shadow would move that point by an
     # amount set by how the shadow is drawn, which tests the drawing, not
@@ -118,6 +126,34 @@ class TestPadFind(unittest.TestCase):
         self.assertEqual(before.side_rule, "guided")
         self.assertEqual(before.qc(), "")
         self.assertLess(abs(before.angle_deg), 0.1)
+
+    def test_top_is_measured(self):
+        """
+        A pad 0.6 px taller than HEIGHT_FIXED: the top is measured where
+        the backing gives way to the pad, not placed one height above the
+        bottom (which would put it 0.6 px too high).
+        """
+        raw, truth = scene(height=padfind.HEIGHT_FIXED + 0.6)
+        before, _ = padfind.find_pad(raw, DARK_DN, RECTS, "pre")
+        self.assertEqual(before.top_source, "measured")
+        np.testing.assert_allclose(fitted_edges(before), truth, atol=0.15)
+
+    def test_dark_mark_is_not_the_top(self):
+        """
+        A dark mark across the pad, steeper than the top edge, does not
+        move the top when it starts TOP_SEARCH_ROWS + 2 rows below it, nor
+        the bottom wherever it is.  (1-3 rows below the top the lens blur
+        carries the mark's edge into the search and moves the top by up to
+        0.8 px: see padfind.TOP_SEARCH_ROWS.)
+        """
+        raw, truth = scene(dark_row=padfind.TOP_SEARCH_ROWS + 2)
+        before, _ = padfind.find_pad(raw, DARK_DN, RECTS, "pre")
+        self.assertEqual(before.top_source, "measured")
+        self.assertLess(abs(before.top - truth[2]), 0.15)
+        for row in (1, 2, 3, 10, 30):
+            raw, truth = scene(dark_row=row)
+            before, _ = padfind.find_pad(raw, DARK_DN, RECTS, "pre")
+            self.assertLess(abs(before.bot - truth[3]), 0.15)
 
     def test_offset_added(self):
         """The fit after the offset is the fit before it, moved by it."""
@@ -181,6 +217,18 @@ class TestPadFind(unittest.TestCase):
         again = padfind.PadFit.from_attrs(after.to_attrs())
         self.assertEqual(again, after)
         self.assertTrue(math.isfinite(again.width))
+
+    def test_attrs_from_an_older_archive(self):
+        """
+        A fit stored before 2026-11-15 has no top_source: it reads back as
+        'height', the only rule then.
+        """
+        raw, _ = scene()
+        _, after = padfind.find_pad(raw, DARK_DN, RECTS, "pre")
+        attrs = after.to_attrs()
+        del attrs["top_source"]
+        self.assertEqual(padfind.PadFit.from_attrs(attrs).top_source,
+                         "height")
 
 
 if __name__ == "__main__":
