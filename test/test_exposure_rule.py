@@ -196,6 +196,19 @@ class TestEdgeRule(unittest.TestCase):
         self.assertEqual(st.floor_min_dn, 464)
         self.assertIsNone(R.bus_exposure({"R": st}, "photo_red", 30_000)[0])
 
+    def test_noise_in_band_1_does_not_leave_ordinary_pixels_out(self):
+        """
+        Band 1 at 690 (d_1 = 0.006, noise): the factor alone would leave
+        out every edge pixel under 653; the fraction keeps those above 350.
+        """
+        for c in (6, 33):
+            self.raw[:, c] = 64 + 690
+        out = R.edge_left_out(self.raw, self.region())
+        self.assertEqual(list(zip(*np.nonzero(out))), [(20, 5)])   # 80
+        loose = R.RuleSettings(edge_signal_fraction=0.99)
+        self.assertGreater(
+            R.edge_left_out(self.raw, self.region(), loose).sum(), 1)
+
     def test_no_band_1_darkening_leaves_nothing_out(self):
         self.raw[:, 6] = self.raw[:, 33] = 64 + 700
         self.assertFalse(R.edge_left_out(self.raw, self.region()).any())
@@ -232,6 +245,8 @@ class TestRuleSettings(unittest.TestCase):
                 ({"multiple_exposure_count": 0},
                  "protocol.multiple_exposure_count"),
                 ({"bus_margin": 0.5}, "capture.bus_margin"),
+                ({"edge_signal_fraction": 1.0},
+                 "capture.edge_signal_fraction"),
                 ({"analysis_channels": "violet.Q"},
                  "protocol.analysis_channels")):
             with self.subTest(**kwargs), self.assertRaises(ValueError) as cm:

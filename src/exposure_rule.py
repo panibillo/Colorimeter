@@ -203,7 +203,8 @@ SEED_US = {"royal_blue": 2260, "violet": 14850, "cyan": 16070,
 #   d_1      the darkening of band 1 (the row next in from the edge), from
 #            the band's mean signal, as the edge study computes it;
 #   rule     a band-0 (outermost row) pixel of that side is left out of the
-#            floor test when its own d > EDGE_DARKENING_FACTOR x d_1.
+#            floor test when its own d > EDGE_DARKENING_FACTOR x d_1, and its
+#            signal is also below EDGE_SIGNAL_FRACTION of the interior's.
 #
 #   EDGE_DARKENING_FACTOR  capture.edge_darkening_factor, 5.0.  From the
 #            edge study
@@ -221,7 +222,17 @@ SEED_US = {"royal_blue": 2260, "violet": 14850, "cyan": 16070,
 #   EDGE_BAND_CLEAR_PX     Band 1's mean leaves out pixels nearer than this
 #            to the top or bottom, so the corners don't count
 #            (white_study BAND_CLEAR_PX).
+#   EDGE_SIGNAL_FRACTION   capture.edge_signal_fraction, 0.5 (Bill,
+#            2026-11-14).  The second condition: a pixel at least half
+#            outside the pad reads at most about half the interior's signal
+#            (d >= 0.30).  Without it the rule was unstable on dim layers:
+#            when band 1 is darker than the interior only by noise, d_1 is
+#            near 0, the factor limit comes out near the interior mean, and
+#            every band-0 pixel darker than average was left out (green.B on
+#            C1048, rpizero3 2026-11-14: 42, 0, 0, 0, 39, 36 pixels in frames
+#            of one exposure; photo_red.B up to all 104).
 EDGE_DARKENING_FACTOR = 5.0
+EDGE_SIGNAL_FRACTION  = 0.5
 EDGE_RULE_SIDES       = ("L", "R")
 EDGE_INTERIOR_PX      = 8
 EDGE_BAND_CLEAR_PX    = 8
@@ -275,6 +286,8 @@ class RuleSettings:
                          (ANALYSIS_CHANNELS).
         edge_darkening_factor: capture.edge_darkening_factor.  The edge rule
                          of the floor test (EDGE_DARKENING_FACTOR).
+        edge_signal_fraction: capture.edge_signal_fraction.  Its second
+                         condition (EDGE_SIGNAL_FRACTION).
 
     Raises:
         ValueError: on construction, when a value makes no sense (see
@@ -294,6 +307,7 @@ class RuleSettings:
     bus_exposure_count: int = BUS_EXPOSURE_COUNT
     analysis_channels: tuple = ANALYSIS_CHANNELS
     edge_darkening_factor: float = EDGE_DARKENING_FACTOR
+    edge_signal_fraction: float = EDGE_SIGNAL_FRACTION
 
     def __post_init__(self):
         # Frozen: set through object.__setattr__.  A list or comma text is
@@ -336,6 +350,9 @@ class RuleSettings:
             p.append("protocol.bus_exposure_count must be at least 1")
         if self.edge_darkening_factor <= 0:
             p.append("capture.edge_darkening_factor must be positive")
+        if not 0 < self.edge_signal_fraction < 1:
+            p.append("capture.edge_signal_fraction must be between 0 and 1, "
+                     f"got {self.edge_signal_fraction}")
         bad = [c for c in self.analysis_channels
                if c.count(".") != 1 or c.split(".")[1] not in LAYER_NAMES]
         if bad:
@@ -368,7 +385,8 @@ class RuleSettings:
             multiple_exposure_count=config.protocol_multiple_exposure_count(),
             bus_exposure_count=config.protocol_bus_exposure_count(),
             analysis_channels=config.protocol_analysis_channels(),
-            edge_darkening_factor=config.capture_edge_darkening_factor())
+            edge_darkening_factor=config.capture_edge_darkening_factor(),
+            edge_signal_fraction=config.capture_edge_signal_fraction())
 
     def to_dict(self) -> dict:
         """Plain values, for the archive's JSON record."""
@@ -526,20 +544,23 @@ def edge_left_out(layer, region: TestRegion,
          (EDGE_INTERIOR_PX or more from every edge, hot pixels left out).
       2. d_1 = -log10(mean signal of band 1 / S), band 1 being the pad
          pixels 1 to 2 px in from that side, away from the corners.
-      3. A band-0 pixel (0 to 1 px in) is left out when
-         -log10(its signal / S) > s.edge_darkening_factor x d_1.
+      3. A band-0 pixel (0 to 1 px in) is left out when both
+         -log10(its signal / S) > s.edge_darkening_factor x d_1, and
+         its signal < s.edge_signal_fraction x S.
     A side whose d_1 is not positive (no darkening to compare with) leaves
     nothing out.
 
     Example: S = 700, band 1 mean 560 -> d_1 = 0.097; the limit is 0.485,
-    i.e. signal 229.  An edge pixel at raw 144 (signal 80, d = 0.94) is left
-    out; one at raw 400 (signal 336, d = 0.32) stays.
+    i.e. signal 229 (the fraction's 350 is higher, so 229 holds).  An edge
+    pixel at raw 144 (signal 80, d = 0.94) is left out; one at raw 400
+    (signal 336, d = 0.32) stays.  With band 1 at 690 (d_1 = 0.006, noise)
+    the factor alone would allow 653; the fraction holds it to 350.
 
     Args:
         layer:  One Bayer layer of the bound crop, raw DN.
         region: The test region; nothing is left out when region.dist is
                 None (the pad was not fitted).
-        s:      The settings (edge_darkening_factor).
+        s:      The settings (edge_darkening_factor, edge_signal_fraction).
 
     Returns:
         Boolean array of the layer's shape, True at the pixels left out.
@@ -564,7 +585,8 @@ def edge_left_out(layer, region: TestRegion,
         # d > factor x d1  <=>  signal < S x 10^(-factor x d1): the same
         # test without a logarithm at every pixel (and a signal at or below
         # zero is always left out).
-        limit = S * 10.0 ** (-s.edge_darkening_factor * d1)
+        limit = min(S * 10.0 ** (-s.edge_darkening_factor * d1),
+                    S * s.edge_signal_fraction)
         out |= band0 & ((a - DARK_DN) < limit)
     return out
 

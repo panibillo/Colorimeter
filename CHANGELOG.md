@@ -153,6 +153,14 @@ sqlite3 src/colorimeter.sqlite \
 - The strip rule now keeps one frame per LED at Tus unless
   `protocol.multiple_exposure_count` says otherwise. It kept three before
   stage 4a.
+- The edge rule of the noise-floor test has a second condition, a new
+  config row `capture.edge_signal_fraction` (0.5): a left or right edge
+  pixel is left out only if its signal is also below half the pad
+  interior's. On dim layers the rule was unstable: when the row next in was
+  darker than the interior only by noise, nearly every edge pixel darker
+  than average was left out (green.B on C1048: 42, 0, 0, 0, 39, 36 pixels
+  in frames of one exposure; photo_red.B up to all 104). Re-measured on the
+  last two rpizero3 archives, no Bus decision changes.
 - The strip rule's coverage check (and its "below the floor at Tus and Bus"
   warning) counts only the layers stored at Tus. Layers that are always
   dark and never stored, such as red.B under a red LED, made the warning

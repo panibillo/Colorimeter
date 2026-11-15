@@ -1044,6 +1044,11 @@ def capture_edge_darkening_factor() -> float:
     return float(get("capture", "edge_darkening_factor"))
 
 
+def capture_edge_signal_fraction() -> float:
+    """The edge rule's second condition: below this x interior signal (0.5)."""
+    return float(get("capture", "edge_signal_fraction"))
+
+
 def protocol_multiple_exposure_count() -> int:
     """Frames kept per LED at Tus (seeded 1; 3 for the trial strips)."""
     return int(get("protocol", "multiple_exposure_count"))

@@ -163,6 +163,7 @@ explains each value and where it came from.
 | `capture.exposure_cap_us` | 200000 | the longest exposure_us the rule may ask for |
 | `capture.bus_margin` | 1.1 | how far past the floor Bus aims |
 | `capture.edge_darkening_factor` | 5.0 | the edge rule of the floor test |
+| `capture.edge_signal_fraction` | 0.5 | the edge rule's second condition: an edge pixel is left out only if its signal is also below this fraction of the interior's |
 | `capture.padfind_led` / `padfind_exposure_us` | photo_red / 10000 | the pad-finding frame |
 | `capture.padfind_offset_pre` / `_post` | 0.10,0.44,0.33,0.33 / 0.13,0.35,0.11,0.11 | the photo_red offsets (left, right, top, bottom; layer px) |
 

@@ -255,6 +255,10 @@ tested. The full plan is `~/.claude/plans/velvety-roaming-pascal.md`.
     `verdict` ('accept' | 'clipped' | 'dim') in place of a separate
     `accepted` flag, and strip-rule sweeps only. rpizero3: 154 rows for a
     5-LED pre/post pair, written in 0.10 s and 0.04 s.
+    The log showed the floor test's edge rule unstable on dim layers; it
+    now also requires an edge pixel's signal to be below
+    `capture.edge_signal_fraction` (0.5) of the interior's (Bill,
+    2026-11-14). No Bus decision changed on the last two Pi archives.
     (One row per frame per layer, retries and
     the pad-finding frame included: sample, archive, pre/post, purpose,
     attempt, label, accepted, stored, LED, Bayer layer, exposure_us
