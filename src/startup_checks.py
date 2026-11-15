@@ -343,10 +343,14 @@ def check_exposures(**_) -> CheckResult:
 
     name = "Exposures"
     groups = exposure_repo.available_groups()
+    # The strip rule's seed rows (one per LED; factory ones are seeded at
+    # start-up, so none at all means a damaged table).
+    seeds = len(exposure_repo.read_seeds())
     if not groups:
         return CheckResult(name, WARN,
                            "none — run the exposure calibration")
-    return CheckResult(name, OK, detail=f"groups: {', '.join(groups)}")
+    return CheckResult(name, OK, detail=f"groups: {', '.join(groups)}; "
+                                        f"seeds: {seeds} LEDs")
 
 
 def check_calibration_window(**_) -> CheckResult:

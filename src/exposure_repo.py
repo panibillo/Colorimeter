@@ -19,7 +19,17 @@ The `exposure` table (db_DDL.sql is the authority):
     remark         TEXT      -- 'low DN (patch)', 'high DN (patch)', 'log rung 1/4'
     low_dn, high_dn REAL     -- signal measured on the rung that fixed a limit
     layers         TEXT      -- Bayer layers that had to pass, e.g. 'Gb Gr'
-    preimage       INTEGER   -- 1 = the pre-image takes this exposure
+    preimage       INTEGER   -- 1 = the group rule's pre-image takes this one
+    role           TEXT      -- 'ladder' (the rows above) | 'tus' (a seed)
+    samp_no        TEXT      -- a seed: the sample whose pre-image set it
+
+Two kinds of row share the table, told apart by `role` (2026-11-14):
+
+    'ladder'  the calibrated brackets: everything this module did before.
+              Every ladder read and write below touches only these rows.
+    'tus'     one active row per LED, exposuregroup NULL: the strip rule's
+              seed, the first exposure_us a pre-image tries for that LED
+              (read_seed / write_seed).  A recalibration leaves it alone.
 
 The `active` flag is the current-vs-history switch.  Only active rows are read.
 A new calibration does not delete or overwrite the previous one: it flips the
@@ -44,17 +54,30 @@ Public surface
     read_led_exposures(led) -> list[int]           every distinct active exposure
     read_preimage_exposures(led) -> list[int]      those flagged for the pre-image
     delete_led(led) -> int                         hard delete (history and all)
+    read_seed(led) -> Seed | None                  the LED's active seed row
+    read_seeds() -> dict[str, Seed]                every LED's active seed row
+    write_seed(led, microseconds, ...) -> int      supersede one LED's seed
 """
 
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Dict, List, Optional
 
 import db_manager as db
 
 log = logging.getLogger(__name__)
+
+#: Values of `role`.
+ROLE_LADDER = "ladder"
+ROLE_TUS    = "tus"
+
+# The clause every ladder read and write adds, so a seed row is never read
+# as, or superseded by, a calibration.  NULL counts as a ladder row: a row
+# written before db_bootstrap gave the old rows their role.
+_LADDER = "(role IS NULL OR role = 'ladder')"
 
 # ── Reads (active rows only) ────────────────────────────────────────────────
 
@@ -68,7 +91,7 @@ def read_exposures(led: str, group: str) -> List[int]:
     """
     rows = db.read_all(
         "SELECT microseconds FROM exposure "
-        "WHERE LED = ? AND exposuregroup = ? AND active = 1 "
+        f"WHERE LED = ? AND exposuregroup = ? AND active = 1 AND {_LADDER} "
         "AND microseconds IS NOT NULL "
         "ORDER BY microseconds",
         (led, str(group)),
@@ -134,7 +157,8 @@ def read_group(group: str) -> Dict[str, List[int]]:
     """
     rows = db.read_all(
         "SELECT LED, microseconds FROM exposure "
-        "WHERE exposuregroup = ? AND active = 1 AND microseconds IS NOT NULL "
+        f"WHERE exposuregroup = ? AND active = 1 AND {_LADDER} "
+        "AND microseconds IS NOT NULL "
         "ORDER BY LED, microseconds",
         (str(group),),
     )
@@ -148,7 +172,7 @@ def available_groups() -> List[str]:
     """Return the distinct active exposuregroup values, sorted numerically."""
     rows = db.read_all(
         "SELECT DISTINCT exposuregroup FROM exposure "
-        "WHERE active = 1 AND exposuregroup IS NOT NULL")
+        f"WHERE active = 1 AND exposuregroup IS NOT NULL AND {_LADDER}")
     groups = [g for (g,) in rows]
     # Sort numerically where possible so '10' would follow '9', not '1'.
     return sorted(groups, key=lambda g: (not g.isdigit(), int(g) if g.isdigit() else 0, g))
@@ -174,7 +198,7 @@ def write_led_exposures(led: str, group: str, microseconds: List[int],
     group = str(group)
     db.write_one(
         "UPDATE exposure SET active = 0 "
-        "WHERE LED = ? AND exposuregroup = ? AND active = 1",
+        f"WHERE LED = ? AND exposuregroup = ? AND active = 1 AND {_LADDER}",
         (led, group))
     return _insert_rows(led, {group: list(microseconds)}, remark,
                         add_dt or _now_local())
@@ -192,7 +216,8 @@ def write_all_groups(led: str, groups: Dict[str, List[int]],
     `groups` is {group: [exposures]} as produced by exposure_fit.fit_led().  The
     LED's currently-active rows are flipped to active=0 (kept as history), and
     the new rows are inserted active=1 — so a re-calibration cleanly supersedes
-    the previous one without losing it.  Other LEDs are untouched.
+    the previous one without losing it.  Other LEDs are untouched, and so is
+    this LED's seed row (role 'tus').
 
     Args:
         notes:   {exposure_us: (remark, low_dn, high_dn)} for the rungs that
@@ -204,8 +229,8 @@ def write_all_groups(led: str, groups: Dict[str, List[int]],
 
     Returns the number of rows inserted.
     """
-    db.write_one("UPDATE exposure SET active = 0 WHERE LED = ? AND active = 1",
-                 (led,))
+    db.write_one("UPDATE exposure SET active = 0 "
+                 f"WHERE LED = ? AND active = 1 AND {_LADDER}", (led,))
     return _insert_rows(led, groups, remark, add_dt or _now_local(),
                         notes, layers, preimage_group)
 
@@ -225,24 +250,25 @@ def _insert_rows(led: str, groups: Dict[str, List[int]],
             note_remark, low, high = notes.get(us, (None, None, None))
             rows.append((1, add_dt, str(group), led, us,
                          note_remark if note_remark is not None else remark,
-                         low, high, layers, flag))
+                         low, high, layers, flag, ROLE_LADDER))
     if not rows:
         return 0
     db.write_many(
         "INSERT INTO exposure "
         "(active, add_dt, exposuregroup, LED, microseconds, remark, "
-        "low_dn, high_dn, layers, preimage) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "low_dn, high_dn, layers, preimage, role) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         rows,
     )
     return len(rows)
 
 
 def read_led_exposures(led: str) -> List[int]:
-    """Every distinct active exposure (µs) stored for the LED, any group, ascending."""
+    """Every distinct active ladder exposure (µs) for the LED, any group, ascending."""
     rows = db.read_all(
         "SELECT DISTINCT microseconds FROM exposure "
-        "WHERE LED = ? AND active = 1 AND microseconds IS NOT NULL "
+        f"WHERE LED = ? AND active = 1 AND {_LADDER} "
+        "AND microseconds IS NOT NULL "
         "ORDER BY microseconds", (led,))
     return [int(us) for (us,) in rows]
 
@@ -251,14 +277,14 @@ def read_preimage_exposures(led: str) -> List[int]:
     """The LED's active exposures flagged for the pre-image, ascending."""
     rows = db.read_all(
         "SELECT microseconds FROM exposure "
-        "WHERE LED = ? AND active = 1 AND preimage = 1 "
+        f"WHERE LED = ? AND active = 1 AND preimage = 1 AND {_LADDER} "
         "ORDER BY microseconds", (led,))
     return sorted({int(r[0]) for r in rows})
 
 
 def delete_led(led: str) -> int:
     """
-    Hard-delete every exposure row for one LED — history included.
+    Hard-delete every exposure row for one LED — history and seed included.
 
     Unlike the calibration writes (which only deactivate), this really removes
     rows.  Used for explicit purges and test cleanup, not the normal flow.
@@ -266,6 +292,104 @@ def delete_led(led: str) -> int:
     """
     return db.write_one("DELETE FROM exposure WHERE LED = ?", (led,))
 
+
+
+# ── The strip rule's seed rows (role 'tus', 2026-11-14) ─────────────────────
+
+@dataclass(frozen=True)
+class Seed:
+    """
+    One LED's active seed row.
+
+    Attributes:
+        rowid:        The row.
+        led:          LED color name.
+        microseconds: The exposure_us a pre-image tries first, µs.
+        add_dt:       When it was written (local time).
+        samp_no:      The sample whose pre-image set it; None for a factory
+                      seed (provisioning/config_defaults.sql).
+        low_dn, high_dn: Darkest and brightest raw DN of the deciding layer
+                      on that pre-image's accepted frame; None for a factory
+                      seed.
+        layers:       The layer that decided Tus, e.g. 'B'.
+        remark:       Where it came from.
+    """
+    rowid: int
+    led: str
+    microseconds: int
+    add_dt: Optional[str]
+    samp_no: Optional[str]
+    low_dn: Optional[float]
+    high_dn: Optional[float]
+    layers: Optional[str]
+    remark: Optional[str]
+
+
+_SEED_COLUMNS = ("rowid, LED, microseconds, add_dt, samp_no, low_dn, "
+                 "high_dn, layers, remark")
+
+
+def _seed_of(row: tuple) -> Seed:
+    rowid, led, us, add_dt, samp_no, low, high, layers, remark = row
+    return Seed(int(rowid), led, int(us), add_dt, samp_no, low, high, layers,
+                remark)
+
+
+def read_seed(led: str) -> Optional[Seed]:
+    """
+    The LED's active seed row, or None if it has none.
+
+    If a hand edit has left two active, the newest is used.
+    """
+    row = db.read_one(
+        f"SELECT {_SEED_COLUMNS} FROM exposure "
+        "WHERE LED = ? AND role = ? AND active = 1 "
+        "AND microseconds IS NOT NULL ORDER BY rowid DESC LIMIT 1",
+        (led, ROLE_TUS))
+    return _seed_of(row) if row else None
+
+
+def read_seeds() -> Dict[str, Seed]:
+    """{LED: active seed row} for every LED that has one."""
+    rows = db.read_all(
+        f"SELECT {_SEED_COLUMNS} FROM exposure "
+        "WHERE role = ? AND active = 1 AND microseconds IS NOT NULL "
+        "ORDER BY rowid", (ROLE_TUS,))
+    return {r[1]: _seed_of(r) for r in rows}
+
+
+def write_seed(led: str, microseconds: int, samp_no: Optional[str],
+               low_dn: Optional[float] = None,
+               high_dn: Optional[float] = None,
+               layers: Optional[str] = None, remark: Optional[str] = None,
+               add_dt: Optional[str] = None) -> int:
+    """
+    Supersede one LED's seed: its active 'tus' row goes to active=0 (kept as
+    history) and a new active one is inserted, in one transaction.
+
+    Args:
+        led:          LED color name.
+        microseconds: The new seed, µs (the pre-image's accepted Tus).
+        samp_no:      The sample whose pre-image set it.
+        low_dn, high_dn: Darkest and brightest raw DN of the deciding layer
+                      at that Tus.
+        layers:       The deciding layer.
+        remark:       Why, e.g. 're-aimed from 14850 µs (clipped)'.
+        add_dt:       Timestamp; defaults to now.
+
+    Returns:
+        The number of rows inserted (1).
+    """
+    db.write_tx([
+        ("UPDATE exposure SET active = 0 "
+         "WHERE LED = ? AND role = ? AND active = 1", (led, ROLE_TUS)),
+        ("INSERT INTO exposure (active, add_dt, exposuregroup, LED, "
+         "microseconds, remark, low_dn, high_dn, layers, preimage, role, "
+         "samp_no) VALUES (1, ?, NULL, ?, ?, ?, ?, ?, ?, 0, ?, ?)",
+         (add_dt or _now_local(), led, int(microseconds), remark, low_dn,
+          high_dn, layers, ROLE_TUS, samp_no)),
+    ])
+    return 1
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Self-test — the table round-trip runs on a

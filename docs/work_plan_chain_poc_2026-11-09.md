@@ -266,7 +266,10 @@ tested. The full plan is `~/.claude/plans/velvety-roaming-pascal.md`.
     sits, the floor test's darkest pixel, pixel count, clipped at top,
     clipped at bottom, below the floor, edge pixels left out). Written after
     the LED is off; a failed write never costs a capture.
-  - **4c. Seed rows in `exposure`** (new columns `role` and `samp_no`).
+  - **4c. Seed rows in `exposure`. Done 2026-11-14.** Role values
+    'ladder' and 'tus'; the factory seeds are rows in
+    provisioning/config_defaults.sql; a bench run with no sample never
+    updates a seed. (New columns `role` and `samp_no`.)
     "Seed" = the exposure_us of an LED's first try. A measurement already
     starts at its own pre-image Tus. Seed rows are read for every
     pre-image and updated only from pre-images, when the seed was re-aimed

@@ -213,13 +213,25 @@ CREATE TABLE IF NOT EXISTS test_equip (
 
 
 -- ────────────────────────────────────────────────────────────────────────────
--- exposure — calibrated exposure ladders.  One row per (LED, group, exposure).
+-- exposure — calibrated exposure ladders, and each LED's seed for the strip
+-- exposure rule.  `role` says which a row is (one column, one meaning):
 --
--- `active` is the current-vs-history switch: a recalibration flips the old
--- rows to active=0 and inserts fresh active=1 rows, so nothing is lost and the
--- operator can hand-edit which calibration is in force.  See exposure_repo.py.
+--   'ladder'  One row per (LED, group, exposure), written by the
+--             Calibration capture path.  Rows from before 2026-11-14 are
+--             given this role at start-up (db_bootstrap).
+--   'tus'     One active row per LED (exposuregroup NULL): the first
+--             exposure_us a pre-image tries for that LED (its "seed").  The
+--             factory rows are provisioning/config_defaults.sql's; a sample's
+--             pre-image replaces one when it had to re-aim to an accepted Tus
+--             (detour stage 4c; Bill, 2026-11-14).  Never written from a
+--             measurement: a stained pad's Tus must not seed the next
+--             pre-image.
 --
--- Seeded empty — rows are written by the Calibration capture path.
+-- `active` is the current-vs-history switch: a recalibration (or a new seed)
+-- flips the old rows to active=0 and inserts fresh active=1 rows, so nothing
+-- is lost and the operator can hand-edit which calibration is in force.  A
+-- recalibration supersedes only 'ladder' rows; a seed only the LED's 'tus'
+-- row.  See exposure_repo.py.
 -- ────────────────────────────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS exposure (
     rowid           INTEGER PRIMARY KEY
@@ -236,7 +248,12 @@ CREATE TABLE IF NOT EXISTS exposure (
     high_dn         REAL,           -- brightest patch signal measured here; set
                                     --   only on the rung the high limit fixed
     layers          TEXT,           -- Bayer layers that had to pass: 'B', 'Gb Gr'
-    preimage        INTEGER DEFAULT 0  -- 1 = capture this exposure in the pre-image
+                                    --   (a seed: the layer that decided Tus)
+    preimage        INTEGER DEFAULT 0, -- 1 = the group rule's pre-image takes
+                                    --   this exposure (ladder rows only)
+    role            TEXT,           -- 'ladder' | 'tus' (see above)
+    samp_no         TEXT            -- a seed: the sample whose pre-image set
+                                    --   it; NULL for a factory seed
 );
 
 

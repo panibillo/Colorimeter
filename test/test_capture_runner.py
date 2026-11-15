@@ -21,6 +21,7 @@ import os
 import shutil
 import sys
 import tempfile
+import sqlite3
 import unittest
 import unittest.mock
 from pathlib import Path
@@ -213,29 +214,35 @@ class FakeLeds:
 
 def guard_live_exposure_log(case: unittest.TestCase) -> None:
     """
-    Keep a test's strip-rule runs from writing exposure_log rows into the
-    live database, for the rest of the test.
+    Keep a test's strip-rule runs from writing exposure_log rows or seed
+    rows into the live database, for the rest of the test.
 
     Many runner and session tests read the live database (src/
     colorimeter.sqlite) for their settings, and the strip rule is the
-    default, so a run would log its frames there.  A write goes through
-    only once the test has moved db_manager.DBNAME to a copy (as
-    CalibratedExposures does); against the live file it is dropped.
+    default, so a run would log its frames there (and a sample's pre-image
+    could replace a seed).  A write goes through only once the test has
+    moved db_manager.DBNAME to a copy (as CalibratedExposures does);
+    against the live file it is dropped.
     """
     import db_manager
     import exposure_log_repo
+    import exposure_repo
     live = Path(db_manager.DBNAME).resolve()
-    real = exposure_log_repo.write_rows
 
-    def guarded(rows):
-        if Path(db_manager.DBNAME).resolve() == live:
-            return 0
-        return real(rows)
+    def guard(module, name):
+        real = getattr(module, name)
 
-    patcher = unittest.mock.patch.object(exposure_log_repo, "write_rows",
-                                         guarded)
-    patcher.start()
-    case.addCleanup(patcher.stop)
+        def guarded(*args, **kwargs):
+            if Path(db_manager.DBNAME).resolve() == live:
+                return 0
+            return real(*args, **kwargs)
+
+        patcher = unittest.mock.patch.object(module, name, guarded)
+        patcher.start()
+        case.addCleanup(patcher.stop)
+
+    guard(exposure_log_repo, "write_rows")
+    guard(exposure_repo, "write_seed")
 
 
 class RunnerTestCase(unittest.TestCase):
@@ -1727,6 +1734,11 @@ class TestStripRule(CalibratedExposures):
         self.cam = LinearCam()
         self.leds = LedsWithPhotoRed()
         self.cam.leds = self.leds
+        # Amber's factory seed (44728 us) is accepted at once on LinearCam;
+        # these tests start it from its group-1 exposure (30000 us), which
+        # needs a re-aim.  photo_red keeps its factory seed.
+        self._db.write_one("DELETE FROM exposure WHERE role = 'tus' "
+                           "AND LED = 'amber'")
 
     def make_runner(self, **kwargs):
         kwargs.setdefault("exposure_rule", capture_runner.RULE_STRIP)
@@ -1880,9 +1892,9 @@ class TestStripRule(CalibratedExposures):
                                led_colors=["photo_red"])
         self.run_to_completion(pre)
         pre_rec = self.led_record(pre, "photo_red", "/pre")
-        self.assertEqual(pre_rec["seed_source"], "D1 seed")
+        self.assertEqual(pre_rec["seed_source"], "seed row")
         self.assertEqual(pre_rec["seed_us"],
-                         exposure_rule.SEED_US["photo_red"])
+                         self._er.read_seed("photo_red").microseconds)
         post = self.make_runner(mode="normal", archive_path=pre.out_path,
                                 led_colors=["photo_red", "amber"])
         self.run_to_completion(post)
@@ -2006,6 +2018,8 @@ class TestExposureLog(CalibratedExposures):
         self.cam = LinearCam()
         self.leds = LedsWithPhotoRed()
         self.cam.leds = self.leds
+        self._db.write_one("DELETE FROM exposure WHERE role = 'tus' "
+                           "AND LED = 'amber'")         # as TestStripRule
 
     def make_runner(self, **kwargs):
         kwargs.setdefault("exposure_rule", capture_runner.RULE_STRIP)
@@ -2099,6 +2113,106 @@ class TestExposureLog(CalibratedExposures):
         rows = self.rows(runner)
         self.assertTrue(rows)
         self.assertEqual({r["section"] for r in rows}, {"pre"})
+
+
+class TestSeedUpdate(CalibratedExposures):
+    """
+    A sample's pre-image replaces an LED's seed row only when it had to
+    re-aim and then found an accepted Tus (stage 4c; Bill, 2026-11-14).
+
+    photo_red on LinearCam: about 64 + exposure_us x 0.0175 raw, so 90000
+    us clips, 50000 us is accepted at once (~940), and the accepted Tus is
+    near 46000 us.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.cam = LinearCam()
+        self.leds = LedsWithPhotoRed()
+        self.cam.leds = self.leds
+        self._db.write_one("INSERT INTO samples (samp_no) VALUES ('T1')")
+        self.sample = self._db.read_val(
+            "SELECT rowid FROM samples WHERE samp_no = 'T1'")
+
+    def make_runner(self, **kwargs):
+        kwargs.setdefault("exposure_rule", capture_runner.RULE_STRIP)
+        kwargs.setdefault("led_colors", ["photo_red"])
+        kwargs.setdefault("mode", capture_runner.MODE_PRE)
+        kwargs.setdefault("sample_rowid", self.sample)
+        return super().make_runner(**kwargs)
+
+    def record(self, runner, section="/pre"):
+        with self.archive(runner) as f:
+            return json.loads(f[f"{section}/leds/photo_red/led_metadata"]
+                              [()])["strip_rule"]
+
+    def test_a_re_aimed_pre_image_replaces_the_seed(self):
+        self._er.write_seed("photo_red", 90_000, None, remark="too long")
+        runner = self.make_runner()
+        self.run_to_completion(runner)
+        rec = self.record(runner)
+        self.assertEqual(rec["seed_source"], "seed row")
+        self.assertEqual(rec["attempts"][0]["verdict"], "clipped")
+        self.assertEqual(rec["tus_status"], "ok")
+        seed = self._er.read_seed("photo_red")
+        self.assertEqual(seed.microseconds, rec["tus_us"])
+        self.assertEqual((seed.samp_no, seed.layers), ("T1", "R"))
+        self.assertIn("re-aimed from 90000", seed.remark)
+        self.assertEqual(rec["seed_update"],
+                         {"from_us": 90_000, "to_us": rec["tus_us"]})
+        # The next pre-image starts where this one ended.
+        nxt = self.make_runner()
+        self.run_to_completion(nxt)
+        self.assertEqual(self.record(nxt)["seed_us"], rec["tus_us"])
+
+    def test_a_seed_accepted_at_once_stays(self):
+        self._er.write_seed("photo_red", 50_000, None)
+        before = self._er.read_seed("photo_red")
+        runner = self.make_runner()
+        self.run_to_completion(runner)
+        rec = self.record(runner)
+        self.assertEqual([a["verdict"] for a in rec["attempts"]], ["accept"])
+        self.assertIsNone(rec["seed_update"])
+        self.assertEqual(self._er.read_seed("photo_red"), before)
+
+    def test_a_measurement_never_replaces_the_seed(self):
+        """No pre-image in the file, so it seeds from the row, and re-aims."""
+        self._er.write_seed("photo_red", 90_000, None)
+        runner = self.make_runner(mode="normal")
+        self.run_to_completion(runner)
+        rec = self.record(runner, section="")
+        self.assertEqual(rec["seed_source"], "seed row")
+        self.assertEqual(rec["attempts"][0]["verdict"], "clipped")
+        self.assertIsNone(rec["seed_update"])
+        self.assertEqual(self._er.read_seed("photo_red").microseconds, 90_000)
+
+    def test_a_bench_run_with_no_sample_never_replaces_it(self):
+        self._er.write_seed("photo_red", 90_000, None)
+        runner = self.make_runner(sample_rowid=None)
+        self.run_to_completion(runner)
+        self.assertIsNone(self.record(runner)["seed_update"])
+        self.assertEqual(self._er.read_seed("photo_red").microseconds, 90_000)
+
+    def test_a_pre_image_still_clipped_leaves_the_seed(self):
+        self._er.write_seed("photo_red", 90_000, None)
+        self.cam.dim = np.full((FRAME_H, FRAME_W), 100.0)   # always clips
+        runner = self.make_runner()
+        self.run_to_completion(runner)
+        self.assertEqual(self.record(runner)["tus_status"], "clipped")
+        self.assertEqual(self._er.read_seed("photo_red").microseconds, 90_000)
+
+    def test_a_failed_seed_write_does_not_cost_the_capture(self):
+        self._er.write_seed("photo_red", 90_000, None)
+
+        def fails(**_):
+            raise sqlite3.OperationalError("database is locked")
+
+        runner = self.make_runner()
+        with unittest.mock.patch.object(self._er, "write_seed", fails), \
+                self.assertLogs("capture_runner", level="ERROR"):
+            progress = self.run_to_completion(runner)
+        self.assertEqual(progress[-1].phase, "done")
+        self.assertEqual(self._er.read_seed("photo_red").microseconds, 90_000)
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -1,4 +1,4 @@
-# Operating the instrument with pad finding and strip exposures (detour stages 1, 3, 4a and 4b)
+# Operating the instrument with pad finding and strip exposures (detour stages 1, 3 and 4)
 
 Written 2026-11-14, for the code in the commit "Detour stage 1: find the pad
 on the Pi". This file grows with the detour; section 6 covers stage 3, where
@@ -199,9 +199,39 @@ for r in L.read_rows(samp_no='C1049'):
 
 `dev/exposure_rule_pi_check.py` also prints the rows it wrote.
 
-## 7. Coming next (stage 4c, not built yet)
+### Seed exposures (stage 4c, 2026-11-14)
 
-- Always read seed exposures from the table.  Keep the table updated when 
-  a seed exposure fails and is corrected on a pre-image. 
+An LED's seed is the exposure_us of its first try. A measurement starts at
+its own pre-image's Tus. A pre-image starts at the LED's **seed row** in the
+`exposure` table (`role` = 'tus', one active row per LED).
+
+- **Factory seeds** (added at start-up for any LED without one):
+  - royal_blue 2260, violet 14850, cyan 16070, green 8760 and photo_red 37900
+    µs, from the D1 study;
+  - red 19301, red_orange 22999, amber 44728 and blue 7351 µs, the Tus on
+    C1048. These four aren't in the pre-image, so nothing updates them.
+- **Updates.** A sample's pre-image replaces an LED's seed row when it had to
+  re-aim and then found an accepted Tus. The old row is kept (active = 0),
+  and the new one records the sample, the deciding layer and its darkest and
+  brightest raw DN. A measurement never updates a seed: a stained pad must
+  not seed the next pre-image. A bench run with no sample doesn't update
+  one either.
+- Each LED's `strip_rule` record has `seed_source` ('seed row', 'pre-image
+  Tus', ...) and `seed_update` (None, or the old and new values).
+- A recalibration (Menu → Advanced → Capture) leaves the seed rows alone.
+  The start-up screen's "Exposures" line counts them.
+- To see the seeds on the Pi:
+
+```
+# Pi, from ~/pi/Colorimeter
+PYTHONPATH=src .venv/bin/python3 -c "
+import exposure_repo as er
+for led, s in er.read_seeds().items():
+    print(led, s.microseconds, s.samp_no, s.add_dt, s.remark)"
+```
+
+## 7. Coming next
+
 - We may keep a Bus seed for post images that will be the shortest acceptable
-  exposure on the darkest expected pad.
+  exposure on the darkest expected pad. To be re-asked after more data
+  (Bill, 2026-11-14).

@@ -30,8 +30,9 @@
 --                offer it without it being retyped.  Never a factory value.
 --     'operator' created on the instrument.  Never written here.
 --
--- It seeds `roi` as well as `config` — both hold commissioned settings, and
--- both have to be present before the application can start.
+-- It seeds `roi` and the strip rule's `exposure` seed rows as well as
+-- `config` — all hold commissioned settings, and all have to be present
+-- before the application can start.
 -- ============================================================================
 
 
@@ -459,3 +460,75 @@ DELETE FROM config WHERE role = 'capture' AND name = 'preimage_rung_shift';
 -- samples, exposure, colorcard and data are intentionally left empty: they
 -- hold run data, calibration results, and card geometry, all produced by the
 -- application rather than commissioned.
+
+
+-- ────────────────────────────────────────────────────────────────────────────
+-- ── exposure: the strip rule's factory seeds (2026-11-14) ───────────────────
+-- One 'tus' row per LED: the first exposure_us a pre-image tries for it
+-- (capture_runner._seed_exposure; see the `exposure` table in db_DDL.sql).
+-- Inserted only for an LED with no active seed row, so a seed a pre-image
+-- has since replaced is kept.  Sources (Bill, 2026-11-13/14):
+--   royal_blue, violet, cyan, green, photo_red: D1, the exposure_us predicted
+--     to put the brightest non-hot test-region pixel at 0.85 x 1023 raw,
+--     scaled from unclipped frames of C1038-C1047
+--     (desktop/padanalysis/preexposure_study.py).  The blue side rests on
+--     C1038 alone.
+--   red, red_orange, amber, blue: the accepted Tus on C1048 (rpizero3,
+--     captures_exposure_test/20261114_1655.h5).  They are not in the
+--     pre-image, so nothing updates them; the brightest pixel there was in
+--     the pad's white end rows, so the stain barely moves them.
+-- `layers` is the layer that decided the value.
+INSERT INTO exposure (active, add_dt, exposuregroup, LED, microseconds,
+                      remark, layers, preimage, role, samp_no)
+SELECT 1, '2026-11-14 00:00:00', NULL, 'royal_blue', 2260,
+       'factory seed: D1: preexposure_study.py, C1038-C1047 (blue side on C1038 alone)', 'B', 0, 'tus', NULL
+ WHERE NOT EXISTS (SELECT 1 FROM exposure
+                    WHERE LED = 'royal_blue' AND role = 'tus' AND active = 1);
+INSERT INTO exposure (active, add_dt, exposuregroup, LED, microseconds,
+                      remark, layers, preimage, role, samp_no)
+SELECT 1, '2026-11-14 00:00:00', NULL, 'violet', 14850,
+       'factory seed: D1: preexposure_study.py, C1038-C1047 (blue side on C1038 alone)', 'B', 0, 'tus', NULL
+ WHERE NOT EXISTS (SELECT 1 FROM exposure
+                    WHERE LED = 'violet' AND role = 'tus' AND active = 1);
+INSERT INTO exposure (active, add_dt, exposuregroup, LED, microseconds,
+                      remark, layers, preimage, role, samp_no)
+SELECT 1, '2026-11-14 00:00:00', NULL, 'cyan', 16070,
+       'factory seed: D1: preexposure_study.py, C1038-C1047 (blue side on C1038 alone)', 'B', 0, 'tus', NULL
+ WHERE NOT EXISTS (SELECT 1 FROM exposure
+                    WHERE LED = 'cyan' AND role = 'tus' AND active = 1);
+INSERT INTO exposure (active, add_dt, exposuregroup, LED, microseconds,
+                      remark, layers, preimage, role, samp_no)
+SELECT 1, '2026-11-14 00:00:00', NULL, 'green', 8760,
+       'factory seed: D1: preexposure_study.py, C1038-C1047', 'Gb', 0, 'tus', NULL
+ WHERE NOT EXISTS (SELECT 1 FROM exposure
+                    WHERE LED = 'green' AND role = 'tus' AND active = 1);
+INSERT INTO exposure (active, add_dt, exposuregroup, LED, microseconds,
+                      remark, layers, preimage, role, samp_no)
+SELECT 1, '2026-11-14 00:00:00', NULL, 'photo_red', 37900,
+       'factory seed: D1: preexposure_study.py, C1038-C1047', 'R', 0, 'tus', NULL
+ WHERE NOT EXISTS (SELECT 1 FROM exposure
+                    WHERE LED = 'photo_red' AND role = 'tus' AND active = 1);
+INSERT INTO exposure (active, add_dt, exposuregroup, LED, microseconds,
+                      remark, layers, preimage, role, samp_no)
+SELECT 1, '2026-11-14 00:00:00', NULL, 'red', 19301,
+       'factory seed: Tus on C1048, rpizero3 2026-11-14 (not in the pre-image; fixed)', 'R', 0, 'tus', NULL
+ WHERE NOT EXISTS (SELECT 1 FROM exposure
+                    WHERE LED = 'red' AND role = 'tus' AND active = 1);
+INSERT INTO exposure (active, add_dt, exposuregroup, LED, microseconds,
+                      remark, layers, preimage, role, samp_no)
+SELECT 1, '2026-11-14 00:00:00', NULL, 'red_orange', 22999,
+       'factory seed: Tus on C1048, rpizero3 2026-11-14 (not in the pre-image; fixed)', 'R', 0, 'tus', NULL
+ WHERE NOT EXISTS (SELECT 1 FROM exposure
+                    WHERE LED = 'red_orange' AND role = 'tus' AND active = 1);
+INSERT INTO exposure (active, add_dt, exposuregroup, LED, microseconds,
+                      remark, layers, preimage, role, samp_no)
+SELECT 1, '2026-11-14 00:00:00', NULL, 'amber', 44728,
+       'factory seed: Tus on C1048, rpizero3 2026-11-14 (not in the pre-image; fixed)', 'R', 0, 'tus', NULL
+ WHERE NOT EXISTS (SELECT 1 FROM exposure
+                    WHERE LED = 'amber' AND role = 'tus' AND active = 1);
+INSERT INTO exposure (active, add_dt, exposuregroup, LED, microseconds,
+                      remark, layers, preimage, role, samp_no)
+SELECT 1, '2026-11-14 00:00:00', NULL, 'blue', 7351,
+       'factory seed: Tus on C1048, rpizero3 2026-11-14 (not in the pre-image; fixed)', 'B', 0, 'tus', NULL
+ WHERE NOT EXISTS (SELECT 1 FROM exposure
+                    WHERE LED = 'blue' AND role = 'tus' AND active = 1);

@@ -186,6 +186,12 @@ MODE_PRE         = "pre"
 RULE_STRIP = "strip"
 RULE_GROUP = "group"
 
+# The strip rule's seed (the first exposure_us an LED tries) comes from the
+# LED's seed row in the `exposure` table when its source is this
+# (_seed_exposure).  Only such an LED, in a sample's pre-image, can update
+# the row (_seed_update).
+SEED_FROM_ROW = "seed row"
+
 # The pre-image path
 # ------------------
 # A reagent pad is not white. It carries a colour of its own before anything
@@ -841,6 +847,9 @@ class CaptureRunner:
         # belong to, or None.
         self._log_rows: "list[dict]" = []
         self._samp_no: "str | None" = None
+        # Strip rule, pre-image: the seed rows to replace, as write_seed
+        # keyword arguments, written with the log rows (_seed_update).
+        self._seed_writes: "list[dict]" = []
         # The archive's root attributes (capture_meta.root_attrs), kept from
         # _write_metadata: the camera model, frame size and serial that the
         # hot-pixel lookup needs.
@@ -1932,6 +1941,42 @@ class CaptureRunner:
             section="pre" if self._is_pre() else "post",
             dark_dn=exposure_rule.DARK_DN)
 
+    def _seed_update(self, color: str, record: dict) -> "dict | None":
+        """
+        Decide whether this LED's pre-image replaces its seed row, and queue
+        the write if so (written by _flush_exposure_log, LEDs off).
+
+        Rule (Bill, 2026-11-14): only a sample's pre-image (not a
+        measurement, whose stained pad must never seed the next pre-image,
+        and not a bench run with no sample), only an LED whose seed came
+        from its seed row, and only when it had to re-aim and then found an
+        accepted Tus.  An LED accepted at its seed, or still clipped or dim
+        after every try, leaves the row as it is.
+
+        Args:
+            color:  LED color name.
+            record: The LED's strip-rule record.
+
+        Returns:
+            None when the seed stays; otherwise {"from_us", "to_us"}, for the
+            record.
+        """
+        if not (self._is_pre() and self._samp_no
+                and record["seed_source"] == SEED_FROM_ROW
+                and record["tus_status"] == "ok"
+                and record["tus_us"] != record["seed_us"]):
+            return None
+        kept = record["attempts"][-1]
+        layer = kept["decided_by"]
+        st = kept["stats"][layer]
+        first = record["attempts"][0]["verdict"]
+        self._seed_writes.append(dict(
+            led=color, microseconds=record["tus_us"], samp_no=self._samp_no,
+            low_dn=st["min_dn"], high_dn=st["max_dn"], layers=layer,
+            remark=(f"pre-image Tus: re-aimed from {record['seed_us']} µs "
+                    f"({first}) in {record['tus_tries']} tries")))
+        return {"from_us": record["seed_us"], "to_us": record["tus_us"]}
+
     def _flush_exposure_log(self) -> None:
         """
         Write the queued exposure_log rows, once, and empty the queue.
@@ -1939,8 +1984,17 @@ class CaptureRunner:
         Called after the last coloured LED is off, and again (with nothing
         left to write) when the run ends however it ends.  A failure is
         logged and dropped: the archive holds the same numbers, and a log
-        write must never cost a capture.
+        write must never cost a capture.  Also writes the queued seed rows
+        (_seed_update), with the same care.
         """
+        seeds, self._seed_writes = self._seed_writes, []
+        for kw in seeds:
+            try:
+                exposure_repo.write_seed(**kw)
+                log.info("seed for %s: now %d µs (%s)", kw["led"],
+                         kw["microseconds"], kw["remark"])
+            except Exception:                         # noqa: BLE001
+                log.exception("seed for %s not written", kw["led"])
         rows, self._log_rows = self._log_rows, []
         if not rows:
             return
@@ -2109,20 +2163,23 @@ class CaptureRunner:
           1. a measurement: this strip's own pre-image Tus, read from the
              `tus_us` attribute of /pre/leds/<color> in the same archive.
              Dye only darkens the pad, so it should not clip there.
-          2. exposure_rule.SEED_US (the D1 study's safe values).
+          2. the LED's seed row in the `exposure` table (exposure_repo.
+             read_seed): factory values, or the Tus of a sample's pre-image
+             that had to re-aim (_seed_update).
           3. the LED's group-1 exposure from the `exposure` table.
           4. the run's default exposure_us (CaptureConfig.exposure_ms).
 
         Returns:
-            (exposure_us, source), source one of 'pre-image Tus', 'D1 seed',
+            (exposure_us, source), source one of 'pre-image Tus', 'seed row',
             'group 1', 'fallback'.
         """
         if not self._is_pre():
             tus = self._writer.led_attrs(color, PRE_SECTION).get("tus_us")
             if tus:
                 return int(tus), "pre-image Tus"
-        if color in exposure_rule.SEED_US:
-            return int(exposure_rule.SEED_US[color]), "D1 seed"
+        seed = exposure_repo.read_seed(color)
+        if seed is not None:
+            return int(seed.microseconds), SEED_FROM_ROW
         middle = exposure_repo.middle_exposure(color, "1")
         if middle:
             return int(middle), "group 1"
@@ -2771,6 +2828,7 @@ class CaptureRunner:
             # frame's log row (_log_padfind_frame).
             self._region = None
             self._log_rows = []
+            self._seed_writes = []
             self._samp_no = (sample_repo.samp_no_for(self.config.sample_rowid)
                              or None)
 
@@ -2826,6 +2884,9 @@ class CaptureRunner:
                     self._led_off(led)
                     lit = self._store_strip_frames(color, result)
                     self._queue_led_log_rows(color, lit)
+                    # Recorded with the LED, before its metadata is written.
+                    lit["record"]["seed_update"] = self._seed_update(
+                        color, lit["record"])
                 else:
                     lit = yield from self._group_lit_frames(
                         color, labels, exposures_us)

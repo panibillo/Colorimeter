@@ -36,8 +36,8 @@ Words used below
 How one LED's exposure_us is found (capture_runner does the frames)
 -------------------------------------------------------------------
   1. Start from a seed: the strip's own pre-image Tus for a measurement
-     (dye only darkens the pad, so it cannot clip there), else SEED_US for
-     a pre-image, else the LED's group-1 exposure from the `exposure` table.
+     (dye only darkens the pad, so it cannot clip there), else the LED's
+     seed row in the `exposure` table, else its group-1 exposure.
   2. Take a frame and measure every layer over the test region (measure()).
   3. Judge it on the decision layers (judge()):
        - a pixel at 1023: "clipped" -> next exposure_us x CLIP_STEP_FACTOR;
@@ -180,16 +180,10 @@ ANALYSIS_CHANNELS = ("violet.B", "royal_blue.B", "cyan.B", "green.Gb",
                      "green.Gr", "green.B", "photo_red.R")
 
 # ── Seeds for a pre-image ───────────────────────────────────────────────
-#   SEED_US  First exposure_us tried in a pre-image, per LED.  From D1
-#            (desktop/padanalysis/preexposure_study.py, 2026-11-13): the
-#            exposure_us predicted to put the brightest test-region pixel at
-#            0.85 x 1023 raw, scaled from unclipped frames of C1038-C1047.
-#            The blue-side values rest on C1038 alone.  An LED not listed
-#            starts from its group-1 exposure.  Stage 4 replaces these with
-#            one seed row per LED in the `exposure` table, updated from the
-#            last accepted pre-image Tus.  Not a RuleSettings field.
-SEED_US = {"royal_blue": 2260, "violet": 14850, "cyan": 16070,
-           "green": 8760, "photo_red": 37900}
+# Each LED's first exposure_us in a pre-image (its seed) is its seed row in
+# the `exposure` table (role 'tus'; exposure_repo.read_seed), read by
+# capture_runner._seed_exposure.  The factory rows and where their values
+# came from are in provisioning/config_defaults.sql (stage 4c, 2026-11-14).
 
 # ── Edge pixels in the noise-floor test (Bill, 2026-11-14) ───────────────
 # The fitted pad's outermost pixel row straddles the cut edge: a pixel there

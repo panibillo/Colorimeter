@@ -252,12 +252,20 @@ def _add_samples_columns(con: sqlite3.Connection) -> None:
 
 
 def _add_exposure_columns(con: sqlite3.Connection) -> None:
-    """Add the columns the tested-bracket calibration records (idempotent)."""
+    """
+    Add the exposure columns added since the table was first made
+    (idempotent): the tested-bracket calibration's, and (2026-11-14) `role`
+    and `samp_no` for the strip rule's seed rows.  Every row with no role is
+    a calibration row from before roles existed, so it is given 'ladder'.
+    Runs before config_defaults.sql, which inserts the factory seed rows.
+    """
     existing = {row[1] for row in con.execute("PRAGMA table_info(exposure)")}
     for name, type_ in (("low_dn", "REAL"), ("high_dn", "REAL"),
-                        ("layers", "TEXT"), ("preimage", "INTEGER DEFAULT 0")):
+                        ("layers", "TEXT"), ("preimage", "INTEGER DEFAULT 0"),
+                        ("role", "TEXT"), ("samp_no", "TEXT")):
         if name not in existing:
             con.execute(f"ALTER TABLE exposure ADD COLUMN {name} {type_}")
+    con.execute("UPDATE exposure SET role = 'ladder' WHERE role IS NULL")
     con.commit()
 
 

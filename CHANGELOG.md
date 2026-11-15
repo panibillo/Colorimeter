@@ -141,6 +141,18 @@ sqlite3 src/colorimeter.sqlite \
   write is logged and never costs a capture. The table is created at
   start-up. Each LED's `strip_rule` record now also has `captured_dt`, the
   time of each stored frame.
+- **Seed rows in the `exposure` table** (detour stage 4c). Each LED's first
+  exposure_us in a pre-image now comes from its seed row (new columns
+  `role` = 'tus' and `samp_no`; calibration rows get `role` = 'ladder' at
+  start-up). Factory seeds are added at start-up for any LED without one:
+  the D1 values for royal_blue, violet, cyan, green and photo_red, and the
+  C1048 Tus for red, red_orange, amber and blue. A sample's pre-image
+  replaces a seed when it had to re-aim and then found an accepted Tus,
+  keeping the old row as history; a measurement or a bench run never does.
+  A recalibration leaves seed rows alone, and the ladder reads ignore them.
+  `exposure_repo.read_seed()` / `read_seeds()` / `write_seed()`. The
+  start-up "Exposures" line counts the seeds. `exposure_rule.SEED_US` is
+  gone.
 
 ### Removed
 
