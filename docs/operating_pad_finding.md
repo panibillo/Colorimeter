@@ -1,4 +1,4 @@
-# Operating the instrument with pad finding and strip exposures (detour stages 1, 3 and 4a)
+# Operating the instrument with pad finding and strip exposures (detour stages 1, 3, 4a and 4b)
 
 Written 2026-11-14, for the code in the commit "Detour stage 1: find the pad
 on the Pi". This file grows with the detour; section 6 covers stage 3, where
@@ -177,9 +177,29 @@ explains each value and where it came from.
   check.
 - Menu → Advanced → Capture Suite always uses the group rule.
 
-## 7. Coming next (stage 4b and 4c, not built yet)
+### The exposure_log table (stage 4b, 2026-11-14)
 
-- Each frame will be logged in a new `exposure_log` table.
+Every frame the strip rule measured is a row per Bayer layer in the
+`exposure_log` table: the pad-finding frame, every try at Tus (rejected ones
+too), and every frame kept at Tus and Bus. `src/exposure_log_repo.py`
+explains every column. The rows are written once per sweep, after the last
+coloured LED is off (about 0.05–0.1 s on rpizero3, 77 rows per 5-LED
+sweep). A failed write is logged and the run goes on; the archive holds the
+same numbers. To look at one sample on the Pi (no sqlite3 there, so Python):
+
+```
+# Pi, from ~/pi/Colorimeter
+PYTHONPATH=src .venv/bin/python3 -c "
+import exposure_log_repo as L
+for r in L.read_rows(samp_no='C1049'):
+    print(r['section'], r['purpose'], r['attempt'], r['label'], r['verdict'],
+          r['LED'], r['bayer_layer'], r['exposure_us'], r['max_dn'], r['min_dn'])"
+```
+
+`dev/exposure_rule_pi_check.py` also prints the rows it wrote.
+
+## 7. Coming next (stage 4c, not built yet)
+
 - Always read seed exposures from the table.  Keep the table updated when 
   a seed exposure fails and is corrected on a pre-image. 
 - We may keep a Bus seed for post images that will be the shortest acceptable

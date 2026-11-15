@@ -64,6 +64,7 @@ import numpy as np
 import capture_meta
 import config_repo as config
 import exposure_repo
+import exposure_log_repo
 import exposure_rule
 import hotpixel_repo
 import layermodel_repo
@@ -834,6 +835,12 @@ class CaptureRunner:
         self._padfind_led: str = "photo_red"
         self._padfind_us: int = 10_000
         self._padfind_offset: "tuple | None" = None
+        # Strip rule: this sweep's exposure_log rows (exposure_log_repo),
+        # gathered as each LED finishes and written once, after the last
+        # coloured LED (_flush_exposure_log).  _samp_no: the sample they
+        # belong to, or None.
+        self._log_rows: "list[dict]" = []
+        self._samp_no: "str | None" = None
         # The archive's root attributes (capture_meta.root_attrs), kept from
         # _write_metadata: the camera model, frame size and serial that the
         # hot-pixel lookup needs.
@@ -1862,6 +1869,8 @@ class CaptureRunner:
             info["error"] = str(exc)
         info["total_s"] = round(time.perf_counter() - t_start, 4)
         self.prof.add("padfind.total", info["total_s"])
+        if layer is not None and self._strip_rule():
+            self._log_padfind_frame(layer, info, section)
 
         with self.prof.time("io.hdf5"):
             self._writer.add_pad(
@@ -1878,6 +1887,70 @@ class CaptureRunner:
         yield self._progress(
             "capture", f"    pad: {self.pad_problem or 'found'}",
             step="padfind")
+
+    def _log_padfind_frame(self, layer: np.ndarray, info: dict,
+                           section: str) -> None:
+        """
+        Measure the pad-finding frame and queue its exposure_log row.
+
+        Measured like every strip-rule frame, over the test region; the
+        region is built here, from the fit just made, and kept for the
+        sweep's frames (_strip_frame would build the same one).
+
+        Args:
+            layer:   The frame's R layer, bound crop, raw DN.
+            info:    The pad record (_find_pad): captured_dt, applied_us.
+            section: 'pre' or 'post'.
+        """
+        self._region = self._test_region(layer.shape)
+        with self.prof.time("cpu.measure"):
+            stats = exposure_rule.measure({"R": layer}, self._region,
+                                          self._rule)
+        self._log_rows += exposure_log_repo.layer_rows(
+            {ch: st.to_dict() for ch, st in stats.items()},
+            stored_layers=("R",),                 # in the sweep's pad group
+            add_dt=info.get("captured_dt"), samp_no=self._samp_no,
+            archive=self.out_path.name, section=section,
+            purpose=exposure_log_repo.PURPOSE_PADFIND,
+            LED=self._padfind_led, exposure_us=self._padfind_us,
+            applied_us=info.get("applied_us"),
+            dark_dn=exposure_rule.DARK_DN)
+
+    def _queue_led_log_rows(self, color: str, lit: dict) -> None:
+        """
+        Queue one LED's exposure_log rows (strip rule), from what
+        _store_strip_frames returned: every try and every stored frame.
+        """
+        frames = {lb: {"exposure_us": us,
+                       "applied_us": lit["applied_us"].get(lb),
+                       "captured_dt": lit["record"]["captured_dt"].get(lb),
+                       "stored": lit["kept"].get(lb, [])}
+                  for lb, us in zip(lit["labels"], lit["exposures_us"])}
+        self._log_rows += exposure_log_repo.rows_for_led(
+            color, lit["record"], frames, samp_no=self._samp_no,
+            archive=self.out_path.name,
+            section="pre" if self._is_pre() else "post",
+            dark_dn=exposure_rule.DARK_DN)
+
+    def _flush_exposure_log(self) -> None:
+        """
+        Write the queued exposure_log rows, once, and empty the queue.
+
+        Called after the last coloured LED is off, and again (with nothing
+        left to write) when the run ends however it ends.  A failure is
+        logged and dropped: the archive holds the same numbers, and a log
+        write must never cost a capture.
+        """
+        rows, self._log_rows = self._log_rows, []
+        if not rows:
+            return
+        try:
+            with self.prof.time("io.exposure_log"):
+                n = exposure_log_repo.write_rows(rows)
+            log.info("exposure_log: %d rows written", n)
+        except Exception:                             # noqa: BLE001
+            log.exception("exposure_log: %d rows not written (the archive "
+                          "has the same numbers)", len(rows))
 
     def _padfind_frame(self, channel: int) -> "tuple[np.ndarray, dict]":
         """
@@ -2380,7 +2453,7 @@ class CaptureRunner:
         labels, exposures_us = [], []
         applied_us, kept_layers, omitted_layers = {}, {}, {}
         render_evidence: dict = {}
-        roles, frame_stats, layer_why = {}, {}, {}
+        roles, frame_stats, layer_why, captured = {}, {}, {}, {}
         for i, (role, f) in enumerate(result["frames"]):
             label = f"e{i}"
             keep, layer_why[label] = exposure_rule.keep_layers(
@@ -2398,6 +2471,7 @@ class CaptureRunner:
             kept_layers[label] = list(keep)
             omitted_layers[label] = omit
             roles[label] = role
+            captured[label] = f["captured_dt"]
             frame_stats[label] = {ch: st.to_dict()
                                   for ch, st in f["stats"].items()}
             render_evidence = render_evidence or f["render_evidence"]
@@ -2405,9 +2479,10 @@ class CaptureRunner:
         # roles: {label: 'tus'|'bus'}; frame_stats: {label: {layer: the
         # test-region statistics of that stored frame}}, every layer, kept
         # or not (the rows stage 4 writes to exposure_log); layers_why:
-        # {label: {layer: why it was kept or left out}}.
+        # {label: {layer: why it was kept or left out}}; captured_dt:
+        # {label: when the frame was taken}.
         record = dict(result["record"], roles=roles, frame_stats=frame_stats,
-                      layers_why=layer_why)
+                      layers_why=layer_why, captured_dt=captured)
         return {"labels": labels, "exposures_us": exposures_us,
                 "applied_us": applied_us, "kept": kept_layers,
                 "omitted": omitted_layers, "render_evidence": render_evidence,
@@ -2692,8 +2767,12 @@ class CaptureRunner:
             # dark pair (taken after its sweep).
             self._lit_us_taken = []
             # The test region is built from this sweep's own pad fit, at its
-            # first strip-rule frame (_strip_frame).
+            # first strip-rule frame (_strip_frame), or by the pad-finding
+            # frame's log row (_log_padfind_frame).
             self._region = None
+            self._log_rows = []
+            self._samp_no = (sample_repo.samp_no_for(self.config.sample_rowid)
+                             or None)
 
             # A pre-image takes its dark frames first, before any LED of its
             # own has lit; a measurement takes them after its last coloured
@@ -2746,6 +2825,7 @@ class CaptureRunner:
                     # writing is not LED on-time.
                     self._led_off(led)
                     lit = self._store_strip_frames(color, result)
+                    self._queue_led_log_rows(color, lit)
                 else:
                     lit = yield from self._group_lit_frames(
                         color, labels, exposures_us)
@@ -2840,6 +2920,11 @@ class CaptureRunner:
                     metadata=meta_json,
                 ))
 
+            # Every coloured LED is off.  For a measurement this write
+            # falls inside the dark frames' settling wait, which is timed
+            # from the last LED going out.
+            self._flush_exposure_log()
+
             if not self._is_pre():
                 if self._strip_rule() and self._lit_us_taken:
                     # The pair is the shortest tested dark and the longest
@@ -2860,4 +2945,6 @@ class CaptureRunner:
             )
         finally:
             self._all_off()
+            # Rows of a run cut short (nothing, if already written).
+            self._flush_exposure_log()
             self._close_writer()

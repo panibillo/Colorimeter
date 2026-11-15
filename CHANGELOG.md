@@ -130,6 +130,17 @@ sqlite3 src/colorimeter.sqlite \
   stops a run before the camera starts, naming the row, and a new start-up
   check, "Exposure rule", warns about it. Each LED's `strip_rule` record
   holds the settings it was taken with (`settings`).
+- **The `exposure_log` table** (`src/exposure_log_repo.py`, new; detour
+  stage 4b). Every frame a strip-rule sweep measured gets one row per Bayer
+  layer: the pad-finding frame, every try at Tus (rejected ones too, with
+  the verdict), and every frame kept at Tus and Bus. A row has the sample,
+  archive, section, purpose, try number, label, whether that layer is
+  stored, the exposure_us asked for and applied, and the test-region
+  statistics. The rows are written once per sweep, after the last coloured
+  LED is off; on rpizero3 a 5-LED sweep's 77 rows took 0.04–0.1 s. A failed
+  write is logged and never costs a capture. The table is created at
+  start-up. Each LED's `strip_rule` record now also has `captured_dt`, the
+  time of each stored frame.
 
 ### Removed
 

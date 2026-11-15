@@ -211,6 +211,33 @@ class FakeLeds:
         return {ch for ch, on in self.state.items() if on}
 
 
+def guard_live_exposure_log(case: unittest.TestCase) -> None:
+    """
+    Keep a test's strip-rule runs from writing exposure_log rows into the
+    live database, for the rest of the test.
+
+    Many runner and session tests read the live database (src/
+    colorimeter.sqlite) for their settings, and the strip rule is the
+    default, so a run would log its frames there.  A write goes through
+    only once the test has moved db_manager.DBNAME to a copy (as
+    CalibratedExposures does); against the live file it is dropped.
+    """
+    import db_manager
+    import exposure_log_repo
+    live = Path(db_manager.DBNAME).resolve()
+    real = exposure_log_repo.write_rows
+
+    def guarded(rows):
+        if Path(db_manager.DBNAME).resolve() == live:
+            return 0
+        return real(rows)
+
+    patcher = unittest.mock.patch.object(exposure_log_repo, "write_rows",
+                                         guarded)
+    patcher.start()
+    case.addCleanup(patcher.stop)
+
+
 class RunnerTestCase(unittest.TestCase):
     """Base class: temp output dir and warmups shortened to keep tests fast."""
 
@@ -226,6 +253,8 @@ class RunnerTestCase(unittest.TestCase):
         self._real_off_settle = capture_runner.LED_OFF_SETTLE_S
         capture_runner.LED_ON_WARMUP_S  = 0.0
         capture_runner.LED_OFF_SETTLE_S = 0.0
+
+        guard_live_exposure_log(self)
 
     def tearDown(self):
         capture_runner.LED_ON_WARMUP_S  = self._real_on_warmup
@@ -1962,6 +1991,114 @@ class TestStripRule(CalibratedExposures):
             self.assertNotIn("strip_rule", meta)
             self.assertEqual(meta["exposure_group"], "3")
 
+
+class TestExposureLog(CalibratedExposures):
+    """
+    A strip-rule sweep writes its exposure_log rows (stage 4b): the
+    pad-finding frame, every try, every stored frame, one row per layer,
+    after the LEDs are off.  The group rule writes none.
+    """
+
+    def setUp(self):
+        super().setUp()
+        import exposure_log_repo
+        self._log = exposure_log_repo
+        self.cam = LinearCam()
+        self.leds = LedsWithPhotoRed()
+        self.cam.leds = self.leds
+
+    def make_runner(self, **kwargs):
+        kwargs.setdefault("exposure_rule", capture_runner.RULE_STRIP)
+        kwargs.setdefault("led_colors", ["amber"])
+        return super().make_runner(**kwargs)
+
+    def rows(self, runner):
+        return self._log.read_rows(archive=runner.out_path.name)
+
+    def test_every_try_and_the_padfind_frame_have_rows(self):
+        runner = self.make_runner(mode="normal")
+        self.run_to_completion(runner)
+        rows = self.rows(runner)
+        pad = [r for r in rows if r["purpose"] == "padfind"]
+        self.assertEqual([(r["LED"], r["bayer_layer"], r["stored"])
+                          for r in pad], [("photo_red", "R", 1)])
+        tries = [r for r in rows if r["purpose"] == "tus"]
+        layers = 4
+        self.assertEqual(len(tries), 2 * layers)       # dim, then accept
+        self.assertEqual(sorted({(r["attempt"], r["verdict"], r["label"])
+                                 for r in tries}),
+                         [(1, "dim", None), (2, "accept", "e0")])
+        self.assertEqual({r["section"] for r in rows}, {"post"})
+        self.assertIsNone(rows[0]["samp_no"])          # a bench run
+
+    def test_stored_matches_the_archive(self):
+        runner = self.make_runner(mode="normal")
+        self.run_to_completion(runner)
+        with self.archive(runner) as f:
+            for r in self.rows(runner):
+                if r["label"] is None:
+                    continue
+                d = f[f"/leds/amber/lit/{r['label']}/{r['bayer_layer']}"]
+                self.assertEqual(r["stored"], int(d.size > 0), r)
+
+    def test_extra_tus_and_bus_frames_have_rows(self):
+        config_repo.save("protocol", "multiple_exposure_count", 3)
+        s = _sample_rect()
+        dim = np.ones((FRAME_H, FRAME_W))
+        dim[s.y:s.y + s.h, s.x:s.x + s.w] = 0.2
+        self.cam.dim = dim
+        runner = self.make_runner(mode="normal", led_colors=["photo_red"])
+        self.run_to_completion(runner)
+        rows = [r for r in self.rows(runner)
+                if r["LED"] == "photo_red" and r["bayer_layer"] == "R"
+                and r["purpose"] != "padfind"]
+        later = [(r["purpose"], r["label"]) for r in rows
+                 if r["attempt"] is None]
+        self.assertEqual(later, [("tus", "e1"), ("tus", "e2"),
+                                 ("bus", "e3")])
+        bus = [r for r in rows if r["purpose"] == "bus"][0]
+        self.assertGreater(bus["exposure_us"], rows[0]["exposure_us"])
+
+    def test_rows_are_written_once_with_every_led_off(self):
+        lit_when_written = []
+        real = self._log.write_rows
+
+        def write_rows(rows):
+            lit_when_written.append(bool(self.leds.lit_channels()))
+            return real(rows)
+
+        with unittest.mock.patch.object(self._log, "write_rows", write_rows):
+            self.run_to_completion(self.make_runner(mode="normal"))
+        self.assertEqual(lit_when_written, [False])
+
+    def test_a_failed_write_does_not_cost_the_capture(self):
+        import sqlite3
+
+        def fails(rows):
+            raise sqlite3.OperationalError("database is locked")
+
+        runner = self.make_runner(mode="normal")
+        with unittest.mock.patch.object(self._log, "write_rows", fails), \
+                self.assertLogs("capture_runner", level="ERROR") as logs:
+            progress = self.run_to_completion(runner)
+        self.assertEqual(progress[-1].phase, "done")
+        self.assertTrue(any("not written" in m for m in logs.output))
+        with self.archive(runner) as f:
+            self.assertIn("/leds/amber/lit/e0/R", f)
+
+    def test_the_group_rule_writes_no_rows(self):
+        runner = self.make_runner(mode="normal",
+                                  exposure_rule=capture_runner.RULE_GROUP)
+        self.run_to_completion(runner)
+        self.assertEqual(self.rows(runner), [])
+
+    def test_the_pre_image_rows_say_pre(self):
+        runner = self.make_runner(mode=capture_runner.MODE_PRE,
+                                  led_colors=["photo_red"])
+        self.run_to_completion(runner)
+        rows = self.rows(runner)
+        self.assertTrue(rows)
+        self.assertEqual({r["section"] for r in rows}, {"pre"})
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

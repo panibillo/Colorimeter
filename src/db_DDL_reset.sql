@@ -32,6 +32,8 @@ DROP INDEX IF EXISTS ux_config_one_active;
 DROP INDEX IF EXISTS ux_config_one_default;
 DROP INDEX IF EXISTS ix_roi_name_active;
 DROP INDEX IF EXISTS ix_layermodels_led_layer_active;
+DROP INDEX IF EXISTS ix_exposure_log_samp_no;
+DROP INDEX IF EXISTS ix_exposure_log_archive;
 
 DROP TABLE IF EXISTS data;
 DROP TABLE IF EXISTS treatments;
@@ -39,6 +41,7 @@ DROP TABLE IF EXISTS test_equip;
 DROP TABLE IF EXISTS colorcard;
 DROP TABLE IF EXISTS layermodels;
 DROP TABLE IF EXISTS roi;
+DROP TABLE IF EXISTS exposure_log;
 DROP TABLE IF EXISTS exposure;
 DROP TABLE IF EXISTS samples;
 DROP TABLE IF EXISTS config;

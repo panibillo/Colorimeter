@@ -251,7 +251,11 @@ tested. The full plan is `~/.claude/plans/velvety-roaming-pascal.md`.
     check counts only layers stored at Tus. `capture.layer_keep_min_dn` /
     `max_dn` stay active: the group rule, the white photo and a start-up
     check still read them.
-  - **4b. `exposure_log` table** (one row per frame per layer, retries and
+  - **4b. `exposure_log` table. Done 2026-11-14.** As below, with
+    `verdict` ('accept' | 'clipped' | 'dim') in place of a separate
+    `accepted` flag, and strip-rule sweeps only. rpizero3: 154 rows for a
+    5-LED pre/post pair, written in 0.10 s and 0.04 s.
+    (One row per frame per layer, retries and
     the pad-finding frame included: sample, archive, pre/post, purpose,
     attempt, label, accepted, stored, LED, Bayer layer, exposure_us
     requested and applied, dark, min, max and mean raw DN, where the max

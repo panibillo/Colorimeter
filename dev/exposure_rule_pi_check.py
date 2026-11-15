@@ -7,7 +7,9 @@ Runs a pre-image and then a measurement (appended to the same archive) on
 whatever strip is in the cassette, with the strip exposure rule
 (src/exposure_rule.py), and prints for each LED: where it started, each try,
 the Tus it settled on, Bus if one was needed, what Tus and Bus left
-uncovered, and how long the LED was on.
+uncovered, and how long the LED was on.  Then what the sweep wrote to the
+exposure_log table (stage 4b): rows per section and purpose, and how long
+each write took.
 
 The pre-image sweeps the LEDs in capture.preimage_led_order; the measurement
 sweeps those too, unless `all` is given, in which case it sweeps every LED
@@ -27,6 +29,8 @@ Run on the Pi, with the Colorimeter program stopped (it holds the camera):
 import json
 import logging
 import sys
+import time
+from collections import Counter
 from datetime import datetime
 from pathlib import Path
 
@@ -36,6 +40,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 import capture_runner as cr                                   # noqa: E402
 import config_repo as config                                  # noqa: E402
+import exposure_log_repo                                      # noqa: E402
 from bayer_cam import BayerCam                                # noqa: E402
 from capture_runner import CaptureConfig, CaptureRunner       # noqa: E402
 from lighting_cal8 import LEDBank                             # noqa: E402
@@ -114,6 +119,29 @@ def report(path, section):
                   f"uncovered {short or 'none'}")
 
 
+#: Seconds each exposure_log write took, in order (timed by _timed_write).
+WRITE_S: list = []
+_real_write = exposure_log_repo.write_rows
+
+
+def _timed_write(rows):
+    """exposure_log_repo.write_rows, timed into WRITE_S."""
+    t0 = time.perf_counter()
+    try:
+        return _real_write(rows)
+    finally:
+        WRITE_S.append(time.perf_counter() - t0)
+
+
+def report_log(path):
+    """Print the exposure_log rows written for this archive."""
+    rows = exposure_log_repo.read_rows(archive=Path(path).name)
+    counts = Counter((r["section"], r["purpose"]) for r in rows)
+    print(f"exposure_log: {len(rows)} rows "
+          f"{dict(sorted(counts.items()))}; writes took "
+          f"{', '.join(f'{s * 1000:.0f} ms' for s in WRITE_S) or 'none'}")
+
+
 def main():
     every = len(sys.argv) > 1 and sys.argv[1] == "all"
     logging.basicConfig(level=logging.WARNING,
@@ -122,6 +150,7 @@ def main():
     pre_colors = config.capture_preimage_led_order()
     post_colors = (config.capture_led_color_order() if every
                    else list(pre_colors))
+    exposure_log_repo.write_rows = _timed_write    # the runner calls this
     cam, leds = BayerCam(), LEDBank()
     try:
         pre = run_sweep(cam, leds, cr.MODE_PRE, pre_colors)
@@ -132,6 +161,7 @@ def main():
               f"post {post.pad_problem or 'found'}")
         report(pre.out_path, "/pre")
         report(pre.out_path, "")
+        report_log(pre.out_path)
     finally:
         try:
             leds.close()                  # every LED off

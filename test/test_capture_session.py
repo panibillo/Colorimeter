@@ -25,7 +25,7 @@ sys.path.insert(0, str(_ROOT / "test"))
 import capture_runner
 from capture_runner import CaptureConfig
 from capture_session import CaptureSession
-from test_capture_runner import FakeCam, FakeLeds
+from test_capture_runner import FakeCam, FakeLeds, guard_live_exposure_log
 
 
 class CaptureSessionTestCase(unittest.TestCase):
@@ -39,6 +39,7 @@ class CaptureSessionTestCase(unittest.TestCase):
         self._real_off_settle = capture_runner.LED_OFF_SETTLE_S
         capture_runner.LED_ON_WARMUP_S  = 0.0
         capture_runner.LED_OFF_SETTLE_S = 0.0
+        guard_live_exposure_log(self)       # no log rows in the live database
 
     def tearDown(self):
         capture_runner.LED_ON_WARMUP_S  = self._real_on_warmup

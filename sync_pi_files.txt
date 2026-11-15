@@ -59,8 +59,10 @@ src/capture_session.py
 # Finds the pad in one photo_red frame before a sweep; capture_runner imports
 # it, so without it the app dies at import on the Pi.
 src/padfind.py
-# The strip exposure rule's arithmetic, and the hot-pixel table it leaves
-# out of the test region; capture_runner imports both.
+# The strip exposure rule's arithmetic, the table it logs every frame to,
+# and the hot-pixel table it leaves out of the test region; capture_runner
+# imports all three.
+src/exposure_log_repo.py
 src/exposure_rule.py
 src/hotpixel_repo.py
 src/exposure_repo.py
