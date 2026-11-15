@@ -446,7 +446,7 @@ gives the sample ROI plus margin a well-filled square-ish view.
       0 ┌─────────────────┬────────┬────────┬────────┐
         │                 │   +    │   ▲    │   −    │  40
      40 │                 ├────────┼────────┼────────┤
-        │                 │   ◀    │  Fit   │   ▶    │  40
+        │                 │   ◀    │Find/Pad│   ▶    │  40
      80 │                 ├────────┼────────┼────────┤
         │   canvas        │  1px   │   ▼    │  Img   │  40
     120 │   200 × 240     ├────────┴────────┴────────┤
@@ -458,8 +458,9 @@ gives the sample ROI plus margin a well-filled square-ish view.
     240 └─────────────────┴────────────┴─────────────┘
 ```
 
-- 3 × 3 pad: cells 40 × 40 at x = 200/240/280, y = 0/40/80. `Fit` at the centre
-  of the pad is "home"; `1px` toggles the edit step to `10px`; `Img` reimages.
+- 3 × 3 pad: cells 40 × 40 at x = 200/240/280, y = 0/40/80. `Find/Pad` at the
+  centre finds the pad (src/padfind.py), outlines it and zooms to it
+  (2026-11-14; it was `Fit`, whole frame, before); `1px` toggles the edit step to `10px`; `Img` reimages.
 - Name strip `Rect(200, 120, 120, 26)`: shows the selected ROI's name, blank
   when nothing is selected.
 - 2 × 2 grid: cells 60 × 47 at x = 200/260, y = 146/193.
@@ -763,7 +764,7 @@ running well off the bright patch into dark background.
 |---|---|
 | ▲ ▼ ◀ ▶ | pan the view — 5 % of the view box on `1px`, 25 % on `10px` |
 | `+` `−` | zoom, clamped between fit and MAX_SCALE |
-| `Fit` | whole frame |
+| `Find/Pad` | flash photo_red, find the pad, outline it 1 px outside its mask, zoom to it (was `Fit`, whole frame, until 2026-11-14) |
 | `Img` | reimage (fresh white-LED exposure) |
 | tap inside a rectangle | select it; its name shows in the name strip |
 | `Edit` | enabled only when a rectangle is selected |
@@ -857,7 +858,7 @@ copy — the stored ROI is untouched until Save, so Cancel is free) and
 | ▲ ▼ ◀ ▶ with a side armed | move that edge by the step; a perpendicular arrow does nothing |
 | ▲ ▼ ◀ ▶ with none armed | move the whole rectangle |
 | `1px` / `10px` | the step |
-| `+` `−` `Fit` `Img` | still zoom / refit / reimage |
+| `+` `−` `Img` | still zoom / reimage (`Find/Pad` is disabled) |
 | `Save` | validate → `roi.save()` → reload → view mode |
 | `Cancel` | discard → view mode |
 

@@ -51,7 +51,9 @@ Public surface
         .centre_on_edge(rect, side)  edit-mode zoom-follow
         .scale .x .y .w .h .box() .rect()
 
-    compose(frame, view, overlays, canvas_size, channel_order, bg) -> PIL.Image
+    compose(frame, view, overlays, canvas_size, channel_order, bg, masks)
+        -> PIL.Image
+    MaskOutline(mask, x0, y0, cell, colour)   a pixel-by-pixel region, outlined
     image_to_canvas(view, x, y)      -> (cx, cy)
     canvas_to_image(view, cx, cy)    -> (x, y)
     rect_to_canvas(view, r)          -> (left, top, right, bottom)
@@ -60,6 +62,7 @@ Public surface
 from __future__ import annotations
 
 import math
+from dataclasses import dataclass
 from typing import Iterable, Optional, Sequence, Tuple
 
 import numpy as np
@@ -187,7 +190,7 @@ class ViewState:
 
     def fit(self) -> "ViewState":
         """
-        Show the whole frame, centred — the `Fit` button and the Menu entry.
+        Show the whole frame, centred — how the Menu entry opens.
 
         Returns self, so calls chain.
         """
@@ -397,7 +400,8 @@ def compose(frame: np.ndarray,
             overlays: Iterable[Tuple[Rect, Sequence[int]]] = (),
             canvas_size: Optional[Tuple[int, int]] = None,
             channel_order: str = "BGR",
-            bg: Sequence[int] = (0, 0, 0)) -> Image.Image:
+            bg: Sequence[int] = (0, 0, 0),
+            masks: Iterable["MaskOutline"] = ()) -> Image.Image:
     """
     Render the view box of `frame` into a canvas-sized image, rectangles drawn on.
 
@@ -425,6 +429,8 @@ def compose(frame: np.ndarray,
         canvas_size:   Override (w, h); defaults to the view's canvas.
         channel_order: "BGR" (the camera's order, the default) or "RGB".
         bg:            Fill for anything outside the frame.
+        masks:         MaskOutlines (a region given pixel by pixel, such as
+                       the fitted pad), drawn after the rectangles.
 
     Returns:
         A PIL RGB image of exactly `canvas_size`.
@@ -500,7 +506,76 @@ def compose(frame: np.ndarray,
         draw.rectangle([int(math.floor(left)) - 1, int(math.floor(top)) - 1,
                         int(math.ceil(right)),     int(math.ceil(bottom))],
                        outline=tuple(colour), width=1)
+    for m in masks:
+        _draw_mask_outline(draw, view, (cw, ch), m)
     return canvas
+
+
+@dataclass(frozen=True)
+class MaskOutline:
+    """
+    A region given pixel by pixel, to be outlined on the canvas.
+
+    The mask's pixels need not be image pixels: a Bayer-layer mask of the
+    bound crop has cells two image px on a side, starting at the bound
+    ROI's corner (roi.to_layer_rect_within's convention).
+
+    Attributes:
+        mask:   2-D boolean array, True inside the region.
+        x0, y0: Image px of the top-left corner of mask cell (0, 0).
+        cell:   Image px per mask cell (2 for a Bayer layer).
+        colour: (r, g, b) of the outline.
+    """
+    mask: np.ndarray
+    x0: float
+    y0: float
+    cell: float
+    colour: Tuple[int, int, int]
+
+
+def _draw_mask_outline(draw: "ImageDraw.ImageDraw", view: ViewState,
+                       canvas_size: Tuple[int, int], m: MaskOutline) -> None:
+    """
+    Stroke a 1 px line just outside every edge between a masked cell and an
+    unmasked one (or the mask's border).
+
+    The same rule as a rectangle's outline: the line sits on the first canvas
+    pixel outside the region, so every pixel of the region stays visible.  A
+    tilted region therefore shows as the staircase of whole cells it really
+    is.  Horizontal edges run one pixel past each end so the corners join.
+    """
+    inside = np.pad(np.asarray(m.mask, dtype=bool), 1)   # False all round
+    core = inside[1:-1, 1:-1]
+    colour = tuple(m.colour)
+
+    def corners(r, c):
+        """Canvas (left, top, right, bottom) of mask cell (r, c)."""
+        left, top = image_to_canvas(view, m.x0 + c * m.cell,
+                                    m.y0 + r * m.cell, canvas_size)
+        right, bottom = image_to_canvas(view, m.x0 + (c + 1) * m.cell,
+                                        m.y0 + (r + 1) * m.cell, canvas_size)
+        return (int(math.floor(left)), int(math.floor(top)),
+                int(math.ceil(right)), int(math.ceil(bottom)))
+
+    # (neighbour shift, side) for the four sides of a cell.
+    sides = (((0, -1), "left"), ((0, 1), "right"),
+             ((-1, 0), "top"), ((1, 0), "bottom"))
+    cw, ch = canvas_size
+    for (dr, dc), side in sides:
+        rows, cols = inside.shape
+        neighbour = inside[1 + dr:rows - 1 + dr, 1 + dc:cols - 1 + dc]
+        for r, c in zip(*np.nonzero(core & ~neighbour)):
+            left, top, right, bottom = corners(r, c)
+            if right < -1 or left > cw or bottom < -1 or top > ch:
+                continue                              # off the canvas
+            if side == "left":
+                draw.line([(left - 1, top), (left - 1, bottom - 1)], colour)
+            elif side == "right":
+                draw.line([(right, top), (right, bottom - 1)], colour)
+            elif side == "top":
+                draw.line([(left - 1, top - 1), (right, top - 1)], colour)
+            else:
+                draw.line([(left - 1, bottom), (right, bottom)], colour)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -684,6 +759,34 @@ if __name__ == "__main__":
     huge = compose(frame, ViewState(fw, fh, cw, ch).fit_to(patch).zoom(4.0),
                    [(patch, (255, 0, 255))])
     check("a ROI larger than the canvas still composes", huge.size, CANVAS)
+
+    print("== a mask is outlined just outside its cells ==")
+    # An L-shaped mask of 2-image-px cells (a Bayer layer's grid), viewed at
+    # 4 canvas px per image px, so each cell is 8 canvas px on a side.
+    frame[:] = 40
+    mask = np.zeros((4, 4), dtype=bool)
+    mask[1:3, 1] = True                    # column 1, rows 1-2
+    mask[2, 2] = True                      # and the cell to its lower right
+    x0, y0 = 1000.0, 600.0
+    v = ViewState(fw, fh, cw, ch).fit_to(Rect(1000, 600, 8, 8), margin=0.0)
+    v.zoom(4.0 / v.scale)
+    pink = (255, 0, 255)
+    img = compose(frame, v, masks=[MaskOutline(mask, x0, y0, 2.0, pink)])
+    cl, ct = (int(round(c)) for c in image_to_canvas(v, x0 + 2, y0 + 2))
+    check("mask cell interior untouched", img.getpixel((cl + 3, ct + 3)),
+          (40, 40, 40))
+    check("first masked pixel not overdrawn", img.getpixel((cl, ct + 3)),
+          (40, 40, 40))
+    check("outline one px left of the mask", img.getpixel((cl - 1, ct + 3)),
+          pink)
+    check("outline one px above the mask", img.getpixel((cl + 3, ct - 1)),
+          pink)
+    check("outline at the step of the L (right of the upper cell)",
+          img.getpixel((cl + 8, ct + 3)), pink)
+    check("no outline between two masked cells",
+          img.getpixel((cl + 3, ct + 8)), (40, 40, 40))
+    check("outline below the L's foot", img.getpixel((cl + 12, ct + 16)),
+          pink)
 
     print("== the fit view's strided reduction keeps small features ==")
     # The pre-thinning in compose() must not alias a ROI-sized patch away —

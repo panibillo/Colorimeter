@@ -36,6 +36,7 @@ from __future__ import annotations
 import datetime
 import functools
 import logging
+import math
 import os
 import signal
 import subprocess
@@ -494,6 +495,10 @@ class Arbiter:
         self._view_step      = 1       # edit nudge, image px: 1 or 10; also
                                        # picks the view-mode pan fraction
         self._view_status    = ""      # transient message for the name strip
+        # The pad Find/Pad last found, outlined on the canvas: (padfind.PadFit
+        # after its offset, the bound Rect its layer px are measured from), or
+        # None.  Cleared when the viewer opens and closes.
+        self._view_pad_fit   = None
         # The exposure the last preview settled on, in µs — the starting point
         # for the next one, so re-imaging normally converges on its first frame
         # instead of walking back from the stored calibration every time.
@@ -5053,6 +5058,7 @@ class Arbiter:
         self._view_armed = None
         self._focused = None
         self._view_pad = pad
+        self._view_pad_fit = None
         self._view_rois = self._load_view_rois()
         # Resolve the requested role to the name the rest of the viewer keys
         # on — tap selection and the edit path both work in names. An
@@ -5130,13 +5136,17 @@ class Arbiter:
         """Build (or rebuild) the whole viewer screen."""
         if self._pool is None:
             return
+        editing_now = self._view_mode == "edit"
         self._pool.hide_all()
         self._pool.put("img_canvas", on=self._view_canvas_press)
         self._pool.put("img_zoom_in",  "+",    on=self._view_zoom_in)
         self._pool.put("img_up",       "▲",    on=lambda: self._view_arrow(0, -1))
         self._pool.put("img_zoom_out", "−",    on=self._view_zoom_out)
         self._pool.put("img_left",     "◀",    on=lambda: self._view_arrow(-1, 0))
-        self._pool.put("img_fit",      "Fit",  on=self._view_fit)
+        self._pool.put("img_find_pad", "Find/\nPad", on=self._view_find_pad,
+                       enabled=self._view_frame is not None
+                               and not self._view_pad
+                               and not editing_now)
         self._pool.put("img_right",    "▶",    on=lambda: self._view_arrow(1, 0))
         self._pool.put("img_step",     f"{self._view_step}px",
                        on=self._view_toggle_step)
@@ -5380,7 +5390,24 @@ class Arbiter:
                 overlays.append((edge, rgb888("roi_edge")))
 
         self._pool["img_canvas"].set_image(
-            image_view.compose(self._view_frame, self._view_state, overlays))
+            image_view.compose(self._view_frame, self._view_state, overlays,
+                               masks=self._view_pad_outline()))
+
+    def _view_pad_outline(self) -> list:
+        """
+        The found pad as an image_view.MaskOutline, or [] when there is none.
+
+        The pad's mask is in Bayer-layer px of the bound crop, so each mask
+        cell is a 2 x 2 block of image px starting at the bound ROI's corner
+        (the convention of roi.to_layer_rect_within).
+        """
+        if self._view_pad_fit is None:
+            return []
+        import image_view
+        from palette import rgb888
+        fit, bound = self._view_pad_fit
+        return [image_view.MaskOutline(fit.mask(), bound.x, bound.y, 2.0,
+                                       rgb888("roi_edge"))]
 
     def _armed_edge_rect(self):
         """
@@ -5566,6 +5593,91 @@ class Arbiter:
             self._view_state.centre_on_edge(self._view_editing, side)
         else:
             self._view_state.centre_on_rect(self._view_editing)
+
+    def _view_find_pad(self) -> None:
+        """
+        Find/Pad: find the pad the way a sample's pre-image does, outline it
+        on the canvas, and zoom to it.
+
+        One frame lit by capture.padfind_led (photo_red) at
+        capture.padfind_exposure_us, taken by the same steps as a sweep's
+        pad-finding frame (capture_runner.flash_frame), then
+        padfind.find_pad on its R layer with the pre-image offset
+        (capture.padfind_offset_pre).  The viewer cannot tell a stained pad
+        from a fresh one, and a fresh pad is what it is mostly used on, so it
+        always fits as a pre-image (no prior fit to be guided by).
+
+        The picture on the canvas is not replaced: the outline is drawn over
+        the white-LED frame already shown.  The name strip says what was
+        found; the full fit goes to the log.
+        """
+        if not self.capture_available():
+            self._toast("Capture running")
+            return
+        if self._view_frame is None or self._view_state is None:
+            return
+        import capture_runner
+        import padfind
+        import roi as _roi
+        hw = self._ensure_camera()
+        if hw is None:
+            self._view_status = "Camera unavailable"
+            self._repaint_canvas()
+            return
+        cam, leds = hw
+        self._view_status = "Finding pad..."
+        self._repaint_canvas()
+        # The flash changes the camera's exposure, so a parked prefetch can
+        # no longer trust it (see _prefetch_epoch), as in preview_frame.
+        self._camera_epoch += 1
+        self._view_pad_fit = None
+        try:
+            size = getattr(cam, "config_size", None) or (None, None)
+            rois = _roi.load_active(size[0], size[1],
+                                    getattr(cam, "model", None))
+            bound = _roi.by_role(rois, _roi.ROLE_BOUND)
+            rects = capture_runner.padfind_rects(rois)
+            led = config.capture_padfind_led()
+            exposure_us = config.capture_padfind_exposure_us()
+            offset = config.capture_padfind_offset(padfind.SECTION_PRE)
+            channel = leds.channel_of(led)
+            bayer, info = capture_runner.flash_frame(
+                cam, exposure_us,
+                led_on=lambda: leds.set_channel(channel, True),
+                led_off=lambda: leds.set_channel(channel, False))
+            layer = capture_runner._roi_bound_layers(
+                bayer, getattr(cam, "bayer_pattern", "BGGR"), bound)["R"]
+            _before, fit = padfind.find_pad(
+                layer, capture_runner.PADFIND_DARK_DN, rects,
+                padfind.SECTION_PRE, offset=offset)
+        except padfind.PadFindError as exc:
+            log.warning("Arbiter: Find/Pad — pad not found: %s", exc)
+            self._view_status = "Pad not found"
+            self._repaint_canvas()
+            return
+        except Exception:
+            log.exception("Arbiter: Find/Pad failed")
+            self._view_status = "Find/Pad failed"
+            self._repaint_canvas()
+            return
+        self._view_pad_fit = (fit, bound)
+        problem = fit.qc()
+        log.info("Arbiter: Find/Pad (%s %d us, %s) — %s%s", led,
+                 info.get("applied_us", exposure_us),
+                 info.get("lit_frame_rule"), fit.describe(),
+                 f"; QC: {problem}" if problem else "")
+        # The strip holds about 16 characters: the first QC problem without
+        # its expected range (e.g. "QC width 37.9 px"); the log has it all.
+        self._view_status = (f"QC {problem.split(' (')[0]}" if problem
+                             else f"Pad {fit.width:.1f}x{fit.height:.1f}")
+        # Frame the pad: the box round its four corners, in image px.
+        from rect import Rect
+        xs = [bound.x + 2 * c for c, _ in fit.corners()]
+        ys = [bound.y + 2 * r for _, r in fit.corners()]
+        x0, y0 = math.floor(min(xs)), math.floor(min(ys))
+        self._view_state.fit_to(Rect(x0, y0, math.ceil(max(xs)) - x0,
+                                     math.ceil(max(ys)) - y0, name="pad"))
+        self._repaint_canvas()
 
     def _view_fit(self) -> None:
         if self._view_state is None:
@@ -5781,6 +5893,7 @@ class Arbiter:
         self._view_frame = None          # ~9 MB; do not hold it past the screen
         self._view_bayer = None          # ~6 MB raw mosaic behind that frame
         self._view_state = None
+        self._view_pad_fit = None
         self._view_rois = {}
         self._view_selected = None
         self._view_editing = None
@@ -7913,6 +8026,9 @@ def _selftest() -> None:
     class _PreviewLeds:
         def __init__(self): self.history = []; self.closed = False
         def set_channel(self, ch, on): self.history.append((ch, on))
+        def channel_of(self, name):
+            from lighting_cal8 import LEDBank
+            return LEDBank.color_names().index(name) + 1
         def close(self): self.closed = True
 
     arb._release_camera()
@@ -7992,6 +8108,87 @@ def _selftest() -> None:
     check("◀ pans back",  round(arb._view_state.cx), round(cx_before))
     arb._view_fit()
     check("Fit restores", arb._view_state.scale, fit_scale)
+
+    print("== image viewer: Find/Pad flashes the pad LED and outlines the pad ==")
+    import capture_runner as _cr
+    import padfind as _pf
+    check("the centre button is Find/Pad",
+          arb._pool["img_find_pad"].label, "Find/\nPad")
+    check("and is enabled on a frame", arb._pool["img_find_pad"].enabled, True)
+    _flashes = []
+    def _fake_flash(cam, us, led_on, led_off, prof=None):
+        """flash_frame without a camera: switch the LED as it would."""
+        _flashes.append(us)
+        led_on(); led_off()
+        return _np.zeros((1296, 2304), _np.uint16), {"applied_us": us}
+    _bound = _roi.by_role(_roi.load_active(2304, 1296, "imx708"),
+                          _roi.ROLE_BOUND)
+    _rows, _cols = _bound.h // 2, _bound.w // 2
+    # A pad 41 x 30 layer px whose top-left corner is at layer (10, 20).
+    _fit = _pf.PadFit(aL=10.0, aR=51.0, m=0.0, yc=35.0, top=20.0, bot=50.0,
+                      shape=(_rows, _cols), strip_top=0.0,
+                      window_rows=(0, _rows - 1), pad_level=1.5,
+                      top_obs=20.0, bot_slope=0.3, bot_source="window",
+                      side_rule="guided", n_rows=30, n_rejected=0,
+                      edge_rms=0.1)
+    _find_calls = []
+    def _fake_find(layer, dark, rects, section, prior=None, offset=None):
+        _find_calls.append((layer.shape, section, set(rects)))
+        return _fit, _fit
+    _real_flash, _real_find = _cr.flash_frame, _pf.find_pad
+    _cr.flash_frame, _pf.find_pad = _fake_flash, _fake_find
+    try:
+        pleds.history.clear()
+        arb._view_find_pad()
+        _ch = pleds.channel_of(config.capture_padfind_led())
+        check("one flash at capture.padfind_exposure_us", _flashes,
+              [config.capture_padfind_exposure_us()])
+        check("the pad LED went on, then off", pleds.history,
+              [(_ch, True), (_ch, False)])
+        check("fitted on the bound crop's R layer, as a pre-image",
+              _find_calls, [((_rows, _cols), _pf.SECTION_PRE,
+                             {"sample", "gray1", "gray2"})])
+        check("the name strip gives the pad's size",
+              arb._pool["img_name"].text, "Pad 41.0x30.0")
+        # The left edge of the pad's mask on a row half way down it, in image
+        # px (each layer px is 2 image px from the bound ROI's corner).
+        _first = int(_np.argmax(_fit.mask()[35]))
+        _px = _bound.x + 2 * _first
+        _py = _bound.y + 2 * 35 + 1
+        import image_view as _ivp
+        _cx, _cy = _ivp.image_to_canvas(arb._view_state, _px, _py)
+        check("the view zoomed in to the pad",
+              arb._view_state.scale > fit_scale * 4, True)
+        _img = arb._pool["img_canvas"].image
+        from palette import rgb888 as _rgb888
+        check("outline 1 px outside the pad's left edge",
+              _img.getpixel((int(math.floor(_cx)) - 1, int(_cy))),
+              _rgb888("roi_edge"))
+        check("the pad's own first pixel is not drawn over",
+              _img.getpixel((int(math.floor(_cx)), int(_cy)))
+              != _rgb888("roi_edge"), True)
+
+        _narrow = _fit.shifted((0.0, -21.0, 0.0, 0.0))
+        _pf.find_pad = lambda *a, **k: (_narrow, _narrow)
+        arb._view_find_pad()
+        check("a fit that fails QC says which check, briefly",
+              arb._pool["img_name"].text, "QC width 20.0 px")
+        check("and is still outlined", arb._view_pad_fit is not None, True)
+
+        def _no_pad(*a, **k):
+            raise _pf.PadFindError("no window")
+        _pf.find_pad = _no_pad
+        pleds.history.clear()
+        arb._view_find_pad()
+        check("a pad not found says so", arb._pool["img_name"].text,
+              "Pad not found")
+        check("and drops the old outline", arb._view_pad_fit, None)
+        check("the LED is off after a failure too", pleds.history[-1],
+              (_ch, False))
+    finally:
+        _cr.flash_frame, _pf.find_pad = _real_flash, _real_find
+    arb._view_status = ""
+    arb._view_fit()
 
     print("== image viewer: canvas taps select, ambiguity cycles ==")
     import image_view as _iv

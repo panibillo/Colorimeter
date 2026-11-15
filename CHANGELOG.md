@@ -162,6 +162,13 @@ sqlite3 src/colorimeter.sqlite \
 
 ### Changed
 
+- Menu → View Image: the centre button of the navigation pad is now
+  **Find/Pad** (it was Fit, which showed the whole frame). It flashes the
+  pad-finding LED (`capture.padfind_led`), finds the pad the way a
+  pre-image does (`src/padfind.py`), draws a 1 px outline just outside the
+  pad's pixels, and zooms to the pad. The name strip shows the pad's size,
+  or the first quality check it failed. The − button still zooms out to the
+  whole frame.
 - The strip rule now keeps one frame per LED at Tus unless
   `protocol.multiple_exposure_count` says otherwise. It kept three before
   stage 4a.

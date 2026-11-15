@@ -436,7 +436,7 @@ CAP_START     = Rect( 84, 184, 152,  48)     # "Calibrate Exposures" (run) / don
 #      0 ┌─────────────────┬────────┬────────┬────────┐
 #        │                 │   +    │   ▲    │   −    │  40
 #     40 │                 ├────────┼────────┼────────┤
-#        │                 │   ◀    │  Home  │   ▶    │  40
+#        │                 │   ◀    │Find/Pad│   ▶    │  40
 #     80 │                 ├────────┼────────┼────────┤
 #        │   canvas        │  1px   │   ▼    │  Img   │  40
 #    120 │   200 x 240     ├────────┴────────┴────────┤
@@ -451,7 +451,7 @@ IMG_ZOOM_IN  = Rect(200,   0,  40,  40)   # +
 IMG_UP       = Rect(240,   0,  40,  40)   # ▲
 IMG_ZOOM_OUT = Rect(280,   0,  40,  40)   # −
 IMG_LEFT     = Rect(200,  40,  40,  40)   # ◀
-IMG_FIT      = Rect(240,  40,  40,  40)   # Fit — whole frame, the pad's "home"
+IMG_FIND_PAD = Rect(240,  40,  40,  40)   # Find/Pad — find the pad, outline it
 IMG_RIGHT    = Rect(280,  40,  40,  40)   # ▶
 IMG_STEP     = Rect(200,  80,  40,  40)   # edit step: 1px ⇄ 10px
 IMG_DOWN     = Rect(240,  80,  40,  40)   # ▼

@@ -517,7 +517,8 @@ class Pool:
         button("img_up",       L.IMG_UP,       "btn_text", "btn_gray", 20, text="▲")
         button("img_zoom_out", L.IMG_ZOOM_OUT, "btn_text", "btn_gray", 20, text="−")
         button("img_left",     L.IMG_LEFT,     "btn_text", "btn_gray", 20, text="◀")
-        button("img_fit",      L.IMG_FIT,      "btn_text", "btn_gray", 14, text="Home")
+        button("img_find_pad", L.IMG_FIND_PAD, "btn_text", "btn_gray", 12,
+               text="Find/\nPad")
         button("img_right",    L.IMG_RIGHT,    "btn_text", "btn_gray", 20, text="▶")
         button("img_step",     L.IMG_STEP,     "btn_text", "btn_gray", 14, text="1px")
         button("img_down",     L.IMG_DOWN,     "btn_text", "btn_gray", 20, text="▼")
@@ -865,12 +866,12 @@ if __name__ == "__main__":
 
     # ── image viewer ─────────────────────────────────────────────────────────
     # Runs last: it shows its own widgets and leaves them shown, and the viewer
-    # controls share screen space with the reagent-phase cluster above (IMG_FIT
+    # controls share screen space with the reagent-phase cluster above (IMG_FIND_PAD
     # overlaps RUN_BTN), which is fine — the two screens are never both up.
     from PIL import Image
 
     _VIEWER = ("img_canvas", "img_zoom_in", "img_up", "img_zoom_out",
-               "img_left", "img_fit", "img_right",
+               "img_left", "img_find_pad", "img_right",
                "img_step", "img_down", "img_reimage", "img_name",
                "img_edit", "img_save", "img_cancel", "img_exit")
 

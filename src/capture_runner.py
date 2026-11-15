@@ -57,7 +57,7 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Iterator
+from typing import Callable, Iterator
 
 import numpy as np
 
@@ -727,6 +727,117 @@ def _settle_frames(cam, exposure_us: int,
     log.warning(f"    frame did not settle after {max_frames} frames; "
                 f"last applied={applied}µs  requested={exposure_us}µs{gains_note}")
     return (*last, max_frames, gains_ok)  # type: ignore[misc]
+
+
+def flash_frame(cam, exposure_us: int,
+                led_on: Callable[[], None], led_off: Callable[[], None],
+                prof: "CaptureProfiler | None" = None,
+                max_frames: int = PADFIND_MAX_FRAMES
+                ) -> "tuple[np.ndarray, dict]":
+    """
+    One raw frame lit by a brief LED flash: settle in the dark, flash, frame,
+    off.  The pad-finding frame of a sweep (CaptureRunner._padfind_frame) and
+    of the image viewer's Find/Pad button.
+
+    1. With the LED off, set `exposure_us` and capture until the camera
+       reports it (_settle_frames).  Those frames are dark and are thrown
+       away; doing this first keeps the settling out of the LED's on-time.
+    2. Switch the LED on and capture until a frame *began* after that
+       moment.  A frame already being read out when the LED came on is
+       partly dark (the sensor reads its rows one after another), so it
+       must not be used.  Each frame's SensorTimestamp (libcamera: when its
+       first row started, in ns on the CLOCK_BOOTTIME clock) is compared
+       with the switch-on time on the same clock.  A camera that reports no
+       SensorTimestamp gets the second frame instead.  Frames are held
+       unconverted (BayerCam.capture_held), so waiting out a rejected frame
+       costs only the frame itself.
+    3. Switch the LED off, in a `finally`, so it goes off however this ends,
+       and only then convert the kept frame to its raw Bayer array
+       (BayerCam.bayer_of).  On the Pi the conversion is the slow part.
+
+    Args:
+        cam:         The camera, already set up (BayerCam).
+        exposure_us: The frame's exposure, µs.
+        led_on:      Switches the LED on (no arguments).
+        led_off:     Switches it off again.
+        prof:        Optional profiler for the dark settling frames.
+        max_frames:  Most frames taken with the LED on (PADFIND_MAX_FRAMES).
+
+    Returns:
+        (whole-frame raw Bayer array, {name: value} for the archive:
+        applied_us, frames_dark, frames_lit, lit_frame_rule, led_on_s,
+        captured_dt).
+    """
+    _, _, _, frames_dark, _ = _settle_frames(cam, exposure_us, prof)
+
+    boottime = getattr(time, "CLOCK_BOOTTIME", None)
+    frames_lit, meta, rule = 0, {}, "frame budget ran out"
+    request = None          # the held frame not yet converted or dropped
+    try:
+        t_on = time.perf_counter()
+        led_on()
+        on_ns = (time.clock_gettime_ns(boottime) if boottime is not None
+                 else None)
+        try:
+            # Frames are held, not converted, so a rejected frame costs only
+            # its wait, and the LED goes off before the slow part.
+            while frames_lit < max_frames:
+                if request is not None:
+                    cam.release_held(request)
+                    request = None
+                request, meta = cam.capture_held()
+                frames_lit += 1
+                started_ns = meta.get("SensorTimestamp")
+                if started_ns is not None and on_ns is not None:
+                    if int(started_ns) >= on_ns:
+                        rule = "SensorTimestamp"
+                        break
+                elif frames_lit >= 2:
+                    rule = "second frame"
+                    break
+        finally:
+            led_off()
+        led_on_s = time.perf_counter() - t_on
+        held, request = request, None
+        bayer = cam.bayer_of(held)          # releases the frame
+    finally:
+        if request is not None:             # an error left one held
+            cam.release_held(request)
+    if rule == "frame budget ran out":
+        log.warning("flash frame: no frame began after the LED came on "
+                    "within %d frames; using the last", frames_lit)
+    return bayer, {"applied_us": int(meta.get("ExposureTime", 0)),
+                   "frames_dark": int(frames_dark),
+                   "frames_lit": frames_lit, "lit_frame_rule": rule,
+                   "led_on_s": round(led_on_s, 4),
+                   "captured_dt": capture_meta.timestamp_ms()}
+
+
+def padfind_rects(rois: "dict[str, Rect]") -> "dict[str, Rect]":
+    """
+    The sample ROI and the two gray chips, in layer px of the bound crop:
+    the `rects` argument of padfind.find_pad.
+
+    The chips are the white_balance ROIs, taken in name order as gray1 and
+    gray2 (their names in every commissioned database).
+
+    Args:
+        rois: The ROIs in force, stream space ({name: Rect}, as _load_rois
+              or roi.load_active returns them).
+
+    Raises:
+        ValueError: there is no sample ROI or fewer than two gray chips.
+    """
+    bound = roi.by_role(rois, roi.ROLE_BOUND)
+    sample = roi.by_role(rois, roi.ROLE_SAMPLE)
+    chips = sorted(roi.all_by_role(rois, roi.ROLE_WHITE_BALANCE),
+                   key=lambda r: r.name)
+    if bound is None or sample is None or len(chips) < 2:
+        raise ValueError("pad finding needs a bound ROI, a sample ROI and "
+                         "two gray chips (white_balance ROIs)")
+    return {"sample": roi.to_layer_rect_within(sample, bound),
+            "gray1": roi.to_layer_rect_within(chips[0], bound),
+            "gray2": roi.to_layer_rect_within(chips[1], bound)}
 
 
 def _set_manual_lens(cam, diopters: float) -> None:
@@ -2008,24 +2119,9 @@ class CaptureRunner:
 
     def _padfind_frame(self, channel: int) -> "tuple[np.ndarray, dict]":
         """
-        Take the pad-finding frame: settle in the dark, flash, frame, off.
-
-        1. With every LED off, set capture.padfind_exposure_us and capture
-           until the camera reports it (_settle_frames).  Those frames are dark and are
-           thrown away; doing this first keeps the settling out of the LED's
-           on-time.
-        2. Switch the LED on and capture until a frame *began* after that
-           moment.  A frame already being read out when the LED came on is
-           partly dark (the sensor reads its rows one after another), so it
-           must not be used.  Each frame's SensorTimestamp (libcamera: when
-           its first row started, in ns on the CLOCK_BOOTTIME clock) is
-           compared with the switch-on time on the same clock.  A camera that
-           reports no SensorTimestamp gets the second frame instead.
-           Frames are held unconverted (BayerCam.capture_held), so waiting
-           out a rejected frame costs only the frame itself.
-        3. Switch the LED off, in a `finally`, so it goes off however this
-           ends, and only then convert the kept frame to its raw Bayer array
-           (BayerCam.bayer_of).  On the Pi the conversion is the slow part.
+        Take the pad-finding frame (flash_frame: settle in the dark, flash,
+        frame, off) at capture.padfind_exposure_us, and crop it to the bound
+        ROI.
 
         Args:
             channel: The LED bank channel of capture.padfind_led.
@@ -2035,74 +2131,17 @@ class CaptureRunner:
             archive: applied_us, frames_dark, frames_lit, lit_frame_rule,
             led_on_s, captured_dt).
         """
-        cam = self._cam
-        _, _, _, frames_dark, _ = _settle_frames(
-            cam, self._padfind_us, self.prof)
-
-        boottime = getattr(time, "CLOCK_BOOTTIME", None)
-        frames_lit, meta, rule = 0, {}, "frame budget ran out"
-        request = None          # the held frame not yet converted or dropped
-        try:
-            t_on = time.perf_counter()
-            self._led_on(channel)
-            on_ns = (time.clock_gettime_ns(boottime) if boottime is not None
-                     else None)
-            try:
-                # Frames are held, not converted, so a rejected frame costs
-                # only its wait, and the LED goes off before the slow part.
-                while frames_lit < PADFIND_MAX_FRAMES:
-                    if request is not None:
-                        cam.release_held(request)
-                        request = None
-                    request, meta = cam.capture_held()
-                    frames_lit += 1
-                    started_ns = meta.get("SensorTimestamp")
-                    if started_ns is not None and on_ns is not None:
-                        if int(started_ns) >= on_ns:
-                            rule = "SensorTimestamp"
-                            break
-                    elif frames_lit >= 2:
-                        rule = "second frame"
-                        break
-            finally:
-                self._led_off(channel)
-            led_on_s = time.perf_counter() - t_on
-            held, request = request, None
-            bayer = cam.bayer_of(held)          # releases the frame
-        finally:
-            if request is not None:             # an error left one held
-                cam.release_held(request)
-        self.prof.add("padfind.led_on", led_on_s)
-        if rule == "frame budget ran out":
-            log.warning("pad finding: no frame began after the LED came on "
-                        "within %d frames; using the last", frames_lit)
+        bayer, info = flash_frame(
+            self._cam, self._padfind_us,
+            led_on=lambda: self._led_on(channel),
+            led_off=lambda: self._led_off(channel), prof=self.prof)
+        self.prof.add("padfind.led_on", info["led_on_s"])
         layer = self._bound_layers(bayer, self._pattern)["R"]
-        return layer, {"applied_us": int(meta.get("ExposureTime", 0)),
-                       "frames_dark": int(frames_dark),
-                       "frames_lit": frames_lit, "lit_frame_rule": rule,
-                       "led_on_s": round(led_on_s, 4),
-                       "captured_dt": capture_meta.timestamp_ms()}
+        return layer, info
 
     def _padfind_rects(self) -> "dict[str, Rect]":
-        """
-        The sample ROI and the two gray chips, in layer px of the bound crop.
-
-        The chips are the white_balance ROIs, taken in name order as gray1
-        and gray2 (their names in every commissioned database).
-
-        Raises:
-            ValueError: there is no sample ROI or fewer than two gray chips.
-        """
-        bound = roi.by_role(self.rois, roi.ROLE_BOUND)
-        sample = roi.by_role(self.rois, roi.ROLE_SAMPLE)
-        chips = sorted(roi.all_by_role(self.rois, roi.ROLE_WHITE_BALANCE),
-                       key=lambda r: r.name)
-        if sample is None or len(chips) < 2:
-            raise ValueError("pad finding needs a sample ROI and two gray "
-                             "chips (white_balance ROIs)")
-        return {"sample": roi.to_layer_rect_within(sample, bound),
-                "gray1": roi.to_layer_rect_within(chips[0], bound),
-                "gray2": roi.to_layer_rect_within(chips[1], bound)}
+        """This run's padfind_rects() (sample ROI and gray chips, layer px)."""
+        return padfind_rects(self.rois)
 
     def _padfind_prior(self, shape) -> "padfind.PadFit | None":
         """
