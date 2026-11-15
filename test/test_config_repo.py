@@ -142,6 +142,45 @@ class TestSeededValues(ConfigTestCase):
         self.assertOneActiveRowPerParameter()
 
 
+class TestStripRuleSeeds(ConfigTestCase):
+    """
+    The strip rule's rows (2026-11-14) hold the values its source documents:
+    exposure_rule's constants and padfind's offsets.  If a seed and a
+    constant drift apart, one of them is out of date.
+    """
+
+    def test_the_rule_settings_are_the_module_constants(self):
+        import exposure_rule
+        self.assertEqual(exposure_rule.RuleSettings.from_config(),
+                         exposure_rule.RuleSettings())
+
+    def test_the_rule_is_the_strip_rule(self):
+        self.assertEqual(config.capture_exposure_rule(), "strip")
+
+    def test_a_rule_that_is_neither_is_refused(self):
+        config.save("capture", "exposure_rule", "ladder")
+        with self.assertRaises(ValueError):
+            config.capture_exposure_rule()
+
+    def test_pad_finding_rows_are_padfinds_constants(self):
+        import padfind
+        self.assertEqual(config.capture_padfind_led(), "photo_red")
+        self.assertEqual(config.capture_padfind_exposure_us(), 10_000)
+        for section, want in (("pre", padfind.OFFSET_PRE),
+                              ("post", padfind.OFFSET_POST)):
+            got = config.capture_padfind_offset(section)
+            self.assertEqual(len(got), 4)
+            for g, w in zip(got, want):
+                self.assertAlmostEqual(g, w, places=9)
+
+    def test_an_offset_that_is_not_four_numbers_is_refused(self):
+        config.save("capture", "padfind_offset_pre", "0.1,0.2,0.3")
+        with self.assertRaises(ValueError):
+            config.capture_padfind_offset("pre")
+        with self.assertRaises(ValueError):
+            config.capture_padfind_offset("middle")
+
+
 class TestReagent2Compensation(ConfigTestCase):
     """
     reagent2_secs(theta) = t2ref25_secs * q10 ** ((25 - theta) / 10).

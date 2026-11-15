@@ -176,7 +176,7 @@ MODE_PRE         = "pre"
 # (CaptureConfig.exposure_rule; the calibration path ignores it):
 #   "strip"  (default, 2026-11-14) — from the strip itself: re-aimed on the
 #            fitted pad and gray chips until nothing there clips, then
-#            exposure_rule.MULTIPLE_EXPOSURE_COUNT frames at that exposure
+#            protocol.multiple_exposure_count frames at that exposure
 #            (Tus), plus a longer Bus frame when an analysis channel falls
 #            below the noise floor.  See src/exposure_rule.py.
 #   "group"  — the exposures stored in the `exposure` table for the chosen
@@ -220,21 +220,27 @@ PRE_SECTION = "/pre"
 # Pad finding  (detour stage 1, 2026-11-14; see src/padfind.py)
 # ------------
 # Before a sweep takes the photos it keeps, the pad is found from one frame
-# of its own, lit by PADFIND_LED.  That frame need not be a good exposure, so
-# the LED gets no warm-up: it is switched on, one fully lit frame is taken,
-# and it is switched off again before the fit is worked out.  The fit is
+# of its own, lit by capture.padfind_led.  That frame need not be a good
+# exposure, so the LED gets no warm-up: it is switched on, one fully lit
+# frame is taken, and it is switched off again before the fit is worked
+# out.  The fit is
 # stored in the sweep's `pad` group (capture_h5.add_pad), and a post-image is
 # guided by the pre-image's fit, read back from the same archive.
 #
-# These four move to the config table in stage 4 of the work plan.
-#
-#   PADFIND_LED          The LED the frame is lit by.  photo_red changes the
-#                        pad least and its dye barely absorbs it, so the
-#                        pad's edges look the same before and after arsine.
-#   PADFIND_EXPOSURE_US  The frame's exposure_us.  About a quarter of
-#                        photo_red's safe pre-image exposure (~38 ms), which
-#                        puts the gray chips near 120 DN above dark: plenty
-#                        for edges, and well clear of clipping on any pad.
+# Three settings are config rows, read once per sweep in run_prefetch
+# (_read_sweep_settings):
+#   capture.padfind_led   The LED the frame is lit by (photo_red).  photo_red
+#                         changes the pad least and its dye barely absorbs it,
+#                         so the pad's edges look the same before and after
+#                         arsine.
+#   capture.padfind_exposure_us  The frame's exposure_us (10000).  About a
+#                         quarter of photo_red's safe pre-image exposure
+#                         (~38 ms), which puts the gray chips near 120 DN
+#                         above dark: plenty for edges, and well clear of
+#                         clipping on any pad.
+#   capture.padfind_offset_pre / _post  The photo_red offsets
+#                         (padfind.OFFSET_PRE / OFFSET_POST explain them).
+# The other two are constants:
 #   PADFIND_MAX_FRAMES   Most frames taken with the LED on while waiting for
 #                        one that began after the LED was switched on.
 #   PADFIND_DARK_DN      Dark level subtracted before dividing by the chips,
@@ -242,8 +248,6 @@ PRE_SECTION = "/pre"
 #                        layer (C1038-C1047), and pad finding uses only ratios
 #                        and half-way levels, so a constant is enough; the
 #                        post-image's own dark frames come after its sweep.
-PADFIND_LED         = "photo_red"
-PADFIND_EXPOSURE_US = 10_000
 PADFIND_MAX_FRAMES  = 4
 PADFIND_DARK_DN     = 64.0
 
@@ -274,7 +278,9 @@ class CaptureConfig:
     # RULE_STRIP or RULE_GROUP: see the comment above RULE_STRIP.  With the
     # strip rule the group is still read, for the seed of an LED that has no
     # other (its group-1 exposure) and for the dark frames' estimate.
-    exposure_rule:  str = RULE_STRIP
+    # Read from capture.exposure_rule when a config is built; the Capture
+    # Suite passes RULE_GROUP.
+    exposure_rule:  str = field(default_factory=config.capture_exposure_rule)
     # An existing archive to add this run to, instead of creating one. Set by
     # the measurement run of a sample whose pre-image already opened the file,
     # so both sweeps of one strip land together. None (the default) creates a
@@ -819,6 +825,15 @@ class CaptureRunner:
         # Strip rule only: the test region every frame of this sweep is
         # judged on (_test_region), built once the pad is found.
         self._region: "exposure_rule.TestRegion | None" = None
+        # This sweep's settings, read from the config table at the start of
+        # run_prefetch (_read_sweep_settings).  The factory values until
+        # then.  _rule: the strip rule's numbers.  _padfind_*: the LED,
+        # exposure_us and (left, right, top, bottom) offset of the pad-
+        # finding frame.
+        self._rule: "exposure_rule.RuleSettings" = exposure_rule.DEFAULTS
+        self._padfind_led: str = "photo_red"
+        self._padfind_us: int = 10_000
+        self._padfind_offset: "tuple | None" = None
         # The archive's root attributes (capture_meta.root_attrs), kept from
         # _write_metadata: the camera model, frame size and serial that the
         # hot-pixel lookup needs.
@@ -1787,7 +1802,8 @@ class CaptureRunner:
 
     def _find_pad(self) -> Iterator[Progress]:
         """
-        Find the pad from one PADFIND_LED frame, and store where it is.
+        Find the pad from one capture.padfind_led frame, and store where
+        it is.
 
         Sets self.pad, self.pad_before and self.pad_problem, and writes the
         sweep's `pad` group.  Never raises for a pad it cannot find, and
@@ -1807,19 +1823,21 @@ class CaptureRunner:
         self.pad = self.pad_before = None
         self.pad_problem = ""
         try:
-            channel = self._leds.channel_of(PADFIND_LED)
+            channel = self._leds.channel_of(self._padfind_led)
         except ValueError:
-            self.pad_problem = f"no {PADFIND_LED} LED on this bank"
+            self.pad_problem = f"no {self._padfind_led} LED on this bank"
             log.warning("pad finding skipped: %s", self.pad_problem)
             return
 
         self.prof.set_section("padfind")
-        yield self._progress("capture", f"Finding the pad ({PADFIND_LED})",
+        yield self._progress("capture",
+                             f"Finding the pad ({self._padfind_led})",
                              step="padfind")
         # Attributes for the archive: plain numbers and text only.
-        info = {"led": PADFIND_LED, "section": section,
-                "exposure_us": PADFIND_EXPOSURE_US,
-                "dark_dn": PADFIND_DARK_DN}
+        info = {"led": self._padfind_led, "section": section,
+                "exposure_us": self._padfind_us,
+                "dark_dn": PADFIND_DARK_DN,
+                "offset": list(self._padfind_offset or ())}
         layer = before = after = None
         t_start = time.perf_counter()
         try:
@@ -1832,7 +1850,7 @@ class CaptureRunner:
             with self.prof.time("padfind.fit"):
                 before, after = padfind.find_pad(
                     layer, PADFIND_DARK_DN, self._padfind_rects(), section,
-                    prior)
+                    prior, offset=self._padfind_offset)
             info["fit_s"] = round(time.perf_counter() - t_fit, 4)
             self.pad, self.pad_before = after, before
             self.pad_problem = after.qc()
@@ -1865,8 +1883,8 @@ class CaptureRunner:
         """
         Take the pad-finding frame: settle in the dark, flash, frame, off.
 
-        1. With every LED off, set PADFIND_EXPOSURE_US and capture until the
-           camera reports it (_settle_frames).  Those frames are dark and are
+        1. With every LED off, set capture.padfind_exposure_us and capture
+           until the camera reports it (_settle_frames).  Those frames are dark and are
            thrown away; doing this first keeps the settling out of the LED's
            on-time.
         2. Switch the LED on and capture until a frame *began* after that
@@ -1883,7 +1901,7 @@ class CaptureRunner:
            (BayerCam.bayer_of).  On the Pi the conversion is the slow part.
 
         Args:
-            channel: The LED bank channel of PADFIND_LED.
+            channel: The LED bank channel of capture.padfind_led.
 
         Returns:
             (R layer of the bound crop in raw DN, {name: value} for the
@@ -1892,7 +1910,7 @@ class CaptureRunner:
         """
         cam = self._cam
         _, _, _, frames_dark, _ = _settle_frames(
-            cam, PADFIND_EXPOSURE_US, self.prof)
+            cam, self._padfind_us, self.prof)
 
         boottime = getattr(time, "CLOCK_BOOTTIME", None)
         frames_lit, meta, rule = 0, {}, "frame budget ran out"
@@ -1988,6 +2006,27 @@ class CaptureRunner:
         """True when this pre-image or measurement uses RULE_STRIP."""
         return (str(self.config.exposure_rule).lower() == RULE_STRIP
                 and str(self.config.mode).lower() in (MODE_PRE, MODE_NORMAL))
+
+    def _read_sweep_settings(self) -> None:
+        """
+        Read this sweep's settings from the config table, once.
+
+        Sets _padfind_led, _padfind_us and _padfind_offset (both rules find
+        the pad), and, for the strip rule, _rule (exposure_rule.
+        RuleSettings.from_config()).  Logged, and stored in each LED's
+        strip-rule record, so an archive says what it was taken with.
+
+        Raises:
+            config_repo.ConfigMissing: a row is missing.
+            ValueError: a value makes no sense (named in the message).
+        """
+        self._padfind_led = config.capture_padfind_led()
+        self._padfind_us = config.capture_padfind_exposure_us()
+        self._padfind_offset = config.capture_padfind_offset(
+            padfind.SECTION_PRE if self._is_pre() else padfind.SECTION_POST)
+        if self._strip_rule():
+            self._rule = exposure_rule.RuleSettings.from_config()
+            log.info("strip rule settings: %s", self._rule.to_dict())
 
     def _seed_exposure(self, color: str) -> "tuple[int, str]":
         """
@@ -2118,7 +2157,7 @@ class CaptureRunner:
         if self._region is None:
             self._region = self._test_region(next(iter(layers.values())).shape)
         with self.prof.time("cpu.measure"):
-            stats = exposure_rule.measure(layers, self._region)
+            stats = exposure_rule.measure(layers, self._region, self._rule)
         self._captures_done += 1
         return {"rgb": rgb, "bayer": bayer, "meta": meta, "layers": layers,
                 "stats": stats, "exposure_us": int(exposure_us),
@@ -2131,29 +2170,33 @@ class CaptureRunner:
         Take one LED's frames by the strip rule.  The LED is already lit and
         warmed up; this does not switch it, and stores nothing.
 
-        1. From the seed, take up to exposure_rule.MAX_EXPOSURE_TRIES frames,
+        Every number comes from this sweep's settings (self._rule).
+
+        1. From the seed, take up to max_exposure_tries frames,
            re-aiming after each (exposure_rule.judge), until one is accepted.
            The last frame is kept whatever it shows.  Rejected frames are
            measured and recorded, not stored.
-        2. Take MULTIPLE_EXPOSURE_COUNT frames at Tus in all, the kept frame
+        2. Take multiple_exposure_count frames at Tus in all, the kept frame
            being the first.
         3. If an analysis channel has a test-region pixel below the noise
-           floor at Tus, take BUS_EXPOSURE_COUNT frames at Bus.
-        4. Count the pixels that are usable at neither (exposure_rule.coverage).
+           floor at Tus, take bus_exposure_count frames at Bus.
+        4. Count the pixels that are usable at neither (exposure_rule.coverage),
+           over the decision layers stored at Tus: one that is not stored
+           (red.B under a red LED, always dark) is not counted.
 
         Returns (as the generator's return value, via `yield from`):
             {"frames": [(role, frame dict), ...] in the order taken,
              "record": the strip rule's JSON record for led_metadata}
         """
-        R = exposure_rule
+        R, s = exposure_rule, self._rule
         seed_us, seed_source = self._color_seed[color]
         attempts: list = []
         us = seed_us
-        for attempt in range(1, R.MAX_EXPOSURE_TRIES + 1):
+        for attempt in range(1, s.max_exposure_tries + 1):
             frame = self._strip_frame(us)
-            decision = R.decision_layers(color, frame["layers"])
+            decision = R.decision_layers(color, frame["layers"], s)
             verdict, next_us, why = R.judge(frame["stats"], decision,
-                                            frame["applied_us"])
+                                            frame["applied_us"], s)
             attempts.append({
                 "attempt": attempt, "exposure_us": frame["exposure_us"],
                 "applied_us": frame["applied_us"], "verdict": verdict,
@@ -2167,7 +2210,7 @@ class CaptureRunner:
                 f"    try {attempt}: {frame['exposure_us']} µs, {verdict} "
                 f"({why} max {st.max_dn:.0f}, {st.n_clip_top} clipped)",
                 step="tus")
-            if (verdict == R.ACCEPT or attempt == R.MAX_EXPOSURE_TRIES
+            if (verdict == R.ACCEPT or attempt == s.max_exposure_tries
                     or next_us == frame["applied_us"]):
                 break
             us = next_us
@@ -2182,33 +2225,35 @@ class CaptureRunner:
         elif tus_status == R.DIM:
             log.warning("%s: brightest pixel still under %.0f %% of %d after "
                         "%d frames at %d µs; kept", color,
-                        100 * R.TOP_FLOOR_FRACTION, R.CLIP_TOP_DN, attempt,
+                        100 * s.top_floor_fraction, s.clip_top_dn, attempt,
                         tus_us)
 
         frames = [("tus", frame)]
         first = frame
-        for _ in range(R.MULTIPLE_EXPOSURE_COUNT - 1):
+        for _ in range(s.multiple_exposure_count - 1):
             frames.append(("tus", self._strip_frame(tus_us)))
             yield self._progress("capture", f"    Tus frame {len(frames)} "
                                  f"({tus_us} µs)", step="tus")
 
         bus_us, bus_layer, bus_min = R.bus_exposure(
-            first["stats"], color, first["applied_us"])
+            first["stats"], color, first["applied_us"], s)
         bus_first = None
         if bus_us is not None:
-            for _ in range(R.BUS_EXPOSURE_COUNT):
+            for _ in range(s.bus_exposure_count):
                 f = self._strip_frame(bus_us)
                 bus_first = bus_first or f
                 frames.append(("bus", f))
             yield self._progress(
                 "capture", f"    Bus {bus_us} µs ({color}.{bus_layer} darkest "
-                           f"{bus_min:.0f} at Tus), {R.BUS_EXPOSURE_COUNT} "
+                           f"{bus_min:.0f} at Tus), {s.bus_exposure_count} "
                            f"frame(s)", step="bus")
 
-        decision = R.decision_layers(color, first["layers"])
+        decision = R.decision_layers(color, first["layers"], s)
+        kept_at_tus, _ = R.keep_layers(color, first["stats"], s)
         cover = R.coverage(first["layers"],
                            bus_first["layers"] if bus_first else None,
-                           self._region, decision)
+                           self._region,
+                           [ch for ch in decision if ch in kept_at_tus], s)
         short = {ch: c["n_below_floor_both"] for ch, c in cover.items()
                  if c["n_below_floor_both"]}
         if short:
@@ -2222,22 +2267,24 @@ class CaptureRunner:
             "tus_status": tus_status, "tus_tries": attempt,
             "bus_us": bus_us, "bus_layer": bus_layer or None,
             "bus_min_dn": None if bus_us is None else round(bus_min, 2),
-            "frames_at_tus": R.MULTIPLE_EXPOSURE_COUNT,
-            "frames_at_bus": R.BUS_EXPOSURE_COUNT if bus_us else 0,
+            "frames_at_tus": s.multiple_exposure_count,
+            "frames_at_bus": s.bus_exposure_count if bus_us else 0,
             "decision_layers": decision,
-            "analysis_layers": R.analysis_layers(color, first["layers"]),
+            "analysis_layers": R.analysis_layers(color, first["layers"], s),
             "test_region": {"pad_source": self._region.pad_source,
                             "n_pixels": int(self._region.mask.sum()),
                             "n_hot_left_out": self._region.n_hot_inside},
             "attempts": attempts,
             "coverage": cover,
-            "limits_dn": {"clip_top": R.CLIP_TOP_DN,
-                          "clip_bottom": R.CLIP_BOTTOM_DN,
-                          "noise_floor": R.NOISE_FLOOR_DN,
+            "limits_dn": {"clip_top": s.clip_top_dn,
+                          "clip_bottom": s.clip_bottom_dn,
+                          "noise_floor": s.noise_floor_dn,
                           "dark": R.DARK_DN},
+            # Every setting this sweep used (config rows; stage 4a).
+            "settings": s.to_dict(),
             # The floor test's edge rule (exposure_rule.edge_left_out);
             # LayerStats.n_edge_left_out counts what it left out.
-            "edge_rule": {"factor": R.EDGE_DARKENING_FACTOR,
+            "edge_rule": {"factor": s.edge_darkening_factor,
                           "sides": list(R.EDGE_RULE_SIDES),
                           "applied": self._region.dist is not None},
         }
@@ -2337,7 +2384,7 @@ class CaptureRunner:
         for i, (role, f) in enumerate(result["frames"]):
             label = f"e{i}"
             keep, layer_why[label] = exposure_rule.keep_layers(
-                color, f["stats"])
+                color, f["stats"], self._rule)
             omit = [ch for ch in f["layers"] if ch not in keep]
             with self.prof.time("io.hdf5"):
                 w.add_lit(color, label, f["layers"],
@@ -2506,6 +2553,9 @@ class CaptureRunner:
         cam  = self._cam
         try:
             self._group = group = str(cfg.exposure_group)
+            # Before the camera starts: a bad settings edit stops the run
+            # here, during the countdown, and not halfway through the sweep.
+            self._read_sweep_settings()
 
             self._choose_out_path()
             self.results = []
@@ -2669,7 +2719,7 @@ class CaptureRunner:
 
                 if self._strip_rule():
                     seed_us, seed_source = self._color_seed[color]
-                    self._captures_per_led = exposure_rule.MULTIPLE_EXPOSURE_COUNT
+                    self._captures_per_led = self._rule.multiple_exposure_count
                     log.info(f"=== LED {led}: {color} (strip rule, seed "
                              f"{seed_us} µs from {seed_source}) ===")
                 else:

@@ -130,6 +130,14 @@ class TestPadFind(unittest.TestCase):
                                    prior=before)
         self.assertEqual(post.offset, padfind.OFFSET_POST)
 
+    def test_offset_given_by_the_caller(self):
+        """The capture passes the config row's offset; it is used as is."""
+        raw, _ = scene()
+        before, after = padfind.find_pad(raw, DARK_DN, RECTS, "pre",
+                                         offset=(1, -1, 0.5, 0))
+        moved = fitted_edges(after) - fitted_edges(before)
+        np.testing.assert_allclose(moved, (1, -1, 0.5, 0), atol=1e-9)
+
     def test_post_image_follows_moved_pad(self):
         """A post-image guided by the pre-image finds a pad moved 1 px."""
         raw_pre, _ = scene()

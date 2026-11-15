@@ -111,9 +111,9 @@ INSERT OR IGNORE INTO config (active, isdefault, editable, add_dt, role, name,
   (0, 1, 1, '2026-08-01 00:00:00', 'capture', 'prefetch_budget_s', 'float', '20.0', 'seed',
    'reserved time for camera setup and focus during the reagent2 countdown'),
   (0, 1, 1, '2026-08-01 00:00:00', 'capture', 'layer_keep_min_dn', 'int', '96', 'seed',
-   'a Bayer layer is too dark to store when its scaled p10 falls below this (signal DN)'),
+   'group rule and white photo only: a Bayer layer is too dark to store when its scaled p10 falls below this (signal DN); the strip rule ignores it'),
   (0, 1, 1, '2026-08-01 00:00:00', 'capture', 'layer_keep_max_dn', 'int', '863', 'seed',
-   'a Bayer layer is too bright to store when its scaled p90 rises above this (signal DN)'),
+   'group rule and white photo only: a Bayer layer is too bright to store when its scaled p90 rises above this (signal DN); the strip rule ignores it'),
   (0, 1, 1, '2026-08-12 00:00:00', 'capture', 'photo_enabled', 'bool', '1', 'seed',
    'take a colour-balanced JPEG under the white LED as the last step of a run'),
   (0, 1, 1, '2026-08-12 00:00:00', 'capture', 'photo_wb_gains', 'str', '1.0,1.0', 'seed',
@@ -123,6 +123,47 @@ INSERT OR IGNORE INTO config (active, isdefault, editable, add_dt, role, name,
   (0, 1, 1, '2026-08-18 00:00:00', 'capture', 'preimage_led_order', 'str',
    'royal_blue,red', 'seed',
    'LEDs the pre-image sweeps; keep it short — this light falls on an unreacted pad');
+-- ── capture: the strip exposure rule (2026-11-14) ───────────────────────────
+-- How a pre-image or a measurement sets each LED's exposure_us from the strip
+-- itself (src/exposure_rule.py, which explains every value; its constants of
+-- the same names are these factory values, and a test keeps the two equal).
+-- Read once at the start of each sweep.  The limits are raw DN, dark level
+-- (64) included.  The pad-finding rows are for the one photo_red frame that
+-- locates the pad before each sweep (src/padfind.py, capture_runner).
+INSERT OR IGNORE INTO config (active, isdefault, editable, add_dt, role, name,
+                              vtype, value, source, remark)
+     VALUES
+  (0, 1, 1, '2026-11-14 00:00:00', 'capture', 'exposure_rule', 'str', 'strip', 'seed',
+   'how a pre-image and a measurement set exposure_us: strip (from the strip itself) or group (the stored exposure group, as before 2026-11-14)'),
+  (0, 1, 1, '2026-11-14 00:00:00', 'capture', 'clip_top_dn', 'int', '1023', 'seed',
+   'strip rule: a pixel at or above this raw DN is clipped at the top'),
+  (0, 1, 1, '2026-11-14 00:00:00', 'capture', 'clip_bottom_dn', 'int', '65', 'seed',
+   'strip rule: a pixel at or below this raw DN (dark + 1) is clipped at the bottom; counted only'),
+  (0, 1, 1, '2026-11-14 00:00:00', 'capture', 'noise_floor_dn', 'int', '164', 'seed',
+   'strip rule: an analysis-channel pixel below this raw DN (dark + 100) at Tus calls for a Bus frame'),
+  (0, 1, 1, '2026-11-14 00:00:00', 'capture', 'top_target_fraction', 'float', '0.85', 'seed',
+   'strip rule: a re-aimed frame puts its brightest pixel at this fraction of clip_top_dn'),
+  (0, 1, 1, '2026-11-14 00:00:00', 'capture', 'top_floor_fraction', 'float', '0.80', 'seed',
+   'strip rule: a frame is accepted when nothing clips and its brightest pixel is at least this fraction of clip_top_dn'),
+  (0, 1, 1, '2026-11-14 00:00:00', 'capture', 'clip_step_factor', 'float', '0.7', 'seed',
+   'strip rule: exposure_us is multiplied by this after a clipped frame'),
+  (0, 1, 1, '2026-11-14 00:00:00', 'capture', 'max_exposure_tries', 'int', '4', 'seed',
+   'strip rule: frames taken to find Tus, the first included'),
+  (0, 1, 1, '2026-11-14 00:00:00', 'capture', 'exposure_cap_us', 'int', '200000', 'seed',
+   'strip rule: longest exposure_us it may ask for, in microseconds'),
+  (0, 1, 1, '2026-11-14 00:00:00', 'capture', 'bus_margin', 'float', '1.1', 'seed',
+   'strip rule: Bus is lengthened by this factor past what puts the darkest pixel on the floor'),
+  (0, 1, 1, '2026-11-14 00:00:00', 'capture', 'edge_darkening_factor', 'float', '5.0', 'seed',
+   'strip rule: a left/right edge pixel darker than this times band 1 is left out of the noise-floor test'),
+  (0, 1, 1, '2026-11-14 00:00:00', 'capture', 'padfind_led', 'str', 'photo_red', 'seed',
+   'pad finding: the LED lighting the one frame the pad is located on'),
+  (0, 1, 1, '2026-11-14 00:00:00', 'capture', 'padfind_exposure_us', 'int', '10000', 'seed',
+   'pad finding: that frame''s exposure_us, in microseconds'),
+  (0, 1, 1, '2026-11-14 00:00:00', 'capture', 'padfind_offset_pre', 'str', '0.10,0.44,0.33,0.33', 'seed',
+   'pad finding: left,right,top,bottom shift (layer px, + = right/down) moving a pre-image photo_red fit to where the desktop all-channel fit puts it'),
+  (0, 1, 1, '2026-11-14 00:00:00', 'capture', 'padfind_offset_post', 'str', '0.13,0.35,0.11,0.11', 'seed',
+   'pad finding: the same shift for a measurement (post-image)');
+
 -- ── calibration ─────────────────────────────────────────────────────────────
 -- The window every stored exposure bracket must fit on the test pad (white,
 -- yellow and brown patches) and the gray chips.  Placeholders for Bill to tune.
@@ -189,7 +230,14 @@ INSERT OR IGNORE INTO config (active, isdefault, editable, add_dt, role, name,
   (0, 1, 1, '2026-08-19 00:00:00', 'protocol', 'reagent2_stir_seconds', 'int', '0', 'seed',
    'stir duration in seconds at 25 C reference; 0 = stir continuously, no sub-alarm'),
   (0, 1, 1, '2026-10-29 00:00:00', 'protocol', 'test_variant', 'int', '0', 'seed',
-   '1 = show the test-variant screen and record a treatments row; 0 = production run');
+   '1 = show the test-variant screen and record a treatments row; 0 = production run'),
+  (0, 1, 1, '2026-11-14 00:00:00', 'protocol', 'multiple_exposure_count', 'int', '1', 'seed',
+   'strip rule: frames kept per LED at Tus, all at one exposure_us; 3 for the trial strips'),
+  (0, 1, 1, '2026-11-14 00:00:00', 'protocol', 'bus_exposure_count', 'int', '1', 'seed',
+   'strip rule: frames kept per LED at Bus when one is needed'),
+  (0, 1, 1, '2026-11-14 00:00:00', 'protocol', 'analysis_channels', 'str',
+   'violet.B,royal_blue.B,cyan.B,green.Gb,green.Gr,green.B,photo_red.R', 'seed',
+   'LED.layer pairs the yellow/brown analysis reads; they decide Tus and only they can call for Bus');
 
 -- ── test_equip ──────────────────────────────────────────────────────────────
 -- The test-variant screen's equipment pick list.  code is UNIQUE, so a re-run

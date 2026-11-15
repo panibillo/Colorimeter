@@ -46,10 +46,10 @@ How one LED's exposure_us is found (capture_runner does the frames)
        - otherwise: "accept".
      At most MAX_EXPOSURE_TRIES frames.  The last one is kept whatever it
      shows; if it still clips, the LED is marked failed.
-  4. Take MULTIPLE_EXPOSURE_COUNT frames at Tus in all (the accepted frame
+  4. Take multiple_exposure_count frames at Tus in all (the accepted frame
      is the first).  The Pi stores them; it never combines them.
   5. If an analysis channel has a test-region pixel below the noise floor at
-     Tus, work out Bus (bus_exposure()) and take BUS_EXPOSURE_COUNT frames
+     Tus, work out Bus (bus_exposure()) and take bus_exposure_count frames
      at it.  The floor test leaves out side-edge pixels that are mostly
      outside the pad (edge_left_out(), below); the clipping test does not.
   6. Save every analysis channel of every frame, and any other layer only
@@ -58,16 +58,28 @@ How one LED's exposure_us is found (capture_runner does the frames)
      every decision layer is below the top limit at Tus and above the floor
      at Tus or at Bus.  The counts that fail are recorded, not acted on.
 
+Settings (detour stage 4a, 2026-11-14)
+--------------------------------------
+Every number the rule can be tuned by is a row in the `config` table, read
+once per sweep into a RuleSettings (RuleSettings.from_config()) and passed
+to every function below.  The factory values of those rows
+(provisioning/config_defaults.sql) are the module constants of the same
+names; RuleSettings() with no arguments holds them, for tests and desktop
+studies that have no database at hand.  A test checks the two agree.
+
 Public surface
 --------------
+    RuleSettings, RuleSettings.from_config(), DEFAULTS
     LayerStats, TestRegion
-    measure(layers, region) -> {layer: LayerStats}
-    decision_layers(color, layers) -> list[str]
-    judge(stats, decision, exposure_us) -> (verdict, next_us, layer)
-    bus_exposure(stats, color, tus_us) -> (bus_us or None, layer, min_dn)
-    keep_layers(color, stats) -> (kept layers, {layer: why})
-    edge_left_out(layer, region) -> mask of edge pixels the floor test skips
-    coverage(tus_layers, bus_layers, region, decision) -> {layer: counts}
+    measure(layers, region, s) -> {layer: LayerStats}
+    analysis_layers(color, layers, s) / decision_layers(color, layers, s)
+    judge(stats, decision, exposure_us, s) -> (verdict, next_us, layer)
+    bus_exposure(stats, color, tus_us, s) -> (bus_us or None, layer, min_dn)
+    keep_layers(color, stats, s) -> (kept layers, {layer: why})
+    edge_left_out(layer, region, s) -> mask of edge pixels the floor test skips
+    coverage(tus_layers, bus_layers, region, decision, s) -> {layer: counts}
+  `s` is a RuleSettings; it defaults to DEFAULTS (the factory values).  The
+  capture always passes the one it read from the config table.
 """
 
 from __future__ import annotations
@@ -77,7 +89,8 @@ from dataclasses import asdict, dataclass, field
 import numpy as np
 
 # ── Limits, in raw DN (Bill, 2026-11-14) ────────────────────────────────
-# Stage 4 moves these into the config table under the names given.
+# The constants named after a config row are that row's factory value (see
+# "Settings" above); the capture uses the row.  DARK_DN is not a setting.
 #
 #   CLIP_TOP_DN     capture.clip_top_dn.  The sensor's ceiling: a pixel at
 #                   1023 may have been brighter, so its value is unknown.
@@ -121,10 +134,12 @@ DARK_DN        = 64.0
 #                        no signal (an LED that didn't light) sending the next
 #                        one to the cap.  A strip needing more gets it over
 #                        two tries.
-#   EXPOSURE_MIN_US,     The range any exposure_us is kept within, in µs.
-#   EXPOSURE_CAP_US      The longest stored exposure so far is 47 ms (amber,
-#                        group 5); 200 ms is well clear of it and bounds the
-#                        LED on-time if a frame is unexpectedly dark.
+#   EXPOSURE_MIN_US,     The range any exposure_us is kept within, in µs;
+#   EXPOSURE_CAP_US      the cap is capture.exposure_cap_us.  The longest
+#                        stored exposure so far is 47 ms (amber, group 5);
+#                        200 ms is well clear of it and bounds the LED
+#                        on-time if a frame is unexpectedly dark.  C1048's
+#                        longest Bus was 69 ms (green.B, 2026-11-14).
 TOP_TARGET_FRACTION = 0.85
 TOP_FLOOR_FRACTION  = 0.80
 CLIP_STEP_FACTOR    = 0.7
@@ -134,22 +149,24 @@ EXPOSURE_MIN_US     = 100
 EXPOSURE_CAP_US     = 200_000
 
 # ── Bus ─────────────────────────────────────────────────────────────────
-#   BUS_MARGIN  Bus is lengthened by this factor beyond what would put the
-#               darkest pixel exactly on the floor, so that frame-to-frame
-#               noise doesn't leave it just under.
+#   BUS_MARGIN  capture.bus_margin.  Bus is lengthened by this factor
+#               beyond what would put the darkest pixel exactly on the
+#               floor, so that frame-to-frame noise doesn't leave it just
+#               under.
 BUS_MARGIN = 1.1
 
 # ── How many frames are kept (Bill, 2026-11-14) ─────────────────────────
 #   MULTIPLE_EXPOSURE_COUNT  protocol.multiple_exposure_count.  Frames kept
 #                    at Tus, all at the same exposure_us.  3 for the trial
-#                    strips, so their archives hold the data for the deferred
-#                    multiple-exposure study (work plan, stage 2).  1 in
-#                    routine use.
-#   BUS_EXPOSURE_COUNT  protocol.bus_exposure_count (new).  Frames kept at
+#                    strips (an operator setting on the instrument), so their
+#                    archives hold the data for the deferred multiple-
+#                    exposure study (work plan, stage 2); the factory value
+#                    is 1, for routine use (Bill, 2026-11-14).
+#   BUS_EXPOSURE_COUNT  protocol.bus_exposure_count.  Frames kept at
 #                    Bus when one is needed.  1 while the exposure rule itself
 #                    is being studied ("only the needed Bus frames"); set to
 #                    MULTIPLE_EXPOSURE_COUNT for the yellow/brown trials.
-MULTIPLE_EXPOSURE_COUNT = 3
+MULTIPLE_EXPOSURE_COUNT = 1
 BUS_EXPOSURE_COUNT      = 1
 
 # ── Which channels matter ───────────────────────────────────────────────
@@ -170,7 +187,7 @@ ANALYSIS_CHANNELS = ("violet.B", "royal_blue.B", "cyan.B", "green.Gb",
 #            The blue-side values rest on C1038 alone.  An LED not listed
 #            starts from its group-1 exposure.  Stage 4 replaces these with
 #            one seed row per LED in the `exposure` table, updated from the
-#            last accepted Tus.
+#            last accepted pre-image Tus.  Not a RuleSettings field.
 SEED_US = {"royal_blue": 2260, "violet": 14850, "cyan": 16070,
            "green": 8760, "photo_red": 37900}
 
@@ -188,7 +205,8 @@ SEED_US = {"royal_blue": 2260, "violet": 14850, "cyan": 16070,
 #   rule     a band-0 (outermost row) pixel of that side is left out of the
 #            floor test when its own d > EDGE_DARKENING_FACTOR x d_1.
 #
-#   EDGE_DARKENING_FACTOR  5.0.  From the edge study
+#   EDGE_DARKENING_FACTOR  capture.edge_darkening_factor, 5.0.  From the
+#            edge study
 #            (desktop/padanalysis/white_study.py step 2a,
 #            white_out/bands.json: 76 pre-image profiles, F/G/H holders, 7
 #            channels): on the left and right sides band 0 is 3.6-4.0 times
@@ -213,6 +231,155 @@ ACCEPT  = "accept"
 CLIPPED = "clipped"
 DIM     = "dim"
 
+# The Bayer layer names an analysis channel may end in.
+LAYER_NAMES = ("R", "Gr", "Gb", "B")
+
+
+@dataclass(frozen=True)
+class RuleSettings:
+    """
+    The tunable numbers of the strip rule, as one sweep uses them.
+
+    Each field is one `config` row (role.name below); the default is that
+    row's factory value, the module constant of the same name, where the
+    reason for the value is written down.
+
+    Attributes:
+        clip_top_dn:     capture.clip_top_dn, raw DN.  Clipped at the top
+                         means raw >= this (CLIP_TOP_DN).
+        clip_bottom_dn:  capture.clip_bottom_dn, raw DN.  Clipped at the
+                         bottom means raw <= this; counted only
+                         (CLIP_BOTTOM_DN).
+        noise_floor_dn:  capture.noise_floor_dn, raw DN.  An analysis-channel
+                         pixel below it at Tus calls for Bus (NOISE_FLOOR_DN).
+        top_target_fraction: capture.top_target_fraction.  A re-aim puts the
+                         brightest pixel at this fraction of clip_top_dn
+                         (TOP_TARGET_FRACTION).
+        top_floor_fraction:  capture.top_floor_fraction.  Accepted when the
+                         brightest pixel is at least this fraction of
+                         clip_top_dn and none clips (TOP_FLOOR_FRACTION).
+        clip_step_factor: capture.clip_step_factor.  exposure_us is
+                         multiplied by this after a clipped frame
+                         (CLIP_STEP_FACTOR).
+        max_exposure_tries: capture.max_exposure_tries.  Frames taken to find
+                         Tus, the first included (MAX_EXPOSURE_TRIES).
+        exposure_cap_us: capture.exposure_cap_us, µs.  Longest exposure_us
+                         the rule asks for (EXPOSURE_CAP_US).
+        bus_margin:      capture.bus_margin.  Bus is lengthened by this
+                         factor (BUS_MARGIN).
+        multiple_exposure_count: protocol.multiple_exposure_count.  Frames
+                         kept at Tus (MULTIPLE_EXPOSURE_COUNT).
+        bus_exposure_count: protocol.bus_exposure_count.  Frames kept at Bus
+                         when one is needed (BUS_EXPOSURE_COUNT).
+        analysis_channels: protocol.analysis_channels.  'LED.layer' names
+                         (ANALYSIS_CHANNELS).
+        edge_darkening_factor: capture.edge_darkening_factor.  The edge rule
+                         of the floor test (EDGE_DARKENING_FACTOR).
+
+    Raises:
+        ValueError: on construction, when a value makes no sense (see
+        _check), naming the config row, so a bad edit is caught before the
+        sweep starts rather than halfway through it.
+    """
+    clip_top_dn: int = CLIP_TOP_DN
+    clip_bottom_dn: int = CLIP_BOTTOM_DN
+    noise_floor_dn: int = NOISE_FLOOR_DN
+    top_target_fraction: float = TOP_TARGET_FRACTION
+    top_floor_fraction: float = TOP_FLOOR_FRACTION
+    clip_step_factor: float = CLIP_STEP_FACTOR
+    max_exposure_tries: int = MAX_EXPOSURE_TRIES
+    exposure_cap_us: int = EXPOSURE_CAP_US
+    bus_margin: float = BUS_MARGIN
+    multiple_exposure_count: int = MULTIPLE_EXPOSURE_COUNT
+    bus_exposure_count: int = BUS_EXPOSURE_COUNT
+    analysis_channels: tuple = ANALYSIS_CHANNELS
+    edge_darkening_factor: float = EDGE_DARKENING_FACTOR
+
+    def __post_init__(self):
+        # Frozen: set through object.__setattr__.  A list or comma text is
+        # accepted for analysis_channels and kept as a tuple.
+        ch = self.analysis_channels
+        if isinstance(ch, str):
+            ch = [c for c in ch.split(",")]
+        object.__setattr__(self, "analysis_channels",
+                           tuple(c.strip() for c in ch if c.strip()))
+        problems = self._check()
+        if problems:
+            raise ValueError("exposure rule settings: " + "; ".join(problems))
+
+    def _check(self) -> "list[str]":
+        """The values that make no sense, each naming its config row."""
+        p = []
+        if not (DARK_DN < self.clip_bottom_dn < self.noise_floor_dn
+                < self.clip_top_dn):
+            p.append("need dark level < capture.clip_bottom_dn < "
+                     "capture.noise_floor_dn < capture.clip_top_dn, got "
+                     f"{DARK_DN:g} < {self.clip_bottom_dn} < "
+                     f"{self.noise_floor_dn} < {self.clip_top_dn}")
+        if not 0 < self.top_floor_fraction <= self.top_target_fraction < 1:
+            p.append("need 0 < capture.top_floor_fraction <= "
+                     "capture.top_target_fraction < 1, got "
+                     f"{self.top_floor_fraction} and "
+                     f"{self.top_target_fraction}")
+        if not 0 < self.clip_step_factor < 1:
+            p.append("capture.clip_step_factor must be between 0 and 1, got "
+                     f"{self.clip_step_factor}")
+        if self.max_exposure_tries < 1:
+            p.append("capture.max_exposure_tries must be at least 1")
+        if self.exposure_cap_us <= EXPOSURE_MIN_US:
+            p.append(f"capture.exposure_cap_us must exceed {EXPOSURE_MIN_US}")
+        if self.bus_margin < 1:
+            p.append("capture.bus_margin must be at least 1")
+        if self.multiple_exposure_count < 1:
+            p.append("protocol.multiple_exposure_count must be at least 1")
+        if self.bus_exposure_count < 1:
+            p.append("protocol.bus_exposure_count must be at least 1")
+        if self.edge_darkening_factor <= 0:
+            p.append("capture.edge_darkening_factor must be positive")
+        bad = [c for c in self.analysis_channels
+               if c.count(".") != 1 or c.split(".")[1] not in LAYER_NAMES]
+        if bad:
+            p.append("protocol.analysis_channels: not LED.layer (layer one "
+                     f"of {', '.join(LAYER_NAMES)}): {', '.join(bad)}")
+        return p
+
+    @classmethod
+    def from_config(cls) -> "RuleSettings":
+        """
+        The settings in force, from the `config` table (config_repo).
+
+        Raises:
+            config_repo.ConfigMissing: a row is missing (db_bootstrap seeds
+                them all, so only a damaged database).
+            ValueError: a value makes no sense (see the class docstring).
+        """
+        import config_repo as config          # only here: keeps tests and
+        #                                       desktop studies DB-free
+        return cls(
+            clip_top_dn=config.capture_clip_top_dn(),
+            clip_bottom_dn=config.capture_clip_bottom_dn(),
+            noise_floor_dn=config.capture_noise_floor_dn(),
+            top_target_fraction=config.capture_top_target_fraction(),
+            top_floor_fraction=config.capture_top_floor_fraction(),
+            clip_step_factor=config.capture_clip_step_factor(),
+            max_exposure_tries=config.capture_max_exposure_tries(),
+            exposure_cap_us=config.capture_exposure_cap_us(),
+            bus_margin=config.capture_bus_margin(),
+            multiple_exposure_count=config.protocol_multiple_exposure_count(),
+            bus_exposure_count=config.protocol_bus_exposure_count(),
+            analysis_channels=config.protocol_analysis_channels(),
+            edge_darkening_factor=config.capture_edge_darkening_factor())
+
+    def to_dict(self) -> dict:
+        """Plain values, for the archive's JSON record."""
+        d = asdict(self)
+        d["analysis_channels"] = list(self.analysis_channels)
+        return d
+
+
+#: The factory values, used when a caller passes no settings.
+DEFAULTS = RuleSettings()
+
 
 @dataclass
 class LayerStats:
@@ -229,9 +396,9 @@ class LayerStats:
         mean_dn:       Their mean.
         max_where:     Which part of the test region the brightest pixel is
                        in: 'pad', 'gray1' or 'gray2'.
-        n_clip_top:    Pixels at or above CLIP_TOP_DN.
-        n_clip_bottom: Pixels at or below CLIP_BOTTOM_DN.
-        n_below_floor: Pixels below NOISE_FLOOR_DN, not counting the edge
+        n_clip_top:    Pixels at or above clip_top_dn.
+        n_clip_bottom: Pixels at or below clip_bottom_dn.
+        n_below_floor: Pixels below noise_floor_dn, not counting the edge
                        pixels the floor test leaves out (edge_left_out).
         floor_min_dn:  Darkest pixel the floor test looks at (the same
                        pixels as n_below_floor).  Bus is worked out from it.
@@ -349,7 +516,8 @@ class TestRegion:
                    pad_source=pad_source, dist=dist)
 
 
-def edge_left_out(layer, region: TestRegion) -> np.ndarray:
+def edge_left_out(layer, region: TestRegion,
+                  s: RuleSettings = DEFAULTS) -> np.ndarray:
     """
     The side-edge pixels of one layer that the noise-floor test leaves out.
 
@@ -359,7 +527,7 @@ def edge_left_out(layer, region: TestRegion) -> np.ndarray:
       2. d_1 = -log10(mean signal of band 1 / S), band 1 being the pad
          pixels 1 to 2 px in from that side, away from the corners.
       3. A band-0 pixel (0 to 1 px in) is left out when
-         -log10(its signal / S) > EDGE_DARKENING_FACTOR x d_1.
+         -log10(its signal / S) > s.edge_darkening_factor x d_1.
     A side whose d_1 is not positive (no darkening to compare with) leaves
     nothing out.
 
@@ -371,6 +539,7 @@ def edge_left_out(layer, region: TestRegion) -> np.ndarray:
         layer:  One Bayer layer of the bound crop, raw DN.
         region: The test region; nothing is left out when region.dist is
                 None (the pad was not fitted).
+        s:      The settings (edge_darkening_factor).
 
     Returns:
         Boolean array of the layer's shape, True at the pixels left out.
@@ -395,18 +564,20 @@ def edge_left_out(layer, region: TestRegion) -> np.ndarray:
         # d > factor x d1  <=>  signal < S x 10^(-factor x d1): the same
         # test without a logarithm at every pixel (and a signal at or below
         # zero is always left out).
-        limit = S * 10.0 ** (-EDGE_DARKENING_FACTOR * d1)
+        limit = S * 10.0 ** (-s.edge_darkening_factor * d1)
         out |= band0 & ((a - DARK_DN) < limit)
     return out
 
 
-def measure(layers: dict, region: TestRegion) -> "dict[str, LayerStats]":
+def measure(layers: dict, region: TestRegion,
+            s: RuleSettings = DEFAULTS) -> "dict[str, LayerStats]":
     """
     Measure each Bayer layer of one frame over the test region.
 
     Args:
         layers: {layer: array} of the bound crop, raw DN.
         region: The test region (its masks have the layers' shape).
+        s:      The settings (the three limits, the edge factor).
 
     Returns:
         {layer: LayerStats}.  A layer with no test-region pixel at all is
@@ -423,27 +594,29 @@ def measure(layers: dict, region: TestRegion) -> "dict[str, LayerStats]":
         where = next((part for part, m in keep.items()
                       if m.any() and float(np.asarray(arr)[m].max())
                       == brightest), "pad")
-        skipped = edge_left_out(arr, region) & every
+        skipped = edge_left_out(arr, region, s) & every
         floor_vals = np.asarray(arr)[every & ~skipped]
         out[name] = LayerStats(
             layer=name, n_pixels=int(vals.size),
             min_dn=float(vals.min()), max_dn=brightest,
             mean_dn=float(vals.mean()), max_where=where,
-            n_clip_top=int((vals >= CLIP_TOP_DN).sum()),
-            n_clip_bottom=int((vals <= CLIP_BOTTOM_DN).sum()),
-            n_below_floor=int((floor_vals < NOISE_FLOOR_DN).sum()),
+            n_clip_top=int((vals >= s.clip_top_dn).sum()),
+            n_clip_bottom=int((vals <= s.clip_bottom_dn).sum()),
+            n_below_floor=int((floor_vals < s.noise_floor_dn).sum()),
             floor_min_dn=(float(floor_vals.min()) if floor_vals.size
                           else float("nan")),
             n_edge_left_out=int(skipped.sum()))
     return out
 
 
-def analysis_layers(color: str, layers) -> "list[str]":
-    """The layers of `color` named in ANALYSIS_CHANNELS, in layer order."""
-    return [ch for ch in layers if f"{color}.{ch}" in ANALYSIS_CHANNELS]
+def analysis_layers(color: str, layers,
+                    s: RuleSettings = DEFAULTS) -> "list[str]":
+    """The layers of `color` named in s.analysis_channels, in layer order."""
+    return [ch for ch in layers if f"{color}.{ch}" in s.analysis_channels]
 
 
-def decision_layers(color: str, layers) -> "list[str]":
+def decision_layers(color: str, layers,
+                    s: RuleSettings = DEFAULTS) -> "list[str]":
     """
     The layers whose test-region pixels decide this LED's Tus.
 
@@ -454,17 +627,19 @@ def decision_layers(color: str, layers) -> "list[str]":
     Args:
         color:  LED color name.
         layers: The layer names a frame has (e.g. dict keys).
+        s:      The settings (analysis_channels).
     """
-    named = analysis_layers(color, layers)
+    named = analysis_layers(color, layers, s)
     return named if named else list(layers)
 
 
-def _clamp_us(us: float) -> int:
-    """Round to whole µs and keep within EXPOSURE_MIN_US..EXPOSURE_CAP_US."""
-    return int(min(max(round(us), EXPOSURE_MIN_US), EXPOSURE_CAP_US))
+def _clamp_us(us: float, s: RuleSettings) -> int:
+    """Round to whole µs and keep within EXPOSURE_MIN_US..s.exposure_cap_us."""
+    return int(min(max(round(us), EXPOSURE_MIN_US), s.exposure_cap_us))
 
 
-def judge(stats: dict, decision, exposure_us: int) -> "tuple[str, int, str]":
+def judge(stats: dict, decision, exposure_us: int,
+          s: RuleSettings = DEFAULTS) -> "tuple[str, int, str]":
     """
     Decide whether one frame's exposure_us is Tus, and if not, the next one.
 
@@ -472,6 +647,7 @@ def judge(stats: dict, decision, exposure_us: int) -> "tuple[str, int, str]":
         stats:       measure()'s result for the frame.
         decision:    The decision layers (decision_layers()).
         exposure_us: The exposure_us the frame was taken at (as applied).
+        s:           The settings.
 
     Returns:
         (verdict, next_us, layer):
@@ -487,23 +663,25 @@ def judge(stats: dict, decision, exposure_us: int) -> "tuple[str, int, str]":
     present = [ch for ch in decision if ch in stats]
     clipped = [ch for ch in present if stats[ch].n_clip_top > 0]
     if clipped:
-        return CLIPPED, _clamp_us(exposure_us * CLIP_STEP_FACTOR), clipped[0]
+        return (CLIPPED, _clamp_us(exposure_us * s.clip_step_factor, s),
+                clipped[0])
     top = max(present, key=lambda ch: stats[ch].max_dn)
     brightest = stats[top].max_dn
-    if brightest >= TOP_FLOOR_FRACTION * CLIP_TOP_DN:
+    if brightest >= s.top_floor_fraction * s.clip_top_dn:
         return ACCEPT, int(exposure_us), top
     signal = max(brightest - DARK_DN, 1.0)
-    target = TOP_TARGET_FRACTION * CLIP_TOP_DN - DARK_DN
+    target = s.top_target_fraction * s.clip_top_dn - DARK_DN
     factor = min(target / signal, DIM_STEP_LIMIT)
-    return DIM, _clamp_us(exposure_us * factor), top
+    return DIM, _clamp_us(exposure_us * factor, s), top
 
 
-def bus_exposure(stats: dict, color: str,
-                 tus_us: int) -> "tuple[int | None, str, float]":
+def bus_exposure(stats: dict, color: str, tus_us: int,
+                 s: RuleSettings = DEFAULTS
+                 ) -> "tuple[int | None, str, float]":
     """
     The Bus exposure_us, when an analysis channel needs one.
 
-    Bus = Tus x (NOISE_FLOOR_DN - dark) / (darkest raw - dark) x BUS_MARGIN,
+    Bus = Tus x (noise_floor_dn - dark) / (darkest raw - dark) x bus_margin,
     the darkest raw being the lowest pixel the floor test looks at
     (LayerStats.floor_min_dn: the test region less the edge pixels it
     leaves out) among this LED's analysis channels that have any such pixel
@@ -514,6 +692,7 @@ def bus_exposure(stats: dict, color: str,
         stats:  measure()'s result for the accepted Tus frame.
         color:  LED color name.
         tus_us: Tus, as applied.
+        s:      The settings.
 
     Returns:
         (bus_us, layer, min_dn).  bus_us is None when no analysis channel of
@@ -523,18 +702,19 @@ def bus_exposure(stats: dict, color: str,
     Example (dark 64): darkest green.B pixel 120 raw at Tus 8760 µs ->
         8760 x 100 / 56 x 1.1 = 17207 µs.
     """
-    short = [ch for ch in analysis_layers(color, stats)
+    short = [ch for ch in analysis_layers(color, stats, s)
              if stats[ch].n_below_floor > 0]
     if not short:
         return None, "", float("nan")
     layer = min(short, key=lambda ch: stats[ch].floor_min_dn)
     darkest = stats[layer].floor_min_dn
     signal = max(darkest - DARK_DN, 1.0)
-    bus = tus_us * (NOISE_FLOOR_DN - DARK_DN) / signal * BUS_MARGIN
-    return _clamp_us(max(bus, tus_us + 1)), layer, darkest
+    bus = tus_us * (s.noise_floor_dn - DARK_DN) / signal * s.bus_margin
+    return _clamp_us(max(bus, tus_us + 1), s), layer, darkest
 
 
-def keep_layers(color: str, stats: dict) -> "tuple[list[str], dict]":
+def keep_layers(color: str, stats: dict,
+                s: RuleSettings = DEFAULTS) -> "tuple[list[str], dict]":
     """
     Which Bayer layers of one frame are saved (replaces the layermodel
     screen, layermodel_repo.keep_channels, for the strip rule).
@@ -543,12 +723,13 @@ def keep_layers(color: str, stats: dict) -> "tuple[list[str], dict]":
       - an analysis channel is always saved, even where it clips: in a Bus
         frame the bright pixels clip by design, and Tus covers them;
       - any other layer is saved only when no test-region pixel is at
-        CLIP_TOP_DN and its brightest test-region pixel is at or above
-        NOISE_FLOOR_DN (so it has signal worth keeping).
+        clip_top_dn and its brightest test-region pixel is at or above
+        noise_floor_dn (so it has signal worth keeping).
 
     Args:
         color: LED color name.
         stats: measure()'s result for the frame.
+        s:     The settings.
 
     Returns:
         (kept layer names, {layer: why}), why one of 'analysis channel',
@@ -556,11 +737,11 @@ def keep_layers(color: str, stats: dict) -> "tuple[list[str], dict]":
     """
     kept, why = [], {}
     for ch, st in stats.items():
-        if f"{color}.{ch}" in ANALYSIS_CHANNELS:
+        if f"{color}.{ch}" in s.analysis_channels:
             why[ch] = "analysis channel"
         elif st.n_clip_top > 0:
             why[ch] = "clipped"
-        elif st.max_dn < NOISE_FLOOR_DN:
+        elif st.max_dn < s.noise_floor_dn:
             why[ch] = "below floor"
         else:
             why[ch] = "unclipped"
@@ -570,20 +751,24 @@ def keep_layers(color: str, stats: dict) -> "tuple[list[str], dict]":
 
 
 def coverage(tus_layers: dict, bus_layers: "dict | None",
-             region: TestRegion, decision) -> "dict[str, dict]":
+             region: TestRegion, decision,
+             s: RuleSettings = DEFAULTS) -> "dict[str, dict]":
     """
     Check every test-region pixel is usable at Tus or at Bus.
 
-    A pixel is usable at the top when it is below CLIP_TOP_DN at Tus; at the
-    bottom when it is at or above NOISE_FLOOR_DN at Tus, or at Bus and below
-    CLIP_TOP_DN there.  The bottom check skips the edge pixels the floor
+    A pixel is usable at the top when it is below clip_top_dn at Tus; at the
+    bottom when it is at or above noise_floor_dn at Tus, or at Bus and below
+    clip_top_dn there.  The bottom check skips the edge pixels the floor
     test leaves out at Tus (edge_left_out).
 
     Args:
         tus_layers: {layer: array} of the accepted Tus frame, raw DN.
         bus_layers: The same for the Bus frame, or None if none was taken.
         region:     The test region.
-        decision:   The layers to check (the decision layers).
+        decision:   The layers to check.  The capture passes the decision
+                    layers it stores at Tus: a layer that is not stored
+                    (red.B under a red LED, always dark) is not checked.
+        s:          The settings.
 
     Returns:
         {layer: {"n_pixels", "n_clip_top", "n_below_floor_both"}}: pixels
@@ -596,12 +781,12 @@ def coverage(tus_layers: dict, bus_layers: "dict | None",
         if ch not in tus_layers:
             continue
         t = np.asarray(tus_layers[ch])[every]
-        skipped = edge_left_out(tus_layers[ch], region)[every]
-        low = (t < NOISE_FLOOR_DN) & ~skipped
+        skipped = edge_left_out(tus_layers[ch], region, s)[every]
+        low = (t < s.noise_floor_dn) & ~skipped
         if bus_layers is not None and ch in bus_layers:
             b = np.asarray(bus_layers[ch])[every]
-            low &= ~((b >= NOISE_FLOOR_DN) & (b < CLIP_TOP_DN))
+            low &= ~((b >= s.noise_floor_dn) & (b < s.clip_top_dn))
         out[ch] = {"n_pixels": int(t.size),
-                   "n_clip_top": int((t >= CLIP_TOP_DN).sum()),
+                   "n_clip_top": int((t >= s.clip_top_dn).sum()),
                    "n_below_floor_both": int(low.sum())}
     return out

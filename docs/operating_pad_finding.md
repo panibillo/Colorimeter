@@ -1,4 +1,4 @@
-# Operating the instrument with pad finding and strip exposures (detour stages 1 and 3)
+# Operating the instrument with pad finding and strip exposures (detour stages 1, 3 and 4a)
 
 Written 2026-11-14, for the code in the commit "Detour stage 1: find the pad
 on the Pi". This file grows with the detour; section 6 covers stage 3, where
@@ -144,16 +144,43 @@ with the service stopped). For a sample's archive, each LED's
 `led_metadata` holds a `strip_rule` record with every try and every stored
 frame's statistics.
 
-Settings are still constants at the top of `src/exposure_rule.py` (three
-frames at Tus, one Bus frame) until stage 4 moves them into the config table.
-To go back to the old rule, set `CaptureConfig.exposure_rule` to "group" in
-code; there is no menu setting for it yet.
+### Settings (stage 4a, 2026-11-14)
 
-## 7. Coming next (stage 4, not built yet)
+Every number of the rule is a row in the config table (Menu → Config), read
+at the start of each run, before the camera starts. `src/exposure_rule.py`
+explains each value and where it came from.
 
-- The settings above become config rows: `protocol.multiple_exposure_count`
-  (3 for the trial yellow/brown strips, 1 in routine use) and
-  `protocol.bus_exposure_count` (1 while studying the exposure rule, N for
-  the yellow/brown trials), and the limits and re-aim factors.
+| Row | Factory value | What it does |
+|---|---|---|
+| `protocol.multiple_exposure_count` | 1 | frames kept per LED at Tus; **set it to 3 for the trial yellow/brown strips** |
+| `protocol.bus_exposure_count` | 1 | frames kept per LED at Bus, when one is needed; N for the yellow/brown trials |
+| `protocol.analysis_channels` | violet.B, royal_blue.B, cyan.B, green.Gb, green.Gr, green.B, photo_red.R | the channels that decide Tus and can call for Bus |
+| `capture.exposure_rule` | strip | "group" goes back to the stored exposure group (the rule before 2026-11-14) |
+| `capture.clip_top_dn` / `clip_bottom_dn` / `noise_floor_dn` | 1023 / 65 / 164 | the raw-DN limits |
+| `capture.top_target_fraction` / `top_floor_fraction` | 0.85 / 0.80 | where a re-aim puts the brightest pixel; how bright it must be to accept |
+| `capture.clip_step_factor` | 0.7 | the step after a clipped frame |
+| `capture.max_exposure_tries` | 4 | tries to find Tus |
+| `capture.exposure_cap_us` | 200000 | the longest exposure_us the rule may ask for |
+| `capture.bus_margin` | 1.1 | how far past the floor Bus aims |
+| `capture.edge_darkening_factor` | 5.0 | the edge rule of the floor test |
+| `capture.padfind_led` / `padfind_exposure_us` | photo_red / 10000 | the pad-finding frame |
+| `capture.padfind_offset_pre` / `_post` | 0.10,0.44,0.33,0.33 / 0.13,0.35,0.11,0.11 | the photo_red offsets (left, right, top, bottom; layer px) |
+
+- A value that makes no sense with the others (say a noise floor above
+  1023) is shown as a warning on the start-up screen ("Exposure rule"),
+  and a run with it stops at once, before the camera starts, with the row
+  named.
+- "Restore defaults" puts the factory values back, so after one the frame
+  count is 1 again.
+- `capture.layer_keep_min_dn` and `layer_keep_max_dn` are not used by the
+  strip rule. They stay for the group rule, the white photo and a start-up
+  check.
+- Menu → Advanced → Capture Suite always uses the group rule.
+
+## 7. Coming next (stage 4b and 4c, not built yet)
+
 - Each frame will be logged in a new `exposure_log` table.
-- Each LED's last accepted Tus becomes its seed for the next pre-image.
+- Always read seed exposures from the table.  Keep the table updated when 
+  a seed exposure fails and is corrected on a pre-image. 
+- We may keep a Bus seed for post images that will be the shortest acceptable
+  exposure on the darkest expected pad.

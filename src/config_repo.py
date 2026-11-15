@@ -90,6 +90,11 @@ Public surface
     capture_preimage_enabled() / capture_preimage_led_order()
     capture_prefetch_budget_s()
     capture_layer_keep_min_dn() / capture_layer_keep_max_dn()
+    capture_exposure_rule() and the strip rule's rows: capture_clip_top_dn(),
+        ... capture_edge_darkening_factor(), protocol_multiple_exposure_count(),
+        protocol_bus_exposure_count(), protocol_analysis_channels()
+    capture_padfind_led() / capture_padfind_exposure_us()
+    capture_padfind_offset(section)
     calibration_window_low_dn() / calibration_window_high_dn()
     calibration_window_low_pctl() / calibration_window_high_pctl()
     calibration_max_search_iter() / calibration_max_exposure_us()
@@ -835,6 +840,10 @@ def capture_layer_keep_min_dn() -> int:
     layermodel_repo.keep_channels().  The seeded 96 DN is a tenth of the
     sensor's 959 DN usable range (1023 minus a 64 DN black level), matching the
     threshold the offline flat-field analysis calls under-exposed.
+
+    Used by the group rule and the white photo only (and a start-up check);
+    the strip rule chooses its layers from the frame itself
+    (exposure_rule.keep_layers), so it ignores this.
     """
     return int(get("capture", "layer_keep_min_dn"))
 
@@ -957,6 +966,145 @@ def capture_preimage_led_order() -> list:
     """
     raw = str(get("capture", "preimage_led_order"))
     return [c.strip() for c in raw.split(",") if c.strip()]
+
+
+# ── The strip exposure rule (2026-11-14) ──────────────────────────────────────
+# How a pre-image or a measurement sets each LED's exposure_us from the strip
+# itself.  src/exposure_rule.py explains every value and its source, under the
+# constant of the same name (those constants are the factory values seeded by
+# config_defaults.sql); exposure_rule.RuleSettings.from_config() reads the
+# lot once per sweep and checks they make sense together.  The limits are raw
+# DN, the dark level (64) included.
+
+def capture_exposure_rule() -> str:
+    """
+    How a pre-image and a measurement set exposure_us: 'strip' or 'group'.
+
+    'strip' (seeded) re-aims each LED on the strip itself; 'group' uses the
+    stored exposure group, as every run did before 2026-11-14.  The Capture
+    Suite and the exposure calibration ignore it (they always use the group).
+
+    Raises:
+        ValueError: the stored value is neither.
+    """
+    rule = str(get("capture", "exposure_rule")).strip().lower()
+    if rule not in ("strip", "group"):
+        raise ValueError(f"capture.exposure_rule must be 'strip' or 'group', "
+                         f"got {rule!r}")
+    return rule
+
+
+def capture_clip_top_dn() -> int:
+    """Raw DN at or above which a pixel is clipped at the top (1023)."""
+    return int(get("capture", "clip_top_dn"))
+
+
+def capture_clip_bottom_dn() -> int:
+    """Raw DN at or below which a pixel is clipped at the bottom (65)."""
+    return int(get("capture", "clip_bottom_dn"))
+
+
+def capture_noise_floor_dn() -> int:
+    """Raw DN below which an analysis-channel pixel calls for Bus (164)."""
+    return int(get("capture", "noise_floor_dn"))
+
+
+def capture_top_target_fraction() -> float:
+    """Fraction of clip_top_dn a re-aimed frame's brightest pixel aims at."""
+    return float(get("capture", "top_target_fraction"))
+
+
+def capture_top_floor_fraction() -> float:
+    """Fraction of clip_top_dn the brightest pixel must reach to accept."""
+    return float(get("capture", "top_floor_fraction"))
+
+
+def capture_clip_step_factor() -> float:
+    """Factor exposure_us is multiplied by after a clipped frame (0.7)."""
+    return float(get("capture", "clip_step_factor"))
+
+
+def capture_max_exposure_tries() -> int:
+    """Frames taken to find one LED's Tus, the first included (4)."""
+    return int(get("capture", "max_exposure_tries"))
+
+
+def capture_exposure_cap_us() -> int:
+    """Longest exposure_us the strip rule may ask for, in µs (200000)."""
+    return int(get("capture", "exposure_cap_us"))
+
+
+def capture_bus_margin() -> float:
+    """Factor Bus is lengthened by past the floor-exact value (1.1)."""
+    return float(get("capture", "bus_margin"))
+
+
+def capture_edge_darkening_factor() -> float:
+    """The floor test's edge rule: x band 1's darkening (5.0)."""
+    return float(get("capture", "edge_darkening_factor"))
+
+
+def protocol_multiple_exposure_count() -> int:
+    """Frames kept per LED at Tus (seeded 1; 3 for the trial strips)."""
+    return int(get("protocol", "multiple_exposure_count"))
+
+
+def protocol_bus_exposure_count() -> int:
+    """Frames kept per LED at Bus, when one is needed (seeded 1)."""
+    return int(get("protocol", "bus_exposure_count"))
+
+
+def protocol_analysis_channels() -> tuple:
+    """
+    The 'LED.layer' pairs the yellow/brown analysis reads, as a tuple.
+
+    Stored comma-separated, e.g. 'violet.B,royal_blue.B,...,photo_red.R'.
+    They decide each LED's Tus, and only they can call for a Bus frame.
+    """
+    raw = str(get("protocol", "analysis_channels"))
+    return tuple(c.strip() for c in raw.split(",") if c.strip())
+
+
+def capture_padfind_led() -> str:
+    """The LED lighting the one frame the pad is located on (photo_red)."""
+    return str(get("capture", "padfind_led")).strip()
+
+
+def capture_padfind_exposure_us() -> int:
+    """That frame's exposure_us, in µs (10000)."""
+    return int(get("capture", "padfind_exposure_us"))
+
+
+def _four_floats(role: str, name: str) -> tuple:
+    """A 'a,b,c,d' row read as four floats; ValueError naming it if not."""
+    raw = str(get(role, name))
+    try:
+        vals = tuple(float(v) for v in raw.split(","))
+    except ValueError:
+        vals = ()
+    if len(vals) != 4:
+        raise ValueError(f"{role}.{name} must be four numbers "
+                         f"'left,right,top,bottom', got {raw!r}")
+    return vals
+
+
+def capture_padfind_offset(section: str) -> tuple:
+    """
+    The pad-finding offset (left, right, top, bottom), layer px, + = right
+    or down: added to a photo_red-only fit so it lands where the desktop's
+    all-channel fit would (padfind.OFFSET_PRE / OFFSET_POST explain the
+    factory values).
+
+    Args:
+        section: 'pre' (capture.padfind_offset_pre) or 'post'
+                 (capture.padfind_offset_post).
+
+    Raises:
+        ValueError: `section` is neither, or the row is not four numbers.
+    """
+    if section not in ("pre", "post"):
+        raise ValueError(f"section must be 'pre' or 'post', got {section!r}")
+    return _four_floats("capture", f"padfind_offset_{section}")
 
 
 def capture_photo_wb_gains() -> tuple:

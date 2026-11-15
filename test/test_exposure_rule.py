@@ -209,5 +209,64 @@ class TestEdgeRule(unittest.TestCase):
         c = R.coverage({"R": self.raw}, None, self.region(), ["R"])["R"]
         self.assertEqual(c["n_below_floor_both"], 0)
 
+class TestRuleSettings(unittest.TestCase):
+    """The settings object every function takes (stage 4a)."""
+
+    def test_defaults_are_the_module_constants(self):
+        d = R.RuleSettings()
+        self.assertEqual(d, R.DEFAULTS)
+        self.assertEqual((d.clip_top_dn, d.clip_bottom_dn, d.noise_floor_dn),
+                         (R.CLIP_TOP_DN, R.CLIP_BOTTOM_DN, R.NOISE_FLOOR_DN))
+        self.assertEqual(d.multiple_exposure_count, 1)
+        self.assertEqual(d.analysis_channels, R.ANALYSIS_CHANNELS)
+
+    def test_channels_may_be_given_as_text(self):
+        s = R.RuleSettings(analysis_channels=" violet.B, photo_red.R ,")
+        self.assertEqual(s.analysis_channels, ("violet.B", "photo_red.R"))
+
+    def test_nonsense_is_refused_naming_the_row(self):
+        for kwargs, row in (
+                ({"noise_floor_dn": 1100}, "capture.noise_floor_dn"),
+                ({"top_floor_fraction": 0.9}, "capture.top_floor_fraction"),
+                ({"clip_step_factor": 1.2}, "capture.clip_step_factor"),
+                ({"multiple_exposure_count": 0},
+                 "protocol.multiple_exposure_count"),
+                ({"bus_margin": 0.5}, "capture.bus_margin"),
+                ({"analysis_channels": "violet.Q"},
+                 "protocol.analysis_channels")):
+            with self.subTest(**kwargs), self.assertRaises(ValueError) as cm:
+                R.RuleSettings(**kwargs)
+            self.assertIn(row, str(cm.exception))
+
+    def test_to_dict_is_plain(self):
+        d = R.DEFAULTS.to_dict()
+        self.assertIsInstance(d["analysis_channels"], list)
+        self.assertEqual(d["noise_floor_dn"], 164)
+
+    def test_a_raised_floor_counts_more_pixels_below_it(self):
+        a = layer(500, at={(3, 3): 300})
+        st = R.measure({"R": a}, region())["R"]
+        self.assertEqual(st.n_below_floor, 0)
+        high = R.RuleSettings(noise_floor_dn=564)
+        st = R.measure({"R": a}, region(), high)["R"]
+        self.assertEqual(st.n_below_floor, 44)            # every pixel
+
+    def test_judge_follows_its_settings(self):
+        st = R.measure({"R": layer(300, at={(3, 3): 600})}, region())
+        self.assertEqual(R.judge(st, ["R"], 10_000)[0], R.DIM)
+        easy = R.RuleSettings(top_floor_fraction=0.5, top_target_fraction=0.6)
+        self.assertEqual(R.judge(st, ["R"], 10_000, easy)[0], R.ACCEPT)
+        capped = R.RuleSettings(exposure_cap_us=12_000)
+        self.assertEqual(R.judge(st, ["R"], 10_000, capped)[1], 12_000)
+
+    def test_the_analysis_channels_setting_decides_the_layers(self):
+        names = ["R", "Gr", "Gb", "B"]
+        s = R.RuleSettings(analysis_channels=("amber.R",))
+        self.assertEqual(R.decision_layers("amber", names, s), ["R"])
+        self.assertEqual(R.decision_layers("photo_red", names, s), names)
+        st = R.measure({"R": layer(400, at={(5, 5): 100})}, region())
+        self.assertIsNotNone(R.bus_exposure(st, "amber", 8760, s)[0])
+
+
 if __name__ == "__main__":
     unittest.main()

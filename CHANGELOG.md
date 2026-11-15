@@ -111,6 +111,25 @@ sqlite3 src/colorimeter.sqlite \
     each layer was kept, Bus, coverage, the test region); its group has
     `tus_us`, `tus_status` and `bus_us`; each frame's group has `role`
     ('tus' or 'bus') and `applied_us`. Labels still run e0, e1, ....
+- **The strip rule's settings are config rows** (detour stage 4a), read once
+  per run, before the camera starts (`exposure_rule.RuleSettings`):
+  - `protocol.multiple_exposure_count` (factory value 1; 3 for the trial
+    strips), `protocol.bus_exposure_count` (1) and
+    `protocol.analysis_channels`;
+  - `capture.exposure_rule` ("strip" or "group"),
+    `clip_top_dn` / `clip_bottom_dn` / `noise_floor_dn` (1023 / 65 / 164),
+    `top_target_fraction` / `top_floor_fraction` (0.85 / 0.80),
+    `clip_step_factor` (0.7), `max_exposure_tries` (4), `exposure_cap_us`
+    (200000), `bus_margin` (1.1) and `edge_darkening_factor` (5.0);
+  - for pad finding, `capture.padfind_led` (photo_red),
+    `padfind_exposure_us` (10000), and `padfind_offset_pre` / `_post`.
+
+  The factory values are the constants in `src/exposure_rule.py` and
+  `src/padfind.py`, and a test keeps them equal. They are added to an
+  existing database at start-up. A value that doesn't fit with the others
+  stops a run before the camera starts, naming the row, and a new start-up
+  check, "Exposure rule", warns about it. Each LED's `strip_rule` record
+  holds the settings it was taken with (`settings`).
 
 ### Removed
 
@@ -120,6 +139,13 @@ sqlite3 src/colorimeter.sqlite \
 
 ### Changed
 
+- The strip rule now keeps one frame per LED at Tus unless
+  `protocol.multiple_exposure_count` says otherwise. It kept three before
+  stage 4a.
+- The strip rule's coverage check (and its "below the floor at Tus and Bus"
+  warning) counts only the layers stored at Tus. Layers that are always
+  dark and never stored, such as red.B under a red LED, made the warning
+  appear for every red-side LED.
 - The run screens take their colors from one table, `STYLE_TABLE` in
   `src/palette.py`. A look can be changed there without touching any screen's
   code. `src/pool.py` explains how a widget gets its colors.

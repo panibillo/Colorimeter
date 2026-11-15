@@ -228,14 +228,44 @@ tested. The full plan is `~/.claude/plans/velvety-roaming-pascal.md`.
   saved-layer rule above, for pre-images and post-images, keeping
   `multiple_exposure_count` frames at Tus. Write the archive after the LED is
   off, so file writing is not LED on-time.
-- **Stage 4. Database.** Seed rows in `exposure` (new columns `role` and
-  `samp_no`); the new `exposure_log` table (one row per frame per layer,
-  retries and the pad-finding frame included: sample, archive, pre/post,
-  purpose, attempt, accepted, stored, LED, Bayer layer, exposure_us
-  requested and applied, dark, min, max and mean raw DN, where the max sits,
-  pixel count, clipped at top, clipped at bottom, below the floor); and the
-  config rows above, plus `protocol.analysis_channels`, the re-aim settings,
-  the pad-finding LED and exposure_us, and the two photo_red offsets.
+  **Done 2026-11-14** (Bill approved; with the edge rule of the floor test).
+  **C1048 test on rpizero3** (2026-11-14, all 10 LEDs,
+  `captures_exposure_test/20261114_1655.h5`): pad found pre and post (tilt
+  0.01 degrees, same height as the desktop fit). The blue-side Tus did not
+  rise on the brown pad. The top 2 rows and bottom row of the fitted pad
+  read white (violet.B ~830 raw against 230-360 inside), and the desktop fit
+  of C1047/C1048 shows the same rows: they are the backing strip (Bill).
+  They set Tus on a stained pad. Left as is for now; the pad's end rows are
+  to be dealt with in the pad-edge steps as planned (Bill, 2026-11-14).
+  Bus ratios on C1048: 1.2-1.6 x Tus for violet, royal_blue and cyan; about
+  7 x for green.B.
+- **Stage 4. Database**, in three steps:
+  - **4a. Config rows. Done 2026-11-14.** Every setting of the strip rule
+    and of pad finding is a config row, read once per run before the camera
+    starts (`exposure_rule.RuleSettings.from_config()`): the rows in
+    `docs/operating_pad_finding.md` section 6, including
+    `capture.exposure_rule`. Factory values = the module constants (a test
+    keeps them equal); `multiple_exposure_count` is 1, and rpizero3 is set
+    to 3 for the trials as an operator change. Bad values stop a run
+    before the camera starts, and a start-up check warns. The coverage
+    check counts only layers stored at Tus. `capture.layer_keep_min_dn` /
+    `max_dn` stay active: the group rule, the white photo and a start-up
+    check still read them.
+  - **4b. `exposure_log` table** (one row per frame per layer, retries and
+    the pad-finding frame included: sample, archive, pre/post, purpose,
+    attempt, label, accepted, stored, LED, Bayer layer, exposure_us
+    requested and applied, dark, min, max and mean raw DN, where the max
+    sits, the floor test's darkest pixel, pixel count, clipped at top,
+    clipped at bottom, below the floor, edge pixels left out). Written after
+    the LED is off; a failed write never costs a capture.
+  - **4c. Seed rows in `exposure`** (new columns `role` and `samp_no`).
+    "Seed" = the exposure_us of an LED's first try. A measurement already
+    starts at its own pre-image Tus. Seed rows are read for every
+    pre-image and updated only from pre-images, when the seed was re-aimed
+    (Bill, 2026-11-14). Red, red_orange, amber and blue are not in the
+    pre-image, so they get fixed seeds from the C1048 run (19301, 22999,
+    44728 and 7351 µs) that never update (Bill, 2026-11-14). Whether to
+    keep a Bus seed for stained pads is to be re-asked after more data.
 
 Bill reviews after each stage. Nothing is committed without his go-ahead.
 

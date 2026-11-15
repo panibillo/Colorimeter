@@ -718,12 +718,14 @@ class CalibratedExposures(RunnerTestCase):
         db.DBNAME = str(tmpdb)
         db.write_one("DELETE FROM exposure")
         db_bootstrap.ensure(tmpdb)       # a live copy may predate new columns
+        config_repo.load(reload=True)    # settings from this copy, not the live
         exposure_repo.write_all_groups("amber", AMBER_GROUPS, preimage_group="1")
         exposure_repo.write_all_groups("blue",  BLUE_GROUPS,  preimage_group="1")
 
     def tearDown(self):
         self._db.DBNAME = self._saved_dbname
         self._dbdir.cleanup()
+        config_repo.load(reload=True)
         super().tearDown()
 
     def make_runner(self, **kwargs):
@@ -1551,7 +1553,10 @@ class TestPadFinding(CalibratedExposures):
         self.assertEqual(runner.pad_problem, "")
         np.testing.assert_allclose(_edges(runner.pad_before), self.cam.truth,
                                    atol=0.15)
-        self.assertEqual(runner.pad.offset, padfind.OFFSET_PRE)
+        # The offset is the config row's, whose factory value is OFFSET_PRE.
+        np.testing.assert_allclose(runner.pad.offset, padfind.OFFSET_PRE)
+        np.testing.assert_allclose(runner.pad.offset,
+                                   config_repo.capture_padfind_offset("pre"))
         with self.archive(runner) as f:
             g = f["/pre/pad"]
             self.assertEqual(g.attrs["led"], "photo_red")
@@ -1576,7 +1581,7 @@ class TestPadFinding(CalibratedExposures):
         # was taken at the pad-finding exposure_us.
         lit = [fr for fr in self.cam.frames if PHOTO_RED_CH in fr[1]]
         self.assertTrue(lit)
-        self.assertTrue(all(fr[0] == capture_runner.PADFIND_EXPOSURE_US
+        self.assertTrue(all(fr[0] == config_repo.capture_padfind_exposure_us()
                             for fr in lit))
 
     def test_led_is_off_before_the_frame_is_converted(self):
@@ -1613,7 +1618,7 @@ class TestPadFinding(CalibratedExposures):
         self.assertEqual(post.pad_before.side_rule, "guided")
         np.testing.assert_allclose(_edges(post.pad_before), self.cam.truth,
                                    atol=0.15)
-        self.assertEqual(post.pad.offset, padfind.OFFSET_POST)
+        np.testing.assert_allclose(post.pad.offset, padfind.OFFSET_POST)
         with self.archive(post) as f:
             self.assertEqual(int(f["/pad"].attrs["guided_by_pre"]), 1)
             self.assertIn("/pre/pad/before_offset", f)
@@ -1679,8 +1684,9 @@ class TestStripRule(CalibratedExposures):
     """
     Each LED's exposure_us is re-aimed on the test region (pad + gray
     chips) until nothing there clips and the brightest pixel is at least
-    80 % of 1023; then MULTIPLE_EXPOSURE_COUNT frames at that Tus, and Bus
-    frames only when an analysis channel falls below the noise floor.
+    80 % of 1023; then protocol.multiple_exposure_count frames at that
+    Tus, and Bus frames only when an analysis channel falls below the noise
+    floor.  Every setting is read from the test database's config table.
 
     With LinearCam the brightest test-region pixel is about
     64 + exposure_us x 0.0175 raw DN, so amber's group-1 seed of 30000 us
@@ -1731,7 +1737,8 @@ class TestStripRule(CalibratedExposures):
         runner = self.make_runner(mode="normal")
         progress = self.run_to_completion(runner)
         rec = self.led_record(runner)
-        self.assertEqual(len(rec["attempts"]), exposure_rule.MAX_EXPOSURE_TRIES)
+        self.assertEqual(len(rec["attempts"]),
+                         config_repo.capture_max_exposure_tries())
         self.assertEqual(rec["tus_status"], "clipped")
         self.assertTrue(any("STILL CLIPPED" in p.message for p in progress))
         with self.archive(runner) as f:
@@ -1741,7 +1748,7 @@ class TestStripRule(CalibratedExposures):
     def test_n_frames_at_tus_are_stored_with_their_role(self):
         runner = self.make_runner(mode="normal")
         self.run_to_completion(runner)
-        n = exposure_rule.MULTIPLE_EXPOSURE_COUNT
+        n = runner._rule.multiple_exposure_count
         rec = self.led_record(runner)
         with self.archive(runner) as f:
             labels = sorted(f["/leds/amber/lit"])
@@ -1763,7 +1770,7 @@ class TestStripRule(CalibratedExposures):
         self.assertEqual(len(rec["attempts"]), 2)        # one rejected
         with self.archive(runner) as f:
             self.assertEqual(len(f["/leds/amber/lit"]),
-                             exposure_rule.MULTIPLE_EXPOSURE_COUNT)
+                             runner._rule.multiple_exposure_count)
 
     def test_led_is_off_before_frames_are_written(self):
         written = []
@@ -1793,9 +1800,9 @@ class TestStripRule(CalibratedExposures):
         self.assertGreater(rec["bus_us"], rec["tus_us"])
         self.assertEqual(rec["bus_layer"], "R")
         self.assertEqual(rec["frames_at_bus"],
-                         exposure_rule.BUS_EXPOSURE_COUNT)
+                         runner._rule.bus_exposure_count)
         self.assertEqual(rec["coverage"]["R"]["n_below_floor_both"], 0)
-        n = exposure_rule.MULTIPLE_EXPOSURE_COUNT
+        n = runner._rule.multiple_exposure_count
         with self.archive(runner) as f:
             self.assertEqual(f[f"/leds/photo_red/lit/e{n}"].attrs["role"],
                              "bus")
@@ -1818,7 +1825,7 @@ class TestStripRule(CalibratedExposures):
         runner = self.make_runner(mode="normal", led_colors=["photo_red"])
         self.run_to_completion(runner)
         rec = self.led_record(runner, "photo_red")
-        bus = f"e{exposure_rule.MULTIPLE_EXPOSURE_COUNT}"
+        bus = f"e{runner._rule.multiple_exposure_count}"
         self.assertEqual(rec["layers_why"][bus]["R"], "analysis channel")
         self.assertEqual(rec["layers_why"][bus]["Gb"], "clipped")
         self.assertGreater(rec["frame_stats"][bus]["R"]["n_clip_top"], 0)
@@ -1872,6 +1879,77 @@ class TestStripRule(CalibratedExposures):
         self.assertEqual(runner.pad_problem, "")
         rec = self.led_record(runner, section="/pre")
         self.assertEqual(rec["test_region"]["pad_source"], "fit")
+
+    # ── Settings from the config table (stage 4a) ─────────────────────
+
+    def _dark_pad(self):
+        """Darken the sample ROI to 0.2 of its gain: photo_red.R needs Bus."""
+        s = _sample_rect()
+        dim = np.ones((FRAME_H, FRAME_W))
+        dim[s.y:s.y + s.h, s.x:s.x + s.w] = 0.2
+        self.cam.dim = dim
+
+    def test_frame_counts_come_from_the_config_table(self):
+        config_repo.save("protocol", "multiple_exposure_count", 3)
+        config_repo.save("protocol", "bus_exposure_count", 2)
+        self._dark_pad()
+        runner = self.make_runner(mode="normal", led_colors=["photo_red"])
+        self.run_to_completion(runner)
+        rec = self.led_record(runner, "photo_red")
+        self.assertEqual((rec["frames_at_tus"], rec["frames_at_bus"]), (3, 2))
+        self.assertEqual(rec["settings"]["multiple_exposure_count"], 3)
+        with self.archive(runner) as f:
+            roles = [f[f"/leds/photo_red/lit/e{i}"].attrs["role"]
+                     for i in range(5)]
+            self.assertNotIn("/leds/photo_red/lit/e5", f)
+        self.assertEqual(roles, ["tus"] * 3 + ["bus"] * 2)
+
+    def test_a_changed_limit_changes_the_rule(self):
+        """Accepting at half of 1023: amber's 30000 us seed (~590) passes."""
+        config_repo.save("capture", "top_floor_fraction", 0.5)
+        config_repo.save("capture", "top_target_fraction", 0.6)
+        runner = self.make_runner(mode="normal")
+        self.run_to_completion(runner)
+        rec = self.led_record(runner)
+        self.assertEqual([a["verdict"] for a in rec["attempts"]], ["accept"])
+        self.assertEqual(rec["settings"]["top_floor_fraction"], 0.5)
+
+    def test_a_setting_that_makes_no_sense_stops_the_run_at_once(self):
+        """Before the camera starts or an archive is opened."""
+        config_repo.save("capture", "noise_floor_dn", 2000)
+        runner = self.make_runner(mode="normal")
+        with self.assertRaises(ValueError) as cm:
+            self.run_to_completion(runner)
+        self.assertIn("capture.noise_floor_dn", str(cm.exception))
+        self.assertEqual(self.cam.frames, [])
+        self.assertFalse(list(self.out_root.rglob("*.h5")))
+
+    def test_the_config_row_chooses_the_rule(self):
+        self.assertEqual(capture_runner.CaptureConfig().exposure_rule,
+                         capture_runner.RULE_STRIP)
+        config_repo.save("capture", "exposure_rule", "group")
+        self.assertEqual(capture_runner.CaptureConfig().exposure_rule,
+                         capture_runner.RULE_GROUP)
+
+    def test_layers_that_are_not_stored_are_not_counted_as_uncovered(self):
+        """
+        Amber's B layer is far too dark to store (as red.B is on the Pi):
+        it is judged on, but neither stored nor counted by the coverage
+        check, so no warning is logged for it.
+        """
+        r, c = divmod(self.cam.bayer_pattern.index("B"), 2)
+        dim = np.ones((FRAME_H, FRAME_W))
+        dim[r::2, c::2] = 0.01
+        self.cam.dim = dim
+        runner = self.make_runner(mode="normal")
+        with self.assertLogs("capture_runner", level="INFO") as logs:
+            self.run_to_completion(runner)
+        rec = self.led_record(runner)
+        self.assertIn("B", rec["decision_layers"])
+        self.assertEqual(rec["layers_why"]["e0"]["B"], "below floor")
+        self.assertNotIn("B", rec["coverage"])
+        self.assertIn("R", rec["coverage"])
+        self.assertFalse([m for m in logs.output if "below the floor" in m])
 
     def test_the_group_rule_is_still_there(self):
         runner = self.make_runner(mode="normal", exposure_group="3",

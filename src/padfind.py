@@ -71,7 +71,7 @@ Public surface
     PadFindError                   raised when the pad cannot be found
     reflectance_field(layer, dark_dn, gray1, gray2) -> ndarray
     fit_pad(field, sample, prior=None) -> PadFit     no offset applied
-    find_pad(layer, dark_dn, rects, section, prior=None)
+    find_pad(layer, dark_dn, rects, section, prior=None, offset=None)
         -> (fit_before_offset, fit_after_offset)
     OFFSET_PRE, OFFSET_POST        the photo_red offsets (layer px)
 """
@@ -176,8 +176,9 @@ FLOOR_ROWS = 4
 #:                only the top and bottom terms (chain_samples
 #:                POST_OFFSET_STEADY); the Pi applies all four, because the
 #:                side terms are as steady as the others (Bill, 2026-11-14).
-#: To be moved to the config table (work plan, Stage 4) so they can be
-#: re-measured on the final device.
+#: These are the factory values of the config rows capture.padfind_offset_pre
+#: and capture.padfind_offset_post, which the capture uses, so they can be
+#: re-measured on the final device (work plan, stage 4a).
 OFFSET_PRE = (0.10, 0.44, 0.33, 0.33)
 OFFSET_POST = (0.10 + 0.03, 0.44 - 0.09, 0.33 - 0.22, 0.33 - 0.22)
 
@@ -786,7 +787,8 @@ def fit_pad(field: np.ndarray, sample: Rect,
 
 
 def find_pad(layer: np.ndarray, dark_dn: float, rects: Dict[str, Rect],
-             section: str, prior: Optional[PadFit] = None
+             section: str, prior: Optional[PadFit] = None,
+             offset: Optional[Tuple[float, float, float, float]] = None
              ) -> Tuple[PadFit, PadFit]:
     """
     Find the pad in one photo_red frame: the whole job, steps 1-7 + offset.
@@ -799,6 +801,10 @@ def find_pad(layer: np.ndarray, dark_dn: float, rects: Dict[str, Rect],
         section: SECTION_PRE or SECTION_POST; chooses the offset.
         prior:   For a post-image, the pre-image's fit before its offset
                  (the first item this function returned for the pre-image).
+        offset:  (left, right, top, bottom) shift, layer px, to apply; None
+                 uses OFFSET_PRE or OFFSET_POST for `section`.  The capture
+                 passes the config rows capture.padfind_offset_pre/_post,
+                 whose factory values are those constants.
 
     Returns:
         (before, after): the fit before the offset (keep it: a post-image is
@@ -814,12 +820,11 @@ def find_pad(layer: np.ndarray, dark_dn: float, rects: Dict[str, Rect],
         >>> before, pad = find_pad(R, 64.0, rects, "pre")   # doctest: +SKIP
         >>> pad_pixels = R[pad.mask()]                        # doctest: +SKIP
     """
-    if section == SECTION_PRE:
-        offset = OFFSET_PRE
-    elif section == SECTION_POST:
-        offset = OFFSET_POST
-    else:
+    if section not in (SECTION_PRE, SECTION_POST):
         raise ValueError(f"section must be 'pre' or 'post', got {section!r}")
+    if offset is None:
+        offset = OFFSET_PRE if section == SECTION_PRE else OFFSET_POST
+    offset = tuple(float(v) for v in offset)
     field = reflectance_field(layer, dark_dn, rects["gray1"], rects["gray2"])
     before = fit_pad(field, rects["sample"], prior)
     return before, before.shifted(offset)
