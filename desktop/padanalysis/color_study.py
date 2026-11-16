@@ -31,7 +31,11 @@ THE PARTS (each is a guarded block in `run()`)
         C1049-C1051 (yellow C1051, brown C1050, 4 frames averaged).
     3c-2 `show_scatter`: every pixel on two-channel graphs with the yellow
         and brown lines: is C1049's dot a mix of the two? (2026-11-15)
-    3d  the check with principal components.  Not started.
+    3d  `color_count`: the check with principal components (2026-11-15).
+    3e  `three_colors`: three reference colors, C1049's dot as the third.
+    3f  `color_count_3f`: principal components again on C1052-C1055
+        (2026-11-16), every LED and layer with a pre-image white: how many
+        colors plus brightness.
 
 WORDS AND SYMBOLS
     R           a photo's reflectance at a pixel: the signal divided by
@@ -847,7 +851,7 @@ WHITE_CHANNELS = (("violet", "B"), ("royal_blue", "B"), ("cyan", "B"),
 DOT_SAMPLE, DOT_MIN_A = "C1049", 0.65
 
 
-def frame_noise(f, cell, sec):
+def frame_noise(f, cell, sec, fr=None):
     """
     Camera noise of one channel's frame average, per pixel, in A.
 
@@ -855,9 +859,10 @@ def frame_noise(f, cell, sec):
     inner-pad pixel, the spread (standard deviation) of log10(frame /
     the pixel's mean over the frames); squared, averaged over the pixels,
     square-rooted, then divided by sqrt(number of frames).  NaN if the
-    channel has only one frame.
+    channel has only one frame.  `fr`: that channel's `sr.frame` result,
+    if already read (saves reading it again).
     """
-    fr = sr.frame(f, cell, sec)
+    fr = sr.frame(f, cell, sec) if fr is None else fr
     c = a1.open_sample(f, sec)
     if len(fr["frames"]) < 2:
         return float("nan")
@@ -927,19 +932,23 @@ def pca_data(files, chans, version):
                 sample=np.array(smp), dot=np.concatenate(dot), where=where)
 
 
-def noise_pca(X, sigma, through_zero):
+def noise_pca(X, sigma, through_zero, remove_even=True):
     """
-    Principal components in noise units, with the even darkening removed.
+    Principal components in noise units, with the even darkening removed
+    (or kept, for step 3f's count of colors plus brightness).
 
     Args:
         X: array (pixels, channels), A.
         sigma: array (channels,), camera noise of one pixel's value, A.
         through_zero: True to measure spread from A = 0 (version A), False
             from the average over all pixels (version B).
+        remove_even: True (3d) to take out the even darkening first; False
+            to keep it, so it shows up as one of the directions.
 
     Returns:
         dict:
-          spread  array (channels - 1,): mean squared length of the pixels
+          spread  array (channels - 1,), or (channels,) when the darkening
+                  is kept: mean squared length of the pixels
                   along each direction, noise units squared (1 = noise);
           dirs    array (directions, channels): each direction, in noise
                   units (unit length);
@@ -953,23 +962,26 @@ def noise_pca(X, sigma, through_zero):
     """
     Z = X / sigma                                   # (pixels, channels)
     u = (1 / sigma) / np.linalg.norm(1 / sigma)     # darkening direction
-    Z = Z - np.outer(Z @ u, u)                      # remove darkening
+    if remove_even:
+        Z = Z - np.outer(Z @ u, u)                  # remove darkening
     if not through_zero:
         Z = Z - Z.mean(0)                           # remove the average
     # SVD: Z = U s Vt; rows of Vt are the directions, s^2/pixels the spread
     _, s, Vt = np.linalg.svd(Z, full_matrices=False)
-    k = len(sigma) - 1                              # darkening removed
+    k = len(sigma) - 1 if remove_even else len(sigma)
     dA = Vt[:k] * sigma
     dA = dA / np.abs(dA).max(1, keepdims=True)
     return dict(spread=s[:k] ** 2 / len(Z), dirs=Vt[:k], dirs_A=dA, Z=Z,
                 u=u)
 
 
-def leftover_after(Z, dirs, m):
+def leftover_after(Z, dirs, m, removed=1):
     """Per pixel, the length left after the first m directions, noise
-    units, divided by sqrt(channels left) so noise alone gives about 1."""
+    units, divided by sqrt(channels left) so noise alone gives about 1.
+    `removed`: directions taken out before the analysis (1 = the even
+    darkening, as in 3d; 0 when it was kept)."""
     P = Z - (Z @ dirs[:m].T) @ dirs[:m]
-    return np.sqrt((P ** 2).sum(1) / (Z.shape[1] - 1 - m))
+    return np.sqrt((P ** 2).sum(1) / (Z.shape[1] - removed - m))
 
 
 def white_agreement(files, chans=WHITE_CHANNELS):
@@ -1458,6 +1470,466 @@ ABOUT_3E = {
 }
 
 
+# ── step 3f: how many colors on the strips of 2026-11-16 ───────────────
+#
+# THE QUESTION: how many independent directions of color change stand above
+# camera noise on C1052-C1055?  Bill's hypothesis (2026-11-15/16): yellow
+# (a bonding site holding 1 As atom), brown, and a third, darker,
+# orange-like color (2 atoms), plus overall brightness -- so 4 directions
+# with the even darkening kept, 3 with it removed.  It decides whether the
+# unmixing matrix needs 2 or 3 reference colors, and which channels the
+# instrument has to capture.  It ends when what is left after keeping k
+# directions is about 1 noise unit everywhere, C1054's orange dots included.
+#
+# WHY IT WORKS: a pixel's A in one channel is about the sum over the dyes of
+# (amount of that dye) x (that dye's A in that channel), plus an even
+# darkening (the same A in every channel).  So every pixel's list of A
+# values lies in the space spanned by a few fixed lists, one per dye plus
+# the list of all ones.  The principal components find, one at a time, the
+# direction the pixels spread along most.  Measured in noise units, pure
+# camera noise spreads about 1 along every direction, so the number of
+# directions well above 1 is the number of fixed lists the data needs.
+
+#: The strips of 2026-11-16 (holder H; every LED but white in the
+#: pre-image; all four camera layers saved; 4 repeat photos per LED).
+#: sample -> file.  C1054's capture is in C1054-a.h5: C1054.h5 is an
+#: abandoned first try that holds only photo_red and red in its pre-image.
+FILES_3F = {"C1052": "C1052", "C1053": "C1053", "C1054": "C1054-a",
+            "C1055": "C1055"}
+#: Arsenic in each sample, ug/L (Bill, 2026-11-16; also in the local
+#: samples.manual_read).
+AMOUNT_3F = {"C1052": 12.8, "C1053": 20, "C1054": 40, "C1055": 600}
+#: LEDs with a pre-image (the white LED has none), shortest wavelength first.
+PRE_LEDS = tuple(led for led in ALL_LEDS if led != "white")
+#: Besides the median, the leftover per strip is also reported at this
+#: percentile of its pixels, so a local dot pattern is not hidden.
+LEFT_PCTL = 95
+#: Numbers of kept directions for which the leftover is reported.
+KEEP_M = (1, 2, 3, 4, 5, 6)
+#: Numbers of directions drawn as bars and as maps.
+SHOW_DIRS = 5
+SHOW_SCORES = 4
+
+
+def white_channels_3f(files, leds=PRE_LEDS, layers=LAYERS):
+    """
+    Channels with a usable flat-field model (`analysis_1.models`) and
+    usable (`analysis_1.rung_verdict`) in both the pre-image and the
+    post-image of every file, with repeat photos in both (so their camera
+    noise can be measured).
+
+    Args:
+        files: list of file names.
+        leds, layers: what to try.
+
+    Returns:
+        (keep, dropped): keep, list of (led, layer), LED order of `leds`
+        then layer order; dropped, dict channel name -> list of str, the
+        reasons it was left out.
+    """
+    keep, dropped = [], {}
+    for led in leds:
+        for lay in layers:
+            cell, why = (led, lay), []
+            m = a1.models().get(cell)
+            if m is None or not m.usable:
+                # no flat-field fit: the weak layers, where the LED barely
+                # reaches the layer (calibration p90 15-86 DN); the
+                # gray-chip divisor cannot be built without the fit
+                dropped[a1.cell_name(cell)] = ["no usable flat-field model"]
+                continue
+            for f in files:
+                for sec in ("", a1.PRE):
+                    tag = f"{f} {'pre' if sec else 'post'}"
+                    try:
+                        rung, reason = a1.rung_verdict(f, cell, sec)
+                    except Exception as e:          # e.g. layer not stored
+                        rung, reason = None, f"{type(e).__name__}: {e}"
+                    if rung is None:
+                        why.append(f"{tag}: {reason}")
+                    elif len(a1.repeat_labels(f, cell, rung, sec)) < 2:
+                        why.append(f"{tag}: one photo")
+            if why:
+                dropped[a1.cell_name(cell)] = why
+            else:
+                keep.append(cell)
+    a1.close_all()
+    return keep, dropped
+
+
+def pca_data_3f(files, chans):
+    """
+    Every interior pad pixel's list of A, and each channel's camera noise.
+
+    For each strip and channel the post-image and its own pre-image are
+    read once (`sr.frame`, the 4 repeat photos averaged on the signal);
+    A = -log10(R_post / R_pre lined up onto the post-image), exactly as
+    `pair_A`; and the noise of both averages is measured from the same
+    reads (`frame_noise`).
+
+    Args:
+        files: dict sample -> file.
+        chans: list of (led, layer).
+
+    Returns:
+        dict:
+          X       array (pixels, channels), A, bigger = darker;
+          sigma   array (channels,), camera noise of one pixel's A: post
+                  and pre-image noise combined, sqrt(post^2 + pre^2), the
+                  median over the strips, A;
+          sigma_by_strip  array (strips, channels), the same per strip, A;
+          sample  array (pixels,) of str;
+          where   list of (sample, rows, cols), for drawing maps;
+          photos  dict sample -> channel name -> [post rung, post photos,
+                  pre rung, pre photos].
+    """
+    X, smp, where, sig, photos = [], [], [], [], {}
+    for s, f in files.items():
+        pre = cs.pre_source(f)
+        A, noise, info = [], [], {}
+        for cell in chans:
+            fpost = sr.frame(f, cell, "")
+            fpre = sr.frame(pre, cell, a1.PRE)
+            Rpost = np.array(fpost["R"], float)
+            Rpre = np.array(fpre["R"], float)
+            on = ws._carry(pre, a1.PRE, f, "", Rpre, Rpost.shape)
+            with np.errstate(invalid="ignore", divide="ignore"):
+                A.append(-np.log10(Rpost / on))
+            noise.append(np.hypot(frame_noise(f, cell, "", fpost),
+                                  frame_noise(pre, cell, a1.PRE, fpre)))
+            info[a1.cell_name(cell)] = [fpost["rung"], len(fpost["frames"]),
+                                        fpre["rung"], len(fpre["frames"])]
+        A = np.stack(A)                             # (channels, rows, cols)
+        zone, _, _ = ws.zones_of(f, "")
+        z = zone["interior"] & np.isfinite(A).all(0)
+        X.append(A[:, z].T)                         # (pixels, channels)
+        smp += [s] * int(z.sum())
+        rr, cc = np.nonzero(z)
+        where.append((s, rr, cc))
+        sig.append(noise)
+        photos[s] = info
+        a1.close_all()
+    sig = np.array(sig)
+    return dict(X=np.vstack(X), sigma=np.median(sig, 0), sigma_by_strip=sig,
+                sample=np.array(smp), where=where, photos=photos)
+
+
+def one_layer_per_led(chans, sigma):
+    """
+    For each LED, the one usable layer with the smallest camera noise (A),
+    LED order kept.  Used to check that the four layers of one LED are not
+    just repeating each other.
+    """
+    best = {}
+    for c, s in zip(chans, sigma):
+        if c[0] not in best or s < best[c[0]][1]:
+            best[c[0]] = (c, s)
+    return [best[led][0] for led in PRE_LEDS if led in best]
+
+
+def _pca_run(d, idx, remove_even):
+    """
+    One principal-component run on the channels `idx` of `pca_data_3f`'s
+    result, through zero (A = 0 means no dye).  Each direction's sign is
+    set so that its largest entry is positive (the sign is arbitrary).
+
+    Returns:
+        dict: channels, spread, dirs_A (as in `noise_pca`), leftover
+        (strip -> m -> [median, LEFT_PCTL percentile], noise units, 1 =
+        noise only), and '_maps' (where, sample, leftover per pixel per m,
+        scores) for the figures; scores array (pixels, SHOW_SCORES), each
+        pixel's position along directions 1.., noise units.
+    """
+    X, sigma = d["X"][:, idx], d["sigma"][idx]
+    p = noise_pca(X, sigma, through_zero=True, remove_even=remove_even)
+    dirs, dA = p["dirs"].copy(), p["dirs_A"].copy()
+    for i in range(len(dA)):                    # largest entry positive
+        if dA[i][np.argmax(np.abs(dA[i]))] < 0:
+            dirs[i], dA[i] = -dirs[i], -dA[i]
+    rem = 1 if remove_even else 0
+    ms = [m for m in KEEP_M if m < len(sigma) - rem]
+    left = {m: leftover_after(p["Z"], dirs, m, rem) for m in ms}
+    strips = list(dict.fromkeys(d["sample"]))
+    lev = {s: {m: [float(np.median(left[m][d["sample"] == s])),
+                   float(np.percentile(left[m][d["sample"] == s],
+                                       LEFT_PCTL))] for m in ms}
+           for s in strips}
+    scores = p["Z"] @ dirs[:SHOW_SCORES].T
+    return dict(spread=p["spread"].tolist(), dirs_A=dA.tolist(),
+                leftover=lev,
+                _maps=(d["where"], d["sample"], left, scores))
+
+
+def color_count_3f(files=None):
+    """
+    Step 3f: how many color directions C1052-C1055 need.
+
+    Three runs, all through zero, in noise units:
+      'all, darkening kept'     every usable channel; hypothesis: 4
+                                directions (yellow, brown, orange,
+                                brightness);
+      'all, darkening removed'  the same with the even darkening taken out
+                                first (as in 3d); hypothesis: 3;
+      'one layer per LED, darkening kept'  the least noisy layer of each
+                                LED; if it finds the same count, the
+                                layers are not just repeating each other.
+
+    Returns:
+        dict: channels (names), dropped (name -> reasons), sigma (A per
+        channel, median over the strips), sigma_by_strip, photos, n_pixels
+        per strip, and runs: run name -> `_pca_run` result plus its
+        channel names.
+    """
+    files = files or FILES_3F
+    keep, dropped = white_channels_3f(list(files.values()))
+    d = pca_data_3f(files, keep)
+    names = [a1.cell_name(c) for c in keep]
+    one = one_layer_per_led(keep, d["sigma"])
+    plan = {"all, darkening kept": (list(range(len(keep))), False),
+            "all, darkening removed": (list(range(len(keep))), True),
+            "one layer per LED, darkening kept":
+                ([keep.index(c) for c in one], False)}
+    runs = {}
+    for name, (idx, rem) in plan.items():
+        runs[name] = _pca_run(d, idx, rem)
+        runs[name]["channels"] = [names[i] for i in idx]
+    return dict(channels=names, dropped=dropped, sigma=d["sigma"].tolist(),
+                sigma_by_strip={s: v.tolist() for s, v in
+                                zip(files, d["sigma_by_strip"])},
+                photos=d["photos"],
+                n_pixels={s: int((d["sample"] == s).sum()) for s in files},
+                runs=runs)
+
+
+def summarize_3f(res):
+    """Print the 3f tables."""
+    print(f"Step 3f: {', '.join(f'{s} ({AMOUNT_3F[s]} ug/L)' for s in FILES_3F)}")
+    print(f"  interior pixels per strip: {res['n_pixels']}")
+    print(f"  {len(res['channels'])} channels kept; "
+          f"{len(res['dropped'])} dropped:")
+    for c, why in res["dropped"].items():
+        print(f"    {c:16s} {why[0]}" + (f" (+{len(why)-1} more)"
+                                         if len(why) > 1 else ""))
+    print("  camera noise of one pixel's A (post and pre combined, median "
+          "over strips), A:")
+    for c, s in zip(res["channels"], res["sigma"]):
+        print(f"    {c:16s} {s:.4f}")
+    for name, r in res["runs"].items():
+        print(f"\n  Run '{name}', {len(r['channels'])} channels.")
+        print("    spread along directions 1-10, noise units squared "
+              "(1 = noise only): " + ", ".join(f"{v:.1f}" for v in
+                                              r["spread"][:10]))
+        ms = list(next(iter(r["leftover"].values())))
+        print(f"    leftover per pixel after m directions, noise units "
+              f"(median / {LEFT_PCTL}th percentile):")
+        print("      " + " " * 8 + "".join(f"   m={m:<9d}" for m in ms))
+        for s, lv in r["leftover"].items():
+            print(f"      {s:8s}" + "".join(
+                f"{lv[m][0]:5.2f}/{lv[m][1]:<6.2f} " for m in ms))
+
+
+def _json_ready_3f(res):
+    """color_count_3f result without the per-pixel arrays."""
+    out = dict(res)
+    out["runs"] = {k: {kk: vv for kk, vv in v.items() if kk != "_maps"}
+                   for k, v in res["runs"].items()}
+    return out
+
+
+def _pad_axes(ax, f):
+    """Zoom a map axis onto file f's fitted post-image pad."""
+    p = a1.pad_of(f, "")
+    ax.set_xlim(p.aL - 2, p.aR + 2)
+    ax.set_ylim(p.bot + 2, p.top - 2)
+    ax.set_xticks([])
+    ax.set_yticks([])
+
+
+def _strip_maps(res_run, files, values):
+    """Per strip, a (rows, cols) image of `values` (one per pixel), NaN off
+    the interior."""
+    where, smp, _, _ = res_run["_maps"]
+    out = {}
+    for s, rr, cc in where:
+        img = np.full(a1.pad_of(files[s], "").mask(0).shape, np.nan)
+        img[rr, cc] = values[smp == s]
+        out[s] = img
+    return out
+
+
+def show_3f(res, files=None, savefig=True):
+    """
+    Step 3f figures, each with a .txt beside it (NOTE_3F):
+      fig/color_3f_spread.png: spread along each direction, the three
+          runs stacked, log scale, with the noise level 1.
+      fig/color_3f_directions.png: the first SHOW_DIRS directions of the
+          run 'all, darkening kept', as A per channel (largest = 1).
+      fig/color_3f_scores.png: each strip's plain color picture, then
+          each pixel's position along directions 1-SHOW_SCORES.
+      fig/color_3f_leftover.png: the plain color picture, then the
+          leftover after 2, 3, 4 and 5 directions (run 'all, darkening
+          kept').
+    """
+    import matplotlib.pyplot as plt
+    files = files or FILES_3F
+    FIG.mkdir(exist_ok=True)
+    strips = list(files)
+    saved = []
+    # 1. spread, three runs stacked with one x axis
+    fig, axs = plt.subplots(len(res["runs"]), 1, figsize=(8, 8), sharex=True)
+    for ax, (name, r) in zip(axs, res["runs"].items()):
+        sp = r["spread"]
+        ax.semilogy(np.arange(1, len(sp) + 1), sp, "o-", ms=4)
+        ax.axhline(1, color="gray", ls=":", label="camera noise only (1)")
+        ax.set_ylabel("spread,\nnoise units squared", fontsize=9)
+        ax.set_title(f"{name}: {len(r['channels'])} channels", fontsize=9)
+        ax.grid(alpha=0.3, which="both")
+        ax.legend(fontsize=8)
+    axs[-1].set_xlabel("direction number (largest spread first)")
+    fig.suptitle("Step 3f: C1052-C1055 post vs own pre-image, A, interior "
+                 "pixels: spread along each color direction", fontsize=10)
+    fig.tight_layout()
+    saved.append(("color_3f_spread", fig))
+    # 2. directions of the main run
+    r = res["runs"]["all, darkening kept"]
+    lay_color = {"B": "tab:blue", "Gb": "tab:green", "Gr": "tab:olive",
+                 "R": "tab:red"}
+    ch = r["channels"]
+    x = np.arange(len(ch))
+    cols = [lay_color[c.split(".")[1]] for c in ch]
+    fig, axs = plt.subplots(SHOW_DIRS, 1, figsize=(11, 10), sharex=True)
+    for i, ax in enumerate(axs):
+        ax.bar(x, r["dirs_A"][i], color=cols)
+        ax.axhline(0, color="k", lw=0.6)
+        for j in range(1, len(ch)):             # line between LEDs
+            if ch[j].split(".")[0] != ch[j - 1].split(".")[0]:
+                ax.axvline(j - 0.5, color="gray", lw=0.5)
+        ax.set_ylabel(f"direction {i+1}\n(spread {r['spread'][i]:.0f})",
+                      fontsize=9)
+        ax.grid(alpha=0.3, axis="y")
+    axs[-1].set_xticks(x)
+    axs[-1].set_xticklabels(ch, rotation=70, fontsize=8)
+    fig.suptitle("Step 3f, all channels, darkening kept: the first "
+                 f"{SHOW_DIRS} color directions as A per channel (largest "
+                 "entry = +1; bar color = camera layer: blue B, green Gb, "
+                 "olive Gr, red R)", fontsize=9)
+    fig.tight_layout()
+    saved.append(("color_3f_directions", fig))
+    # 3. scores and 4. leftover maps: plain picture on top, strips across
+    pics = {s: true_color(files[s]) for s in strips}
+    sc = r["_maps"][3]
+    rows = [(f"direction {i+1}\nposition, noise units", sc[:, i])
+            for i in range(SHOW_SCORES)]
+    left = r["_maps"][2]
+    lrows = [(f"leftover after {m}\ndirections, noise units", left[m])
+             for m in (2, 3, 4, 5) if m in left]
+    for name, rws, kind in (("color_3f_scores", rows, "score"),
+                            ("color_3f_leftover", lrows, "left")):
+        fig, axs = plt.subplots(len(rws) + 1, len(strips),
+                                figsize=(2.6 * len(strips) + 1.5,
+                                         2.2 * (len(rws) + 1)),
+                                squeeze=False)
+        for j, s in enumerate(strips):
+            axs[0, j].imshow(pics[s])
+            _pad_axes(axs[0, j], files[s])
+            axs[0, j].set_title(f"{s} post, {AMOUNT_3F[s]:g} ug/L",
+                                fontsize=9)
+        axs[0, 0].set_ylabel("white LED\n(for the eye)", fontsize=9)
+        for i, (lab, vals) in enumerate(rws, start=1):
+            maps = _strip_maps(r, files, vals)
+            if kind == "score":
+                lim = float(np.nanpercentile(np.abs(vals), 99))
+                lo, hi, cmap = (0, lim, "magma") if i == 1 else \
+                    (-lim, lim, "RdBu_r")
+            else:
+                lo, hi, cmap = 0, 4, "magma"
+            for j, s in enumerate(strips):
+                im = axs[i, j].imshow(maps[s], cmap=cmap, vmin=lo, vmax=hi)
+                _pad_axes(axs[i, j], files[s])
+            axs[i, 0].set_ylabel(lab, fontsize=8)
+            fig.colorbar(im, ax=list(axs[i]), fraction=0.03, pad=0.01)
+        fig.suptitle("Step 3f, all channels, darkening kept: " +
+                     ("each interior pixel's position along each direction"
+                      if kind == "score" else "what is left after keeping "
+                      "k directions (1 = camera noise only)"), fontsize=10)
+        saved.append((name, fig))
+    a1.close_all()
+    if savefig:
+        for name, f in saved:
+            out = FIG / f"{name}.png"
+            f.savefig(out, dpi=100)
+            out.with_suffix(".txt").write_text(NOTE_3F)
+            print(f"fig saved to {out}")
+
+
+NOTE_3F = """\
+color_3f_*.png -- step 3f, how many color directions the strips of
+2026-11-16 need (made by color_study.py, color_count_3f and show_3f)
+
+Strips: C1052 12.8 ug/L, C1053 20 ug/L, C1054 40 ug/L (file C1054-a.h5),
+C1055 600 ug/L; holder H.  Pixels: every interior pad pixel (8 or more
+layer pixels from every edge) of each post-image.
+
+A (absorbance) = -log10(post-image / the strip's own pre-image lined up),
+per channel (LED . camera layer).  Bigger A = darker, more dye; 0 = no
+change.  Every channel is the average of 4 repeat photos in both images.
+Channels: every LED but white (no pre-image) x every camera layer that is
+usable in both images of all four strips.
+
+Noise units: each channel's A is divided by its camera noise per pixel
+(post and pre-image combined, from the spread between the 4 repeat
+photos).  In these units pure camera noise spreads about 1 along every
+direction.  Paper texture that does not cancel between pre and post
+images, and small misalignment, add to that, so the last directions sit
+somewhat above 1 (3d found 2.5-3.9).
+
+Through zero: spread is measured from A = 0 (no dye), not from the average.
+Darkening kept / removed: the even darkening is the same added A in every
+channel (overall brightness).  'Kept' leaves it in, so it can show up as a
+direction; 'removed' takes it out first, as step 3d did.
+
+color_3f_spread.png: y axis, the spread along each direction (mean squared
+distance of the pixels along it), noise units squared, log scale; x axis,
+directions, largest first.  Top: all channels, darkening kept (Bill's
+hypothesis predicts 4 directions well above the rest: yellow, brown,
+orange and brightness).  Middle: darkening removed (predicts 3).  Bottom:
+one layer per LED (the least noisy), darkening kept: the same count here
+means the four layers of one LED are not just repeating each other.
+
+color_3f_directions.png: each panel one direction, drawn as the change in
+A per channel that moving along it makes, scaled so the largest entry is
++1.  The sign is arbitrary (a direction and its mirror are the same
+direction).  Gray lines separate LEDs; LEDs run from violet (shortest
+wavelength) to photo_red (longest).
+
+color_3f_scores.png: top row, a plain picture from the white LED (post
+only, for the eye, not used in any number).  Below, each pixel's position
+along directions 1-4, noise units: where on the pad each direction is
+found.  Direction 1 runs from 0 up (darker); the others are centered on 0,
+red and blue being opposite signs.
+
+color_3f_leftover.png: top row as above.  Below, per pixel, what is left
+after keeping the first k directions: the length of the rest, noise
+units, divided by sqrt(number of directions left) so that noise alone gives
+about 1.  Bright = the kept directions do not describe that pixel.
+"""
+
+ABOUT_3F = {
+    "what": "Step 3f: principal components of C1052-C1055 interior pixels, "
+            "through zero, noise units; color_study.color_count_3f().",
+    "A": "-log10(post / own pre-image lined up), bigger = darker",
+    "channels": "LED.layer usable in pre and post of all four strips",
+    "dropped": "channel -> reasons it was left out",
+    "sigma": "camera noise of one pixel's A, post and pre combined, "
+             "median over the strips, A",
+    "photos": "strip -> channel -> [post rung, post photos averaged, pre "
+              "rung, pre photos averaged]",
+    "runs": "run name -> spread (noise units squared, 1 = noise only), "
+            "dirs_A (A per channel, largest entry +1), leftover (strip -> "
+            "m -> [median, 95th percentile], noise units, 1 = noise only)",
+}
+
+
 def _save(name, obj, about):
     """Write {"about": about, "rows": obj} to color_out/<name>.json."""
     OUT.mkdir(exist_ok=True)
@@ -1502,6 +1974,9 @@ def run():
         3e  three_colors  -> color_out/three_colors.json, terminal
             show_three_colors -> fig/color_3e_maps.png,
                 color_3e_dot_profile.png (+ .txt)
+        3f  color_count_3f -> color_out/color_count_3f.json, terminal
+            show_3f -> fig/color_3f_spread.png, color_3f_directions.png,
+                color_3f_scores.png, color_3f_leftover.png (+ .txt)
     """
     if 0:
         _save("pairing", pairing_check(), ABOUT_PAIRING)
@@ -1526,11 +2001,16 @@ def run():
         _save("color_count", _json_ready(res), ABOUT_3D)
         summarize_color_count(res)
         show_color_count(res)
-    if 1:   # 3e: three reference colors
+    if 0:   # 3e: three reference colors
         res = three_colors()
         _save("three_colors", res, ABOUT_3E)
         summarize_three_colors(res)
         show_three_colors(res)
+    if 1:   # 3f: how many colors on C1052-C1055 (all LEDs and layers)
+        res = color_count_3f()
+        _save("color_count_3f", _json_ready_3f(res), ABOUT_3F)
+        summarize_3f(res)
+        show_3f(res)
 
 
 if __name__ == "__main__":
