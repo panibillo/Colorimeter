@@ -327,9 +327,12 @@ class TestPersist(FitRunnerTestCase):
         runner.persist(add_dt="2026-10-26 12:00:00")
         rows = db.read_all(
             "SELECT exposuregroup, microseconds, remark, low_dn, high_dn, "
-            "layers, preimage FROM exposure WHERE LED = 'green' AND active = 1")
+            "layers, preimage FROM exposure WHERE LED = 'green' AND active = 1 "
+            "AND role = 'ladder'")
         self.assertTrue(rows)
         self.assertEqual({r[5] for r in rows}, {"Gb Gr"})
+        # The strip rule's seed row is not a calibration: it survives one.
+        self.assertIsNotNone(exposure_repo.read_seed("green"))
         g5 = runner.fits["green"].groups["5"]
         low = [r for r in rows if r[0] == "5" and r[1] == g5[0]][0]
         high = [r for r in rows if r[0] == "5" and r[1] == g5[-1]][0]

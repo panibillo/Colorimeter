@@ -1,0 +1,32 @@
+color_3c_yellow_brown.png -- what the panels show
+(made by color_study.py, show_yellow_brown; second pass 2026-11-15)
+
+One column per strip, its post-image, ordered by arsenic (ug/L in the
+column title).  Each channel is the average of 4 repeat photos.
+
+Top row: a plain color picture, for the eye only: the white LED photo,
+each camera layer divided by its gray chips.
+
+The other rows come from each pixel's absorbances in these channels:
+violet.B, royal_blue.B, cyan.B, green.Gb, green.Gr, green.B, photo_red.R.
+A = -log10(post-image / pre-image lined up), bigger = darker.  One matrix
+multiplication (chain step 8) splits each pixel's list into an even
+darkening of every channel (not shown), an amount of yellow and an amount
+of brown.
+
+Second row, yellow amount c_Y: 1 = as much yellow as the average of
+C1051's interior (the yellow reference).  0 = none.  Darker = more.
+Below 0 (palest) means the pixel cannot be a positive mix of the two
+references.
+
+Third row, brown amount c_B: 1 = as much brown as the average of C1050's
+interior (the brown reference).  Darker = more.
+
+Bottom row, leftover: what the even darkening, the yellow and the brown
+together cannot describe, per pixel, as the root mean square over the
+channels, in A.  Camera noise alone, after averaging 4 photos, gives
+about 0.003-0.005 A per channel here (post and pre-image together).  More
+than that means a third color, or a pixel at the edge where the channels
+see slightly different spots.
+
+Axes: the pad, layer pixels (one layer pixel = 2 sensor pixels).

@@ -67,6 +67,7 @@ from typing import Callable, List, Optional
 from PIL import Image
 
 from geometry import Rect
+import palette
 
 log = logging.getLogger(__name__)
 
@@ -89,6 +90,46 @@ def _darken(color565: int, factor: float = 0.5) -> int:
     return (int(r * factor) << 11) | (int(g * factor) << 5) | int(b * factor)
 
 
+def style_state(w: "Widget") -> str:
+    """
+    The STYLE_TABLE state of a widget, from its four separate facts.
+
+    The first that applies wins:
+      disabled         not enabled — wins over everything, "complete" included
+      editing_pending  a text box being typed into that is also pending
+      editing          a text box being typed into
+      invalid_pending  valid is False and pending is True
+      invalid          valid is False
+      pending          pending is True
+      normal           otherwise
+
+    `enabled` and `editing` belong to the widget; `valid` and `pending` are
+    set by the phase through Pool.mark() and reset by Pool.hide_all().
+    """
+    if not w.enabled:
+        return "disabled"
+    if getattr(w, "editing", False):
+        # Editing and pending can hold at once.  The pending mark is set at
+        # each render, and typing does not render (it only writes the value
+        # through), so a box that was owed when the screen was drawn keeps
+        # its pending frame while it is typed in, until the next render.
+        return "editing_pending" if w.pending else "editing"
+    if not w.valid:
+        return "invalid_pending" if w.pending else "invalid"
+    return "pending" if w.pending else "normal"
+
+
+def _style(w: "Widget") -> Optional["palette.Style"]:
+    """The widget's look from the style table, or None if it has no role."""
+    return palette.style(w.role, style_state(w)) if w.role else None
+
+
+def _draw_frame(display, w: "Widget", st: "palette.Style") -> None:
+    """Draw a style's frame inside the widget's rect, if it has one."""
+    if st.frame is not None and st.width > 0:
+        display.draw_rect(w.rect, st.frame, fill=False, thickness=st.width)
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Base widget
 # ─────────────────────────────────────────────────────────────────────────────
@@ -106,6 +147,19 @@ class Widget:
     Attributes set by subclasses
     ----------------------------
     focusable : True for interactive widgets (Button, editable TextBox)
+
+    Style attributes (run screens only)
+    -----------------------------------
+    role    : None, or a STYLE_TABLE role ("action", "rowlabel", "textbox",
+              "msgbox").  With a role, Button, TextBox and Label take their
+              colours from palette.STYLE_TABLE each time they draw, and ignore
+              their own colour attributes.  Without one they draw exactly as
+              they were built.
+    pending : True when this is what the operator should do next.
+    valid   : False when the widget holds a bad entry.
+    See style_state() for how these combine with enabled and editing.
+    The whole route is described in pool.py, "Where a widget's colours come
+    from".
     """
 
     def __init__(self, rect: Rect, name: str = "", widget_id: int = 0):
@@ -116,6 +170,9 @@ class Widget:
         self.enabled          = True
         self.focusable        = False
         self.focused          = False
+        self.role: Optional[str] = None
+        self.pending          = False
+        self.valid            = True
         self.on_focus_change: Optional[Callable] = None
         log.debug("created %s %r", type(self).__name__, name or "(unnamed)")
 
@@ -426,6 +483,9 @@ class Label(Widget):
     align  : "left" | "center" | "right"
     valign : "top"  | "middle" | "bottom"
     name   : identifier for logging
+
+    With a role (see Widget), the colours come from palette.STYLE_TABLE and
+    the style's frame is drawn inside the rect, after the text.
     """
 
     def __init__(
@@ -449,15 +509,19 @@ class Label(Widget):
         self.valign = valign
 
     def draw(self, display) -> None:
+        st = _style(self)
+        bg, fg = (st.bg, st.text) if st else (self.bg, self.color)
         # Paint the background first: draw_text renders glyphs only (transparent),
         # so a coloured label needs its own fill, and a redraw needs it to erase
         # the previous text (e.g. the 1 Hz clock).
-        display.fill_rect(self.rect, self.bg)
+        display.fill_rect(self.rect, bg)
         display.draw_text(self.text, self.rect,
-                          color=self.color, bg=self.bg,
+                          color=fg, bg=bg,
                           size=self.size,
                           align=self.align, valign=self.valign,
                           widget_id=str(self.widget_id) if self.widget_id else "")
+        if st:
+            _draw_frame(display, self, st)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -476,6 +540,26 @@ class TextBox(Widget):
     - touching the widget sets editing=True (draws EDIT_BORDER, accepts chars)
     - Enter key toggles editing on/off
     - focus loss always clears editing
+
+    Cursor and long values
+    ----------------------
+    While editing, a 2 px cursor bar marks where the next character goes.
+    Left/Right move it one character, Home/End jump to either end, Backspace
+    removes the character before it and Delete the one after it (at the end
+    of the text, where there is nothing after, Delete removes the one before,
+    as it did before the cursor existed).  Every start or end of editing puts
+    the cursor back at the end of the text, so a plain run of typing still
+    appends, as it always has.
+
+    A value wider than the box used to be cut off at the right edge, and since
+    typing lands at the end, keystrokes on a long value went on out of sight
+    (the config editor's 66-character analysis_channels, 2026-11-16).  Now:
+      - not editing: the start of the value is shown, ending in '…' to say
+        there is more;
+      - editing: the text scrolls sideways to keep the cursor in view, with a
+        leading '…' while the start is scrolled off.
+    Both need the display to measure text (its text_width method); on a
+    display without one the box draws as it always did, without a cursor.
 
     Visual states (priority order)
     --------------------------------
@@ -526,10 +610,49 @@ class TextBox(Widget):
         self.valign       = valign
         self.border_color = border_color
         self.editable     = editable
+        # Cursor position, counted in characters back from the END of the
+        # value: 0 = after the last character.  Counted from the end so that
+        # a value replaced from outside (Pool.put on a redraw) leaves the
+        # cursor at the end, where typing has always gone.
+        self._tail        = 0
+        # First character shown while a long value is scrolled sideways
+        # (index into the value; 0 = not scrolled).  Kept between draws so the
+        # text only moves when the cursor would otherwise leave the box.
+        self._scroll      = 0
         self.editing      = False   # True while user is typing into this field
         self.focusable    = editable
         self.secret       = False   # draw '*' per character, not the value
         self._last_drawn  = object()   # sentinel — forces first draw
+
+    # Keys that move the cursor without changing the text.
+    CURSOR_KEYS = ("left", "right", "home", "end")
+    # Pixels between the box's left edge and the first glyph, as both displays
+    # draw left-aligned text (the panel at 0, the mock at 2; 1 splits them).
+    _TEXT_PAD = 1
+    # Width of the cursor bar, pixels.
+    _CURSOR_W = 2
+    # Shown in place of text scrolled or cut off the box.
+    _MORE = "\u2026"   # '…'
+
+    @property
+    def editing(self) -> bool:
+        """True while the user is typing into this field."""
+        return self._editing
+
+    @editing.setter
+    def editing(self, on: bool) -> None:
+        # Starting or ending an edit always puts the cursor back at the end
+        # and unscrolls, so one edit's cursor never carries into the next.
+        # A setter rather than a method so that the places which set the flag
+        # directly (arbiter's Tab handling) get this too.
+        self._editing = bool(on)
+        self._tail    = 0
+        self._scroll  = 0
+
+    @property
+    def cursor(self) -> int:
+        """Cursor position as an index into value (0 = before the first character)."""
+        return len(self.value) - min(self._tail, len(self.value))
 
     def invalidate(self) -> None:
         self._last_drawn = object()
@@ -560,36 +683,139 @@ class TextBox(Widget):
             self.draw(display, force=True)
 
     def draw(self, display, force: bool = False) -> None:
-        state = (self.value, self.focused, self.editing, self.enabled, self.secret)
+        # The style facts are in the key: without them a box marked pending
+        # (or invalid) after its last draw would skip the repaint that shows it.
+        state = (self.value, self.focused, self.editing, self.enabled, self.secret,
+                 self.role, self.pending, self.valid, self._tail)
         if not force and state == self._last_drawn:
             return
         self._last_drawn = state
         widget_id_str = str(self.widget_id) if self.widget_id else ""
-        color = self.color if self.enabled else _darken(self.color)
+        st = _style(self)
+        if st:
+            bg, color = st.bg, st.text
+        else:
+            bg, color = self.bg, (self.color if self.enabled else _darken(self.color))
         # Fill the background first so edits/backspaces erase the old value
         # (draw_text renders glyphs only).  The border is drawn after, on top.
-        display.fill_rect(self.rect, self.bg)
-        shown = "*" * len(self.value) if self.secret else self.value
+        display.fill_rect(self.rect, bg)
+        full = "*" * len(self.value) if self.secret else self.value
+        shown, align, caret_x = self._fit(display, full)
         display.draw_text(shown, self.rect,
-                          color=color, bg=self.bg,
+                          color=color, bg=bg,
                           size=self.size,
-                          align=self.align, valign=self.valign,
+                          align=align, valign=self.valign,
                           widget_id=widget_id_str)
-        if self.editing:
+        if caret_x is not None:
+            r = self.rect
+            x = min(max(r.x + caret_x, r.x), r.x + r.w - self._CURSOR_W)
+            display.fill_rect(Rect(x, r.y + 3, self._CURSOR_W, max(1, r.h - 6)),
+                              color)
+        if st:
+            # The style's frame covers editing too (its own table row); only
+            # the keyboard-focus ring is drawn on top of it, as before.
+            if self.focused and not self.editing:
+                display.draw_rect(self.rect, self.FOCUS_BORDER, fill=False, thickness=2)
+            else:
+                _draw_frame(display, self, st)
+        elif self.editing:
             display.draw_rect(self.rect, self.EDIT_BORDER, fill=False, thickness=2)
         elif self.focused:
             display.draw_rect(self.rect, self.FOCUS_BORDER, fill=False, thickness=2)
         elif self.border_color is not None:
             display.draw_rect(self.rect, self.border_color, widget_id=widget_id_str)
 
+    def _fit(self, display, full: str):
+        """
+        Decide what part of the value to draw, and where the cursor goes.
+
+        Args:
+            display: The display being drawn on; its text_width(text, size)
+                     measures a string in pixels.
+            full:    The whole text as it would be drawn ('*'s for a secret).
+
+        Returns:
+            (shown, align, caret_x): the string to hand to draw_text, the
+            alignment to draw it with, and the cursor bar's x in pixels from
+            the box's left edge — None when no cursor is drawn.
+        """
+        measure = getattr(display, "text_width", None)
+        if measure is None or "\n" in full:
+            # No way to measure, or a multi-line value: draw as always.
+            return full, self.align, None
+        width = lambda s: measure(s, self.size)
+        room  = self.rect.w - 2 * self._TEXT_PAD - self._CURSOR_W
+        fits  = width(full) <= room
+        if not self.editing:
+            if fits:
+                return full, self.align, None
+            # Cut at the right and say so.  Linear from the end: values are
+            # short (tens of characters) and this runs only on a redraw.
+            cut = len(full)
+            while cut > 0 and width(full[:cut] + self._MORE) > room:
+                cut -= 1
+            return full[:cut] + self._MORE, "left", None
+
+        cur = self.cursor
+        if fits:
+            self._scroll = 0
+            shown = full
+            align = self.align
+        else:
+            align = "left"
+            more  = lambda start: self._MORE if start > 0 else ""
+            # Cursor moved left of the window: bring the window back to it,
+            # keeping a few characters of context before it.
+            if cur < self._scroll + 1:
+                self._scroll = max(0, cur - 3)
+            # Cursor past the right edge: slide the window right until it fits.
+            while (self._scroll < cur and
+                   width(more(self._scroll) + full[self._scroll:cur]) > room):
+                self._scroll += 1
+            # Text deleted from the end: slide back so the box stays full.
+            while (self._scroll > 0 and
+                   width(more(self._scroll - 1) + full[self._scroll - 1:]) <= room):
+                self._scroll -= 1
+            shown = more(self._scroll) + full[self._scroll:]
+        before = shown[:len(shown) - (len(full) - cur)]
+        if align == "center":
+            x0 = (self.rect.w - width(shown)) // 2
+        elif align == "right":
+            x0 = self.rect.w - width(shown) - self._TEXT_PAD
+        else:
+            x0 = self._TEXT_PAD
+        return shown, align, x0 + width(before)
+
     def handle_char(self, char: str, display=None) -> None:
-        """Append or delete a character. Only active while editing."""
+        """
+        Edit at the cursor, or move it.  Only active while editing.
+
+        Args:
+            char:    One printable character (inserted at the cursor),
+                     'backspace', 'delete', or one of CURSOR_KEYS.
+            display: If given, the box is redrawn on it.
+        """
         if not self.editing:
             return
-        if char in ('backspace', 'delete'):
-            self.value = self.value[:-1]
+        v   = self.value
+        cur = self.cursor
+        if char == 'backspace' or (char == 'delete' and cur == len(v)):
+            if cur == 0:
+                return
+            self.value = v[:cur - 1] + v[cur:]
+        elif char == 'delete':
+            self.value = v[:cur] + v[cur + 1:]
+            self._tail = max(0, self._tail - 1)
+        elif char == 'left':
+            self._tail = min(len(v), self._tail + 1)
+        elif char == 'right':
+            self._tail = max(0, self._tail - 1)
+        elif char == 'home':
+            self._tail = len(v)
+        elif char == 'end':
+            self._tail = 0
         elif len(char) == 1 and char.isprintable():
-            self.value += char
+            self.value = v[:cur] + char + v[cur:]
         else:
             return
         self.invalidate()
@@ -666,7 +892,13 @@ class Button(Widget):
         self.pressed        = False
 
     def draw(self, display) -> None:
-        if not self.enabled:
+        st = _style(self)
+        if st:
+            # Disabled is a row of the style table, not a darkened face.
+            face, tcolor = st.bg, st.text
+            if self.pressed:
+                face = _darken(face, 0.65)
+        elif not self.enabled:
             face   = (self.disabled_color if self.disabled_color is not None
                       else _darken(self.color))
             tcolor = _darken(self.text_color)
@@ -681,6 +913,8 @@ class Button(Widget):
 
         if self.focused and self.enabled and not self.pressed:
             display.draw_rect(self.rect, self.FOCUS_BORDER, fill=False, thickness=2)
+        elif st and not self.pressed:
+            _draw_frame(display, self, st)
         elif self.border_color is not None and not self.pressed:
             display.draw_rect(self.rect, self.border_color)
 
@@ -1021,9 +1255,9 @@ if __name__ == "__main__":
         """Prints draw calls instead of driving hardware."""
         def fill_screen(self, color):
             print(f"    fill_screen #{color:04x}")
-        def fill_rect(self, rect, color):
+        def fill_rect(self, rect, color, **kw):
             print(f"    fill_rect   ({rect.x},{rect.y} {rect.w}x{rect.h}) #{color:04x}")
-        def draw_rect(self, rect, color, fill=False, thickness=1):
+        def draw_rect(self, rect, color, fill=False, thickness=1, **kw):
             mode = "fill" if fill else f"border t={thickness}"
             print(f"    draw_rect   ({rect.x},{rect.y} {rect.w}x{rect.h}) #{color:04x} {mode}")
         def draw_text(self, text, rect, **kw):
@@ -1098,6 +1332,50 @@ if __name__ == "__main__":
     print("  toggle_editing — should stop editing:")
     tb_ed.toggle_editing(disp)
     print(f"  editing: {tb_ed.editing}")
+
+    # ── TextBox: cursor and a value longer than the box ──────────────────────
+    print("\n── TextBox: cursor and long values ──")
+
+    class _Measured:
+        """A display that measures text at 7 px per character and keeps the
+        last string drawn and the last rect filled (the cursor bar)."""
+        def text_width(self, text, size):  return 7 * len(text)
+        def fill_rect(self, rect, color, widget_id=""):  self.filled = rect
+        def draw_text(self, text, rect, **kw):  self.text = text
+        def draw_rect(self, *a, **kw):  pass
+
+    def _expect(what, got, want):
+        assert got == want, f"{what}: got {got!r}, want {want!r}"
+        print(f"  OK {what}")
+
+    md  = _Measured()
+    val = "violet.B,royal_blue.B,cyan.B,green.Gb,green.Gr,green.B,photo_red.R"
+    tl  = TextBox(Rect(4, 66, 248, 22), val, editable=True, name="long")
+    tl.draw(md, force=True)
+    _expect("idle: the start, cut with '…'",
+            (md.text.startswith("violet"), md.text.endswith("…")), (True, True))
+    tl.editing = True
+    tl.draw(md, force=True)
+    _expect("editing: scrolled to show the end",
+            (md.text.startswith("…"), md.text.endswith("photo_red.R")), (True, True))
+    _expect("cursor bar inside the box",
+            tl.rect.x <= md.filled.x <= tl.rect.x + tl.rect.w - 2, True)
+    for _ in range(len("photo_red.R") + 1):
+        tl.handle_char("left")
+    tl.handle_char("backspace")              # the 'B' of green.B
+    tl.handle_char("Gr")                     # not one character: ignored
+    tl.handle_char("R")
+    _expect("edit in the middle", tl.value, val.replace("green.B,", "green.R,"))
+    tl.handle_char("home"); tl.handle_char("delete")
+    _expect("Home, then Delete takes the first character",
+            tl.value.startswith("iolet"), True)
+    tl.handle_char("end"); tl.handle_char("delete")
+    _expect("Delete at the end takes the last character, as before",
+            tl.value.endswith("photo_red."), True)
+    tl.handle_char("home")
+    tl.editing = False
+    _expect("ending the edit puts the cursor back at the end",
+            tl.cursor, len(tl.value))
 
     # ── Screen ────────────────────────────────────────────────────────────────
     print("\n── Screen.render() ──")

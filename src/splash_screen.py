@@ -69,7 +69,7 @@ FAIL    = "FAIL"
 _TONE = {
     RUNNING: "hdr_blue",
     OK:      "body_dark",
-    WARN:    "step_running",   # amber
+    WARN:    "amber",
     FAIL:    "edited_text",    # red
 }
 

@@ -26,6 +26,34 @@ unless a phase asked for it.  The usual flow, owned by the arbiter, is:
 
 Phases speak only in names and text here — never pixels (those live in
 layout.py) and never raw colours (those are palette names resolved at build).
+
+Where a widget's colours come from
+----------------------------------
+There are two routes, and a widget takes exactly one of them.
+
+1. **Run-screen widgets (styled).**  The widgets named in `_ROLES` below get
+   a role at build: action, rowlabel, textbox or msgbox.  Their colours are
+   never set directly.  Instead:
+
+   a. The phase states facts with `mark(name, pending=..., valid=...)`:
+      pending means "this is what to do next"; valid=False means "this box
+      holds a bad entry".  `enabled` is set as before, with put()/enable().
+   b. `hide_all()`, which the arbiter calls before every render, resets every
+      mark to pending=False, valid=True.  So a phase marks only the
+      exceptions, and a mark can never leak from one screen to the next.
+   c. When the widget draws, widgets.style_state() turns its facts (plus its
+      own `editing` flag) into one state, and palette.style(role, state)
+      looks up that row of palette.STYLE_TABLE: background, frame, frame
+      width, text.
+   d. palette.PALETTE turns the table's colour names into RGB565 numbers.
+
+   To change a look, edit STYLE_TABLE (or a colour in PALETTE).  No phase
+   needs to change.
+
+2. **Everything else (unstyled).**  Menus, the header slot button, the
+   footer, the step chips, the weight grid's calculated cells, the vent
+   screen and the modals keep the palette colours given at build below, and
+   may be recoloured with `recolor()`.
 """
 
 from __future__ import annotations
@@ -41,6 +69,25 @@ import version
 from timer import TimerWidget
 
 log = logging.getLogger(__name__)
+
+
+# The run-screen widgets that take their look from palette.STYLE_TABLE (see
+# "Where a widget's colours come from" above).  The colours each is built with
+# below are then unused while it has a role.
+_ROLES: Dict[str, tuple] = {
+    "action":   ("main_btn", "run_btn"),
+    "rowlabel": ("id_lbl", "user_lbl", "test_lbl", "test_lot_lbl",
+                 "temp_lbl", "weight_lbl", "collectdt_lbl", "remark_lbl",
+                 "result_lbl",
+                 "var_equip_lbl", "var_reps_lbl", "var_r1_lbl", "var_r2_lbl"),
+    "textbox":  ("id_fld", "user_fld", "test_fld", "test_lot_fld",
+                 "temp_fld", "weight_fld", "collectdt_fld", "remark_fld",
+                 "result_fld", "color_fld",
+                 "wt1_init_fld", "wt1_final_fld", "wt2_init_fld", "wt2_final_fld",
+                 "var_r1_wt_fld", "var_r1_time_fld", "var_r2_wt_fld",
+                 "var_r2_time_fld", "var_conc_fld"),
+    "msgbox":   ("instr1", "instr_l", "instr_r"),
+}
 
 
 class Pool:
@@ -127,23 +174,26 @@ class Pool:
         button("run_btn", L.RUN_BTN, "btn_text", "start_green", 24)
 
         # ── body: reagent weight grid ──────────────────────────────────────────
-        # Two rows x four cells under a heading strip.  Initial and Final are
-        # TextBoxes and stay editable in every state; Over and Target are
-        # calculated, and are Labels rather than read-only fields because
+        # Two rows x five cells under a heading strip.  Initial and Final are
+        # TextBoxes and stay editable in every state; Packet, Over and Target
+        # are calculated, and are Labels rather than read-only fields because
         # Label always repaints — TextBox.draw caches on
         # (value, focused, editing, enabled), which does not include the
         # colours these cells change by, and would need an invalidate() on
         # every recolour.  Phase._show_weights sets the text and the colours.
+        label("wt_hdr_pack",  L.WT_HDR_PACK,  "black", "white", 10, text="Packet")
         label("wt_hdr_init",  L.WT_HDR_INIT,  "black", "white", 10, text="Initial")
         label("wt_hdr_final", L.WT_HDR_FINAL, "black", "white", 10, text="Final")
         label("wt_hdr_over",  L.WT_HDR_OVER,  "black", "white", 10, text="Over")
         label("wt_hdr_targ",  L.WT_HDR_TARG,  "black", "white", 10, text="Target")
         label("wt1_row_lbl",  L.WT1_ROW_LBL,  "black", "white", 12, text="R1")
+        label("wt1_pack_lbl",  L.WT1_PACK,  "black", "white", 14)
         field("wt1_init_fld",  L.WT1_INIT,  14, "field_blue", align="center")
         field("wt1_final_fld", L.WT1_FINAL, 14, "field_blue", align="center")
         label("wt1_over_lbl",  L.WT1_OVER,  "black", "white", 14)
         label("wt1_targ_lbl",  L.WT1_TARG,  "black", "white", 14)
         label("wt2_row_lbl",  L.WT2_ROW_LBL,  "black", "white", 12, text="R2")
+        label("wt2_pack_lbl",  L.WT2_PACK,  "black", "white", 14)
         field("wt2_init_fld",  L.WT2_INIT,  14, "field_blue", align="center")
         field("wt2_final_fld", L.WT2_FINAL, 14, "field_blue", align="center")
         label("wt2_over_lbl",  L.WT2_OVER,  "black", "white", 14)
@@ -152,7 +202,13 @@ class Pool:
         # One instruction line, full width.  There used to be three stacked
         # here; the reagent screens spent two of them formatting weights into
         # prose, which the grid below now shows as numbers.
-        label("instr1", L.INSTR1, "black", "white", 16, align="left")
+        # Centred, like the pre-image screen's two halves, so the text keeps
+        # clear of the 2 px frame a pending line gets.
+        label("instr1", L.INSTR1, "black", "white", 16, align="center")
+        # The pre-image screen's two halves of the line: reagent packets on
+        # the left, imaging on the right (PreImagePhase).
+        label("instr_l", L.INSTR_L, "black", "white", 16, align="center")
+        label("instr_r", L.INSTR_R, "black", "white", 16, align="center")
         label("collect_line", L.COLLECT_LINE, "black", "white", 13, align="left")
 
         # ── body: step-status chips (reagent 1 / 2 / Capture) ──────────────────
@@ -165,17 +221,15 @@ class Pool:
 
         # ── body: read-strip prompt (ReadPhase) ─────────────────────────────────
         # manual_lbl is a fixed prompt ("Manually read color:") beside the entry
-        # field — red/larger to draw the eye there; color_fld's border matches
-        # (field_red) for the same reason. color_lbl (row 2, full width) carries
-        # the capture instruction only, black on white, larger. Text for both
-        # color_lbl states is set per-render by ReadPhase; manual_lbl's text
-        # never changes, so ReadPhase only show()s it.
+        # field, in red to draw the eye there.  color_fld is a styled text box:
+        # ReadPhase marks it pending while the reading is still owed.  The
+        # capture instruction is instr1, as on the other run screens.
+        # manual_lbl's text never changes, so ReadPhase only show()s it.
         label("manual_lbl", L.MANUAL_LBL, "alert_text", "white", 16, align="left",
               text="Manually read color:")
         field("color_fld",  L.READ_FLD, 18, "field_red")
-        label("color_lbl",  L.READ_LBL, "black", "white", 20, align="left")
-        label("result_lbl", L.BODY_LBL3, "white", "label_coral", 13, text="Result")
-        field("result_fld", L.BODY_FLD3, 18, "field_blue", editable=False)
+        label("result_lbl", L.RESULT_LBL, "white", "label_coral", 13, text="Result")
+        field("result_fld", L.RESULT_FLD, 18, "field_blue", editable=False)
 
         # ── body: test-variant screen (VariantPhase) ─────────────────────────────
         # Row labels are Buttons, as on the entry screens: pressing one puts
@@ -196,6 +250,9 @@ class Pool:
         field("var_r2_wt_fld",  L.VAR_WT_FLD4,   18, "field_blue", align="center")
         label("var_r2_time_cap", L.VAR_TIME_CAP4, "black", "white", 13, text="time")
         field("var_r2_time_fld", L.VAR_TIME_FLD4, 18, "field_blue", align="center")
+        # The standard's arsenic concentration, beside the Reps value.
+        label("var_conc_cap",   L.VAR_CONC_CAP2, "black", "white", 11, text="C\nµg/L")
+        field("var_conc_fld",   L.VAR_CONC_FLD2, 18, "field_blue", align="center")
 
         # ── body: vent reminder (VentPhase) — a red backdrop over the whole
         # screen, built first so the text and OK land on top of it.
@@ -460,7 +517,8 @@ class Pool:
         button("img_up",       L.IMG_UP,       "btn_text", "btn_gray", 20, text="▲")
         button("img_zoom_out", L.IMG_ZOOM_OUT, "btn_text", "btn_gray", 20, text="−")
         button("img_left",     L.IMG_LEFT,     "btn_text", "btn_gray", 20, text="◀")
-        button("img_fit",      L.IMG_FIT,      "btn_text", "btn_gray", 14, text="Home")
+        button("img_find_pad", L.IMG_FIND_PAD, "btn_text", "btn_gray", 12,
+               text="Find/\nPad")
         button("img_right",    L.IMG_RIGHT,    "btn_text", "btn_gray", 20, text="▶")
         button("img_step",     L.IMG_STEP,     "btn_text", "btn_gray", 14, text="1px")
         button("img_down",     L.IMG_DOWN,     "btn_text", "btn_gray", 20, text="▼")
@@ -508,6 +566,10 @@ class Pool:
         button("modal_no",  L.MODAL_NO,  "btn_text", "btn_gray", 18)
         button("modal_third", L.MODAL_3C, "btn_text", "btn_gray", 14)   # 3-choice modals
 
+        for role, names in _ROLES.items():
+            for name in names:
+                p[name].role = role
+
         log.info("Pool.build: %d widgets", len(p._widgets))
         return p
 
@@ -553,15 +615,56 @@ class Pool:
     def recolor(self, name: str, bg: Optional[str] = None,
                 fg: Optional[str] = None) -> Widget:
         """
-        Recolour a widget by *palette name* (phases still never touch raw
-        values — the pool resolves the name).  bg sets the fill, fg the text.
-        Used for status coding, e.g. the reagent/capture step chips.
+        Recolour an *unstyled* widget by palette name (phases still never touch
+        raw values — the pool resolves the name).  bg sets the fill, fg the
+        text.  Used for status coding, e.g. the step chips and the weight
+        grid's Over cell.
+
+        A Button keeps its face in `color` and its text in `text_color`, where
+        a Label or TextBox keeps them in `bg` and `color`; this maps bg/fg onto
+        whichever the widget has, so callers need not know the difference.
+
+        A styled widget (one with a role) draws from the style table and would
+        ignore these colours, so recolouring one is logged as a mistake: use
+        mark() instead.
         """
         w = self[name]
-        if bg is not None:
-            w.bg = color(bg)
-        if fg is not None:
-            w.color = color(fg)
+        if w.role:
+            log.warning("Pool.recolor: %r is styled (%s) — use mark()", name, w.role)
+        if isinstance(w, Button):
+            if bg is not None:
+                w.color = color(bg)
+            if fg is not None:
+                w.text_color = color(fg)
+        else:
+            if bg is not None:
+                w.bg = color(bg)
+            if fg is not None:
+                w.color = color(fg)
+        return w
+
+    def mark(self, name: str, pending: Optional[bool] = None,
+             valid: Optional[bool] = None) -> Widget:
+        """
+        State facts about a styled widget; its look follows from the style
+        table when it draws.
+
+        Args:
+            name:    The widget.
+            pending: True when this is what the operator should do next.
+                     None leaves it as it is.
+            valid:   False when the widget holds a bad entry.  None leaves it
+                     as it is.
+
+        Both reset at every hide_all(), so a phase marks only the exceptions.
+        """
+        w = self[name]
+        if not w.role:
+            log.warning("Pool.mark: %r has no style role; the mark has no effect", name)
+        if pending is not None:
+            w.pending = bool(pending)
+        if valid is not None:
+            w.valid = bool(valid)
         return w
 
     def on(self, name: str, callback: Optional[Callable]) -> Widget:
@@ -610,8 +713,14 @@ class Pool:
             self[n].visible = False
 
     def hide_all(self) -> None:
+        """
+        Hide every widget and clear every style mark (pending=False,
+        valid=True), ready for a phase to configure the next screen.
+        """
         for w in self._widgets.values():
             w.visible = False
+            w.pending = False
+            w.valid = True
 
     def visible_names(self) -> List[str]:
         return [n for n, w in self._widgets.items() if w.visible]
@@ -647,14 +756,23 @@ class Pool:
         return [w for w in self._widgets.values()
                 if w.visible and w.enabled and w.focusable]
 
-    def layout_modal_buttons(self, count: int) -> List[str]:
+    def layout_modal_buttons(self, count: int, tall: bool = False) -> List[str]:
         """
-        Position the modal action buttons for a 1/2/3-choice dialog and return
-        their widget names in order.  One shared set of button widgets is
-        repositioned per dialog (centred / two-across / three-across), so
+        Position the modal panel, message and action buttons for a
+        1/2/3-choice dialog and return the button widget names in order.  One
+        shared set of widgets is repositioned per dialog (centred / two-across
+        / three-across, or the tall panel for a list or a long reason), so
         ModalPhase never mentions pixels.
         """
-        if count <= 1:
+        self["modal_panel"].rect = (layout.MODAL_TALL_PANEL if tall
+                                    else layout.MODAL_PANEL)
+        self["modal_msg"].rect = layout.MODAL_TALL_MSG if tall else layout.MODAL_MSG
+        if tall and count <= 1:
+            names, rects = ["modal_yes"], [layout.MODAL_TALL_ONE]
+        elif tall:
+            names, rects = ["modal_yes", "modal_no"], [layout.MODAL_TALL_YES,
+                                                       layout.MODAL_TALL_NO]
+        elif count <= 1:
             names, rects = ["modal_yes"], [layout.MODAL_ONE]
         elif count == 2:
             names, rects = ["modal_yes", "modal_no"], [layout.MODAL_YES, layout.MODAL_NO]
@@ -664,6 +782,48 @@ class Pool:
         for name, r in zip(names, rects):
             self[name].rect = r
         return names
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Long messages in the tall modal
+# ─────────────────────────────────────────────────────────────────────────────
+
+#: Font size of the modal's message, pt: the usual dialog (as built in
+#: Pool.build) and the tall one.  phases.ModalPhase sets the same sizes.
+MODAL_MSG_SIZE = 16
+TALL_MSG_SIZE = 13
+
+#: Characters per line of the tall modal's message (MODAL_TALL_MSG, 256 px)
+#: at 13 pt.  The Pi's font (DejaVu Sans) averages 6.5 px a character on
+#: this kind of text, so 256 px holds about 39; 34 leaves room for wide
+#: letters.
+TALL_MSG_CHARS = 34
+#: Lines of the tall modal's message at 13 pt (132 px; layout.py says
+#: about 7 fit, so 7 is the limit).
+TALL_MSG_LINES = 7
+
+
+def wrap_tall(heading: str, text: str) -> str:
+    """
+    A heading line and a long reason, word-wrapped to fit the tall modal.
+
+    A reason too long for the panel is cut, and its last line ends in
+    "..."; the whole reason is in the log.
+
+    Args:
+        heading: First line, e.g. "Pre-image failed:".  Kept as is.
+        text:    The reason, any length.
+
+    Returns:
+        Lines joined with newlines, at most TALL_MSG_LINES.
+    """
+    import textwrap
+    body = textwrap.wrap(text, TALL_MSG_CHARS) or [""]
+    room = TALL_MSG_LINES - 1
+    if len(body) > room:
+        body = body[:room]
+        body[-1] = body[-1][:TALL_MSG_CHARS - 3] + "..."
+    return "\n".join([heading] + body)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -719,10 +879,11 @@ if __name__ == "__main__":
     pool.set("wt1_targ_lbl", "2.900")
     pool.show("title", "main_btn", "slot_btn", "timer_lbl", "timer", "run_btn",
               "instr1", "chip_a", "chip_b", "chip_c",
-              "wt_hdr_init", "wt_hdr_final", "wt_hdr_over", "wt_hdr_targ",
-              "wt1_row_lbl", "wt1_init_fld", "wt1_final_fld",
+              "wt_hdr_pack", "wt_hdr_init", "wt_hdr_final", "wt_hdr_over",
+              "wt_hdr_targ",
+              "wt1_row_lbl", "wt1_pack_lbl", "wt1_init_fld", "wt1_final_fld",
               "wt1_over_lbl", "wt1_targ_lbl",
-              "wt2_row_lbl", "wt2_init_fld", "wt2_final_fld",
+              "wt2_row_lbl", "wt2_pack_lbl", "wt2_init_fld", "wt2_final_fld",
               "wt2_over_lbl", "wt2_targ_lbl",
               "prior_btn", "clock", "next_btn")
     pool.render(disp)
@@ -749,12 +910,12 @@ if __name__ == "__main__":
 
     # ── image viewer ─────────────────────────────────────────────────────────
     # Runs last: it shows its own widgets and leaves them shown, and the viewer
-    # controls share screen space with the reagent-phase cluster above (IMG_FIT
+    # controls share screen space with the reagent-phase cluster above (IMG_FIND_PAD
     # overlaps RUN_BTN), which is fine — the two screens are never both up.
     from PIL import Image
 
     _VIEWER = ("img_canvas", "img_zoom_in", "img_up", "img_zoom_out",
-               "img_left", "img_fit", "img_right",
+               "img_left", "img_find_pad", "img_right",
                "img_step", "img_down", "img_reimage", "img_name",
                "img_edit", "img_save", "img_cancel", "img_exit")
 
@@ -841,17 +1002,17 @@ if __name__ == "__main__":
     print(f"  4 rows y{_rows[0].y}..{_rows[-1].bottom}, "
           f"footer y{_footer[0].y}..{_footer[-1].bottom}, no overlaps")
 
-    print("\n== reagent weight grid: two rows of four cells, clear of the footer ==")
+    print("\n== reagent weight grid: two rows of five cells, clear of the footer ==")
     # The grid is the bottom band of the reagent screens, so the two things
     # that can go wrong are a cell escaping its row and row 2 running into the
     # footer.  Cells are touch targets that open an entry field, so their width
     # is checked too.
-    _hdr = [pool[n].rect for n in ("wt_hdr_init", "wt_hdr_final",
+    _hdr = [pool[n].rect for n in ("wt_hdr_pack", "wt_hdr_init", "wt_hdr_final",
                                    "wt_hdr_over", "wt_hdr_targ")]
     _wt_rows = []
     for i in (1, 2):
         cells = [pool[f"wt{i}_{n}"].rect
-                 for n in ("row_lbl", "init_fld", "final_fld",
+                 for n in ("row_lbl", "pack_lbl", "init_fld", "final_fld",
                            "over_lbl", "targ_lbl")]
         for a, b in zip(cells, cells[1:]):
             assert a.right <= b.x, f"wt row {i}: {a} overlaps {b}"
@@ -866,8 +1027,17 @@ if __name__ == "__main__":
         "wt row 2 runs into the footer"
     assert pool["instr1"].rect.bottom <= _hdr[0].y, \
         "instr1 runs into the weight grid"
-    for c in _wt_rows[0][1:]:
-        assert c.w >= 60, f"wt cell is only {c.w} px wide"
+    # Packet (cell 1) is a narrow calculated cell; the four after it need
+    # room for "+0.020" at 14 pt (about 52 px) and are touch targets.
+    for c in _wt_rows[0][2:]:
+        assert c.w >= 56, f"wt cell is only {c.w} px wide"
+    # The pre-image screen's two message boxes sit side by side in instr1's
+    # band, so they must not overlap each other or the grid headings.
+    _il, _ir = pool["instr_l"].rect, pool["instr_r"].rect
+    assert _il.right <= _ir.x, "instr_l overlaps instr_r"
+    assert _il.y == _ir.y == pool["instr1"].rect.y, "instr_l/r are off instr1's band"
+    assert max(_il.bottom, _ir.bottom) <= _hdr[0].y, "instr_l/r run into the grid"
+    assert _ir.right <= layout.SCREEN_W, "instr_r runs off screen"
     # Each heading sits over the column it names.
     for h, c in zip(_hdr, _wt_rows[0][1:]):
         assert h.x == c.x and h.w == c.w, f"heading {h} is not over {c}"

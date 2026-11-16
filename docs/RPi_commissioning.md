@@ -141,7 +141,8 @@ blindly (SD flash, the `config.txt` edit, the database copy) — is in
 
 **Desktop-run** helpers stay at the repo root: `sync_to_pi.sh` (curated firmware
 push), `bulk_sync_to_pi.sh` (blanket `src/dev/config` push), `push_pi_scripts.sh`
-(upload the `provisioning/deploy/` set), and `sync_from_pi.sh` (Pi→desktop pull).
+(upload the `provisioning/deploy/` set). Pi→desktop pulls are listed in
+[desktop_tools/pi_transfer_tools.md](desktop_tools/pi_transfer_tools.md).
 
 The **`/boot/firmware/config.txt` edit is deliberately *not* scripted** — a bad
 `config.txt` can stop the Pi from booting, so step 2 walks through it manually

@@ -1,0 +1,801 @@
+\documentclass[11pt,letterpaper]{article}
+
+\usepackage[margin=2.5cm]{geometry}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{bm}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{ragged2e}
+\usepackage{seqsplit}
+\usepackage{enumitem}
+\usepackage{xcolor}
+\usepackage[hidelinks]{hyperref}
+\usepackage{caption}
+\usepackage{float}
+\usepackage{graphicx}
+\usepackage{setspace}
+\setstretch{1.15}
+
+\DeclareGraphicsExtensions{.pdf}
+\graphicspath{{figs/}}
+\setlength{\emergencystretch}{3em}
+\newcolumntype{L}[1]{>{\RaggedRight\arraybackslash}p{#1}}
+
+%----------------------------------------------------------------------
+%  Text helpers
+%----------------------------------------------------------------------
+\newcommand{\file}[1]{\texttt{\seqsplit{#1}}}
+\newcommand{\code}[1]{\texttt{#1}}
+\newcommand{\SCALAR}{\textbf{scalar}}
+\newcommand{\ToClaude}[1]{[\textbf{CLAUDE}: {#1}]}
+
+%----------------------------------------------------------------------
+%  Notation: the same as tex/analysis_chain.tex.  Images bold, tables
+%  blackboard bold, scalars plain.  \overline = mean over a region,
+%  \widetilde = smoothed, \widehat = fitted or estimated.
+%----------------------------------------------------------------------
+\newcommand{\mR}{\mathbf{R}}   % post-image reflectance vs gray chips
+\newcommand{\mS}{\mathbf{S}}   % pre-image reflectance, lined up
+\newcommand{\mA}{\mathbf{A}}   % post-image absorbance
+\newcommand{\mB}{\mathbf{B}}   % pre-image absorbance, lined up
+\newcommand{\mC}{\mathbf{C}}   % stain absorbance
+\newcommand{\mD}{\mathbf{D}}   % error image (this study only)
+\newcommand{\mF}{\mathbf{F}}   % dark-corrected signal
+\newcommand{\mG}{\mathbf{G}}   % gray-chip level map
+\newcommand{\mP}{\mathbf{P}}   % flat-field polynomial shape
+\newcommand{\mM}{\mathbf{M}}   % region indicator (1 inside, 0 outside)
+\newcommand{\mX}{\mathbf{X}}   % any image
+\newcommand{\tB}{\widetilde{\mathbf{B}}}
+\newcommand{\hB}{\widehat{\mathbf{B}}}
+\newcommand{\tD}{\widetilde{\mathbf{D}}}
+\newcommand{\tX}{\widetilde{\mathbf{X}}}
+\newcommand{\Sown}{\mathbf{S}_{\text{own}}}
+\newcommand{\Bown}{\mathbf{B}_{\text{own}}}
+\newcommand{\Rwhite}{R_{\text{white}}}
+\newcommand{\bw}{b_{\text{w}}}
+\newcommand{\Cbar}{\overline{C}}
+\newcommand{\reg}[2]{\underset{\text{#1}}{#2}}
+\newcommand{\avg}[2]{\overline{\reg{#1}{#2}}}
+\newcommand{\MA}{\mathcal{A}}
+\newcommand{\MB}{\mathcal{B}}
+\newcommand{\MC}{\mathcal{C}}
+\newcommand{\MD}{\mathcal{D}}
+
+\title{Shading removal with the pre-image\\
+\large Four methods, how lining up changes the pre-image,\\
+and what the single white value $\Rwhite$ does}
+\author{Colorimeter project --- pad analysis chain}
+\date{2026-10-03 (rewritten in the notation of \file{analysis\_chain.tex};
+first version 2026-10-02).  Branch \file{preimage-capture}, commit
+\file{4962604} plus uncommitted changes to
+\file{desktop/padanalysis/shading\_review.py}.}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+\noindent
+A photo of the indicator pad is darker in some places than others even
+where there is no stain.  The pad's edge casts a shadow, and the paper's
+fibers make a fine pixel-to-pixel pattern.  The pre-image (the same strip,
+photographed before exposure to arsine) holds the same shadow and much of
+the same pattern, so taking it out should leave only the stain.  This note
+compares four ways of doing that on one pad (C1032, royal\_blue.B).  It
+writes each as one equation, $\mC = \mA - \hB$, and shows where a single
+number is applied to every pixel.  Three findings:
+\begin{itemize}[nosep]
+  \item No method wins everywhere: smoothing the pre-image is best inside
+    the pad, using it pixel by pixel is best at the rim.
+  \item The single white value $\Rwhite$ cancels in three methods and is
+    right only more than 2 pixels in from the pad's edge.
+  \item Lining up the pre-image on the post-image averages 4 pixels, and
+    that lowers its pixel-to-pixel scatter to 0.61 of its true size
+    (median over 18 pads and 6 channels; range 0.43--0.96, set by where
+    each pad happened to land).  So ``pixel by pixel'' is really a
+    smoothing whose strength changes from pad to pad.
+\end{itemize}
+The chain is not changed by this note.
+\end{abstract}
+
+\tableofcontents
+\newpage
+
+%======================================================================
+\section{The question, the decision, and when to stop}
+
+\begin{description}[leftmargin=2em]
+  \item[Question.] Which way of taking out the pre-image leaves the
+    corrected pad flattest where there is no stain, without changing the
+    stain?
+  \item[Decision it could change.] Step 6 of the chain
+    (\file{analysis\_chain.tex}): how $\hB$ is made.
+  \item[When to stop.] When the methods have been compared on one pad
+    with figures and numbers (this note), then on all 18 pads and six
+    channels as a table.  Choose a method only after the second step.
+\end{description}
+
+%======================================================================
+\section{Notation}
+\label{sec:notation}
+
+The notation is that of \file{analysis\_chain.tex}, Section 2.  In short:
+\textbf{bold uppercase} is an image (one value per pixel, one channel);
+plain is a single number; $A_{ij}$ is the pixel in row $i$, column $j$; a
+region's name is written under a symbol; an overline is a mean over a
+region, a tilde means smoothed, a hat means estimated or fitted.  Arithmetic
+between images is pixel by pixel.  Scalars that are applied to many pixels
+are flagged in bold, because each assumes those pixels are alike.
+
+\medskip
+\begin{tabular}{@{}L{2.3cm}L{1.6cm}L{10.7cm}@{}}
+\toprule
+Symbol & Kind & Meaning \\
+\midrule
+$\mR$ & image & post-image reflectance: dark-corrected signal divided by
+  the gray-chip level at the same pixel.  Bigger = lighter.  The pad reads
+  about 2 (it is about twice as bright as the gray chips). \\
+$\mS$ & image & the pre-image, the same steps, lined up on $\mR$'s grid. \\
+$\Sown$ & image & the pre-image before lining up, on its own grid. \\
+$\mA$, $\mB$, $\Bown$ & image & absorbance: $-\log_{10}$ of $\mR$, $\mS$,
+  $\Sown$.  Bigger = darker.  0.01 in absorbance is about 2.3\,\% in
+  reflectance. \\
+$\tX$ & image & any image $\mX$ smoothed over width $\sigma$, pad pixels
+  only (Section~\ref{sec:smooth}). \\
+$\hB$ & image & the estimated shading: what a method takes out. \\
+$\mC$ & image & the stain: $\mC = \mA - \hB$. \\
+$\Rwhite$ & \SCALAR & the single white value of method $\MA$: the median of
+  $\Sown$ more than 6 pixels in from the pad's edge.  One per channel per
+  strip.  Not part of the chain (\file{analysis\_chain.tex}). \\
+$\bw$ & \SCALAR & the same in absorbance, $\bw = -\log_{10}\Rwhite$. \\
+$\lambda$ & \SCALAR & method $\MD$: the weight on $\mB$; $1 - \lambda$ goes
+  to $\tB$.  $\hat\lambda$ is its fitted value. \\
+$\Cbar$ & \SCALAR & one per method: the median of $\mC$ over the dye-free
+  inner pad.  Used only to measure error. \\
+$\mD$, $\tD$ & image & the error, $\mD = \mC - \Cbar$, and its smooth
+  part (Section~\ref{sec:error}).  This study only. \\
+\bottomrule
+\end{tabular}
+
+\medskip
+\noindent Regions of the post-image pad:
+
+\medskip
+\begin{tabular}{@{}L{3.2cm}L{11.4cm}@{}}
+\toprule
+pad & the fitted pad rectangle, hot pixels left out: 2215 pixels on C1032. \\
+rim, inner & pad pixels within, and more than, $w = 4$ pixels of the pad's
+  edge. \\
+dot & pad pixels inside the dot's fitted edge (dyed): 280 pixels. \\
+free & pad pixels at least 6 pixels outside the dot's edge (dye-free).
+  Split into the dye-free inner pad (760 pixels) and the dye-free rim (686
+  pixels). \\
+g1, g2 & the left and right gray chips. \\
+\bottomrule
+\end{tabular}
+
+\medskip
+\noindent The dot's size and shape on these samples are not final (the
+exposure geometry will change), so nothing here depends on the dot being
+round.
+
+%======================================================================
+\section{Where \texorpdfstring{$\mR$ and $\mS$}{R and S} come from}
+\label{sec:chain}
+
+Steps 1--4 of \file{analysis\_chain.tex}, in brief.  Each photo:
+\begin{enumerate}
+  \item \textbf{Dark level.}  $F_{ij} = E_{ij} - e$: the lit layer minus
+    $e$, a \SCALAR{} per Bayer layer per photo (the mean of one dark
+    frame).
+  \item \textbf{Gray-chip level.}  $R_{ij} = F_{ij} / G_{ij}$.  $\mG$ is
+    the flat-field polynomial $\mP$ (a fixed shape, measured once) scaled to
+    match the two gray chips of this same photo.  The \SCALAR{} mean signals
+    $\avg{g1}{\mF}$ and $\avg{g2}{\mF}$ are taken on each chip.  The chips
+    lie on opposite sides of the pad, and the scale is blended in a straight
+    line between the chips' centroids, so that $\mG$ matches each chip there.
+    That blend is in the column direction only; nothing is measured or
+    adjusted in the row direction.
+\end{enumerate}
+The pre-image goes through both steps in its own frame, with its own gray
+chips (the light belongs to the stage, not the strip), giving $\Sown$.
+Then it is lined up on the post-image's grid, giving $\mS$: the two fitted
+pad rectangles give a shift and scale (\code{analysis\_1.pre\_to\_post}),
+and each lined-up value is a weighted average of the 4 nearest pre-image
+pixels (\code{\_register}).  The next section measures what that averaging
+does.
+
+%======================================================================
+\section{Lining up lowers the pre-image's pixel-to-pixel scatter}
+\label{sec:lineup}
+
+\subsection{Why it matters}
+
+A lined-up value is a weighted average of 4 pre-image pixels, so it varies
+less from pixel to pixel than the photo does.  That changes any noise or
+texture measured on $\mS$, and it makes method $\MC$ (``pixel by pixel'')
+partly a smoothing.  How much depends on where the post-image's pixels
+fall between the pre-image's: not at all if they land on whole pixels, most
+if they land half-way.
+
+\subsection{How it is measured}
+
+Three versions of the pre-image's absorbance are compared on the inner pad
+(so the edge shadow does not count):
+\begin{itemize}[nosep]
+  \item $\Bown$, on the pre-image's own grid;
+  \item lined up by taking the single \emph{nearest} pre-image pixel (no
+    averaging);
+  \item lined up as the chain does (\emph{bilinear}: the 4-pixel average).
+\end{itemize}
+For each, the difference between every pixel and its right-hand neighbor
+(and, separately, the one below) is taken:
+\begin{equation}
+  d_{ij} = \frac{X_{i,j+1} - X_{ij}}{\sqrt 2}.
+\end{equation}
+Differences cancel anything smooth, so what is left changes from one pixel
+to the next.  On the pre-image's pad that is mostly the paper's fiber
+texture, with camera noise (about 0.002) a small part.  Dividing by
+$\sqrt 2$ makes the spread of $d$ the spread of one pixel, if pixels are
+independent.  The spread is the robust one, $1.4826 \times$ the median
+distance from the median, so a speck of dust does not decide it
+(\code{duotone.\_pair\_noise}).
+
+\noindent\textbf{What pure camera noise would do.}  Let $f_x$ and $f_y$ be
+how far a lined-up pixel falls between pre-image columns and rows (0 to 1;
+scalars for each pixel).  For noise that is independent from pixel to
+pixel, the 4-pixel average scales the spread of a difference along a row by
+\begin{equation}
+  \sqrt{\tfrac12\left[(1-f_x)^2 + (1-2f_x)^2 + f_x^2\right]\,
+        \left[(1-f_y)^2 + f_y^2\right]},
+\end{equation}
+and along a column the same with $f_x$ and $f_y$ swapped.  At $f = 0$ the
+factor is 1; at $f_x = 0.5$ the first bracket gives 0.5.  This is the
+``predicted'' ratio below (its root-mean-square over the inner pad).
+
+\subsection{Results}
+
+\textbf{C1032 royal\_blue.B} (fractional position: rows 0.83, columns 0.05,
+so mostly a row shift):
+
+\medskip
+\begin{center}
+\begin{tabular}{@{}lrrrrr@{}}
+\toprule
+differences & own grid & nearest & bilinear & ratio bilinear/own & predicted \\
+\midrule
+along rows    & 0.0067 & 0.0067 & 0.0054 & 0.80 & 0.81 \\
+along columns & 0.0068 & 0.0068 & 0.0049 & 0.72 & 0.74 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent\textbf{All 18 pads, six channels} (108 pairs; median, with range):
+own grid 0.0067, nearest 0.0067, bilinear 0.0041.  Ratio bilinear/own
+0.61 along rows and 0.61 along columns, range 0.43--0.96.  Predicted
+0.58 and 0.57.  Measured is above predicted by a median of 0.04, because
+the fiber texture spans more than one pixel and is averaged less than
+independent noise would be.  C1032 is
+among the milder cases (C1023 and C1033 are milder); C1017, C1019, C1020,
+C1022, C1025, C1030, C1034 and C1035 fall near half a pixel and lose about
+half their scatter.
+
+\begin{figure}[h!]
+    \centering
+    \includegraphics[width=\textwidth]{shading-R4a}
+    \caption{
+    royal\_blue.B pre-image, inner pad: $\mB$ on its own grid, lined up by
+    nearest pixel, and lined up by the 4-pixel (bilinear) average, each
+    minus its median ($\pm 0.02$, bigger = darker); right, histograms of
+    the neighbor differences along rows.  Top, C1032 (lands nearly on whole
+    columns: mild averaging); bottom, C1020 (lands half-way: the scatter
+    halves).  Made by \code{shading\_review.show\_lineup\_noise} (step R4a).
+    }
+\label{fig:shading-R4a}
+\end{figure}
+
+\begin{figure}[h!]
+    \centering
+    \includegraphics[width=0.62\textwidth]{shading-R4b}
+    \caption{
+    All 18 pads and six channels: the measured lowering of the
+    pixel-to-pixel scatter (robust spread lined up by bilinear average,
+    divided by the spread on the own grid) against the lowering predicted
+    for independent pixel noise from each pad's fractional position.  1 =
+    not lowered.  Made by \code{shading\_review.lineup\_noise\_table} and
+    \code{show\_lineup\_ratio} (step R4b).
+    }
+\label{fig:shading-R4b}
+\end{figure}
+
+\subsection{What follows from it}
+
+\begin{enumerate}
+  \item \textbf{Measure noise and texture on the own grid}, never on the
+    lined-up pre-image.  The yellow/brown code already does
+    (\code{duotone.PadCube} reads the pre-image with \code{register=False}).
+  \item \textbf{Method $\MC$ is not purely pixel by pixel.}  Its $\mB$ is a
+    4-pixel average whose strength is set by where the pad landed, from
+    almost none (C1033) to a half-pixel average (C1017, C1020).  So the
+    methods' ranking, and the best $\lambda$ in method $\MD$, can differ from
+    pad to pad for a reason unrelated to the paper.  This fits Bill's note
+    that $\lambda$ may have to be set for each photo from measures of its
+    noise and of how the photos line up.
+  \item \textbf{Nearest-pixel lining up keeps the scatter} but places
+    values up to half a pixel wrong, which matters at the edge shadow.
+  \item \textbf{The C1032 results below are a mild case} (ratio 0.80 along
+    rows).  Section~\ref{sec:open} lists what this suggests for the next
+    step.
+\end{enumerate}
+
+%======================================================================
+\section{The single white value \texorpdfstring{$\Rwhite$}{R\_white}
+(method \texorpdfstring{$\MA$}{A})}
+\label{sec:white}
+
+\subsection{What it is}
+
+\begin{align}
+  \Rwhite &= \operatorname{median}\bigl\{\,(S_\text{own})_{ij} :
+    \text{more than 6 px in from the pre-image pad's edge} \,\bigr\}
+    && \text{(\SCALAR)} \\
+  \bw &= -\log_{10}\Rwhite && \text{(\SCALAR)}
+\end{align}
+Method $\MA$ divides every post-image pixel by it; in absorbance it takes
+out the same $\bw$ at every pixel:
+\begin{equation}
+  C_{ij} = A_{ij} - \bw = -\log_{10}\frac{R_{ij}}{\Rwhite}.
+\end{equation}
+
+\noindent\textbf{Worked example} (C1032 royal\_blue.B).  $\Rwhite = 2.1888$,
+$\bw = -0.3402$.  The dye-free pixel at row 55, column 78 has
+$R = 2.1327$, $A = -0.3289$, so $C = -0.3289 + 0.3402 = +0.0113$: 2.6\,\%
+darker than the white value.
+
+\subsection{If it cancels, what use is it?}
+
+In methods $\MB$, $\MC$ and $\MD$ it cancels exactly
+(Section~\ref{sec:cancel}): there the pre-image gives every pixel its own
+white, $10^{-\hat B_{ij}}$.  In method $\MA$, the code's current behavior,
+it does not cancel, not even in the yellow/brown split, which removes only
+the average over channels at each pixel (\code{duotone.contrast}).  Its job
+in $\MA$ is to make $\mC = 0$ mean ``as the unreacted pad'' in every
+channel; without it, the paper's own color (how it differs from the gray
+chips from one LED to the next) would be read as stain.  The size of that,
+on C1032:
+
+\medskip
+\begin{center}
+\begin{tabular}{@{}lcc@{}}
+\toprule
+channel & $\Rwhite$ & $-\bw = \log_{10}\Rwhite$ \\
+\midrule
+violet.B      & 1.8219 & 0.2605 \\
+royal\_blue.B & 2.1888 & 0.3402 \\
+cyan.B        & 2.0233 & 0.3061 \\
+green.Gb      & 1.9398 & 0.2878 \\
+green.Gr      & 1.9382 & 0.2874 \\
+photo\_red.R  & 1.6101 & 0.2069 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent These differ by up to 0.13 between channels, about as much as the
+palest stained pixels.  Mean or median makes no difference: over the region
+it is taken from, the mean of $\Sown$ is 1.0002 times the median.  Over the
+whole pad, rim included, the mean would be 2.4\,\% lower.
+
+\subsection{Is it the right value everywhere on the pad?}
+
+No.  Figure~\ref{fig:shading-R3d} shows each pre-image pad pixel against
+$\Rwhite$, as $\Bown - \bw = -\log_{10}(\Sown/\Rwhite)$, by depth into the
+pad:
+
+\medskip
+\begin{center}
+\begin{tabular}{@{}lrrrrr@{}}
+\toprule
+depth into the pad & pixels & median & sd & 95th pct & median, in reflectance \\
+\midrule
+over 6 px ($\Rwhite$ taken here) & 1226 & 0.0000 & 0.0072 & +0.0119 & 0 \\
+2 to 6 px    & 625 & +0.0035 & 0.0095 & +0.0207 & 0.8\,\% darker \\
+1 to 2 px    & 176 & +0.0377 & 0.0191 & +0.0632 & 8.3\,\% darker \\
+outermost pixel & 184 & +0.0686 & 0.0496 & +0.1886 & 14.6\,\% darker \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent (The darkest outermost pixel is $+0.239$, 42\,\% darker.)  More
+than 2 pixels in, $\Rwhite$ is right on average (within 0.0035) but each
+pixel differs from it by the paper's texture (sd 0.0072, about 1.7\,\%).
+In the outer 2 pixels it is wrong by 8--15\,\% typically: method $\MA$ reads
+the edge shadow as stain.  The dot, on these samples, lies inside the
+region $\Rwhite$ is taken from.
+
+\begin{figure}[h!]
+    \centering
+    \includegraphics[width=\textwidth]{shading-R3d}
+    \caption{
+    C1032 royal\_blue.B pre-image, own grid: how far each pad pixel is from
+    the single white value, as $\Bown - \bw$ (0 = $\Rwhite$; bigger =
+    darker).  Left: the map; the black line encloses the region $\Rwhite$
+    is the median of.  Right: histograms by depth into the pad, sharing the
+    $x$ axis; black line = $\Rwhite$, red dashed = that band's median.
+    Made by \code{shading\_review.show\_white} (step R3d).
+    }
+\label{fig:shading-R3d}
+\end{figure}
+
+%======================================================================
+\section{The four methods, as equations}
+\label{sec:methods}
+
+\subsection{One equation, four choices of \texorpdfstring{$\hB$}{B-hat}}
+
+Every method computes the stain the same way and differs only in the
+estimated shading $\hB$ it takes out:
+\begin{equation}
+  C_{ij} = A_{ij} - \hat B_{ij}.
+\end{equation}
+
+\medskip
+\begin{tabular}{@{}L{3.4cm}L{7.4cm}L{3.6cm}@{}}
+\toprule
+method & $\hat B_{ij}$ & scalars \\
+\midrule
+$\MA$ (code now) & $\bw$, the same at every pixel & $\Rwhite$ \\
+$\MB$1, $\MB$2 & $\tilde B_{ij}$, $\mB$ smoothed over $\sigma = 1$ or 2 px & $\sigma$ \\
+$\MC$ & $B_{ij}$, the lined-up pre-image itself & --- \\
+$\MD$ & $\lambda B_{ij} + (1-\lambda)\tilde B_{ij}$, $\sigma = 1$ px & $\lambda$, $\sigma$ \\
+\bottomrule
+\end{tabular}
+
+\medskip
+\noindent In reflectance each is a division by a per-pixel white,
+$10^{-\hat B_{ij}}$; for $\MA$ that white is the single number $\Rwhite$.
+
+\subsection{Why a constant cancels in \texorpdfstring{$\MB$, $\MC$ and $\MD$}{B, C and D}}
+\label{sec:cancel}
+
+Add the same number $c$ to every pixel of both $\mA$ and $\mB$ (for
+example, by measuring both against $\Rwhite$ rather than against the gray
+chips, $c = -\bw$).  Then:
+\begin{itemize}
+  \item $\MC$: $\hat B$ gains $c$, so $C = (A + c) - (B + c) = A - B$.
+    Unchanged.
+  \item $\MB$: smoothing is a weighted average whose weights add up to 1
+    (Section~\ref{sec:smooth}), so $\tilde B$ gains exactly $c$ too.
+    Unchanged.
+  \item $\MD$: $\hat B$ gains $\lambda c + (1-\lambda) c = c$.  Unchanged.
+    \textbf{The weights summing to 1 is what makes this work.}  Fitted
+    freely, the weights on $\tB$ and on $\mB - \tB$ come out at 0.94 and
+    0.87; then $1 - 0.94 = 0.06$ of the pad's own level against the gray
+    chips ($\approx 0.34$) would stay in $\mC$: 0.020 at every pixel.
+  \item $\MA$: $\hat B = \bw$ is a fixed number, so $C$ gains $c$.  Here the
+    reference matters.
+\end{itemize}
+
+\subsection{The smoothing, exactly}
+\label{sec:smooth}
+
+\begin{equation}
+  \tilde X_{ij} = \frac{\sum_{i',j'} \kappa_\sigma(i - i', j - j')\,
+                        M_{i'j'}\, X_{i'j'}}
+                       {\sum_{i',j'} \kappa_\sigma(i - i', j - j')\, M_{i'j'}}
+\end{equation}
+where $\kappa_\sigma$ is a bell-shaped weight of width $\sigma$ pixels (a
+Gaussian with standard deviation $\sigma$), the sums run over pixels near
+$(i, j)$, and $M_{i'j'} = 1$ on the pad, 0 elsewhere.  Dividing by the sum
+of the weights makes them add up to 1 at every pixel.  Near the pad's edge
+only pad pixels count, so the paper outside does not leak in; but a pixel at
+the edge is then averaged only with pixels further in, which are lighter.
+\textbf{So smoothing pulls the edge shadow inward} and makes the outermost
+pixel look lighter than it is (Section~\ref{sec:results}).
+
+\subsection{How \texorpdfstring{$\lambda$}{lambda} is fitted}
+
+Method $\MD$ is $\mC = \mA - \tB - \lambda(\mB - \tB)$.  $\hat\lambda$ is the
+value that makes the sum of squared leftovers smallest over the dye-free
+zone (an overall offset is allowed for in the fit, then thrown away):
+\begin{equation}
+  \hat\lambda = \frac{\sum (f - \bar f)(y - \bar y)}{\sum (f - \bar f)^2},
+  \qquad f = B_{ij} - \tilde B_{ij},\quad y = A_{ij} - \tilde B_{ij},
+\end{equation}
+summed over the dye-free pixels, with $\bar f$, $\bar y$ their means there.
+On C1032: $\hat\lambda = 0.81$, one \SCALAR{} for the whole pad.
+\textbf{Fitted on each part alone, it is 0.24 on the dye-free inner pad and
+0.85 on the dye-free rim.}  The rim's error is about six times larger, so
+it sets the pooled value.
+
+\subsection{Worked example: two pixels, every method}
+
+Both pixels are dye-free.  The inner one is 8.8 px in from the pad's edge
+(row 55, column 78); the rim one is 0.8 px in (row 66, column 70).
+$\Rwhite = 2.1888$, $\bw = -0.3402$.
+
+\medskip
+\begin{center}
+\begin{tabular}{@{}lrr@{}}
+\toprule
+ & inner pixel & rim pixel \\
+\midrule
+$R$ & 2.1327 & 1.5559 \\
+$S$ & 2.1939 & 1.5702 \\
+$A = -\log_{10} R$ & $-0.3289$ & $-0.1920$ \\
+$B = -\log_{10} S$ & $-0.3412$ & $-0.1960$ \\
+$\tilde B$, $\sigma = 1$ & $-0.3418$ & $-0.2431$ \\
+\midrule
+\multicolumn{3}{@{}l}{$C = A - \hat B$ for each method:} \\
+$\MA$: $\hat B = \bw$                            & +0.0113 & +0.1482 \\
+$\MB$1: $\hat B = \tilde B$, $\sigma = 1$        & +0.0129 & +0.0511 \\
+$\MB$2: $\hat B = \tilde B$, $\sigma = 2$        & +0.0117 & +0.0853 \\
+$\MC$: $\hat B = B$                              & +0.0123 & +0.0040 \\
+$\MD$: $\hat B = 0.81\,B + 0.19\,\tilde B$       & +0.0124 & +0.0129 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent Check of $\MC$ on the rim pixel, from reflectance:
+$R/S = 1.5559/1.5702 = 0.9909$, $-\log_{10}(0.9909) = +0.0040$; no
+$\Rwhite$ needed.  Check of $\MD$ on the rim pixel:
+$\hat B = 0.81(-0.1960) + 0.19(-0.2431) = -0.2049$, and
+$C = -0.1920 + 0.2049 = +0.0129$.
+
+\noindent On the inner pixel all methods agree within 0.0016, under the
+paper's texture (0.007).  On the rim pixel they differ by 0.14: the pad is
+0.14 darker there than inside in both photos; $\MA$ leaves all of it, $\MB$1
+leaves a third (smoothing has lightened $\tilde B$ there from $-0.196$ to
+$-0.243$), and $\MC$ removes it.
+
+%======================================================================
+\section{How the error is measured}
+\label{sec:error}
+
+The truth is not known at any pixel, so the error has to be defined.  The
+rule: \emph{the corrected dye-free pad should be flat, at the level of the
+dye-free inner pad.}  For each method:
+\begin{align}
+  \Cbar &= \operatorname{median}\{C_{ij} : \text{dye-free inner pad}\}
+    && \text{(\SCALAR, one per method)} \\
+  D_{ij} &= C_{ij} - \Cbar && \text{(the error; image, whole pad)}
+\end{align}
+The error is split into a smooth part $\tD$ ($\mD$ smoothed with
+$\sigma = 2$ px) and a fine part $\mD - \tD$.
+\begin{itemize}
+  \item $\Cbar$ only sets where 0 is.  It is subtracted from every pad
+    pixel, so $\Rwhite$ has no effect on $\mD$ in any method.  But because it
+    centers each method's inner pad on 0, a method that shifts the whole
+    inner pad does not show it in $\mD$: $\MB$2 does ($\Cbar = 0.0027$
+    against 0.0044--0.0048 for the others).
+  \item $\tD$ is shadow left over (positive) or overdone (negative).  2 px
+    is wider than the fiber texture (1--2 px) and narrower than the edge
+    shadow (2--3 px).
+  \item $\mD - \tD$ is everything that changes within about 2 px: camera
+    noise, fiber texture not cancelled, one-pixel mismatches at the pad's
+    edge, and, around the dot, the stain's own steep edge.
+  \item Inside the dot, $\mD$ is stain, not error.  Error numbers are for
+    the dye-free zone only; for the dot only the mean of $\mC$ is compared.
+  \item $\tD$ is smoothed over the whole pad, so a little of the stain's
+    fade leaks into it near the start of the dye-free zone: on average
+    +0.0004 to +0.001 within 3 px of that line, at most +0.004.
+\end{itemize}
+
+%======================================================================
+\section{Results on C1032 royal\_blue.B}
+\label{sec:results}
+
+\subsection{Orientation}
+
+\begin{figure}[h!]
+    \centering
+    \includegraphics[width=\textwidth]{shading-R2a}
+    \caption{
+    C1032 royal\_blue.B: $\mC$ by method $\MA$ ($\mA - \bw$), the lined-up
+    pre-image ($\mB - \bw$), and $\mC$ by method $\MC$ ($\mA - \mB$).  Top
+    row: a scale that shows the dot.  Bottom row: a tight scale ($\pm 0.04$)
+    that shows shading.  Black line = dot edge; gray line = start of the
+    dye-free zone.  Bigger = darker.  Made by
+    \code{shading\_review.show\_r2\_maps} (step R2a).
+    }
+\label{fig:shading-R2a}
+\end{figure}
+
+\subsection{One row, every method}
+
+Figure~\ref{fig:shading-R3e} follows one dye-free row (row 82) and one row
+through the dot (row 66) across the pad:
+\begin{itemize}
+  \item Panel 1: the edge shadow is in both photos (left end: $\mA$ rises
+    0.12, $\mB$ 0.14 above the inner pad).  Smoothing lowers the outermost
+    value and raises its neighbors: the shadow pulled inward.
+  \item Panel 2: $\hB$ for each method; $\MA$'s is the flat line $\bw$.
+  \item Panel 3, left end: $\MA$ leaves the shadow (+0.12); $\MB$1 and
+    $\MB$2 leave part of it in the outermost pixel and overdo the next one
+    in ($-0.01$); $\MC$ and $\MD$ come closest.
+  \item Panel 3, right end: here the post-image is darker at the edge than
+    the pre-image, so every method leaves +0.04 to +0.06.  The mismatch
+    between the two photos' edges goes both ways.
+  \item Panel 4: through the dot, all methods lie on top of each other;
+    they differ only at the pad's edges.
+\end{itemize}
+
+\begin{figure}[h!]
+    \centering
+    \includegraphics[width=0.78\textwidth]{shading-R3e}
+    \caption{
+    C1032 royal\_blue.B, one row across the pad; panels share the column
+    axis; the rim (within 4 px of the pad's edge) is shaded gray.  1:
+    $\mA$, $\mB$ and $\tB$ against the gray chips; the gray line is $\bw$.
+    2: $\hB$, what each method takes out.  3 and 4: $\mC = \mA - \hB$ on the
+    dye-free row and on the row through the dot.  Bigger = darker.  Made by
+    \code{shading\_review.show\_r3\_profile} (step R3e).
+    }
+\label{fig:shading-R3e}
+\end{figure}
+
+\subsection{Maps of the error}
+
+\begin{figure}[h!]
+    \centering
+    \includegraphics[width=\textwidth]{shading-R3a}
+    \caption{
+    C1032 royal\_blue.B: where each method leaves its error.  One column per
+    method; the scalars each uses are printed under its name.  Rows: 1,
+    $\hB - \bw$ (what is taken out, relative to method $\MA$'s single white);
+    2, the error $\mD = \mC - \Cbar$; 3, its smooth part $\tD$ (red =
+    shadow left, blue = overdone); 4, its fine part $\mD - \tD$ (tighter
+    scale).  The dot is stain, not error, and saturates on purpose.  Made
+    by \code{shading\_review.show\_r3\_maps} (step R3a).
+    }
+\label{fig:shading-R3a}
+\end{figure}
+
+\subsection{Sorted error and sorted stain values}
+
+\begin{figure}[h!]
+    \centering
+    \includegraphics[width=\textwidth]{shading-R3b}
+    \caption{
+    C1032 royal\_blue.B: each method's values in one region, sorted from
+    lowest to highest, against the percent of pixels below.  A flat curve
+    near 0 is a good correction; a steep end is a few pixels far off.  Top:
+    $\mD$ on the dye-free inner pad and on the dye-free rim, $\mD - \tD$ on
+    the dye-free zone.  Bottom: $\mC$ on the whole pad, the dot, and the
+    dye-free zone.  Made by \code{shading\_review.show\_r3\_sorted}
+    (step R3b).
+    }
+\label{fig:shading-R3b}
+\end{figure}
+
+\subsection{The numbers}
+
+Standard deviations (sd) in absorbance; ``robust sd'' is $1.4826 \times$ the
+median distance from the median.  Made by \code{shading\_review.r3\_numbers}
+(step R3c).
+
+\medskip
+\begin{center}
+\small
+\begin{tabular}{@{}lrrrrrrrr@{}}
+\toprule
+ & \multicolumn{4}{c}{dye-free inner pad (760 px)} &
+   \multicolumn{3}{c}{dye-free rim (686 px)} & dot \\
+\cmidrule(lr){2-5}\cmidrule(lr){6-8}\cmidrule(l){9-9}
+method & sd of $\mD$ & robust & sd of $\tD$ & sd of $\mD - \tD$ & sd of $\mD$
+  & sd of $\mD - \tD$ & 99th pct & mean $\mC$ \\
+\midrule
+$\MA$  & 0.0068 & 0.0066 & 0.0038 & 0.0065 & 0.0411 & 0.0299 & +0.177 & 0.4941 \\
+$\MB$1 & \textbf{0.0066} & 0.0061 & 0.0028 & \textbf{0.0058} & 0.0203 & 0.0184 & +0.061 & 0.4934 \\
+$\MB$2 & 0.0073 & 0.0071 & 0.0035 & 0.0062 & 0.0296 & 0.0252 & +0.111 & 0.4933 \\
+$\MC$  & 0.0074 & 0.0064 & 0.0026 & 0.0067 & 0.0122 & 0.0100 & +0.032 & 0.4935 \\
+$\MD$  & 0.0071 & \textbf{0.0060} & \textbf{0.0026} & 0.0063 & \textbf{0.0119} & \textbf{0.0099} & +0.034 & 0.4935 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{What the results show}
+
+\begin{enumerate}
+  \item \textbf{No method wins everywhere.}  On the dye-free inner pad,
+    $\MB$1 is best (sd 0.0066) and $\MC$ worst (0.0074).  On the dye-free
+    rim, $\MC$ and $\MD$ are best (0.012) and $\MB$1 is about twice as bad
+    (0.020).
+  \item \textbf{The rim matters more.}  Its error is 2--6 times the inner
+    pad's under every method.
+  \item \textbf{Smoothing the pre-image pulls the edge shadow inward}: $\MB$
+    under-corrects the outermost pixel and over-corrects the next ones in.
+    At 2 px the effect reaches the inner pad ($\MB$2's $\Cbar$ drops to
+    0.0027).
+  \item \textbf{$\MD$ is about as good as $\MC$ on the rim and slightly
+    better inside}, but its one $\hat\lambda$ is set by the rim (0.85 there,
+    0.24 inside).
+  \item \textbf{Every method leaves some error at the pad's very edge},
+    over-corrected in places and under-corrected in others, because the
+    two photos' edges do not line up to the pixel.
+  \item On this pad the lined-up pre-image is already smoothed to 0.80
+    (rows) and 0.72 (columns) of its scatter (Section~\ref{sec:lineup}).
+    On pads that land half-way between pixels, $\MC$ is smoothed much more.
+\end{enumerate}
+
+%======================================================================
+\section{Side effects: the stain}
+
+The correction must not change the stain.  The dot's mean $\mC$ is
+0.4933--0.4941 for all five, a spread of 0.0008 (0.2\,\% of the dot's
+value), and its sorted values lie on top of each other
+(Figure~\ref{fig:shading-R3b}, bottom middle).  Through the dot, the
+methods differ only at the pad's edges (Figure~\ref{fig:shading-R3e},
+panel 4).
+
+%======================================================================
+\section{How big are these effects?}
+
+Compared with the spreads already known (in absorbance): camera noise
+about 0.002, paper texture 0.006--0.008, rim shadow about 0.04.
+\begin{itemize}
+  \item On the inner pad the methods range from 0.0066 to 0.0074, all
+    within the paper's texture.  Choosing among them there is polish.
+  \item On the rim they range from 0.012 to 0.041: a large effect.  This is
+    where the choice matters.
+  \item Lining up lowers the pre-image's scatter by up to half (0.0067 to
+    0.0036 on C1020): as large as the differences between methods inside
+    the pad.
+\end{itemize}
+
+%======================================================================
+\section{What this note does not tell us, and what is next}
+\label{sec:open}
+
+\begin{itemize}
+  \item It is one pad and one channel.  Whether $\hat\lambda$ and the order
+    of the methods hold on the other pads is not known; the lining-up
+    result says they may not, since each pad's $\mB$ is smoothed by a
+    different amount.
+  \item \textbf{$\lambda$ (Bill, 2026-10-03).}  A $\lambda$ that varies across
+    the pad risks being confused with the stain.  First try to make one
+    $\lambda$ work through the right smoothing near the edge.  Only if the
+    outermost one to three rows along each pad edge are shaded in a
+    fundamentally different way, let $\lambda$ vary there, and only there.
+    $\lambda$ may be found once and stored, or set for each photo from its
+    noise and how well the two photos line up.
+  \item \textbf{The rim} (deferred by Bill on 2026-10-02): why the outermost
+    pixel is over-corrected on one side and under-corrected on the other,
+    and whether a smoothing that respects the edge can avoid it.  Bill's
+    expected method: two-dimensional smoothing on the inner pad and
+    smoothing along rows or columns only, at twice the width, near the
+    edges, then method $\MD$ with both weights non-zero.
+  \item \textbf{Lining up.}  Possible ways to handle the pad-to-pad
+    difference in smoothing: record each pad's fractional position and
+    allow for it when setting $\sigma$ and $\lambda$; or line up so that the
+    smoothing is the same on every pad.  Bill (2026-10-04): compare
+    recording the fractional position with lining up by nearest pixel, in
+    the rim and edge-smoothing step.
+  \item The error is measured against a flat dye-free pad.  Faint stain
+    more than 6 px from the dot, if any, would count as error.
+\end{itemize}
+
+%======================================================================
+\section{How to reproduce}
+
+Script: \file{desktop/padanalysis/shading\_review.py}.  Every figure and
+number in this note comes from
+\begin{verbatim}
+cd desktop/padanalysis
+timeout -k 10 600 ../../.venv/bin/python3 -u -c \
+  "import shading_review as sr; sr.tex_figs()"
+\end{verbatim}
+\noindent which writes \file{tex/figs/shading-R2a.pdf}, \file{shading-R3a},
+\file{-R3b}, \file{-R3d}, \file{-R3e}, \file{-R4a} and \file{-R4b}, and
+prints the numbers.  Functions: \code{post\_pre} (the two photos),
+\code{r3\_methods} (the four methods and the error), \code{r3\_numbers},
+\code{show\_white}, \code{show\_r3\_maps}, \code{show\_r3\_sorted},
+\code{show\_r3\_profile}, \code{r3\_example} (worked example; prints the
+code's values relative to $\bw$), \code{lineup\_noise},
+\code{lineup\_noise\_table}, \code{show\_lineup\_noise},
+\code{show\_lineup\_ratio}.  In the code, the arrays \code{A\_post} and
+\code{A\_pre} are $\mA - \bw$ and $\mB - \bw$, \code{corr} is $\hB - \bw$,
+\code{after} is $\mC$, \code{level} is $\Cbar$, \code{err} is $\mD$, and
+\code{wt} is $\hat\lambda$.  The study log is
+\file{docs/shading\_study\_2026-09-29.md}, section ``Reassessment''.
+
+\end{document}

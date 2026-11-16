@@ -34,12 +34,14 @@ Key strings returned
 --------------------
   Printable characters  : 'a', 'A', '1', '!', ' ', etc.
   Navigation            : 'tab', 'shift-tab', 'enter', 'backspace',
-                          'delete', 'escape', 'up', 'down', 'left', 'right'
+                          'delete', 'escape', 'up', 'down', 'left', 'right',
+                          'home', 'end'
   Modifier-only keys    : None  (shift state is tracked internally)
 
 Shift is tracked (KEY_LEFTSHIFT / KEY_RIGHTSHIFT).
 Caps Lock is not implemented.
-Auto-repeat fires only for 'backspace' (value=2 events).
+Auto-repeat fires only for 'backspace', 'delete', 'left' and 'right'
+(value=2 events) — the keys that edit or walk through a text box.
 """
 
 import logging
@@ -104,6 +106,8 @@ def _build_maps():
         c.KEY_DOWN:      'down',
         c.KEY_LEFT:      'left',
         c.KEY_RIGHT:     'right',
+        c.KEY_HOME:      'home',
+        c.KEY_END:       'end',
     }
 
     shift_keys = {c.KEY_LEFTSHIFT, c.KEY_RIGHTSHIFT}
@@ -113,6 +117,9 @@ def _build_maps():
 
 if _EVDEV_AVAILABLE:
     _CHAR_MAP, _NAV_MAP, _SHIFT_KEYS = _build_maps()
+    # Keys whose auto-repeat events are passed through (see _translate).
+    _REPEAT = {ecodes.KEY_BACKSPACE, ecodes.KEY_DELETE,
+               ecodes.KEY_LEFT, ecodes.KEY_RIGHT}
 else:
     _CHAR_MAP = _NAV_MAP = _SHIFT_KEYS = {}
 
@@ -213,7 +220,8 @@ class KbReader:
         Translate an EV_KEY event (code + value) to a key string.
 
         value: 1 = key-down, 2 = auto-repeat, 0 = key-up.
-        Only key-down and (for backspace) auto-repeat events produce output.
+        Only key-down and (for the _REPEAT keys) auto-repeat events produce
+        output.
         """
         # Track shift state on both down and up.
         if code in _SHIFT_KEYS:
@@ -223,8 +231,9 @@ class KbReader:
         if value == 0:       # key-up — no output
             return None
 
-        # Auto-repeat: only pass backspace through (natural typing feel).
-        if value == 2 and code != ecodes.KEY_BACKSPACE:
+        # Auto-repeat: only for the keys that edit or walk through a text box
+        # (holding a letter should not type a row of it).
+        if value == 2 and code not in _REPEAT:
             return None
 
         # Navigation keys.

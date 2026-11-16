@@ -90,7 +90,7 @@ Three destinations, and only the last one leaves the desktop:
                                  reduced result the instrument reads
 
 The last is opt-in: pass `layermodels_db=` to analyze(), which
-`run_bound39a.py` does.  It puts new weights **in force**, superseding the
+`run_bound_union_a.py` does.  It puts new weights **in force**, superseding the
 previous rows rather than deleting them.  See build_layermodels() for which
 cell becomes which row, and src/layermodel_repo.py for what reads them back.
 
@@ -109,7 +109,7 @@ whole crop.  The extra step here is that the archives were cropped to a
 to the target bound before anything else happens.  See `subcrop_slices()`.
 
 Usage:
-    .venv/bin/python3 devdesk/run_bound39a.py
+    .venv/bin/python3 devdesk/run_bound_union_a.py
     .venv/bin/python3 devdesk/flatfield_pool.py --selftest
 """
 
@@ -262,7 +262,8 @@ class Geometry:
     t: Optional[float] = None
 
 
-def build_geometry(rowids: Sequence[int], bound_rowid: int) -> Geometry:
+def build_geometry(rowids: Sequence[int], bound_rowid: int,
+                   roles: Optional[Dict[int, str]] = None) -> Geometry:
     """
     Resolve the requested rois into a target bound plus patches inside it.
 
@@ -271,9 +272,16 @@ def build_geometry(rowids: Sequence[int], bound_rowid: int) -> Geometry:
     measured within it.  This mirrors flatfield.load_patches(), which drops the
     bound role for the same reason.
 
+    Since 2026-08-09 (commit d9cf70b) both gray chips carry the role
+    'white_balance' in the roi table, so the table alone no longer says which
+    chip is the left one.  Pass `roles` to say so, e.g.
+    `{51: 'gray1', 50: 'gray2'}`.
+
     Args:
         rowids: Every `roi.rowid` in the study, including the bound's.
         bound_rowid: Which of them is the bound.
+        roles: {rowid: role} to use instead of the row's own `role` column,
+            or None to use the table as it stands.
 
     Returns:
         A Geometry.
@@ -283,7 +291,8 @@ def build_geometry(rowids: Sequence[int], bound_rowid: int) -> Geometry:
             the bound, or the roles needed for anchoring are absent.
 
     Example:
-        >>> g = build_geometry((32, 35, 36, 39), 39)   # doctest: +SKIP
+        >>> g = build_geometry((32, 35, 36, 39), 39,
+        ...     {32: 'sample', 36: 'gray1', 35: 'gray2'})  # doctest: +SKIP
         >>> g.patches.rects['chip1'], round(g.t, 4)    # doctest: +SKIP
         ((10, 26, 34, 34), 0.4627)
     """
@@ -293,6 +302,8 @@ def build_geometry(rowids: Sequence[int], bound_rowid: int) -> Geometry:
             f"add it so the crop\nand the patches come from one list.")
 
     rois = load_rois_by_rowid(rowids)
+    for rowid, role in (roles or {}).items():
+        rois[rowid].role = role
     bound = rois[bound_rowid]
 
     rects, roles, rowid_of, dropped = {}, {}, {}, []
@@ -2288,7 +2299,8 @@ def analyze(files: Sequence[Sequence], bound: int,
             captures_dir: Path = DEFAULT_CAPTURES_DIR,
             figures: bool = True,
             layermodels_db=None,
-            analysisref: Optional[str] = None) -> List[Result]:
+            analysisref: Optional[str] = None,
+            roles: Optional[Dict[int, str]] = None) -> List[Result]:
     """
     Pool a set of captures over one bound and settle its anchor weights.
 
@@ -2320,6 +2332,8 @@ def analyze(files: Sequence[Sequence], bound: int,
         analysisref: Name stamped on the published rows, e.g. 'bound39a'.
             Defaults to the writedir's own name, which is where the reports
             backing those rows sit.
+        roles: {rowid: role} overriding the roi table's `role` column; see
+            `build_geometry`.
 
     Returns:
         Every Result, in visit order.
@@ -2328,7 +2342,7 @@ def analyze(files: Sequence[Sequence], bound: int,
         >>> analyze((("ZP1001_grayA1a.h5", 26),), 39, (32, 35, 36, 39),
         ...         "devdesk/flatfield/bound39a")      # doctest: +SKIP
     """
-    geom = build_geometry(roi_rowid, bound)
+    geom = build_geometry(roi_rowid, bound, roles)
     writedir = Path(writedir)
     writedir.mkdir(parents=True, exist_ok=True)
     db_path = Path(db_path)
@@ -2477,7 +2491,8 @@ def _selftest() -> int:
     check("subcrop arithmetic",
           sl == (slice(101, 231), slice(93, 276)), f"{sl}")
 
-    geom = build_geometry((32, 35, 36, 39), 39)
+    geom = build_geometry((32, 35, 36, 39), 39,
+                          {32: "sample", 36: "gray1", 35: "gray2"})
     shape = (geom.bound.h // 2, geom.bound.w // 2)
     check("geometry", shape == (130, 183) and abs(geom.t - 0.4627) < 5e-4,
           f"shape {shape}, t = {geom.t:.4f}")
@@ -2670,4 +2685,4 @@ if __name__ == "__main__":
     if "--selftest" in sys.argv:
         sys.exit(_selftest())
     print(__doc__)
-    print("Run devdesk/run_bound39a.py, or import analyze() from this module.")
+    print("Run devdesk/run_bound_union_a.py, or import analyze() from this module.")

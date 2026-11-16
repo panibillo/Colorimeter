@@ -68,6 +68,7 @@ R_white (the white reference)
 
 """
 import json
+import re
 import sqlite3
 import sys
 from datetime import datetime
@@ -79,9 +80,11 @@ from scipy import ndimage
 SP = Path(__file__).resolve().parent
 sys.path.insert(0, str(SP))
 
+import chain_samples                                        # noqa: E402
 import padphot                                              # noqa: E402
-from probe import BAYER, PRE, RAW_MAX, Capture, sections    # noqa: E402
-from padrect import PadRect                                 # noqa: E402
+from probe import (BAYER, PRE, RAW_MAX, Capture,             # noqa: E402
+                   archive_path, sections)
+from padrect import LAYOUT_WINDOW, PadRect                  # noqa: E402
 from whitecorr import load_models, rect_mask                # noqa: E402
 from fields import rung_for                                 # noqa: E402
 from chemistry import cell_name                             # noqa: E402
@@ -213,7 +216,33 @@ MAX_SAT_FRACTION = 0.001
 #: day when hot pixels began to be left out.
 #: Then "+pre_white" the same day, when R_white moved from the bare paper
 #: to the pre-image's own pad.
-CHAIN = "dark_level+divisor_map+hot_mask+pre_white"
+#: Then "+ff_union" on 2026-11-02, when the flat field was refitted over the
+#: union bound (roi rowid 61, analysisref 'bound_union_a') after the gray
+#: chips moved on 2026-10-28.
+#: Then "+guided_sides" on 2026-11-11, when the pad's sides in the cassette
+#: holders (cap_style F, G1, H1) began to be found guided by the pre-image
+#: (`pad_of`, `padrect` module docstring).
+#: Then "+measured_top" on 2026-11-15, when the cassette holders' pad top
+#: began to be measured instead of placed 53.34 rows above the bottom (it sat
+#: about one row too high, on the backing strip; `padrect._measure_top`).
+CHAIN = ("dark_level+divisor_map+hot_mask+pre_white+ff_union+guided_sides"
+         "+measured_top")
+
+#: Holder layout for each cassette `samples.cap_style`.  A sample whose
+#: cap_style is listed gets this layout instead of padrect's guess from the
+#: image (the guess reads the last rows of the bound, which in holder G1 are
+#: the window's lower edge, and so can go either way), and its pad sides are
+#: found guided: the pre-image around its own first fit, the post-image
+#: around the pre-image (`pad_of`).  Any other cap_style, or none, keeps
+#: padrect's own fit, unchanged.
+#: Bill, 2026-11-11: cap_style will later also give the pad's location in
+#: whole-image coordinates (the camera and stage are fixed; the bound is
+#: editable).  A cassette not fully inserted can sit more than a few px
+#: lower, so that location is a starting point, not a tight limit, down
+#: the strip.
+CAP_LAYOUT = {"F-cassette": LAYOUT_WINDOW,
+              "G1-cassette": LAYOUT_WINDOW,
+              "H1-cassette": LAYOUT_WINDOW}
 
 _STRIP_ROIS = (ROISAMPLE, ROIWHITE)     # move with the strip; see registration
 _ROI_NAMES = (ROIBOUND, ROIWHITE, ROIGRAY1, ROIGRAY2, ROISAMPLE)
@@ -222,6 +251,7 @@ _captures = {}      # (samp_no, section) -> Capture
 _pads = {}          # (samp_no, section) -> PadRect
 _models = None      # {(led, layer): whitecorr.LayerModel}
 _manual_reads = {}  # samp_no -> str or None
+_cap_styles = {}    # samp_no -> str or None
 
 
 # ── opening, caching, closing ──────────────────────────────────────────
@@ -251,7 +281,7 @@ def open_sample(samp_no, sec="") -> Capture:
     """
     key = (samp_no, sec)
     if key not in _captures:
-        path = CAPTURES / f"{samp_no}.h5"
+        path = archive_path(samp_no)            # captures/, then test_image/
         with Hdf5Reader(str(path)) as r:
             problem = version.check_archive(r.attrs("/"))
         if problem:
@@ -283,6 +313,7 @@ def close_all() -> None:
         c.close()
     _captures.clear()
     _pads.clear()
+    _cells_pads.clear()
 
 
 def layer_shape(samp_no, sec="") -> tuple:
@@ -464,6 +495,20 @@ def pad_of(samp_no, sec="") -> PadRect:
     as on a heavily stained one -- which is what makes the pre-image and the
     measurement comparable.
 
+    For a sample whose `cap_style` is in CAP_LAYOUT (the cassette holders),
+    the layout comes from the cap_style and the sides are found guided
+    (`padrect.PadRect._find_sides_guided`):
+      - pre-image: fitted as usual, then its sides refitted around that
+        first fit;
+      - post-image: sides looked for only within `padrect.SIDE_SEARCH_PX`
+        of the same file's pre-image sides.  If the file has no pre-image,
+        it is fitted like a pre-image instead.
+    Every other sample is fitted exactly as before 2026-11-11.
+    A sample listed in chain_samples.PAD_FIT_CELLS is located on those
+    channels only, in both sections (2026-11-13: C1048, on photo_red), and
+    then moved by `fit_offset` (plus chain_samples.POST_OFFSET_STEADY for
+    a post-image), so it sits where an all-channel fit would.
+
     Args:
         samp_no: Capture name.
         sec: Which sweep -- '' measurement, 'pre' pre-image.
@@ -471,14 +516,112 @@ def pad_of(samp_no, sec="") -> PadRect:
     Returns:
         The cached `PadRect`.  `.describe()` is its one-line QC summary;
         read it before believing any number that depends on the geometry.
+        Its `side_rule` says 'guided' or 'half-level'.
 
     Example:
         >>> print(pad_of("C1020").describe())            # doctest: +SKIP
     """
     key = (samp_no, sec)
-    if key not in _pads:
-        _pads[key] = PadRect(open_sample(samp_no, sec), rung=PAD_RUNG)
-    return _pads[key]
+    if key in _pads:
+        return _pads[key]
+    c = open_sample(samp_no, sec)
+    layout = CAP_LAYOUT.get(_cap_style(samp_no))
+    cells = chain_samples.pad_fit_cells(samp_no)   # None: every channel
+    if cells is not None:                    # located on a few channels
+        pad = _cells_fit(samp_no, sec, cells)
+        if chain_samples.APPLY_FIT_OFFSET:
+            off = np.array(fit_offset(samp_no))
+            if sec == "":
+                off = off + np.array(chain_samples.POST_OFFSET_STEADY)
+            pad.shift_edges(*off)
+    elif layout is None:                     # not a cassette: as before
+        pad = PadRect(c, rung=PAD_RUNG)
+    elif sec == "" and PRE in sections(samp_no):
+        pad = PadRect(c, rung=PAD_RUNG, layout=layout,
+                      prior=pad_of(samp_no, PRE))
+    else:
+        pad = PadRect(c, rung=PAD_RUNG, layout=layout)
+        pad.guide_sides()
+    _pads[key] = pad
+    return pad
+
+
+_cells_pads = {}    # (samp_no, section, cells) -> PadRect, before any shift
+
+
+def _cells_fit(samp_no, sec, cells):
+    """
+    A pad fit located on `cells` only, before any offset, cached: the
+    pre-image guided by itself, the post-image guided by this same kind
+    of fit of its own file's pre-image (as `pad_of` does with all
+    channels).  A new object each call is not needed: callers that shift
+    it get a copy.
+    """
+    import copy
+    key = (samp_no, sec, tuple(cells))
+    if key not in _cells_pads:
+        c = open_sample(samp_no, sec)
+        layout = CAP_LAYOUT.get(_cap_style(samp_no))
+        if sec == "" and PRE in sections(samp_no):
+            pad = PadRect(c, rung=PAD_RUNG, layout=layout,
+                          prior=_cells_fit(samp_no, PRE, cells), cells=cells)
+        else:
+            pad = PadRect(c, rung=PAD_RUNG, layout=layout, cells=cells)
+            if layout is not None:
+                pad.guide_sides()
+        _cells_pads[key] = pad
+    return copy.copy(_cells_pads[key])
+
+
+def fit_offset(samp_no):
+    """
+    The offset of the usual all-channel pad fit from a fit located on the
+    sample's PAD_FIT_CELLS, measured on the pre-image its post-image is
+    paired with (chain_samples.pre_source; C1048 -> C1047), as [left,
+    right, top, bottom] in layer px, left and right at the pad's middle
+    row.  If that pre-image is itself located on a few channels, the mean
+    over the F/G/H files, chain_samples.DEFAULT_PRE_OFFSET, is used.
+    (color_study.fit_basis_offsets; Bill, 2026-11-13.)
+    """
+    cells = chain_samples.pad_fit_cells(samp_no)
+    ref = chain_samples.pre_source(samp_no)
+    if chain_samples.pad_fit_cells(ref) is not None:
+        return chain_samples.DEFAULT_PRE_OFFSET
+    full = pad_of(ref, PRE)
+    part = _cells_fit(ref, PRE, cells)
+    y = 0.5 * (full.top + full.bot)
+
+    def sides(p):
+        return np.array([p.aL + p.m * (y - p.yc), p.aR + p.m * (y - p.yc),
+                         p.top, p.bot])
+    return tuple(float(v) for v in sides(full) - sides(part))
+
+
+def _cap_style(samp_no):
+    """
+    The holder (`samples.cap_style`) of a capture, or None.
+
+    A repeat or restarted capture file ("C1045rep3", "C1042-b",
+    "C1044rep2-b") has no row of its own, so when the name has none, the
+    row of its leading letters and digits ("C1045") is used.
+    """
+    if samp_no not in _cap_styles:
+        names = [samp_no]
+        m = re.match(r"[A-Za-z]+\d+", samp_no)
+        if m and m.group(0) != samp_no:
+            names.append(m.group(0))
+        conn = sqlite3.connect(f"file:{DB}?mode=ro", uri=True)
+        try:
+            row = None
+            for n in names:
+                row = conn.execute("SELECT cap_style FROM samples "
+                                   "WHERE samp_no = ?", (n,)).fetchone()
+                if row is not None:
+                    break
+        finally:
+            conn.close()
+        _cap_styles[samp_no] = row[0] if row and row[0] else None
+    return _cap_styles[samp_no]
 
 
 def _region(samp_no, roi, sec="", erode=ERODE) -> np.ndarray:
@@ -515,16 +658,33 @@ CREATE TABLE IF NOT EXISTS sample_roi (
   top_residual REAL, top_clearance REAL, bot_source TEXT,
   bound_x   INTEGER, bound_y INTEGER,-- the crop these coords are inside
   bound_w   INTEGER, bound_h INTEGER,
+  layout    TEXT,                    -- holder layout: 'window' | 'channel'
+  side_rule TEXT,                    -- how the sides were found:
+                                     -- 'half-level' | 'guided'
   PRIMARY KEY (samp_no, section)
 )
 """
+
+#: Columns added to `sample_roi` after it was first created, with their
+#: types; `_sample_roi_upgrade` adds any an older table lacks.
+#: layout, side_rule: 2026-11-11, when guided sides began (`pad_of`).
+_SAMPLE_ROI_ADDED = (("layout", "TEXT"), ("side_rule", "TEXT"))
 
 _SAMPLE_ROI_COLS = (
     "samp_no", "section", "add_dt", "rung", "aL", "aR", "width", "height",
     "m", "yc", "angle_deg", "top", "bot", "strip_top", "edge_rms",
     "n_rows", "n_rejected", "top_residual", "top_clearance", "bot_source",
-    "bound_x", "bound_y", "bound_w", "bound_h",
+    "bound_x", "bound_y", "bound_w", "bound_h", "layout", "side_rule",
 )
+
+
+def _sample_roi_upgrade(conn):
+    """Create `sample_roi` if missing, and add any _SAMPLE_ROI_ADDED column."""
+    conn.execute(_SAMPLE_ROI_DDL)
+    have = {r[1] for r in conn.execute("PRAGMA table_info(sample_roi)")}
+    for col, typ in _SAMPLE_ROI_ADDED:
+        if col not in have:
+            conn.execute(f"ALTER TABLE sample_roi ADD COLUMN {col} {typ}")
 
 
 def locate_pad(samp_no, write=True) -> dict:
@@ -558,8 +718,9 @@ def locate_pad(samp_no, write=True) -> dict:
     """
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     rows = {}
-    for sec in sections(samp_no):
-        _pads.pop((samp_no, sec), None)          # always a fresh fit
+    for sec in sections(samp_no):                # always fresh fits; drop both
+        _pads.pop((samp_no, sec), None)          # first, since a post-image
+    for sec in sections(samp_no):                # fit can lean on the pre's
         p = pad_of(samp_no, sec)
         bx, by, bw, bh = open_sample(samp_no, sec).bound
         tr = None if np.isnan(p.top_residual) else float(p.top_residual)
@@ -576,6 +737,7 @@ def locate_pad(samp_no, write=True) -> dict:
             n_rejected=int(p.n_rejected), top_residual=tr,
             top_clearance=float(p.top_clearance), bot_source=p.bot_source,
             bound_x=bx, bound_y=by, bound_w=bw, bound_h=bh,
+            layout=p.layout, side_rule=p.side_rule,
         )
         print(f"  {samp_no}/{sec or 'post':<4} {p.describe().strip()}")
     if not write:
@@ -583,7 +745,7 @@ def locate_pad(samp_no, write=True) -> dict:
 
     conn = sqlite3.connect(DB)
     try:
-        conn.execute(_SAMPLE_ROI_DDL)
+        _sample_roi_upgrade(conn)
         for row in rows.values():
             conn.execute(
                 f"INSERT OR REPLACE INTO sample_roi "
@@ -806,6 +968,46 @@ def rung_verdict(samp_no, cell, sec="", erode=ERODE) -> tuple:
         if best is None or level > best[1]:
             best = (rung, level)
     return (best[0], "ok") if best else (None, why)
+
+
+def repeat_labels(samp_no, cell, rung, sec="", erode=ERODE) -> list:
+    """
+    The frames to average for one channel: `rung` and every other frame of
+    the same LED taken at the same exposure_us, that clips nowhere in the
+    pad and the gray chips (`_measured_region`).
+
+    Since 2026-11-15 the Pi can take N repeat frames at one exposure_us
+    (`protocol.multiple_exposure_count` for Tus, `bus_exposure_count` for
+    Bus; C1049-C1051 have N = 4).  The repeats differ only by camera noise,
+    so averaging their dark-corrected signals cuts that noise by about
+    sqrt(N) (half, for 4 frames).  Averaging is done on the signal (light),
+    before any ratio or logarithm.  Tus and Bus frames have different
+    exposure_us, so they are never mixed here.  Archives before C1049 hold
+    one frame per exposure_us, and get back just [rung].
+
+    Args:
+        samp_no: Capture name.
+        cell: (led, layer).
+        rung: the label `rung_verdict` chose, e.g. 'e1'.
+        sec: '' measurement, 'pre' pre-image.
+        erode: layer px backed off the pad edge for the clipping test.
+
+    Returns:
+        list of labels, `rung` first.
+    """
+    c = open_sample(samp_no, sec)
+    led, layer = cell
+    us = c.exposure_us(led, rung)
+    region = _measured_region(samp_no, sec, erode)
+    out = [rung]
+    for lab in c.labels(led):
+        if lab == rung or c.exposure_us(led, lab) != us:
+            continue
+        got = c.layer(led, lab, layer)
+        if got is None or (got[1][region] >= SATURATED_DN).any():
+            continue
+        out.append(lab)
+    return out
 
 
 def _pick_rung(samp_no, cell, sec="", erode=ERODE):
@@ -1920,6 +2122,9 @@ def run_sampno():
     # ── locate_pad() must run before anything that measures the pad.
     SAMPS = [f"C{n}" for n in range(1034, 1037)] 
     SAMPS = [f"C{1000+n}" for n in (14, 15, 16, 17, 18, 19, 21, 26, 27)]
+    SAMPS = ["C1038_IMG003",]
+    SAMPS = ["C1038",]
+    
     # SAMPS = ['C1025']
     # SAMP = SAMPS[-1]
     # SAMPS = [SAMP]
@@ -1948,7 +2153,7 @@ def run_sampno():
 
     # 4. Every cell at once, then the same thing as numbers.
     #    quantity = one of 'sig', 'R', 'R_inf', 'A', 'KS', 'KS_signed' 
-    if 1:
+    if 0:
         
         for SAMP in SAMPS:
             try:
@@ -1958,8 +2163,8 @@ def run_sampno():
                     contact_sheet(SAMP, quantity=quantity, figs=True, savefigs=True)
                     print()
                 cell_table(SAMP, roi=ROISAMPLE)
-            except:
-                print(f"\n=== missing ({SAMP})")
+            except Exception as e:
+                print(f"\n   Exception {e}\n   === missing ({SAMP})")
 
         return
 
@@ -1976,7 +2181,8 @@ def run_sampno():
 
     # 6. One cell end to end, and the strip against its own dry self.
     #    quantity = one of 'sig', 'R', 'R_inf', 'A', 'KS', 'KS_signed' 
-    if 0: 
+    if 1: 
+        SAMP = SAMPS[0]
         for quantity in [ None, 'sig', 'R', 'R_inf', 'A', 'KS', 'KS_signed']:
         # for quantity in [None]:
             print(f"\n=== a single cell, quantity = {quantity!r}")

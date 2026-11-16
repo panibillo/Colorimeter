@@ -18,12 +18,13 @@
 -- scratch, run db_DDL_reset.sql first — that is the destructive one, and it is
 -- kept in a separate file precisely so it cannot be triggered by accident.
 --
--- Object inventory (9 tables):
+-- Object inventory (10 tables):
 --
 --     colorcard    colour-calibration card patch geometry
 --     config       every instrument setting — see config_repo.py
 --     data         generic timestamped key/value measurements
 --     exposure     calibrated exposure ladders, per LED and group
+--     exposure_log every frame the strip exposure rule measured, per layer
 --     hotpixels    known hot pixels, per camera context and Bayer layer
 --     layermodels  illumination correction, per LED and Bayer layer
 --     roi          regions of interest in camera stream coordinates
@@ -192,7 +193,8 @@ CREATE TABLE IF NOT EXISTS treatments (
     R1_wt_factor   REAL,       -- reagent 1 target weight multiplier
     R1_time_factor REAL,       -- reagent 1 countdown multiplier
     R2_wt_factor   REAL,       -- reagent 2 target weight multiplier
-    R2_time_factor REAL        -- reagent 2 countdown multiplier
+    R2_time_factor REAL,       -- reagent 2 countdown multiplier
+    standard_conc  REAL        -- µg/L arsenic of a standard; NULL = not a standard
 );
 
 
@@ -211,13 +213,25 @@ CREATE TABLE IF NOT EXISTS test_equip (
 
 
 -- ────────────────────────────────────────────────────────────────────────────
--- exposure — calibrated exposure ladders.  One row per (LED, group, exposure).
+-- exposure — calibrated exposure ladders, and each LED's seed for the strip
+-- exposure rule.  `role` says which a row is (one column, one meaning):
 --
--- `active` is the current-vs-history switch: a recalibration flips the old
--- rows to active=0 and inserts fresh active=1 rows, so nothing is lost and the
--- operator can hand-edit which calibration is in force.  See exposure_repo.py.
+--   'ladder'  One row per (LED, group, exposure), written by the
+--             Calibration capture path.  Rows from before 2026-11-14 are
+--             given this role at start-up (db_bootstrap).
+--   'tus'     One active row per LED (exposuregroup NULL): the first
+--             exposure_us a pre-image tries for that LED (its "seed").  The
+--             factory rows are provisioning/config_defaults.sql's; a sample's
+--             pre-image replaces one when it had to re-aim to an accepted Tus
+--             (detour stage 4c; Bill, 2026-11-14).  Never written from a
+--             measurement: a stained pad's Tus must not seed the next
+--             pre-image.
 --
--- Seeded empty — rows are written by the Calibration capture path.
+-- `active` is the current-vs-history switch: a recalibration (or a new seed)
+-- flips the old rows to active=0 and inserts fresh active=1 rows, so nothing
+-- is lost and the operator can hand-edit which calibration is in force.  A
+-- recalibration supersedes only 'ladder' rows; a seed only the LED's 'tus'
+-- row.  See exposure_repo.py.
 -- ────────────────────────────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS exposure (
     rowid           INTEGER PRIMARY KEY
@@ -234,7 +248,12 @@ CREATE TABLE IF NOT EXISTS exposure (
     high_dn         REAL,           -- brightest patch signal measured here; set
                                     --   only on the rung the high limit fixed
     layers          TEXT,           -- Bayer layers that had to pass: 'B', 'Gb Gr'
-    preimage        INTEGER DEFAULT 0  -- 1 = capture this exposure in the pre-image
+                                    --   (a seed: the layer that decided Tus)
+    preimage        INTEGER DEFAULT 0, -- 1 = the group rule's pre-image takes
+                                    --   this exposure (ladder rows only)
+    role            TEXT,           -- 'ladder' | 'tus' (see above)
+    samp_no         TEXT            -- a seed: the sample whose pre-image set
+                                    --   it; NULL for a factory seed
 );
 
 
@@ -444,6 +463,52 @@ CREATE TABLE IF NOT EXISTS hotpixels (
 
 CREATE INDEX IF NOT EXISTS ix_hotpixels_context_active
     ON hotpixels (model, hardware_sn, frame_w, frame_h, bayer_layer, active);
+
+
+-- ────────────────────────────────────────────────────────────────────────────
+-- exposure_log — every frame the strip exposure rule measured (2026-11-14,
+-- detour stage 4b), one row per Bayer layer: the pad-finding frame, every
+-- try at Tus (rejected ones too), and the frames kept at Tus and Bus.
+-- Written by the capture after each sweep's coloured LEDs, with the LEDs
+-- off (src/exposure_log_repo.py, which explains every column).  An index of
+-- the archives, not a replacement: the same numbers are in each LED's
+-- strip_rule record.  Append-only; nothing reads it on the instrument.
+-- ────────────────────────────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS exposure_log (
+    rowid           INTEGER PRIMARY KEY NOT NULL,
+    add_dt          TEXT,      -- when the frame was captured (local, ms)
+    samp_no         TEXT,      -- the sample; NULL for a bench check
+    archive         TEXT,      -- archive file name, e.g. 'C1048.h5'
+    section         TEXT,      -- 'pre' | 'post'
+    purpose         TEXT,      -- 'padfind' | 'tus' | 'bus'
+    attempt         INTEGER,   -- try number while Tus is searched; else NULL
+    label           TEXT,      -- archive label 'e0', ...; NULL if not stored
+                               --   as a lit frame
+    verdict         TEXT,      -- 'accept' | 'clipped' | 'dim'; NULL if the
+                               --   frame was not judged
+    stored          INTEGER,   -- 1 = this layer of this frame is archived
+    LED             TEXT,      -- LED color name
+    bayer_layer     TEXT,      -- 'R' | 'Gr' | 'Gb' | 'B'
+    exposure_us     INTEGER,   -- asked for
+    applied_us      INTEGER,   -- reported applied by the camera
+    dark_dn         REAL,      -- dark level the rule used, raw DN
+    min_dn          REAL,      -- test region (pad + gray chips, hot pixels
+    max_dn          REAL,      --   left out), raw DN
+    mean_dn         REAL,
+    max_where       TEXT,      -- 'pad' | 'gray1' | 'gray2'
+    floor_min_dn    REAL,      -- darkest pixel the noise-floor test sees
+    n_pixels        INTEGER,   -- test-region pixels measured
+    n_clip_top      INTEGER,   -- at or above capture.clip_top_dn
+    n_clip_bottom   INTEGER,   -- at or below capture.clip_bottom_dn
+    n_below_floor   INTEGER,   -- below capture.noise_floor_dn
+    n_edge_left_out INTEGER,   -- side-edge pixels the floor test left out
+    remark          TEXT
+);
+
+CREATE INDEX IF NOT EXISTS ix_exposure_log_samp_no
+    ON exposure_log (samp_no, LED);
+CREATE INDEX IF NOT EXISTS ix_exposure_log_archive
+    ON exposure_log (archive);
 
 
 -- ────────────────────────────────────────────────────────────────────────────

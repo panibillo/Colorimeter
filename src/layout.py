@@ -51,34 +51,42 @@ DIV3        = Rect(  0, 172, 320,  1)
 # ── body: timer cluster  y 55..117 ─────────────────────────────────────────────
 TIMER_LBL   = Rect(  8,  55,  68, 67)   # Remaining / Elapsed / Final
 TIMER       = Rect( 90,  55, 140, 42)   # compound: ‖ | MM:SS | ›
-RUN_BTN     = Rect(240,  55,  72, 67)   # START / RESET / CAPTURE / POST
+RUN_BTN     = Rect(240,  55,  72, 67)   # Start / Running / Capture / ANALYZE
 
 # ── body: reagent weight grid  y 154..214 ──────────────────────────────────────
-# Two fixed rows — reagent 1 above, reagent 2 below — of four cells each, under
+# Two fixed rows — reagent 1 above, reagent 2 below — of five cells each, under
 # a thin column-heading strip.  Positional and unchanging: a cell means the same
 # thing on every screen that shows the grid and in every run state, which is the
 # whole point of the grid replacing the old flip-flopping Initial/Final column.
 #
-#        Initial   Final    Over   Target
-#     R1 [ 3.762 ][ 1.201 ][+0.020][1.450]
-#     R2 [       ][       ][      ][0.650]
+#        Packet  Initial   Final    Over   Target
+#     R1 [ 3.43][ 3.762][ 1.201][+0.020][ 2.900]
+#     R2 [ 1.84][      ][      ][      ][ 1.300]
+#
+# Packet is what a full packet should weigh on the balance (target plus the
+# empty packet), so it is narrower: "3.43" needs about 30 px at 14 pt.  The
+# other four share what is left.  "+0.020" is the widest text, about 52 px.
+# Columns: row label 22, Packet 46, four of 58, 2 px gaps — x 6..316.
 #
 # Shown on the pre-image and both reagent phases, and on the read phase only
 # while a finished capture waits for the final packet weights.
-WT_HDR_INIT  = Rect( 30, 154,  70, 12)
-WT_HDR_FINAL = Rect(102, 154,  70, 12)
-WT_HDR_OVER  = Rect(174, 154,  70, 12)
-WT_HDR_TARG  = Rect(246, 154,  70, 12)
+WT_HDR_PACK  = Rect( 30, 154,  46, 12)
+WT_HDR_INIT  = Rect( 78, 154,  58, 12)
+WT_HDR_FINAL = Rect(138, 154,  58, 12)
+WT_HDR_OVER  = Rect(198, 154,  58, 12)
+WT_HDR_TARG  = Rect(258, 154,  58, 12)
 WT1_ROW_LBL  = Rect(  6, 167,  22, 23)   # "R1"
-WT1_INIT     = Rect( 30, 167,  70, 23)   # wt1_init_fld   (editable)
-WT1_FINAL    = Rect(102, 167,  70, 23)   # wt1_final_fld  (editable)
-WT1_OVER     = Rect(174, 167,  70, 23)   # wt1_over_lbl   (calculated)
-WT1_TARG     = Rect(246, 167,  70, 23)   # wt1_targ_lbl   (calculated)
+WT1_PACK     = Rect( 30, 167,  46, 23)   # wt1_pack_lbl   (calculated)
+WT1_INIT     = Rect( 78, 167,  58, 23)   # wt1_init_fld   (editable)
+WT1_FINAL    = Rect(138, 167,  58, 23)   # wt1_final_fld  (editable)
+WT1_OVER     = Rect(198, 167,  58, 23)   # wt1_over_lbl   (calculated)
+WT1_TARG     = Rect(258, 167,  58, 23)   # wt1_targ_lbl   (calculated)
 WT2_ROW_LBL  = Rect(  6, 191,  22, 23)   # row 2: same x/w as row 1, y + 24
-WT2_INIT     = Rect( 30, 191,  70, 23)
-WT2_FINAL    = Rect(102, 191,  70, 23)
-WT2_OVER     = Rect(174, 191,  70, 23)
-WT2_TARG     = Rect(246, 191,  70, 23)
+WT2_PACK     = Rect( 30, 191,  46, 23)
+WT2_INIT     = Rect( 78, 191,  58, 23)
+WT2_FINAL    = Rect(138, 191,  58, 23)
+WT2_OVER     = Rect(198, 191,  58, 23)
+WT2_TARG     = Rect(258, 191,  58, 23)
 
 # ── body: step-status chips  y 95..229 ─────────────────────────────────────────
 # A "chip" is a small pill/badge widget (the UI sense of the word) — here three
@@ -94,6 +102,12 @@ CHIP_C      = Rect( 182, 100,  48, 22)   # Capture
 # lines formatted weights into prose.  The grid at y154 shows those as numbers
 # and takes the space, leaving room for this one line above it.
 INSTR1      = Rect(  8, 125, 304, 28)
+# The pre-image screen splits the line in two, because two things are owed at
+# once there: the reagent packets (left) and the imaging (right).  The left box
+# only ever says "Weigh R1" or "Weigh R2", so it is narrow; the right one has
+# to hold "Load cassette in meter", about 184 px at 16 pt.
+INSTR_L     = Rect(  8, 125,  96, 28)
+INSTR_R     = Rect(108, 125, 204, 28)
 
 # ── body: persistent collect stamp  y 188..210 ─────────────────────────────────
 # Shown on the read/analysis phases (below the instructions, above the footer)
@@ -104,24 +118,31 @@ COLLECT_LINE = Rect(  8, 188, 224, 22)
 
 # ── body: wide label/field pairs (share y with USER and TEST rows) ─────────────
 COLOR_LBL   = Rect(  8,  95, 110, 35);  COLOR_FLD  = Rect(120,  93, 130, 39)
-RESULT_LBL  = Rect(  8, 135,  68, 35);  RESULT_FLD = Rect( 82, 133, 230, 39)
 
-# ── body: read-strip prompt (ReadPhase) ────────────────────────────────────────
-# Two stacked rows, same y128..186 footprint as before — bounded above by
-# CHIP_C's bottom (y122) and below by COLLECT_LINE's top (y188), so neither
-# overlaps:
-#   row 1 (y128..156): "Manually read color:" prompt + the reading entry,
-#                       side by side;
-#   row 2 (y158..186): the full-width capture instruction line.
-MANUAL_LBL  = Rect(  8, 128, 176, 28)   # "Manually read color:" prompt
-READ_FLD    = Rect(190, 128, 122, 28)   # manual colour reading entry
-READ_LBL    = Rect(  8, 158, 304, 28)   # capture instruction (single line)
+# ── body: analysis result row (AnalysisPhase)  y125..153 ──────────────────────
+# Where the instruction line is on the other run screens, so the read screen's
+# manual-reading row (MANUAL_LBL / READ_FLD, y158..186) fits below it on the
+# analysis screen too: the reading can still be typed or corrected after the
+# capture, which is where the POST / NEXT "incomplete" dialog's Return lands.
+# It used to be body row 3 (y133..172), over the reading's row.
+RESULT_LBL  = Rect(  8, 125,  68, 28);  RESULT_FLD = Rect( 82, 125, 230, 28)
+
+# ── body: read-strip prompt (ReadPhase)  y158..186 ────────────────────────────
+# One row: the "Manually read color:" prompt and the reading entry side by side,
+# below the instruction line (INSTR1, y125..153), which sits where it does on
+# every other run screen.  Bounded below by COLLECT_LINE's top (y188).  The two
+# swapped places on 2026-11-04; the old separate capture line (READ_LBL) went.
+MANUAL_LBL  = Rect(  8, 158, 176, 28)   # "Manually read color:" prompt
+READ_FLD    = Rect(190, 158, 122, 28)   # manual colour reading entry
 
 # ── body: test-variant screen (VariantPhase) ───────────────────────────────────
 # Rows 1-2 reuse the generic label/field rows (Equip and Reps, whose values are
 # tap-to-step buttons).  Rows 3-4 split the field span into two captioned
 # factor boxes per reagent:
 #     [Reagent 1]  wt [ 1.0 ]  time [ 1.0 ]
+# Row 2 also holds the standard concentration, right of the short Reps value:
+#     [Image reps] [   2   ]  C µg/L [ 10 ]
+VAR_CONC_CAP2 = Rect(214,  95,  30, 35); VAR_CONC_FLD2 = Rect(246,  93,  66, 39)
 VAR_WT_CAP3   = Rect( 82, 135,  26, 35); VAR_WT_FLD3   = Rect(110, 133,  76, 39)
 VAR_TIME_CAP3 = Rect(190, 135,  38, 35); VAR_TIME_FLD3 = Rect(230, 133,  82, 39)
 VAR_WT_CAP4   = Rect( 82, 175,  26, 35); VAR_WT_FLD4   = Rect(110, 173,  76, 39)
@@ -143,6 +164,14 @@ MODAL_ONE   = Rect(110, 132, 100,  46)   # single-button layout (centred)
 MODAL_3A    = Rect( 28, 134,  84,  46)   # three-button layout (keep/delete/resume)
 MODAL_3B    = Rect(118, 134,  84,  46)
 MODAL_3C    = Rect(208, 134,  84,  46)
+# Tall layout, for a message that is a list (the "incomplete" check on
+# POST and NEXT, two buttons) or a long reason (a failed capture, the config
+# editor's refusal; one button).  The message area holds about 7 lines at 13 pt.
+MODAL_TALL_PANEL = Rect( 20,  24, 280, 200)
+MODAL_TALL_MSG   = Rect( 32,  30, 256, 132)
+MODAL_TALL_YES   = Rect( 40, 170, 100,  44)
+MODAL_TALL_NO    = Rect(180, 170, 100,  44)
+MODAL_TALL_ONE   = Rect(110, 170, 100,  44)   # tall, one button (a failure's reason)
 
 # ── menu screen (reached by the dedicated footer MENU button — a screen of its
 # own, not part of the A/B toggle) ───────────────────────────────────────────────
@@ -416,7 +445,7 @@ CAP_START     = Rect( 84, 184, 152,  48)     # "Calibrate Exposures" (run) / don
 #      0 ┌─────────────────┬────────┬────────┬────────┐
 #        │                 │   +    │   ▲    │   −    │  40
 #     40 │                 ├────────┼────────┼────────┤
-#        │                 │   ◀    │  Home  │   ▶    │  40
+#        │                 │   ◀    │Find/Pad│   ▶    │  40
 #     80 │                 ├────────┼────────┼────────┤
 #        │   canvas        │  1px   │   ▼    │  Img   │  40
 #    120 │   200 x 240     ├────────┴────────┴────────┤
@@ -431,7 +460,7 @@ IMG_ZOOM_IN  = Rect(200,   0,  40,  40)   # +
 IMG_UP       = Rect(240,   0,  40,  40)   # ▲
 IMG_ZOOM_OUT = Rect(280,   0,  40,  40)   # −
 IMG_LEFT     = Rect(200,  40,  40,  40)   # ◀
-IMG_FIT      = Rect(240,  40,  40,  40)   # Fit — whole frame, the pad's "home"
+IMG_FIND_PAD = Rect(240,  40,  40,  40)   # Find/Pad — find the pad, outline it
 IMG_RIGHT    = Rect(280,  40,  40,  40)   # ▶
 IMG_STEP     = Rect(200,  80,  40,  40)   # edit step: 1px ⇄ 10px
 IMG_DOWN     = Rect(240,  80,  40,  40)   # ▼

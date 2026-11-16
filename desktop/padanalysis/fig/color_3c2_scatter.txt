@@ -1,0 +1,26 @@
+color_3c2_scatter.png -- what the graphs show
+(made by color_study.py, show_scatter, 2026-11-15)
+
+Each dot is one pad pixel (interior pixels: 8 or more layer pixels from
+every edge) of a post-image.  Every channel is the average of 4 repeat
+photos.  Both axes are absorbance, A = -log10(post-image / pre-image lined
+up): 0 = unchanged paper, bigger = darker.  0.1 A is about 21 % less
+light.
+
+x axis, every panel: royal_blue.B, the channel the stains darken most of those
+with little noise.  y axis: one other channel per panel.
+
+Lines, all from (0, 0):
+  yellow line: the average color of C1051's interior, scaled up and down.
+      A pixel with only that yellow, in any amount, lies on it.
+  brown line: the same for C1050's interior.
+  dotted 45-degree line: the direction of an even darkening (the same
+      added A in both channels).
+A pixel that is a mix of the yellow and the brown (positive amounts of
+each) lies in the wedge between the yellow and brown lines, shifted at
+most a little along the dotted direction.  A cloud that leaves the wedge,
+by more than its own width, is not a mix of these two references.
+
+Colors: C1051 olive circles, C1050 brown squares.  C1049's pixels are colored
+by their own x value, so the dot's center (darkest) is yellow-green and
+the rest of the pad is purple.

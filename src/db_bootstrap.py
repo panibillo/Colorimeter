@@ -252,12 +252,35 @@ def _add_samples_columns(con: sqlite3.Connection) -> None:
 
 
 def _add_exposure_columns(con: sqlite3.Connection) -> None:
-    """Add the columns the tested-bracket calibration records (idempotent)."""
+    """
+    Add the exposure columns added since the table was first made
+    (idempotent): the tested-bracket calibration's, and (2026-11-14) `role`
+    and `samp_no` for the strip rule's seed rows.  Every row with no role is
+    a calibration row from before roles existed, so it is given 'ladder'.
+    Runs before config_defaults.sql, which inserts the factory seed rows.
+    """
     existing = {row[1] for row in con.execute("PRAGMA table_info(exposure)")}
     for name, type_ in (("low_dn", "REAL"), ("high_dn", "REAL"),
-                        ("layers", "TEXT"), ("preimage", "INTEGER DEFAULT 0")):
+                        ("layers", "TEXT"), ("preimage", "INTEGER DEFAULT 0"),
+                        ("role", "TEXT"), ("samp_no", "TEXT")):
         if name not in existing:
             con.execute(f"ALTER TABLE exposure ADD COLUMN {name} {type_}")
+    con.execute("UPDATE exposure SET role = 'ladder' WHERE role IS NULL")
+    con.commit()
+
+
+def _add_treatments_columns(con: sqlite3.Connection) -> None:
+    """
+    Add the treatment columns added since the table was first made
+    (idempotent).  standard_conc: the arsenic concentration of a standard,
+    in µg/L, or NULL for a run that is not a standard.
+    """
+    existing = {row[1] for row in con.execute("PRAGMA table_info(treatments)")}
+    if not existing:
+        return                      # no table yet: the DDL makes it whole
+    for name, type_ in (("standard_conc", "REAL"),):
+        if name not in existing:
+            con.execute(f"ALTER TABLE treatments ADD COLUMN {name} {type_}")
     con.commit()
 
 
@@ -438,6 +461,7 @@ def ensure(path=None) -> Result:
         _run_script(con, DDL_PATH)
         _add_samples_columns(con)
         _add_exposure_columns(con)
+        _add_treatments_columns(con)
         _run_script(con, DEFAULTS_PATH)
 
         added = len(_rowids(con) - before)

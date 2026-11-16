@@ -88,19 +88,14 @@ Pick an address **outside** the router's DHCP pool range to avoid conflicts.
 
 ### File Sync
 
-Two scripts in the project root handle syncing:
-
-| Script | Direction |
-|---|---|
-| `sync_to_pi.sh` | Desktop → Pi |
-| `sync_from_pi.sh` | Pi → Desktop |
-
-Usage:
+`sync_to_pi.sh` in the project root sends program files from the desktop to the Pi:
 
 ```bash
 ./sync_to_pi.sh rpi
-./sync_from_pi.sh rpi
 ```
+
+Every transfer script, in both directions, is listed in
+[docs/desktop_tools/pi_transfer_tools.md](docs/desktop_tools/pi_transfer_tools.md).
 
 `sync_pi_files.txt` (also in the project root) controls exactly which files are transferred.
 See Project Maintenance for how to keep it current.

@@ -1,0 +1,1259 @@
+% ======================================================================
+% VARIABLE RENAMES (2026-10-22), applied to this file only.
+% Use this table to rename the same symbols in chain_derivation#.tex
+% and other files.  Apply the rows in order.  Labels, \eqref keys and the plain
+% symbols d and d' are NOT renamed.
+%
+%   #  Old                     New                   Meaning
+%   1  r_{ij}   (noise-free)   \zeta_{ij}            pixel's noise-free reflectance
+%   2  d_g', d'_g              g'                    gray level, pre-image
+%      d_g                     g                     gray level, post-image
+%      d_{g,(i,j)}             g_{(i,j)}             (same, at pixel (i,j))
+%      d'_{g,(i,j)}            g'_{(i,j)}
+%   3  a, a', a_{ij}, a'_{ij}  r, r', r_{ij}, r'_{ij}  reflectance, fraction reflected [0-1]
+%   4  b, b', b_{ij}           \beta, \beta', \beta_{ij}  shading, 1 - fraction shaded [0-1]
+%
+% Row 1 must come first, because row 3 creates new r_{ij}.  Rows 2-4
+% apply only inside math (or \COMMENT text), not to English words.
+% Unchanged: d, d' (raw pixel reading), s^2(\lambda) (spread), w_{ij}.
+% ======================================================================
+\documentclass[11pt,letter]{article}
+
+\usepackage[margin=2.5cm]{geometry}
+\usepackage{amsmath}  % \eqref{eq:ratio}
+\usepackage{amssymb}
+\usepackage{bm}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{ragged2e}
+\usepackage{seqsplit}
+\usepackage{enumitem}
+\usepackage[hidelinks]{hyperref}
+\usepackage{cleveref}  % \cref or \Cref{sec:ratio}   Add after hyperref.
+\usepackage{setspace}
+\setstretch{1.15}
+
+
+\setlength{\emergencystretch}{3em}
+\newcolumntype{L}[1]{>{\RaggedRight\arraybackslash}p{#1}}
+
+%----------------------------------------------------------------------
+%  Text helpers
+%----------------------------------------------------------------------
+\newcommand{\file}[1]{\texttt{\seqsplit{#1}}}
+\newcommand{\ToClaude}[1]{[\textbf{CLAUDE}: {#1}]}
+\newcommand{\COMMENT}[1]{}
+
+%----------------------------------------------------------------------
+%  Notation.  Lowercase italic = what is physically there (never
+%  computed).  Bold uppercase = an image computed from a photo.  Plain =
+%  one number.  Prime = the pre-image.
+%----------------------------------------------------------------------
+\newcommand{\iE}{\mathbf{E}}   % reading as stored, DN
+\newcommand{\iD}{\mathbf{D}}   % light counts, DN
+\newcommand{\iP}{\mathbf{P}}   % shape of the stage's light
+\newcommand{\iG}{\mathbf{G}}   % gray level map, DN
+\newcommand{\iR}{\mathbf{R}}   % reflectance relative to the gray chips
+\newcommand{\iW}{\mathbf{W}}   % pre-image white, lined up
+\newcommand{\tW}{\widetilde{\mathbf{W}}}   % W smoothed
+\newcommand{\hW}{\widehat{\mathbf{W}}}     % estimated white
+\newcommand{\iT}{\mathbf{T}}   % fraction the dye let through
+\newcommand{\iA}{\mathbf{A}}   % stain absorbance (the output)
+\newcommand{\tblA}{\mathbb{A}} % A for all channels
+\newcommand{\vgamma}{\bm{\gamma}}
+\newcommand{\reg}[2]{\underset{\text{#1}}{#2}}
+\newcommand{\avg}[2]{\overline{\reg{#1}{#2}}}
+\newcommand{\MD}{\mathcal{D}}
+\newcommand{\Lten}{\log_{10}}
+
+
+\title{From photons to stain absorbance\\
+\large The chain for one pixel, derived from one thought experiment}
+\author{Colorimeter project --- pad analysis}
+\date{Draft for Bill's review, 2026-10-05.  Companion to
+\file{analysis\_chain.tex}; no code is changed by this document.}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+\noindent
+Based on /home/bill/Projects/Colorimeter/docs/color\_coordinates\_brightness\_2026-10-25.md
+
+A simplified chain
+\end{abstract}
+
+\tableofcontents
+
+\section{notation changes}
+
+$n$ photon count dropped in favor of $I$ incident light amount.
+
+$d \to n$ DN count after dark subtraction
+
+$d$, $s$ diffuse and specular \textit{fractions} of total reflectance, $r$.   $r = d + s$ 
+
+\section{intro}
+
+$I$ is incident light that falls on the paper.
+
+$r$ is the total light reflected from the top of the paper.
+
+$s$ is the specular reflection fraction. It is small and mostly misses the camera.
+
+$d$ is the diffuse reflection fraction. 
+\begin{equation}
+	r = d + s
+\end{equation}
+
+All diffuse reflected light first enters the paper.
+$I d$ is the amount of incident light that enters the paper.
+Inside the paper, photons follow a random walk, 
+that is preferentially sideways along the fiber directions, 
+until they end up in 1 of 4 buckets: absorbed, $P_{abs}$, lost out the edges, $P_{edge}$, lost out the back, $P_{back}$ or emitted back out the top, $P_{top}$.  
+All have the units of $I$.
+\begin{equation}
+	I d = P_{abs} + P_{edge} + P_{back} + P_{top}
+\end{equation}
+
+The camera sees only the top of the paper, and collects a fixed fraction $\kappa$ of $P_{top}$
+\begin{equation}
+\begin{aligned}
+	n = \kappa P_{top} &= \kappa\big[I d - P_{abs} - P_{edge} - P_{back}\big]
+	\\  &= \kappa(I d\big[ 1 - \frac{P_{abs}}{I d} - 
+	       \frac{P_{edge}}{I d} - \frac{P_{back}}{I d} \big]
+	\\  &= \kappa\,I d\big[ 1 - \alpha - \epsilon - \tau \big]	 
+\end{aligned}
+\end{equation}
+
+We can only observe the products  $\kappa I d$, not the individual values.
+
+Let $\nu = \kappa I d$, and write 
+\begin{equation}
+	n = \nu(1 - \alpha - \epsilon - \tau)
+\end{equation}
+
+The absorbed amount is $P_{abs}$, which we observe indirectly as $\alpha$, and it consists of light absorbed by the paper and by the chromophores of interest.  
+
+$\alpha$ varies in two ways that we need to distinguish.  
+
+First there is a slight variation from pixel to pixel that we associate with paper roughness or unevenness in the fiber distribution.  
+At this scale, we assume that $I d$ and $P_{back}$ are constants;
+so variations in  $P_{top}$ are due to variations in $P_{abs} + P_{edge}$.
+We first consider reflectance away from the edge of the paper, where $P_{edge} \approxeq 0$ 
+
+Second, there is a slight variation due to the direction that the surface of a fiber is facing.  This is at a scale slightly smaller than the camera pixels, so it appears as noise.  But it is actually variations in the scaling factor $\kappa$, which we observe as variations in $\nu$.
+
+The paper color is white, and $P_{abs}$ is should have a characteristic ratio of the different frequencies that the colorimeter can observe.
+It should be evenly small in every frequency if the paper is white.
+This ratio should not depend on where in the paper's thickness that the light is absorbed, 
+so while the amount of absorption of all wavelengths may vary with path length or surface orientation, the relative amounts should stay constant.
+
+ 
+We distinguish pre-exposure images from post-exposure images by writing a prime on the pre-image. 
+The matching  pre-exposure image reading would be 
+\begin{equation}
+	n' = \nu(1 - \alpha' - \epsilon' - \tau')
+\end{equation}
+
+The ratio of post-image to pre-image sensor readings is
+\begin{equation}
+	\frac{n}{n'} = \frac{\nu(1 - \alpha - \epsilon - \tau)}
+	                    {\nu(1 - \alpha' - \epsilon' - \tau')}
+\end{equation} 
+$\nu$ cancels, and at the center of the pad where  $\epsilon \approxeq 0$, we obtain
+\begin{equation}
+	\frac{n}{n'} = \frac{1 - \alpha - \tau}
+	                    {1 - \alpha' - \tau'}
+\end{equation} 
+ 
+ 
+\end{document}
+
+
+$\kappa$ [DN/r] is the fraction of $rI$ that is collected by the camera sensor, with a conversion factor that converts units of $I$ to sensor digital number, DN.
+
+$n$ [DN], [0 - 960] is the dark corrected numerical reading of a camera sensor
+
+
+%======================================================================
+\section{What this document does}
+\label{sec:scope}
+
+It follows one pixel of one channel (one LED and one Bayer layer) from the
+stored photo to the stain's absorbance.  The two photos are simplified to
+what matters for the algebra:
+\begin{itemize}[nosep]
+  \item the \textbf{pre-image} (the strip before exposure to arsine) shows
+    the white pad and its shadow, with no dye;
+  \item the \textbf{post-image} (after exposure) shows the same pad, with
+    the same shadow, and dye.
+\end{itemize}
+It leaves out everything that does not change the algebra: choosing the
+exposure time, hot pixels, finding the pad, how the lining-up shift is
+found, how the smoothing is done near the pad's edge, the yellow/brown
+split, and the calibration against arsenic.
+
+\medskip
+\noindent The chain uses three ways of expressing the light, each for a
+reason:
+
+\medskip
+\begin{tabular}{@{}L{2.6cm}L{2.0cm}L{10.0cm}@{}}
+\toprule
+Domain & Steps & What it is used for, and why \\
+\midrule
+counts (DN) & 1 & Removing the dark reading, which \emph{adds} to the
+  light, so it must be subtracted from the raw counts. \\
+reflectance & 2--5 & Removing factors (lamp, stage, shadow, paper) by
+  division, and averaging light (lining up, smoothing), which must be done
+  on light itself (\Cref{sec:rules}). \\
+absorbance & 6 & The output.  It grows in proportion to the amount of dye,
+  and two dyes' absorbances add, which is what the yellow/brown split
+  needs. \\
+\bottomrule
+\end{tabular}
+
+%======================================================================
+\section{Simplified outline of the signal path}
+\label{sec:thought}
+
+The measured signal is a count of photons landing on the camera sensors.  
+From that we extract an estimate of the dye on the paper indicator pad, 
+and the dye is later related to a chemical concentration. 
+Here we follow the path of the photons from the LEDs to a camera sensor and show how the dye amount is measured at one pixel of the camera image.
+\begin{itemize}[nosep]
+  \item $n$ (photons) The LEDs emit photons toward the stage. %, on which are a paper indicator pad and a reference gray chip.
+    The camera focuses a sensor (an individual pixel) on a small spot the stage, on either the paper indicator pad or a reference gray chip. 
+    A fraction of the photons that hit that spot are reflected back to a sensor, where they are counted and reported as a pixel value.
+    The maximum number of photons that can be reflected back to the sensor is $n$, 
+    and is set by the staging, the lamp's brightness, and the exposure time.  
+    The staging is fixed and is subsumed in the concept of brightness.
+  \item$\psi$ (specular reflection) Estimated at about 4 percent on white paper.  
+    Does not depend on color in the paper.  Varies per pixel.
+    Should be constant per pixel between pre and post images collected using the same staging and geometry.
+  \item$\beta$ (shading)  The surface of the paper is rough, and some areas are shaded from one or more of the LEDs,
+    so that only a fraction $\beta$ of $n$ hits a spot and can be reflected.  
+    The remaining fraction $1-\beta$ is not observed.
+   	$\beta = 1$ when the spot is fully lit, and $\beta < 1$ when the spot is partly shaded.
+   	The number of photons that can be reflected from the spot is $\beta \cdot n$.
+  \item $r$ (reflectance)  The net fraction of photons reflected back from the spot to the sensor is $r$.  
+    On the pad, $r$ is a constant property of the paper, plus the effect of any dye on the paper that absorbs photons. 
+    A shadow does not change $r$.
+    The reflected photons that are captured by a sensor are then $d = r \cdot \beta \cdot n$
+  \item $e$ is a baseline signal that the sensor always reports. 
+    It is called the \textit{dark level} because it is the value of $d$ when $n=0$.
+    The sensor measurment is the sum of the counted photons plus the dark level.
+    \begin{equation}
+    	d_\text{raw, lit} = r \cdot \beta \cdot n + e
+    \end{equation}
+    %$d_\text{raw, lit} = r \cdot \beta \cdot n + e$. 
+\end{itemize}
+
+For each measurement 3 photos are taken:  
+a dark image $e$, 
+a lit image taken before the pad is exposed to chemical, $d'$, 
+and a final image taken after chemical exposure, $d$. 
+The latter two are called the \textit{pre-image} and the \textit{post-image}. 
+We write a prime ($'$) to distinguish the pre-image. 
+
+\subsection{Dark level removal}
+
+The dark level $e$ is removed by measuring it in an unlit photo, and subtracting it from the raw sensor reading in a lit photo.
+\begin{alignat}{2}
+	e & = d_\text{raw, unlit}  \\
+	d_\text{lit} & = d_\text{raw, lit} - e
+\end{alignat}
+
+The dark level varies with the temperature of the camera, so it is remeasured each time that the camera is used.
+In practice, the change in $e$ over a short sequence of photos is negligible.
+
+The dark level varies by pixel, but the variation is mostly noise. 
+The best predictor of dark level for a given pixel in a given image is the mean dark level of all valid pixels in a contemporaneous dark image.   
+
+A small percentage of images report dark levels that are identified as outliers.
+We set a threshold range and label pixels outside of the threshold range as invalid.
+
+\subsection{Total reflected light}
+
+$d_\text{lit}$ is the total light reaching a pixel from the small area on the paper surface that the camera pixel is focused on.  
+It is the sum of specular reflection ($\psi$), diffuse reflection ($r$), and fluorescence ($\ksi$).
+\begin{equation}
+	d_\text{lit} = r + \psi + \ksi
+\end{equation}
+Except for the violet LED, we assume no fluorescence, $\ksi = 0$.
+
+About 4 percent of light 
+
+\subsection{Shading removal}
+
+Shade is removed from a post-image of the pad, $d$, by comparing it with a pre-image, $d'$ of the same pad.
+%The same spot is measured in two photos, a pre-image taken before dye is developed, and a post-image taken after dye is developed.  
+%Write a prime ($'$) to denote the pre-image.  
+Assume that the shadow $\beta$ is unchanged, $\beta' = \beta$; 
+But the surface changes from $r'$ to $r$; 
+and the exposure changes from $n'$ to $n$.
+We have
+\begin{equation}
+  d' = r'\, \beta\, n', \qquad d = r\, \beta\, n .
+  \label{eq:te}
+\end{equation}
+
+\noindent\textbf{The ratio} of $d / d'$ cancels the shading, independent of the exposure and the amount of dye 
+\begin{equation}
+  \frac{d}{d'} = \frac{r\, \beta\, n}{r'\, \beta\, n'}
+  = \frac{r}{r'} \cdot \frac{n}{n'} .
+  \label{eq:te-ratio}
+\end{equation}
+Shading $\beta$ is gone;  
+leaving the change in the dye, $r/r'$, 
+and the change in the exposure, $n/n'$.
+
+We later remove two kinds of shading,  
+one due to paper roughness and the other due to fiber disturbance along the pad edges.
+Their effect and removal are the same, but they are measured differently.
+
+\subsection{Balancing the exposure}
+
+Equation \eqref{eq:te-ratio} contains unknowns $n$ and $n'$ that we wish to remove.
+They are unknown because the exposure time and LED emissions may both vary.
+We can remove the ratio $n/n'$ by observing reflectance from a reference gray chip with invariant reflectance and shading.
+The fraction of light returned by the gray chip in every image is $\rho$, which replaces $r \cdot \beta$.
+
+Measure the dark-corrected reflectance on each pre-image and each post-image, $g'$ and $g$.
+There is no shading on the chip, and there is no change in the chip color between images, 
+so the measures are only a function of $\rho \, n$, or $\rho' n'$
+\begin{equation}
+	g' = \rho\, n_g', \qquad g = \rho \, n_g .
+\end{equation}
+ 
+Taking the ratio $g / g'$ gives
+\begin{equation}
+	\frac{g}{g'} = \frac{\rho \, n}{\rho \, n'} = \frac{n}{n'}
+	\label{eq:dggdash}
+\end{equation}
+We can substitute \eqref{eq:dggdash} for  $n / n'$ in \eqref{eq:te-ratio}
+and solve for $r / r'$
+\begin{equation}
+	\frac{r}{r'} = \frac{d}{d'} \frac{g'}{g}
+	\label{eq:daadash}
+\end{equation}
+
+\subsection{Finding $g$ on the pad}
+
+\COMMENT{In this section I need to show clearly and simply how $P$ works to estimate $g'$ and $g$ during measurments.  I think I have to show the basic solution of $P$ during calibration, minimizing $g - P$ using least squares, and then how $P$ is used to extrapolate from the reference gray chips to the equivalent reference gray value at the pad during measurements.  I'd like to first show how that would work using a single gray reference chip with only a scalar multiplier on $P$, and then how it would work using multiple gray reference readings and linear or bilinear multiplier on $P$.  The difficulty is to show that the algebra is correct without getting too detailed. For example, I'd like to say that $P$ is found by minimizing $(P - g)^2$ over the area, and not show the matrix solution.  }
+
+The lighting changes across the stage, and the values $g$ measured on a reference gray-chip near the pad will differ from what would be read from a reference gray-chip at the pad.
+In a calibration phase, a matching gray chip is placed in the pad location, and a polynomial $P(i,j)$ is found 
+that minimizes $[P(i,j) - g_{(i,j)}]^2$ over all pixels $(i,j)$ over the area of the pad and the reference gray chip.
+It is also determined during calibration that across various exposure times the value of $P$ varies only by a constant, $\varphi$. 
+We therefore have for pre-image and post-image during measurments, 
+\begin{equation} \label{eq:dgofPprepost1}
+	g'_{(i,j)} = \varphi' P_{i,j} \qquad \ g_{(i,j)} = \varphi P_{i,j} 
+\end{equation}
+Taking ratios of the left and right hand sides of equations \eqref{eq:dgofPprepost1} gives
+\begin{equation} \label{eq:dgofPprepost2}
+	\frac{g_{(i,j)}}{g'_{(i,j)}} = \frac{\varphi P_{i,j}}{\varphi' P_{i,j}} 
+\end{equation}
+We se that $P_{(i,j)}$ cancels, and that the ratio $g/g'$ is equal to a constant $\Phi = \varphi/\varphi'$.
+In a pre-image and post-image pair, we can estimate the constant $\Phi$ by sampling $g$ and $g'$ at the reference gray chip
+\begin{equation} \label{eq:dgofPprepost3}
+	\widehat\Phi = \text{mean}\left[\frac{g_{(i,j)}}{g'_{(i,j)}}\right] \quad (i,j)\in\text{ gray chip}
+\end{equation}
+Then for any pixel $(i,j)$ on the pad we can write \eqref{eq:daadash} as 
+\begin{equation}
+	\frac{r}{r'} = \frac{d}{d'} \widehat\Phi
+	\label{eq:daadashPhi}
+\end{equation}
+
+It remains to show that $\Phi$ really is a constant across the stage, 
+and that $P$ really is invariant across images.
+
+\COMMENT{
+that models $g$ across the areas of the pad and the reference chip. 
+For a pixel at $(i,j)$, we have
+\begin{equation} \label{eq:dgofPvarphi}
+	g_{(i,j)} = \varphi P_{i,j} % n_{(i,j)} 
+\end{equation}
+where $\varphi$ is some varying factor due to differences in LED brightness and exposure duration.
+We anticipate that $P_{i,j}$ should be fixed
+because the geometry of the LEDs and the reference gray chip is held invariant after calibration.
+This is verified by showing $P$ can be fit satisfactorily  during calibration using a scalar $\varphi$ over different exposure durations.
+%
+With $P$ known, we write for the pre-image and post-image
+\begin{equation} \label{eq:dgofPprepost}
+	g'_{(i,j)} = \varphi' P_{i,j} \qquad \ g_{(i,j)} = \varphi P_{i,j} 
+\end{equation}
+So that 
+%
+that \eqref{eq:dgofPvarphi} provides a good estimate of $g_{(i,j)}$ using a fixed $P$ and varying $\varphi$ over many photos with varying exposure times.
+%
+ that the $g_{(i,j)}$ 
+and we assume that $P$ measured during calibration and $P$ measured during 
+%
+ matches the average relative reflectance from the reference gray chips in their fixed locations on the stage, and on the gray chip in the pad location.
+The  gray chip level can be estimated at any point on the pad by fitting the polynomial to match the observed reference gray chip levels.
+}
+
+\section{dye effect} 
+
+The dye absorbs light in certain frequencies.
+By absorbing light, the amount reflected is reduced.
+We attempt to relate the fraction reflected, or amount reflected, to the amount of arsenic 
+
+We assume that light absorbance by the dye behaves approximately as light transmitted through a dyed liquid.
+In a dyed liquid, the dye acts as a filter that transmits a fraction $t$ of the light.  
+On the paper pad, the dyed surface reflects light, and we model the dye as absorbing some, permitting the fraction $t$ to be reflected.  
+On the undyed paper $t$ = 1.
+On the dyed paper, the reflected amount is 
+\begin{equation}
+	r  = r' \, t
+	\label{eq:dye1}
+\end{equation}
+so the final measure of the dye
+\begin{equation}
+	t   = \frac{r}{r'}
+	\label{eq:dye2}
+\end{equation}
+
+Combining \eqref{eq:daadashPhi} and \eqref{eq:dye2}, gives $t$ in terms of quantities measured in the pre-image and post-image pair
+\begin{equation}
+	t   = \frac{d}{d'} \widehat\Phi
+	\label{eq:dye3}
+\end{equation}
+
+
+\section{dye amount and arsenic concentration}
+
+The Beer-Lambert law for light transmission through a dyed liquid states that the 
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%\end{document}
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+The exposures $n'$ and $n$,  may differ
+, which the gray chips
+will measure (\Cref{sec:ratio}).
+%
+\noindent\textbf{The difference} does not cancel the shadow:
+\begin{equation}
+  d - d' = \beta\,\bigl(r\, n - r'\, n'\bigr).
+  \label{eq:te-diff}
+\end{equation}
+$\beta$ stays as a multiplier, so the shadow stays in the answer.
+%
+\noindent\textbf{Example.}  Equal exposures ($n = n' = 1$); the stain
+halves the light ($r' = 1$, $r = 0.5$); in the shadow a quarter of the
+light is blocked ($\beta = 0.75$):
+%
+\medskip
+\begin{center}
+\begin{tabular}{@{}lrrrr@{}}
+\toprule
+ & $d'$ (pre) & $d$ (post) & ratio $d/d'$ & difference $d - d'$ \\
+\midrule
+fully lit ($\beta = 1$)    & 1.00 & 0.50  & \textbf{0.50} & $-0.50$ \\
+in shadow ($\beta = 0.75$) & 0.75 & 0.375 & \textbf{0.50} & $-0.375$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+%
+\noindent The ratio reads the same stain in and out of the shadow.  The
+difference reads the shadowed spot as 25\,\% less stained.
+%
+\subsection{Two rules}
+\label{sec:rules}
+
+\textbf{Rule 1: combining light is an ordinary (arithmetic) average or sum,
+of counts or of reflectance.}  Light adds: from different LEDs (that is
+what $\beta$ is), from different places, and from different moments.  A pixel
+records the light collected over its area.  So any step that stands for
+``the light over a shifted or a larger area'' --- lining up, smoothing ---
+must be an arithmetic average of light.
+
+\textbf{Rule 2: an influence that enters as a factor is removed by
+division, which is exactly a subtraction in absorbance.}  The logarithm of
+a product is the sum of the logarithms:
+\begin{equation}
+  -\Lten d = -\Lten r - \Lten \beta - \Lten n .
+  \label{eq:log}
+\end{equation}
+Dividing $d$ by $\beta$, or subtracting $-\Lten \beta$ from $-\Lten d$, gives the
+same number.  So for a division, it does not matter which domain it is
+written in.  For an average, it does: by rule 1, averages are done on light.
+
+%======================================================================
+\section{Notation}
+\label{sec:notation}
+
+\begin{tabular}{@{}L{3.4cm}L{11.4cm}@{}}
+\toprule
+Style & Meaning \\
+\midrule
+$r$, $\beta_{ij}$ (lowercase italic) & What is physically there: the
+  thought experiment's factors.  They are never computed from a photo, so
+  they have no bold form. \\
+$\iR$ (bold uppercase) & An image computed from a photo: one value per
+  pixel, one channel. \\
+$R_{ij}$ (plain, subscripted) & One element of that image: row $i$,
+  column $j$.  A single number. \\
+$\vgamma$ (bold lowercase) & A list of numbers, here one per column. \\
+$\tblA$ (blackboard bold) & A table: one row per pixel, one column per
+  channel. \\
+$e$, $\lambda$ (plain) & One number. \\
+$'$ (prime) & The pre-image.  Same letter as in the post-image. \\
+$\avg{g1}{D}$ & The mean over a region; the region is named underneath
+  (g1, g2 = the left and right gray chips). \\
+$\widetilde W$, $\widehat W$ & Tilde: smoothed.  Hat: estimated. \\
+\bottomrule
+\end{tabular}
+
+\medskip
+\noindent Arithmetic between images is done pixel by pixel; no matrix
+product is meant anywhere.  Equations are written for one element.
+
+\subsection*{What is physically there}
+
+\begin{tabular}{@{}L{2.4cm}L{12.4cm}@{}}
+\toprule
+$n_j$, $n'_j$ & The light level of the photo at column $j$: exposure time
+  $\times$ lamp brightness $\times$ the camera's counts per photon.  It may
+  change slowly from left to right. \\
+$P_{ij}$ & The shape of the light on the stage (the flat-field polynomial),
+  mean 1.  Measured once; the same for both photos. \\
+$\beta_{ij}$ & The shadow: the fraction of the stage's light that reaches this
+  spot of the pad.  It moves with the strip. \\
+$r_{ij}$, $r'_{ij}$ & The fraction of the arriving light that the surface
+  sends back, after and before exposure. \\
+$t_{ij}$ & The fraction of the light that the dye lets through; 1 where
+  there is no dye. \\
+$\alpha_{ij}$ & The amount of dye on the absorbance scale,
+  $\alpha_{ij} = -\Lten t_{ij}$.  Bigger means more dye. \\
+$\rho$ & The gray chips' own return fraction.  The chips are fixed to the
+  stage, so $\rho$ is the same in both photos. \\
+\bottomrule
+\end{tabular}
+
+\subsection*{What is computed from the photos}
+
+\begin{tabular}{@{}L{3.4cm}L{9.6cm}L{1.6cm}@{}}
+\toprule
+Symbol & Meaning & Step \\
+\midrule
+$\iE$, $\iE'$ & the reading as stored, DN & 1 \\
+$e$, $e'$ & the dark level: one number per Bayer layer per photo & 1 \\
+$\iD$, $\iD'$ & light counts, $\iE - e$; the image form of $d$ & 1 \\
+$\gamma_1$, $\gamma_2$ & the light level measured at each gray chip & 2 \\
+$f_j$, $\gamma_j$ & fraction of the way from the left chip to the right;
+  the level blended between the chips & 2 \\
+$\iG$, $\iG'$ & the gray level at each pixel & 2 \\
+$\iR$, $\iR'$ & reflectance relative to the gray chips, each photo in its
+  own frame & 2 \\
+$\iW$, $\eta_q$ & the pre-image's $\iR'$ lined up on the post-image's
+  grid: the white, one value per pixel; $\eta_q$ are the lining-up weights
+  & 3 \\
+$\iT$ & the fraction the dye let through, as measured & 4, 5 \\
+$\tW$, $k_m$ & $\iW$ smoothed; $k_m$ are the smoothing weights & 5 \\
+$\hW$, $\lambda$ & the estimated white, a blend of $\iW$ and $\tW$;
+  $\lambda$ is the weight on $\iW$ & 5 \\
+$\delta$, $\varepsilon$, $\tau$ & fractional errors: post-image noise,
+  pre-image noise, pattern lost by smoothing & 5 \\
+$\iA$ & \textbf{the stain's absorbance: the output} & 6 \\
+$\tblA$ & $\iA$ for all channels: pixels $\times$ channels & 6 \\
+\bottomrule
+\end{tabular}
+
+%======================================================================
+\section{A pixel's reading}
+\label{sec:model}
+
+The thought experiment, written for pixel $(i, j)$ of a real photo, needs
+two more factors and one added term.  The light reaching the stage is not
+the same everywhere: it is $n_j P_{ij}$, a level $n_j$ for this photo times
+a fixed shape $P_{ij}$.  And the camera reads a little even with no light,
+the dark level $e$.  So the reading at a pad pixel in the post-image is
+\begin{equation}
+  E_{ij} = r_{ij}\, \beta_{ij}\, n_j\, P_{ij} + e ,
+  \label{eq:model-pad}
+\end{equation}
+at a gray-chip pixel, where the surface is the chip and nothing shades it,
+\begin{equation}
+  E_{ij} = \rho\, n_j\, P_{ij} + e ,
+  \label{eq:model-chip}
+\end{equation}
+and in the pre-image, in its own frame,
+\begin{equation}
+  E'_{ij} = r'_{ij}\, \beta_{ij}\, n'_j\, P_{ij} + e' , \qquad
+  E'_{ij} = \rho\, n'_j\, P_{ij} + e' \ \text{(chip)}.
+  \label{eq:model-pre}
+\end{equation}
+The dye acts as a filter over the paper: the post-image surface returns
+what the paper returned, times the fraction the dye lets through,
+\begin{equation}
+  r_{ij} = r'_{ij}\, t_{ij} .
+  \label{eq:dye}
+\end{equation}
+
+\subsection*{Assumptions}
+
+Each step below names the assumption it uses.
+\begin{enumerate}[label=(A\arabic*), leftmargin=3.2em]
+  \item \textbf{The dark reading adds} to the light, and is the same at
+    every pixel (\file{dark\_signal\_characterization.tex}).
+  \item \textbf{The stage's light is $n_j P_{ij}$.}  The shape $P$ is
+    fixed.  The level $n_j$ changes in a straight line from left to right,
+    and so little across one gray chip that it is constant there.  Both
+    chips have the same gray, $\rho$.
+  \item \textbf{The strip moves little between the photos,} so its shadow
+    and its paper move with it and the LEDs see it the same way; lining up
+    puts each piece of strip back on its post-image pixel.
+  \item \textbf{The dye acts as a filter,} $r = r' t$
+    \eqref{eq:dye}.  For dye inside paper this is only roughly true; it
+    matters only for what $\iA$ means (step 6), not for the cancellations.
+  \item \textbf{A pixel records the light over its area,} so its value is
+    the average of $r\,\beta$ over that area.  The steps below cancel $\beta$
+    exactly where the shadow, or the dye, is even across the pixel.
+  \item \textbf{Noise is random}: zero on average, and unrelated between
+    the two photos, between pixels, and to the pad's pattern.
+  \item \textbf{The gray level $\iG$ carries almost no noise,} because it
+    comes from means over the many pixels of each chip.
+\end{enumerate}
+
+\subsection*{Running example}
+
+Round numbers, not image data.  Two spots of the pad, fully lit
+($\beta = 1$) and in shadow ($\beta = 0.75$).  Paper $r' = 0.9$; dye $t = 0.5$, so
+$r = 0.45$.  Gray chips $\rho = 0.45$.  Post-image level $n = 1000$,
+pre-image $n' = 600$, the same in every column.  Stage shape $P = 1.02$ at
+both spots and $1.00$ at the chips.  Dark level $e = e' = 64$\,DN.
+
+%======================================================================
+\section{Step 1: remove the dark level (counts)}
+\label{sec:dark}
+
+\textbf{In words.}  Take away what the camera reads with no light.
+
+\textbf{Why subtraction, and why first.}  The dark reading is added to the
+light (A1), so it is removed by subtraction, in counts.  It must go before
+any division: dividing $E$ by anything would scale the dark reading along
+with the light, and it could no longer be separated.
+
+\textbf{Algebra.}  Define the light counts
+\begin{equation}
+  D_{ij} = E_{ij} - e .
+  \label{eq:D-def}
+\end{equation}
+Substituting \eqref{eq:model-pad} for $E_{ij}$ in \eqref{eq:D-def} yields,
+for a pad pixel,
+\begin{equation}
+  D_{ij} = r_{ij}\, \beta_{ij}\, n_j\, P_{ij} ,
+  \label{eq:D}
+\end{equation}
+and in the same way, from \eqref{eq:model-chip} and \eqref{eq:model-pre},
+\begin{equation}
+  D_{ij} = \rho\, n_j\, P_{ij} \ \text{(chip)}, \qquad
+  D'_{ij} = r'_{ij}\, \beta_{ij}\, n'_j\, P_{ij}, \qquad
+  D'_{ij} = \rho\, n'_j\, P_{ij} \ \text{(chip)}.
+  \label{eq:D-others}
+\end{equation}
+
+\textbf{Removed:} $e$.  \textbf{Left:} the thought experiment's
+$d = r\,\beta\,n$, with the stage's shape $P$ added.
+
+\textbf{Example.}
+
+\medskip
+\begin{center}
+\begin{tabular}{@{}lrrrr@{}}
+\toprule
+ & \multicolumn{2}{c}{post-image} & \multicolumn{2}{c}{pre-image} \\
+ & lit & shadow & lit & shadow \\
+\midrule
+$E$, DN & 523.00 & 408.25 & 614.80 & 477.10 \\
+$D = E - e$, DN & 459.00 & 344.25 & 550.80 & 413.10 \\
+\bottomrule
+\end{tabular}
+\end{center}
+\noindent For instance $D = 0.45 \times 1 \times 1000 \times 1.02 = 459$.
+At the chips, $E = 514$ (post) and $334$ (pre), so $D = 450$ and $270$.
+
+%======================================================================
+\section{Step 2: divide by the gray level (counts to reflectance)}
+\label{sec:gray}
+
+\textbf{In words.}  The gray chips are read in the same photo as the pad.
+Dividing each pad pixel by what a gray chip would read at that pixel
+removes the lamp, the exposure time and the shape of the stage's light all
+at once.  The result is the pad's \emph{reflectance relative to the gray
+chips}: $R = 1$ means ``as bright as a gray chip would be here''.
+
+\textbf{Why here, and why each photo in its own frame.}  The lamp, the
+exposure and the stage's shape belong to the stage and to the moment the
+photo was taken, not to the strip.  So each photo is divided by its own
+chips, at its own pixels, before the pre-image is moved (step 3).
+
+\textbf{Algebra: the level at each chip.}  The chip's level is the mean
+of $\iD$ over the chip, divided by the mean of $\iP$ over the same chip:
+\begin{equation}
+  \gamma_1 = \frac{\avg{g1}{D}}{\avg{g1}{P}} .
+  \label{eq:gamma1-def}
+\end{equation}
+Substituting the chip form of \eqref{eq:D-others} for $D_{ij}$, and taking
+$n_j$ as constant across the chip, $n_j = n_1$ (A2), the mean is
+\begin{equation}
+  \avg{g1}{D} = \rho\, n_1\, \avg{g1}{P} ,
+  \label{eq:chipmean}
+\end{equation}
+and substituting \eqref{eq:chipmean} for $\avg{g1}{D}$ in
+\eqref{eq:gamma1-def} yields
+\begin{equation}
+  \gamma_1 = \rho\, n_1, \qquad \text{and in the same way} \qquad
+  \gamma_2 = \rho\, n_2 .
+  \label{eq:gamma12}
+\end{equation}
+The chip's level is the light level there times the chip's gray.  Dividing
+by $\avg{g1}{P}$ takes out the stage's shape at the chip.
+
+\textbf{Algebra: the level at each column.}  Between the chips the level
+is blended in a straight line.  With $j_1$ and $j_2$ the chips' center
+columns,
+\begin{equation}
+  f_j = \frac{j - j_1}{j_2 - j_1}, \qquad
+  \gamma_j = (1 - f_j)\,\gamma_1 + f_j\,\gamma_2 .
+  \label{eq:gammaj-def}
+\end{equation}
+Substituting \eqref{eq:gamma12} for $\gamma_1$ and $\gamma_2$ in
+\eqref{eq:gammaj-def} yields
+\begin{equation}
+  \gamma_j = \rho\,\bigl[(1 - f_j)\, n_1 + f_j\, n_2\bigr] = \rho\, n_j ,
+  \label{eq:gammaj}
+\end{equation}
+because the bracket is the straight line through $n_1$ at column $j_1$ and
+$n_2$ at column $j_2$, which by A2 is $n_j$.
+
+\textbf{Algebra: the gray level and the reflectance.}  The gray level
+at each pixel is the stage's shape times the column's level, and the
+reflectance is the light counts divided by it:
+\begin{equation}
+  G_{ij} = P_{ij}\, \gamma_j , \qquad
+  R_{ij} = \frac{D_{ij}}{G_{ij}} .
+  \label{eq:G-R-def}
+\end{equation}
+Substituting \eqref{eq:gammaj} for $\gamma_j$ in the first of
+\eqref{eq:G-R-def} yields
+\begin{equation}
+  G_{ij} = \rho\, n_j\, P_{ij} ,
+  \label{eq:G}
+\end{equation}
+which is what a gray chip would read at pixel $(i, j)$.  Substituting
+\eqref{eq:D} for $D_{ij}$ and \eqref{eq:G} for $G_{ij}$ in the second of
+\eqref{eq:G-R-def} yields
+\begin{equation}
+  R_{ij} = \frac{r_{ij}\, \beta_{ij}\, n_j\, P_{ij}}{\rho\, n_j\, P_{ij}}
+         = \frac{r_{ij}\, \beta_{ij}}{\rho} .
+  \label{eq:R}
+\end{equation}
+The pre-image goes through the same steps with its own chips, giving
+$\gamma'_j = \rho\, n'_j$, $G'_{ij} = \rho\, n'_j P_{ij}$ and, in its own
+frame,
+\begin{equation}
+  R'_{ij} = \frac{r'_{ij}\, \beta_{ij}}{\rho} .
+  \label{eq:Rpre}
+\end{equation}
+
+\textbf{Removed:} $n$ (lamp and exposure time) and $P$ (the stage's shape),
+inside each photo.  \textbf{Left:} the surface $r$, the shadow $\beta$, and
+the chips' gray $\rho$.\footnote{If the two chips' grays differ, $\rho_1
+\ne \rho_2$, then $\gamma_j = (1 - f_j)\rho_1 n_1 + f_j \rho_2 n_2$ is no
+longer $\rho\, n_j$, and $R$ is not exactly $r \beta / \rho$.  The
+cancellation in step 4 still holds if the light's left-to-right balance is
+the same in both photos, $n'_j = c\, n_j$ for one number $c$: then
+$\gamma'_j = c\, \gamma_j$, so $G'_{ij} = c\, G_{ij}$, and in step 4
+$R_{ij}/R'_{ij} = (D_{ij}/D'_{ij})(G'_{ij}/G_{ij})
+= \bigl(t_{ij}/c\bigr)\, c = t_{ij}$, without knowing $\rho_1$ or
+$\rho_2$.}
+
+\textbf{Example.}  $\gamma = 450$ (post) and $270$ (pre) at both chips and
+every column, since $P = 1.00$ at the chips.
+
+\medskip
+\begin{center}
+\begin{tabular}{@{}lrrrr@{}}
+\toprule
+ & \multicolumn{2}{c}{post-image} & \multicolumn{2}{c}{pre-image} \\
+ & lit & shadow & lit & shadow \\
+\midrule
+$G = P\gamma$, DN & 459.00 & 459.00 & 275.40 & 275.40 \\
+$R = D/G$         & 1.000  & 0.750  & 2.000  & 1.500 \\
+\bottomrule
+\end{tabular}
+\end{center}
+\noindent Check against \eqref{eq:R}: lit post-image,
+$r \beta/\rho = 0.45 \times 1 / 0.45 = 1.000$; shadowed pre-image,
+$0.9 \times 0.75 / 0.45 = 1.500$.  The pad reads about 2 before exposure
+because the paper returns about twice what the chips do.
+
+%======================================================================
+\section{Step 3: line up the pre-image (an average of light)}
+\label{sec:lineup}
+
+\textbf{In words.}  The strip was taken out and put back between the
+photos, so a given piece of the pad sits at slightly different pixels in
+the two.  Lining up moves the pre-image's reflectance onto the
+post-image's grid, so that each post-image pixel is paired with the same
+piece of strip.  The result, $\iW$, is the \emph{white}: what this piece
+of the pad returned before exposure, one value per pixel.
+
+\textbf{Algebra.}  The piece of strip at post-image pixel $(i, j)$ sat,
+in the pre-image, at a position generally between pixels.  Its value is
+taken as a weighted average of the four nearest pre-image pixels,
+$q = 1 \dots 4$, with weights $\eta_q$ set by how close each one is:
+\begin{equation}
+  W_{ij} = \sum_{q=1}^{4} \eta_q\, R'_q , \qquad
+  \sum_{q=1}^{4} \eta_q = 1 .
+  \label{eq:W-def}
+\end{equation}
+
+\textbf{Why an arithmetic average of reflectance.}  It stands for the
+light a pixel at the in-between position would have collected, and light
+adds (rule 1).  $R'$ is light divided by the smooth gray level, so
+averaging $R'$ is averaging light.
+
+\textbf{Result.}  With the strip put back in place (A3) and each pixel
+recording the light over its area (A5), substituting \eqref{eq:Rpre} into
+\eqref{eq:W-def} yields the pre-image's value for the same piece of
+strip:
+\begin{equation}
+  W_{ij} = \frac{r'_{ij}\, \beta_{ij}}{\rho} .
+  \label{eq:W}
+\end{equation}
+
+\textbf{Example.}  The example's strip did not move, so $W = R'$: 2.000
+(lit) and 1.500 (shadow).
+
+%======================================================================
+\section{Step 4: the ratio, without noise}
+\label{sec:ratio}
+
+\textbf{In words.}  Divide the post-image by the white.  This is the
+thought experiment's ratio \eqref{eq:te-ratio}, now with every factor
+accounted for.
+
+\textbf{Algebra.}  Define
+\begin{equation}
+  T_{ij} = \frac{R_{ij}}{W_{ij}} .
+  \label{eq:T-def}
+\end{equation}
+Substituting \eqref{eq:R} for $R_{ij}$ and \eqref{eq:W} for $W_{ij}$ in
+\eqref{eq:T-def} yields
+\begin{equation}
+  T_{ij} = \frac{r_{ij}\, \beta_{ij} / \rho}{r'_{ij}\, \beta_{ij} / \rho}
+         = \frac{r_{ij}}{r'_{ij}} ,
+  \label{eq:T-a}
+\end{equation}
+and substituting \eqref{eq:dye} for $r_{ij}$ in \eqref{eq:T-a} yields
+\begin{equation}
+  T_{ij} = \frac{r'_{ij}\, t_{ij}}{r'_{ij}} = t_{ij} .
+  \label{eq:T}
+\end{equation}
+
+\textbf{Removed:} $\rho$ (the chips' own gray), $\beta$ (the shadow), and $r'$
+(the paper's own brightness and pattern).  \textbf{Left:} $t$, the
+fraction the dye lets through, and nothing else.
+
+\textbf{Where the thought experiment's $n/n'$ went.}  For a strip that did
+not move, \eqref{eq:T-def} can be regrouped as
+\begin{equation}
+  T_{ij} = \frac{D_{ij}/G_{ij}}{D'_{ij}/G'_{ij}}
+         = \frac{D_{ij}}{D'_{ij}} \cdot \frac{G'_{ij}}{G_{ij}}
+         = \Bigl(t_{ij}\,\frac{n_j}{n'_j}\Bigr) \cdot
+           \frac{n'_j}{n_j}
+         = t_{ij} ,
+  \label{eq:T-check}
+\end{equation}
+using \eqref{eq:D}, \eqref{eq:D-others}, \eqref{eq:dye} for the first
+factor and \eqref{eq:G} for the second.  The first factor is the thought
+experiment's ratio \eqref{eq:te-ratio}; the gray chips supply exactly the
+$n'/n$ that it left over.
+
+\medskip
+\begin{center}
+\begin{tabular}{@{}lll@{}}
+\toprule
+Factor & What it is & Removed in \\
+\midrule
+$e$ & dark reading & step 1, subtraction \\
+$n$ & lamp and exposure time & step 2, division by $\iG$ \\
+$P$ & shape of the stage's light & step 2, division by $\iG$ \\
+$\rho$ & the chips' own gray & step 4, division by $\iW$ \\
+$\beta$ & shadow & step 4, division by $\iW$ \\
+$r'$ & the paper & step 4, division by $\iW$ \\
+\midrule
+$t$ & the dye & \textbf{kept} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\textbf{Example.}  Lit: $T = 1.000 / 2.000 = 0.500$.  Shadow:
+$T = 0.750 / 1.500 = 0.500$.  The same stain in and out of the shadow.
+
+%======================================================================
+\section{Step 5: noise, and the blended white (method \texorpdfstring{$\MD$}{D})}
+\label{sec:noise}
+
+\textbf{In words.}  Every measured value carries a little random noise.
+Dividing by $\iW$ removes the shadow and the paper's pattern, but it also
+adds the pre-image's noise to the answer.  Smoothing $\iW$ lowers its noise,
+but blurs the pattern, which then no longer cancels.  Method $\MD$ uses a
+blend of the two, and the algebra below shows that the best blend always
+gives some weight to each.
+
+\subsection{The pre-image's noise goes straight into the answer}
+
+Write the measured values as their noise-free values from steps 2 and 3,
+$\zeta_{ij} = r_{ij} \beta_{ij}/\rho$ and $w_{ij} = r'_{ij} \beta_{ij}/\rho$, times a
+small fractional error: $\delta_{ij}$ in the post-image and
+$\varepsilon_{ij}$ in the lined-up pre-image,
+\begin{equation}
+  R_{ij} = \zeta_{ij}\,(1 + \delta_{ij}), \qquad
+  W_{ij} = w_{ij}\,(1 + \varepsilon_{ij}) .
+  \label{eq:noise}
+\end{equation}
+($\iG$ adds almost nothing, A7.)  Substituting \eqref{eq:noise} into
+\eqref{eq:T-def}, and $\zeta_{ij}/w_{ij} = t_{ij}$ from \eqref{eq:T}, yields
+\begin{equation}
+  T_{ij} = t_{ij}\, \frac{1 + \delta_{ij}}{1 + \varepsilon_{ij}}
+         \approx t_{ij}\,\bigl(1 + \delta_{ij} - \varepsilon_{ij}\bigr),
+  \label{eq:T-noise}
+\end{equation}
+where the approximation keeps only terms of first size (it drops products
+of two small errors).  The post-image's noise $\delta$ cannot be avoided.
+The pre-image's noise $\varepsilon$ is added to it, in full.
+
+\subsection{Smoothing lowers the noise but leaves a pattern}
+
+Smoothing replaces each value by a weighted average of it and its
+neighbors, $m = 0, 1, 2, \dots$ ($m = 0$ is the pixel itself):
+\begin{equation}
+  \widetilde W_{ij} = \sum_m k_m\, W_m , \qquad \sum_m k_m = 1 .
+  \label{eq:Wt-def}
+\end{equation}
+This is an average of light, so it is done in reflectance (rule 1).
+Substituting \eqref{eq:noise} for $W_m$ in \eqref{eq:Wt-def} splits it
+into a noise-free part and a noise part:
+\begin{equation}
+  \widetilde W_{ij} = \sum_m k_m\, w_m \;+\; \sum_m k_m\, w_m\,
+  \varepsilon_m .
+  \label{eq:Wt-split}
+\end{equation}
+Define two fractions of $w_{ij}$, one for each part:
+\begin{equation}
+  \tau_{ij} = \frac{\sum_m k_m\, w_m}{w_{ij}} - 1 , \qquad
+  \widetilde\varepsilon_{ij} = \frac{\sum_m k_m\, w_m\,
+  \varepsilon_m}{w_{ij}} .
+  \label{eq:tau-def}
+\end{equation}
+$\tau_{ij}$ is how much the smoothing changed the noise-free white at this
+pixel: the part of the shadow and paper pattern that smoothing blurred
+away.  It is zero where the white is even, and largest where it changes
+sharply from pixel to pixel.  $\widetilde\varepsilon_{ij}$ is the noise
+left after smoothing: an average of many independent errors (A6), so much
+smaller than $\varepsilon_{ij}$.  Substituting \eqref{eq:tau-def} into
+\eqref{eq:Wt-split} yields
+\begin{equation}
+  \widetilde W_{ij} = w_{ij}\,\bigl(1 + \tau_{ij} +
+  \widetilde\varepsilon_{ij}\bigr).
+  \label{eq:Wt}
+\end{equation}
+Dividing by $\widetilde W$ instead of $W$ would trade the noise
+$\varepsilon$ for the pattern $\tau$.
+
+\subsection{The blend}
+
+Method $\MD$ blends the two, with weights that sum to 1:
+\begin{equation}
+  \widehat W_{ij} = \lambda\, W_{ij} + (1 - \lambda)\, \widetilde W_{ij},
+  \qquad 0 < \lambda < 1 ,
+  \label{eq:What-def}
+\end{equation}
+and the measured fraction the dye let through is now
+\begin{equation}
+  T_{ij} = \frac{R_{ij}}{\widehat W_{ij}} .
+  \label{eq:T5-def}
+\end{equation}
+
+\textbf{The blend is itself one average of light.}  Substituting
+\eqref{eq:Wt-def} for $\widetilde W_{ij}$ in \eqref{eq:What-def}, and
+separating out the pixel itself ($m = 0$), yields
+\begin{equation}
+  \widehat W_{ij} = \bigl[\lambda + (1 - \lambda)\, k_0\bigr]\, W_{ij}
+    + \sum_{m \ne 0} (1 - \lambda)\, k_m\, W_m ,
+  \label{eq:What-weights}
+\end{equation}
+whose weights sum to
+$\lambda + (1-\lambda)k_0 + (1-\lambda)(1 - k_0) = \lambda + (1-\lambda) = 1$.
+So $\widehat W$ is a single weighted average of the lined-up pre-image:
+extra weight on the pixel itself, the rest spread over its neighbors.
+Since each $W$ is in turn an average of the pre-image's own pixels
+\eqref{eq:W-def}, the whole white is one weighted average of the
+pre-image's reflectances.  By rule 1 it is done in reflectance.
+
+\textbf{Algebra.}  Substituting \eqref{eq:noise} for $W_{ij}$ and
+\eqref{eq:Wt} for $\widetilde W_{ij}$ in \eqref{eq:What-def} yields
+\begin{equation}
+  \widehat W_{ij} = w_{ij}\,\bigl[\lambda\,(1 + \varepsilon_{ij})
+    + (1 - \lambda)\,(1 + \tau_{ij} + \widetilde\varepsilon_{ij})\bigr]
+  = w_{ij}\,\bigl[1 + \lambda\,\varepsilon_{ij}
+    + (1 - \lambda)\,(\tau_{ij} + \widetilde\varepsilon_{ij})\bigr],
+  \label{eq:What}
+\end{equation}
+where the 1 comes from $\lambda + (1 - \lambda) = 1$.  Substituting
+\eqref{eq:noise} for $R_{ij}$ and \eqref{eq:What} for $\widehat W_{ij}$ in
+\eqref{eq:T5-def}, with $\zeta_{ij}/w_{ij} = t_{ij}$, yields the exact result
+\begin{equation}
+  T_{ij} = t_{ij}\;
+    \frac{1 + \delta_{ij}}
+         {1 + \lambda\,\varepsilon_{ij}
+            + (1 - \lambda)\,(\tau_{ij} + \widetilde\varepsilon_{ij})} .
+  \label{eq:T5}
+\end{equation}
+Without noise or pattern this is $t_{ij}$, as in step 4.  The error terms
+are carried into absorbance in step 6, where the best $\lambda$ is found.
+
+\textbf{Example.}  The example has no noise and an even white at each spot,
+so $\widehat W = W$ and $T = 0.500$ at both spots, for any $\lambda$.
+
+%======================================================================
+\section{Step 6: change to absorbance (once, at the end)}
+\label{sec:absorbance}
+
+\textbf{In words.}  Take $-\Lten$ of the fraction the dye let through.
+The result is the stain's absorbance: 0 where there is no dye, bigger
+where there is more.
+
+\begin{equation}
+  A_{ij} = -\Lten T_{ij} .
+  \label{eq:A-def}
+\end{equation}
+
+\textbf{Why here, and not earlier.}  Every step before this one is either
+a division (steps 2 and 4), which gives the same number in either domain
+(rule 2), or an average of light (steps 3 and 5), which must be done in
+reflectance (rule 1).  So nothing before this point needs absorbance, and
+the averages forbid it.  The reasons for absorbance only appear now:
+\begin{itemize}[nosep]
+  \item \textbf{It measures the amount of dye.}  Light passing through a
+    dye keeps a fraction $10^{-\alpha}$, where $\alpha$ grows in
+    proportion to the amount of dye (the Beer--Lambert law), so
+    $-\Lten t = \alpha$.  For dye inside paper this holds only roughly
+    (A4).
+  \item \textbf{Two dyes add.}  If yellow lets through $t_u$ and brown
+    $t_v$, both together let through $t_u t_v$, and
+    $-\Lten (t_u t_v) = -\Lten t_u - \Lten t_v$.  The yellow/brown split
+    solves sums, so it needs absorbance.
+\end{itemize}
+After this point nothing is averaged pixel by pixel, so the domain question
+does not come up again.
+
+\textbf{The same number, written as a subtraction.}  Substituting
+\eqref{eq:T5-def} for $T_{ij}$ in \eqref{eq:A-def} yields
+\begin{equation}
+  A_{ij} = -\Lten R_{ij} - \bigl(-\Lten \widehat W_{ij}\bigr) ,
+  \label{eq:A-sub}
+\end{equation}
+the post-image's absorbance minus the white's.  This is rule 2: the final
+division and this subtraction are the same step.
+
+\textbf{The result, with its errors.}  Substituting \eqref{eq:T5} for
+$T_{ij}$ in \eqref{eq:A-def}, and using $\Lten(xy/z) = \Lten x + \Lten y -
+\Lten z$, yields
+\begin{equation}
+  A_{ij} = -\Lten t_{ij} \;-\; \Lten(1 + \delta_{ij}) \;+\;
+    \Lten\bigl[1 + \lambda\,\varepsilon_{ij}
+    + (1 - \lambda)(\tau_{ij} + \widetilde\varepsilon_{ij})\bigr] .
+  \label{eq:A-exact}
+\end{equation}
+The first term is $\alpha_{ij}$.  For a small $x$,
+$\Lten(1 + x) \approx x / \ln 10 = 0.434\, x$, so to first size
+\begin{equation}
+  A_{ij} \approx \alpha_{ij} + 0.434\,\bigl[-\delta_{ij}
+    + \lambda\,\varepsilon_{ij}
+    + (1 - \lambda)(\tau_{ij} + \widetilde\varepsilon_{ij})\bigr] .
+  \label{eq:A-first}
+\end{equation}
+The measured stain is the true amount of dye plus three errors: the
+post-image's noise, the pre-image's noise weighted by $\lambda$, and the
+blurred pattern (with the small leftover noise) weighted by $1 - \lambda$.
+
+\subsection{The best blend, and why both weights are non-zero}
+\label{sec:lambda}
+
+Across the pad, each error has a spread (standard deviation):
+$\sigma_\delta$, $\sigma_\varepsilon$, $\sigma_\tau$.  The spread of the
+error in \eqref{eq:A-first} follows from the rule that the spreads of
+unrelated quantities add as squares (A6: the noises are unrelated to each
+other and to the pattern).  Take first the simple case where the smoothing
+averages enough pixels that $\widetilde\varepsilon$ can be dropped.  Then
+the squared spread of $A - \alpha$, divided by $0.434^2$, is
+\begin{equation}
+  s^2(\lambda) = \sigma_\delta^2 + \lambda^2\,\sigma_\varepsilon^2
+    + (1 - \lambda)^2\,\sigma_\tau^2 .
+  \label{eq:spread}
+\end{equation}
+Its slope with respect to $\lambda$ is
+$2\lambda\sigma_\varepsilon^2 - 2(1 - \lambda)\sigma_\tau^2$.  Setting the
+slope to zero and solving for $\lambda$ yields the best weight:
+\begin{equation}
+  \lambda = \frac{\sigma_\tau^2}{\sigma_\varepsilon^2 + \sigma_\tau^2} .
+  \label{eq:lambda}
+\end{equation}
+It is a minimum, because the curvature,
+$2(\sigma_\varepsilon^2 + \sigma_\tau^2)$, is positive.  Substituting
+\eqref{eq:lambda} for $\lambda$ in \eqref{eq:spread} yields the smallest
+spread,
+\begin{equation}
+  s^2_{\min} = \sigma_\delta^2
+    + \frac{\sigma_\varepsilon^2\, \sigma_\tau^2}
+           {\sigma_\varepsilon^2 + \sigma_\tau^2} .
+  \label{eq:spread-min}
+\end{equation}
+
+\noindent What this shows:
+\begin{itemize}
+  \item \textbf{The weight on the unsmoothed pre-image is the pattern's
+    share} of the pre-image's total spread.  A strong pattern calls for
+    dividing by the pre-image as it is; strong noise calls for smoothing.
+  \item \textbf{Both weights are non-zero} whenever the pre-image has both
+    noise ($\sigma_\varepsilon > 0$) and a pattern ($\sigma_\tau > 0$),
+    which it always does: \eqref{eq:lambda} is then strictly between 0
+    and 1.
+  \item \textbf{The blend beats both pure choices.}  At $\lambda = 1$ the
+    added spread is $\sigma_\varepsilon^2$; at $\lambda = 0$ it is
+    $\sigma_\tau^2$.  The fraction in \eqref{eq:spread-min} is smaller
+    than both, because it is $\sigma_\varepsilon^2$ times
+    $\sigma_\tau^2/(\sigma_\varepsilon^2 + \sigma_\tau^2) < 1$, and also
+    $\sigma_\tau^2$ times
+    $\sigma_\varepsilon^2/(\sigma_\varepsilon^2 + \sigma_\tau^2) < 1$.
+  \item \textbf{$\lambda$ can be set from measurements:} the pre-image's
+    noise $\sigma_\varepsilon$ and the pattern its smoothing removes,
+    $\sigma_\tau$.  Where $\sigma_\tau$ differs over the pad, the best
+    $\lambda$ differs too.  The algebra holds for any smoothing whose
+    weights sum to 1.
+\end{itemize}
+
+\noindent\textbf{Example.}  If $\sigma_\varepsilon = 0.010$ and
+$\sigma_\tau = 0.006$, then $\lambda = 0.000036/0.000136 = 0.26$, and the
+pre-image adds a spread of $0.434\sqrt{0.0000265} = 0.0022$ in absorbance,
+against $0.0043$ for $\lambda = 1$ and $0.0026$ for $\lambda = 0$.  (These
+spreads are illustrative, not measured.)
+
+\textbf{The exact form.}  Keeping $\widetilde\varepsilon$: if the white
+changes little over the smoothing's reach, \eqref{eq:tau-def} gives
+$\widetilde\varepsilon_{ij} \approx \sum_m k_m \varepsilon_m$.  Its squared
+spread is $h\,\sigma_\varepsilon^2$ with $h = \sum_m k_m^2$, and it shares
+the pixel's own error through the weight $k_0$, which adds the term
+$2\lambda(1 - \lambda)k_0\sigma_\varepsilon^2$.  Then
+\begin{equation}
+  s^2(\lambda) = \sigma_\delta^2
+    + \sigma_\varepsilon^2\bigl[\lambda^2 + 2\lambda(1-\lambda)k_0
+    + (1-\lambda)^2 h\bigr] + (1-\lambda)^2\sigma_\tau^2 ,
+  \label{eq:spread-exact}
+\end{equation}
+and setting its slope to zero yields
+\begin{equation}
+  \lambda = \frac{\sigma_\tau^2 + \sigma_\varepsilon^2\,(h - k_0)}
+                 {\sigma_\tau^2 + \sigma_\varepsilon^2\,(1 - 2k_0 + h)} .
+  \label{eq:lambda-exact}
+\end{equation}
+With $k_0 = h = 0$ this is \eqref{eq:lambda}.  For a bell-shaped smoothing
+one pixel wide, $k_0 = 0.159$ and $h = 0.080$; the weight on the
+unsmoothed image is then non-zero whenever
+$\sigma_\tau^2 > 0.08\,\sigma_\varepsilon^2$, that is, whenever the
+pattern's spread is more than 0.28 of the noise's.  (Lining up shares
+noise between neighboring pixels, which changes $h$ and $k_0$ slightly but
+not the form of the result.)  Both formulas were checked numerically by
+finding the minimum of \eqref{eq:spread} and \eqref{eq:spread-exact} on a
+fine grid of $\lambda$.
+
+\subsection{All channels}
+
+Steps 1--6 are done for each channel separately.  Putting each channel's
+$\iA$ side by side, one row per pad pixel and one column per channel, gives
+the table $\tblA$ that the yellow/brown split works on.
+
+%======================================================================
+\section{The chain on one page}
+\label{sec:summary}
+
+\begin{align*}
+  &\text{1. counts:}       & D_{ij} &= E_{ij} - e
+     &&= r_{ij}\, \beta_{ij}\, n_j\, P_{ij} \\
+  &\text{2. reflectance:}  & R_{ij} &= D_{ij} \big/ (P_{ij}\gamma_j)
+     &&= r_{ij}\, \beta_{ij} / \rho \\
+  &\text{2. pre-image:}    & R'_{ij} &= D'_{ij} \big/ (P_{ij}\gamma'_j)
+     &&= r'_{ij}\, \beta_{ij} / \rho \quad\text{(own frame)} \\
+  &\text{3. line up:}      & W_{ij} &= \textstyle\sum_q \eta_q R'_q
+     &&= r'_{ij}\, \beta_{ij} / \rho \\
+  &\text{5. blend:}        & \widehat W_{ij} &= \lambda W_{ij}
+     + (1-\lambda)\textstyle\sum_m k_m W_m
+     &&= w_{ij}\,[1 + \text{small errors, \eqref{eq:What}}] \\
+  &\text{4, 5. ratio:}     & T_{ij} &= R_{ij} / \widehat W_{ij}
+     &&\approx t_{ij} \\
+  &\text{6. absorbance:}   & A_{ij} &= -\Lten T_{ij}
+     &&\approx \alpha_{ij}
+\end{align*}
+
+\medskip
+\begin{tabular}{@{}lL{8.4cm}@{}}
+\toprule
+Assumption & Used in \\
+\midrule
+A1 dark adds, even & step 1 \\
+A2 stage light $n_j P_{ij}$, one gray & step 2 \\
+A3 strip moves little & step 3 (and $\beta$ the same in both photos) \\
+A4 dye is a filter & step 4 ($r = r't$); step 6 (what $\iA$ means) \\
+A5 pixel averages its area & step 3, step 4 \\
+A6 noise random, unrelated & step 5, the best $\lambda$ \\
+A7 $\iG$ nearly noise-free & step 5 \\
+\bottomrule
+\end{tabular}
+
+\medskip
+\noindent There is no single white number anywhere: every pixel is divided
+by its own white, $\widehat W_{ij}$, taken from the same strip before
+exposure.
+
+%======================================================================
+\section{Where this differs from the code today}
+\label{sec:code}
+
+\begin{itemize}[nosep]
+  \item The smoothing and the blend are averages of light, so here they are
+    done in reflectance.  The study code (\file{shading\_review.py}) does
+    them in absorbance.  The two agree to first size and differ by small
+    second-size terms; the difference is largest where the white changes
+    sharply.
+  \item Absorbance is taken once, at the end, instead of before the
+    shading removal.
+  \item There is no scalar white (\file{R\_white}).
+\end{itemize}
+
+\appendix
+\section{Symbols in \texttt{analysis\_chain.tex}}
+
+\begin{tabular}{@{}lll@{}}
+\toprule
+This document & \file{analysis\_chain.tex} & Meaning \\
+\midrule
+$\iD$ & $\mathbf{F}$ & light counts \\
+$\iW$ & $\mathbf{S}$ & pre-image, lined up \\
+$\hW$ & $\widehat{\mathbf{S}}$ & estimated white \\
+$\iT$ & $\mathbf{T}$ & corrected reflectance \\
+$\iA$ & $\mathbf{C}$ & stain absorbance \\
+--- & $\mathbf{A}$, $\mathbf{B}$, $\widetilde{\mathbf{B}}$,
+  $\widehat{\mathbf{B}}$ & not needed: nothing is averaged in absorbance \\
+\bottomrule
+\end{tabular}
+
+\end{document}

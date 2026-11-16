@@ -1,0 +1,1085 @@
+{
+ "about": "padfind_parity.py: src/padfind.py against the desktop pad finder. port = padfind before offset minus analysis_1._cells_fit(photo_red R); offset = padfind after offset minus analysis_1.pad_of (all channels). Each is [left, right, top, bottom] in layer px of the bound crop, sides at the pad's middle row, + = right or down.",
+ "rows": [
+  {
+   "file": "C1038",
+   "section": "pre",
+   "port": [
+    0.0,
+    0.0,
+    0.0,
+    0.0
+   ],
+   "offset": [
+    -0.20170799946050977,
+    0.06621374846956485,
+    -0.3011144050246841,
+    -0.13731316678813243
+   ],
+   "qc": "",
+   "describe": "L= 76.81 R=118.30 W=41.49 | top= 41.66 bot= 94.05 | tilt=-0.91 deg rms=0.252 px n=46-0 top_resid=-0.43 guided/window/top measured"
+  },
+  {
+   "file": "C1038",
+   "section": "post",
+   "port": [
+    0.0,
+    0.0,
+    0.0,
+    0.0
+   ],
+   "offset": [
+    -0.10422589484396383,
+    0.03824536059403272,
+    0.03912534650089583,
+    -0.12840187443224238
+   ],
+   "qc": "",
+   "describe": "L= 77.33 R=118.70 W=41.37 | top= 42.14 bot= 94.20 | tilt=-1.09 deg rms=0.262 px n=47-0 top_resid=-0.33 guided/window/top measured"
+  },
+  {
+   "file": "C1038rep2",
+   "section": "pre",
+   "port": [
+    0.0,
+    0.0,
+    0.0,
+    0.0
+   ],
+   "offset": [
+    -0.15149277447437726,
+    0.09553338041811799,
+    -0.1558228198154339,
+    -0.08381746618927366
+   ],
+   "qc": "",
+   "describe": "L= 76.86 R=118.36 W=41.50 | top= 41.80 bot= 94.10 | tilt=-0.92 deg rms=0.238 px n=46-0 top_resid=-0.43 guided/window/top measured"
+  },
+  {
+   "file": "C1038rep2",
+   "section": "post",
+   "port": [
+    0.0,
+    0.0,
+    0.0,
+    0.0
+   ],
+   "offset": [
+    -0.09999291539638477,
+    0.05916602683250005,
+    0.08387757859944145,
+    -0.15290865033948364
+   ],
+   "qc": "",
+   "describe": "L= 76.99 R=118.36 W=41.37 | top= 42.37 bot= 94.45 | tilt=-0.96 deg rms=0.236 px n=46-0 top_resid=-0.33 guided/window/top measured"
+  },
+  {
+   "file": "C1038rep3",
+   "section": "pre",
+   "port": [
+    0.0,
+    0.0,
+    0.0,
+    0.0
+   ],
+   "offset": [
+    -0.15391217975461302,
+    0.061946314561623694,
+    -0.041972436847565575,
+    -0.11756411404788025
+   ],
+   "qc": "",
+   "describe": "L= 76.92 R=118.40 W=41.48 | top= 41.97 bot= 94.13 | tilt=-0.91 deg rms=0.233 px n=46-0 top_resid=-0.43 guided/window/top measured"
+  },
+  {
+   "file": "C1038rep3",
+   "section": "post",
+   "port": [
+    0.0,
+    0.0,
+    0.0,
+    0.0
+   ],
+   "offset": [
+    -0.08625122165175014,
+    0.05233376327913675,
+    -0.048877314461392984,
+    -0.1437995750984129
+   ],
+   "qc": "",
+   "describe": "L= 77.87 R=119.22 W=41.35 | top= 42.40 bot= 94.51 | tilt=-1.00 deg rms=0.241 px n=46-0 top_resid=-0.33 guided/window/top measured"
+  },
+  {
+   "file": "C1038rep4",
+   "section": "pre",
+   "port": [
+    0.0,
+    0.0,
+    0.0,
+    0.0
+   ],
+   "offset": [
+    -0.13891164220193275,
+    0.061996921064718435,
+    0.030121156550350747,
+    -0.05558854681645187
+   ],
+   "qc": "",
+   "describe": "L= 77.53 R=118.98 W=41.45 | top= 42.08 bot= 94.28 | tilt=-1.07 deg rms=0.253 px n=46-0 top_resid=-0.43 guided/window/top measured"
+  },
+  {
+   "file": "C1038rep4",
+   "section": "post",
+   "port": [
+    0.0,
+    0.0,
+    0.0,
+    0.0
+   ],
+   "offset": [
+    -0.10514502635950862,
+    0.046610186013992916,
+    -0.06738252568590752,
+    -0.10324428881122572
+   ],
+   "qc": "",
+   "describe": "L= 77.81 R=119.16 W=41.36 | top= 42.57 bot= 94.70 | tilt=-1.06 deg rms=0.233 px n=46-0 top_resid=-0.33 guided/window/top measured"
+  },
+  {
+   "file": "C1038rep5",
+   "section": "pre",
+   "port": [
+    0.0,
+    0.0,
+    0.0,
+    0.0
+   ],
+   "offset": [
+    -0.1563218908393651,
+    0.06458966369420693,
+    0.09626449505342549,
+    -0.0512151870246953
+   ],
+   "qc": "",
+   "describe": "L= 76.98 R=118.46 W=41.48 | top= 42.21 bot= 94.35 | tilt=-0.99 deg rms=0.237 px n=47-0 top_resid=-0.43 guided/window/top measured"
+  },
+  {
+   "file": "C1038rep5",
+   "section": "post",
+   "port": [
+    0.0,
+    0.0,
+    0.0,
+    0.0
+   ],
+   "offset": [
+    -0.0944450217378403,
+    0.060024338162293134,
+    -0.10479407371033744,
+    -0.11131625461861461
+   ],
+   "qc": "",
+   "describe": "L= 77.59 R=118.94 W=41.35 | top= 42.58 bot= 94.75 | tilt=-1.07 deg rms=0.236 px n=46-0 top_resid=-0.33 guided/window/top measured"
+  },
+  {
+   "file": "C1039",
+   "section": "pre",
+   "port": [
+    0.0,
+    0.0,
+    0.0,
+    0.0
+   ],
+   "offset": [
+    -0.0867567390427979,
+    -0.018083212290093797,
+    -0.3925346309637874,
+    -0.19375193572511762
+   ],
+   "qc": "",
+   "describe": "L= 78.71 R=119.81 W=41.10 | top= 41.55 bot= 93.97 | tilt=-0.42 deg rms=0.319 px n=46-0 top_resid=-0.43 guided/window/top measured"
+  },
+  {
+   "file": "C1039",
+   "section": "post",
+   "port": [
+    0.0,
+    0.0,
+    0.0,
+    0.0
+   ],
+   "offset": [
+    -0.07004994729956593,
+    -0.01708653649420455,
+    0.19087149663706526,
+    -0.009376259537702936
+   ],
+   "qc": "",
+   "describe": "L= 78.91 R=119.84 W=40.93 | top= 42.41 bot= 94.69 | tilt=-0.40 deg rms=0.307 px n=46-0 top_resid=-0.33 guided/window/top measured"
+  },
+  {
+   "file": "C1039rep2",
+   "section": "pre",
+   "port": [
+    0.0,
+    0.0,
+    0.0,
+    0.0
+   ],
+   "offset": [
+    -0.06217355844079009,
+    -0.04714231947518499,
+    -0.052851871243966286,
+    -0.009609202186297239
+   ],
+   "qc": "",
+   "describe": "L= 79.51 R=120.61 W=41.09 | top= 41.96 bot= 94.21 | tilt=-0.66 deg rms=0.321 px n=46-0 top_resid=-0.43 guided/window/top measured"
+  },
+  {
+   "file": "C1039rep2",
+   "section": "post",
+   "port": [
+    0.0,
+    0.0,
+    0.0,
+    0.0
+   ],
+   "offset": [
+    -0.061928767761230574,
+    -0.09264023033880164,
+    0.12998913993057926,
+    -0.019346010739653252
+   ],
+   "qc": "",
+   "describe": "L= 79.57 R=120.46 W=40.89 | top= 42.42 bot= 94.79 | tilt=-0.70 deg rms=0.312 px n=46-0 top_resid=-0.33 guided/window/top measured"
+  },
+  {
+   "file": "C1039rep3",
+   "section": "pre",
+   "port": [
+    0.0,
+    0.0,
+    0.0,
+    0.0
+   ],
+   "offset": [
+    -0.08097129513633661,
+    -0.04338682737676436,
+    0.16535332735453778,
+    -0.005564761957430164
+   ],
+   "qc": "",
+   "describe": "L= 78.80 R=119.86 W=41.05 | top= 42.31 bot= 94.42 | tilt=-0.35 deg rms=0.320 px n=47-0 top_resid=-0.43 guided/window/top measured"
+  },
+  {
+   "file": "C1039rep3",
+   "section": "post",
+   "port": [
+    0.0,
+    0.0,
+    0.0,
+    0.0
+   ],
+   "offset": [
+    -0.023589577890021474,
+    -0.05680493305075629,
+    0.13701411186387702,
+    -0.043706952056979276
+   ],
+   "qc": "",
+   "describe": "L= 78.99 R=119.80 W=40.82 | top= 42.91 bot= 95.04 | tilt=-0.51 deg rms=0.314 px n=46-0 top_resid=-0.33 guided/window/top measured"
+  },
+  {
+   "file": "C1039rep4",
+   "section": "pre",
+   "port": [
+    0.0,
+    0.0,
+    0.0,
+    0.0
+   ],
+   "offset": [
+    -0.04499358209540105,
+    -0.06753088959763431,
+    0.16737719583575483,
+    0.024391921530337868
+   ],
+   "qc": "",
+   "describe": "L= 79.48 R=120.54 W=41.05 | top= 42.31 bot= 94.50 | tilt=-0.72 deg rms=0.320 px n=47-0 top_resid=-0.43 guided/window/top measured"
+  },
+  {
+   "file": "C1039rep4",
+   "section": "post",
+   "port": [
+    0.0,
+    0.0,
+    0.0,
+    0.0
+   ],
+   "offset": [
+    0.0037078242700090414,
+    -0.05469853107059919,
+    0.1561064058047208,
+    -0.017337799095514583
+   ],
+   "qc": "",
+   "describe": "L= 79.04 R=119.83 W=40.79 | top= 43.00 bot= 95.14 | tilt=-0.33 deg rms=0.312 px n=47-0 top_resid=-0.33 guided/window/top measured"
+  },
+  {
+   "file": "C1039rep5",
+   "section": "pre",
+   "port": [
+    0.0,
+    0.0,
+    0.0,
+    0.0
+   ],
+   "offset": [
+    -0.05785926664729857,
+    -0.029051048214583375,
+    0.17980580025248827,
+    0.06783906387737204
+   ],
+   "qc": "",
+   "describe": "L= 78.87 R=119.90 W=41.03 | top= 42.45 bot= 94.67 | tilt=-0.35 deg rms=0.307 px n=46-0 top_resid=-0.43 guided/window/top measured"
+  },
+  {
+   "file": "C1039rep5",
+   "section": "post",
+   "port": [
+    0.0,
+    0.0,
+    0.0,
+    0.0
+   ],
+   "offset": [
+    -0.030690332839071743,
+    -0.04179004019960075,
+    0.16594655107334688,
+    0.007780436967422588
+   ],
+   "qc": "",
+   "describe": "L= 79.69 R=120.55 W=40.86 | top= 42.98 bot= 95.14 | tilt=-0.72 deg rms=0.312 px n=47-0 top_resid=-0.33 guided/window/top measured"
+  },
+  {
+   "file": "C1040",
+   "section": "pre",
+   "port": [
+    0.0,
+    0.0,
+    0.0,
+    0.0
+   ],
+   "offset": [
+    0.26419021803280884,
+    -0.025096824208617363,
+    0.05021772580144557,
+    0.08505544830556744
+   ],
+   "qc": "",
+   "describe": "L= 81.26 R=123.67 W=42.41 | top= 42.11 bot= 94.22 | tilt=-0.59 deg rms=0.350 px n=45-1 top_resid=-0.43 guided/window/top measured"
+  },
+  {
+   "file": "C1040",
+   "section": "post",
+   "port": [
+    0.0,
+    0.0,
+    0.0,
+    0.0
+   ],
+   "offset": [
+    0.03950582933066471,
+    -0.01835094068182741,
+    -0.01184630093323591,
+    -0.0024537060516820475
+   ],
+   "qc": "",
+   "describe": "L= 81.47 R=123.85 W=42.38 | top= 41.96 bot= 93.98 | tilt=-0.61 deg rms=0.378 px n=45-1 top_resid=-0.33 guided/window/top measured"
+  },
+  {
+   "file": "C1040rep2",
+   "section": "pre",
+   "port": [
+    0.0,
+    0.0,
+    0.0,
+    0.0
+   ],
+   "offset": [
+    0.23679090064732122,
+    0.02112178322650493,
+    0.10915310709095394,
+    0.06302310498277564
+   ],
+   "qc": "",
+   "describe": "L= 80.62 R=123.07 W=42.44 | top= 42.18 bot= 94.21 | tilt=-0.46 deg rms=0.324 px n=45-1 top_resid=-0.43 guided/window/top measured"
+  },
+  {
+   "file": "C1040rep2",
+   "section": "post",
+   "port": [
+    0.0,
+    0.0,
+    0.0,
+    0.0
+   ],
+   "offset": [
+    0.11993452496663792,
+    0.040877164892393125,
+    0.00807668670390882,
+    0.01740511207798079
+   ],
+   "qc": "",
+   "describe": "L= 80.86 R=123.21 W=42.35 | top= 42.30 bot= 94.30 | tilt=-0.55 deg rms=0.322 px n=47-0 top_resid=-0.33 guided/window/top measured"
+  },
+  {
+   "file": "C1040rep3",
+   "section": "pre",
+   "port": [
+    0.0,
+    0.0,
+    0.0,
+    0.0
+   ],
+   "offset": [
+    0.22721137747529951,
+    0.012595023955839224,
+    0.10976509252180477,
+    0.04392974700668617
+   ],
+   "qc": "",
+   "describe": "L= 80.58 R=123.03 W=42.45 | top= 42.18 bot= 94.19 | tilt=-0.49 deg rms=0.328 px n=45-1 top_resid=-0.43 guided/window/top measured"
+  },
+  {
+   "file": "C1040rep3",
+   "section": "post",
+   "port": [
+    0.0,
+    0.0,
+    0.0,
+    0.0
+   ],
+   "offset": [
+    0.11173744738592006,
+    0.02701864269116072,
+    0.02858414348523297,
+    -0.0591708173812151
+   ],
+   "qc": "",
+   "describe": "L= 80.97 R=123.31 W=42.34 | top= 42.39 bot= 94.33 | tilt=-0.67 deg rms=0.328 px n=46-0 top_resid=-0.33 guided/window/top measured"
+  },
+  {
+   "file": "C1040rep4",
+   "section": "pre",
+   "port": [
+    0.0,
+    0.0,
+    0.0,
+    0.0
+   ],
+   "offset": [
+    0.22699074707911393,
+    0.03991484656802413,
+    0.061554302908902514,
+    0.10337014029758507
+   ],
+   "qc": "",
+   "describe": "L= 80.71 R=123.17 W=42.46 | top= 42.13 bot= 94.21 | tilt=-0.50 deg rms=0.323 px n=45-1 top_resid=-0.43 guided/window/top measured"
+  },
+  {
+   "file": "C1040rep4",
+   "section": "post",
+   "port": [
+    0.0,
+    0.0,
+    0.0,
+    0.0
+   ],
+   "offset": [
+    0.10578815894646709,
+    0.058697355203193524,
+    -0.028070146174385968,
+    0.011507923398269782
+   ],
+   "qc": "",
+   "describe": "L= 80.83 R=123.20 W=42.36 | top= 42.47 bot= 94.46 | tilt=-0.58 deg rms=0.298 px n=46-0 top_resid=-0.33 guided/window/top measured"
+  },
+  {
+   "file": "C1040rep5",
+   "section": "pre",
+   "port": [
+    0.0,
+    0.0,
+    0.0,
+    0.0
+   ],
+   "offset": [
+    0.2787435826429885,
+    -0.029143115673846864,
+    0.0486373380258911,
+    0.11010233119044699
+   ],
+   "qc": "",
+   "describe": "L= 81.26 R=123.65 W=42.39 | top= 42.06 bot= 94.15 | tilt=-0.63 deg rms=0.344 px n=45-1 top_resid=-0.43 guided/window/top measured"
+  },
+  {
+   "file": "C1040rep5",
+   "section": "post",
+   "port": [
+    0.0,
+    0.0,
+    0.0,
+    0.0
+   ],
+   "offset": [
+    0.1409029801661177,
+    0.07525138465945247,
+    -0.018092378929097208,
+    0.06566615294180167
+   ],
+   "qc": "",
+   "describe": "L= 80.91 R=123.25 W=42.34 | top= 42.57 bot= 94.62 | tilt=-0.55 deg rms=0.283 px n=45-1 top_resid=-0.33 guided/window/top measured"
+  },
+  {
+   "file": "C1041",
+   "section": "pre",
+   "port": [
+    0.0,
+    0.0,
+    0.0,
+    0.0
+   ],
+   "offset": [
+    -0.007885382649092776,
+    -0.14741352627729043,
+    0.10843882684518036,
+    -0.038388117441186864
+   ],
+   "qc": "",
+   "describe": "L= 79.86 R=121.59 W=41.73 | top= 41.42 bot= 93.62 | tilt=-0.17 deg rms=0.197 px n=46-1 top_resid=-0.43 guided/window/top measured"
+  },
+  {
+   "file": "C1041",
+   "section": "post",
+   "port": [
+    0.0,
+    0.0,
+    0.0,
+    0.0
+   ],
+   "offset": [
+    0.01210476787321113,
+    -0.007952604921484863,
+    -0.11033725738245437,
+    -0.03186135066528095
+   ],
+   "qc": "",
+   "describe": "L= 80.70 R=122.38 W=41.68 | top= 41.82 bot= 93.97 | tilt=-0.15 deg rms=0.207 px n=46-0 top_resid=-0.33 guided/window/top measured"
+  },
+  {
+   "file": "C1041rep2",
+   "section": "pre",
+   "port": [
+    0.0,
+    0.0,
+    0.0,
+    0.0
+   ],
+   "offset": [
+    0.002664194784458118,
+    -0.044183058357361915,
+    0.10783102051435378,
+    -0.0028636159859161125
+   ],
+   "qc": "",
+   "describe": "L= 80.63 R=122.44 W=41.81 | top= 41.46 bot= 93.69 | tilt=-0.16 deg rms=0.218 px n=46-0 top_resid=-0.43 guided/window/top measured"
+  },
+  {
+   "file": "C1041rep2",
+   "section": "post",
+   "port": [
+    0.0,
+    0.0,
+    0.0,
+    0.0
+   ],
+   "offset": [
+    0.01891383853975981,
+    -0.04307023428587797,
+    -0.029870868494946023,
+    0.012844311247917517
+   ],
+   "qc": "",
+   "describe": "L= 80.17 R=121.89 W=41.72 | top= 42.10 bot= 94.20 | tilt=-0.06 deg rms=0.211 px n=47-0 top_resid=-0.33 guided/window/top measured"
+  },
+  {
+   "file": "C1041rep3",
+   "section": "pre",
+   "port": [
+    0.0,
+    0.0,
+    0.0,
+    0.0
+   ],
+   "offset": [
+    0.01222001332338607,
+    -0.06899785700903749,
+    0.08728684718577995,
+    -0.02476348531283179
+   ],
+   "qc": "",
+   "describe": "L= 80.70 R=122.49 W=41.78 | top= 41.37 bot= 93.50 | tilt=-0.11 deg rms=0.221 px n=47-0 top_resid=-0.43 guided/window/top measured"
+  },
+  {
+   "file": "C1041rep3",
+   "section": "post",
+   "port": [
+    0.0,
+    0.0,
+    0.0,
+    0.0
+   ],
+   "offset": [
+    0.029609460597427528,
+    -0.02922517671629521,
+    0.026298016296145477,
+    0.014099968549601272
+   ],
+   "qc": "",
+   "describe": "L= 80.28 R=122.02 W=41.74 | top= 42.31 bot= 94.38 | tilt=-0.02 deg rms=0.218 px n=47-0 top_resid=-0.33 guided/window/top measured"
+  },
+  {
+   "file": "C1041rep4",
+   "section": "pre",
+   "port": [
+    0.0,
+    0.0,
+    0.0,
+    0.0
+   ],
+   "offset": [
+    -0.001803836610420717,
+    -0.11194918359601047,
+    0.16279687930723696,
+    -0.05721672200296268
+   ],
+   "qc": "",
+   "describe": "L= 79.78 R=121.54 W=41.75 | top= 41.46 bot= 93.58 | tilt=-0.15 deg rms=0.197 px n=45-1 top_resid=-0.43 guided/window/top measured"
+  },
+  {
+   "file": "C1041rep4",
+   "section": "post",
+   "port": [
+    0.0,
+    0.0,
+    0.0,
+    0.0
+   ],
+   "offset": [
+    0.04080438558926858,
+    -0.08491803426710476,
+    -0.04765539903161198,
+    0.060550726624029494
+   ],
+   "qc": "",
+   "describe": "L= 80.86 R=122.54 W=41.67 | top= 42.30 bot= 94.44 | tilt=-0.29 deg rms=0.202 px n=47-0 top_resid=-0.33 guided/window/top measured"
+  },
+  {
+   "file": "C1041rep5",
+   "section": "pre",
+   "port": [
+    0.0,
+    0.0,
+    0.0,
+    0.0
+   ],
+   "offset": [
+    0.014793310109453728,
+    -0.015180040594728439,
+    0.09924042116003307,
+    -0.02235474256221437
+   ],
+   "qc": "",
+   "describe": "L= 80.60 R=122.42 W=41.82 | top= 41.47 bot= 93.66 | tilt=-0.15 deg rms=0.220 px n=46-0 top_resid=-0.43 guided/window/top measured"
+  },
+  {
+   "file": "C1041rep5",
+   "section": "post",
+   "port": [
+    0.0,
+    0.0,
+    0.0,
+    0.0
+   ],
+   "offset": [
+    0.03587488814672213,
+    -0.07501511184752019,
+    -0.08485949160566975,
+    0.01594760339695256
+   ],
+   "qc": "",
+   "describe": "L= 80.91 R=122.60 W=41.70 | top= 42.34 bot= 94.44 | tilt=-0.28 deg rms=0.187 px n=46-0 top_resid=-0.33 guided/window/top measured"
+  },
+  {
+   "file": "C1042-b",
+   "section": "pre",
+   "port": [
+    0.0,
+    0.0,
+    0.0,
+    0.0
+   ],
+   "offset": [
+    0.09593136909843736,
+    0.004419296952505647,
+    -0.08457309662281887,
+    0.14243368369719178
+   ],
+   "qc": "",
+   "describe": "L= 80.90 R=122.99 W=42.09 | top= 41.63 bot= 93.99 | tilt=-0.67 deg rms=0.228 px n=45-1 top_resid=-0.43 guided/window/top measured"
+  },
+  {
+   "file": "C1042-b",
+   "section": "post",
+   "port": [
+    0.0,
+    0.0,
+    0.0,
+    0.0
+   ],
+   "offset": [
+    -0.02942075816879708,
+    0.02580716642172831,
+    -0.22767171821688237,
+    0.14855586333069937
+   ],
+   "qc": "",
+   "describe": "L= 81.59 R=123.61 W=42.02 | top= 41.66 bot= 93.92 | tilt=-0.72 deg rms=0.229 px n=45-1 top_resid=-0.33 guided/window/top measured"
+  },
+  {
+   "file": "C1042rep2-a",
+   "section": "pre",
+   "port": [
+    0.0,
+    0.0,
+    0.0,
+    0.0
+   ],
+   "offset": [
+    0.11165367933703862,
+    0.039831239610094826,
+    -0.06664596225743225,
+    0.10377490685489477
+   ],
+   "qc": "",
+   "describe": "L= 81.50 R=123.59 W=42.09 | top= 41.64 bot= 93.95 | tilt=-0.79 deg rms=0.220 px n=46-0 top_resid=-0.43 guided/window/top measured"
+  },
+  {
+   "file": "C1042rep2-a",
+   "section": "post",
+   "port": [
+    0.0,
+    0.0,
+    0.0,
+    0.0
+   ],
+   "offset": [
+    -0.024746824423587555,
+    -0.01132147194424249,
+    -0.02363216575627547,
+    0.13473289850895753
+   ],
+   "qc": "",
+   "describe": "L= 80.76 R=122.76 W=42.00 | top= 42.03 bot= 94.04 | tilt=-0.76 deg rms=0.245 px n=46-0 top_resid=-0.33 guided/window/top measured"
+  },
+  {
+   "file": "C1044-e",
+   "section": "pre",
+   "port": [
+    0.0,
+    0.0,
+    0.0,
+    0.0
+   ],
+   "offset": [
+    0.012643643416268446,
+    -0.022414931585899467,
+    -0.055036021693730675,
+    -0.09284871471680844
+   ],
+   "qc": "",
+   "describe": "L= 80.85 R=122.48 W=41.63 | top= 41.51 bot= 93.77 | tilt=-0.36 deg rms=0.211 px n=45-1 top_resid=-0.43 guided/window/top measured"
+  },
+  {
+   "file": "C1044-e",
+   "section": "post",
+   "port": [
+    0.0,
+    0.0,
+    0.0,
+    0.0
+   ],
+   "offset": [
+    -0.032430725095807134,
+    -0.05025495583596751,
+    -0.1375322332546176,
+    -0.044365158715223174
+   ],
+   "qc": "",
+   "describe": "L= 80.86 R=122.40 W=41.54 | top= 41.80 bot= 94.01 | tilt=-0.38 deg rms=0.223 px n=45-1 top_resid=-0.33 guided/window/top measured"
+  },
+  {
+   "file": "C1044rep2-b",
+   "section": "pre",
+   "port": [
+    0.0,
+    0.0,
+    0.0,
+    0.0
+   ],
+   "offset": [
+    0.01692504323544597,
+    -0.08307364381118987,
+    -0.17036057887393952,
+    0.10764508670261819
+   ],
+   "qc": "",
+   "describe": "L= 80.98 R=122.58 W=41.59 | top= 41.57 bot= 94.04 | tilt=-0.29 deg rms=0.198 px n=45-1 top_resid=-0.43 guided/window/top measured"
+  },
+  {
+   "file": "C1044rep2-b",
+   "section": "post",
+   "port": [
+    0.0,
+    0.0,
+    0.0,
+    0.0
+   ],
+   "offset": [
+    -0.0003627343208165712,
+    -0.034640601615365085,
+    0.04883747327146892,
+    -0.004484489185912821
+   ],
+   "qc": "",
+   "describe": "L= 80.28 R=121.85 W=41.57 | top= 42.20 bot= 94.33 | tilt=-0.29 deg rms=0.288 px n=47-0 top_resid=-0.33 guided/window/top measured"
+  },
+  {
+   "file": "C1046",
+   "section": "pre",
+   "port": [
+    0.0,
+    0.0,
+    0.0,
+    0.0
+   ],
+   "offset": [
+    -0.1310412552489879,
+    -0.08529040428999224,
+    -0.1500606111872358,
+    0.10467713441961735
+   ],
+   "qc": "",
+   "describe": "L= 76.85 R=117.76 W=40.91 | top= 43.84 bot= 96.15 | tilt=-0.60 deg rms=0.372 px n=46-0 top_resid=-0.43 guided/window/top measured"
+  },
+  {
+   "file": "C1046",
+   "section": "post",
+   "port": [
+    0.0,
+    0.0,
+    0.0,
+    0.0
+   ],
+   "offset": [
+    0.04656252763246016,
+    -0.03417737615492911,
+    -0.20052503183316617,
+    0.17616532405260443
+   ],
+   "qc": "",
+   "describe": "L= 77.67 R=118.46 W=40.79 | top= 43.69 bot= 95.97 | tilt=-0.42 deg rms=0.378 px n=46-0 top_resid=-0.33 guided/window/top measured"
+  },
+  {
+   "file": "C1047",
+   "section": "pre",
+   "port": [
+    0.0,
+    0.0,
+    0.0,
+    0.0
+   ],
+   "offset": [
+    0.10501813225214107,
+    -0.03694986889738061,
+    0.019652564698247943,
+    0.0434336447900705
+   ],
+   "qc": "",
+   "describe": "L= 79.48 R=121.33 W=41.84 | top= 44.07 bot= 96.31 | tilt=-0.34 deg rms=0.275 px n=44-2 top_resid=-0.43 guided/window/top measured"
+  },
+  {
+   "file": "C1047",
+   "section": "post",
+   "port": [
+    0.0,
+    0.0,
+    0.0,
+    0.0
+   ],
+   "offset": [
+    0.1246932057665191,
+    -0.04418098646333135,
+    -0.08759578013130209,
+    0.06528732508107282
+   ],
+   "qc": "",
+   "describe": "L= 76.68 R=118.58 W=41.90 | top= 43.82 bot= 95.95 | tilt=+0.06 deg rms=0.307 px n=37-9 top_resid=-0.33 guided/window/top measured"
+  },
+  {
+   "file": "C1045-a",
+   "section": "pre",
+   "port": [
+    0.0,
+    0.0,
+    0.0,
+    0.0
+   ],
+   "offset": [
+    -0.06718861909820362,
+    0.0937975042779442,
+    -0.06935175958830797,
+    0.036739763380424506
+   ],
+   "qc": "",
+   "describe": "L= 80.54 R=121.89 W=41.35 | top= 48.66 bot=101.09 | tilt=-0.62 deg rms=0.322 px n=46-0 top_resid=-0.43 guided/window/top measured"
+  },
+  {
+   "file": "C1045-a",
+   "section": "post",
+   "port": [
+    0.0,
+    0.0,
+    0.0,
+    0.0
+   ],
+   "offset": [
+    -0.037081031909593776,
+    0.021795224264693047,
+    0.056509726821140305,
+    0.02426293603404872
+   ],
+   "qc": "",
+   "describe": "L= 81.10 R=122.30 W=41.20 | top= 49.11 bot=101.39 | tilt=-0.63 deg rms=0.294 px n=47-0 top_resid=-0.33 guided/window/top measured"
+  },
+  {
+   "file": "C1045rep2-a",
+   "section": "pre",
+   "port": [
+    0.0,
+    0.0,
+    0.0,
+    0.0
+   ],
+   "offset": [
+    -0.08632228074048953,
+    0.10230179955604513,
+    -0.059955166578909314,
+    -0.006448811783485553
+   ],
+   "qc": "",
+   "describe": "L= 80.56 R=121.92 W=41.36 | top= 48.75 bot=101.21 | tilt=-0.62 deg rms=0.318 px n=46-0 top_resid=-0.43 guided/window/top measured"
+  },
+  {
+   "file": "C1045rep2-a",
+   "section": "post",
+   "port": [
+    0.0,
+    0.0,
+    0.0,
+    0.0
+   ],
+   "offset": [
+    -0.0092831242471334,
+    0.05378056202229686,
+    0.05155751569653688,
+    0.006173674849307531
+   ],
+   "qc": "",
+   "describe": "L= 81.09 R=122.29 W=41.20 | top= 49.21 bot=101.50 | tilt=-0.62 deg rms=0.287 px n=47-0 top_resid=-0.33 guided/window/top measured"
+  },
+  {
+   "file": "C1045rep3",
+   "section": "pre",
+   "port": [
+    0.0,
+    0.0,
+    0.0,
+    0.0
+   ],
+   "offset": [
+    -0.07444241951299091,
+    0.12452984895787722,
+    -0.00850744396664993,
+    -0.06104595742473862
+   ],
+   "qc": "",
+   "describe": "L= 80.64 R=122.00 W=41.36 | top= 48.90 bot=101.23 | tilt=-0.64 deg rms=0.316 px n=46-0 top_resid=-0.43 guided/window/top measured"
+  },
+  {
+   "file": "C1045rep3",
+   "section": "post",
+   "port": [
+    0.0,
+    0.0,
+    0.0,
+    0.0
+   ],
+   "offset": [
+    -0.006006577714941841,
+    0.034540537571714935,
+    0.09600840561238755,
+    0.025946191997533674
+   ],
+   "qc": "",
+   "describe": "L= 81.17 R=122.35 W=41.19 | top= 49.30 bot=101.61 | tilt=-0.60 deg rms=0.286 px n=47-0 top_resid=-0.33 guided/window/top measured"
+  },
+  {
+   "file": "C1045rep4",
+   "section": "pre",
+   "port": [
+    0.0,
+    0.0,
+    0.0,
+    0.0
+   ],
+   "offset": [
+    -0.07233827937632498,
+    0.09265791857376371,
+    0.012890030900798877,
+    0.011123186210781455
+   ],
+   "qc": "",
+   "describe": "L= 80.51 R=121.85 W=41.33 | top= 48.93 bot=101.32 | tilt=-0.64 deg rms=0.317 px n=46-0 top_resid=-0.43 guided/window/top measured"
+  },
+  {
+   "file": "C1045rep4",
+   "section": "post",
+   "port": [
+    0.0,
+    0.0,
+    0.0,
+    0.0
+   ],
+   "offset": [
+    0.010763670394993596,
+    0.03184994595953583,
+    0.05718486859003491,
+    0.1259643258518537
+   ],
+   "qc": "",
+   "describe": "L= 81.17 R=122.33 W=41.16 | top= 49.30 bot=101.76 | tilt=-0.60 deg rms=0.286 px n=47-0 top_resid=-0.33 guided/window/top measured"
+  }
+ ]
+}

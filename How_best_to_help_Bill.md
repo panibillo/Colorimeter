@@ -53,6 +53,7 @@ with dates, so you can see the pattern behind each rule.
 
 ## 2. What slows progress, and what to do about it
 
+
 Bill's own list, with what we saw in the sessions.
 
 ### 2.1 Bill has to understand the chain and feel sure of it
@@ -148,6 +149,9 @@ Bill has said this in nearly every session, and it is now in `CLAUDE.md` and
   back after a gap.
 - **Never use a technical term just to save words.** If a plain phrase is
   longer but clear, use the plain phrase.
+- **Define jargon, technical terms and shorthand expressions** This is 
+  technical writing that should enable reproducability. Exact technical
+  terms are useful for avoiding ambiguity, but must have clear definitions.
 - **Name a method by what it does.** Say "the method that fits the circle
   using the edge brightness," not just "ECC." Name the library function
   only as a reference.
@@ -157,7 +161,8 @@ Bill has said this in nearly every session, and it is now in `CLAUDE.md` and
 - **Before sending a long technical reply, re-read it once looking only for
   jargon.** Replace every term that Bill hasn't already used, or that isn't
   defined in the glossary below.
-
+- **Include clear definitions and units in output files** Because some files
+  may later stand on their own. Non-standard units should have clear descriptions.
 ---
 
 ## 4. Words that are easy to confuse
@@ -174,7 +179,7 @@ Use these exact meanings. When a document uses one of these, define it there.
 | **K/S (Kubelka–Munk)** | (1 − R_inf)² / (2·R_inf). It estimates how much light is absorbed compared with how much is scattered, for a thick scattering layer like paper. | Bigger means **darker**. |
 | **Shading / shadow** | Darkening caused by the light and the pad's shape (rim, tilt), not by dye. Visible in the pre-image. | |
 | **Texture** | The paper's own fixed pixel-to-pixel pattern. It repeats between exposures and moves with the strip. Don't call it noise (2026-09-29 finding). | |
-| **Noise** | Random change from one exposure to the next at the same pixel. About 0.002 A for the camera. | |
+| **Noise** | Random change from one photo to the next at the same pixel. For the camera, one pixel, one photo: 0.004–0.007 A on clean paper (photo_red.R 0.0042, green.B 0.0068), up to 0.012 A on stained paper (measured 2026-11-11, `white_study.py` step 2b; 0.002 A was the earlier estimate). | |
 | **Dark level** | What the sensor reads with no light. We subtract the dark frame's whole-frame average, not each pixel's own value (decided 2026-09-12, done in commit a887dd9). | |
 | **Hot pixel** | A pixel whose dark level is reliably higher than the rest. It is masked out, not repaired. | |
 | **Section** | Used in .h5 files. `''` is the measurement capture, and `'pre'` is the pre-image of the strip. | |
@@ -259,7 +264,7 @@ one round, not four.
 
    | Source of spread | Rough size |
    |---|---|
-   | Camera noise per pixel | about 0.002 A |
+   | Camera noise per pixel, one photo | 0.004–0.007 A on clean paper, up to 0.012 A stained (measured 2026-11-11) |
    | Paper texture per pixel | 0.006–0.008 A |
    | Shadow at the pad rim | about 0.04 A |
    | Hot pixels on the pad | well under 1% |

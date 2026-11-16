@@ -30,8 +30,9 @@
 --                offer it without it being retyped.  Never a factory value.
 --     'operator' created on the instrument.  Never written here.
 --
--- It seeds `roi` as well as `config` — both hold commissioned settings, and
--- both have to be present before the application can start.
+-- It seeds `roi` and the strip rule's `exposure` seed rows as well as
+-- `config` — all hold commissioned settings, and all have to be present
+-- before the application can start.
 -- ============================================================================
 
 
@@ -83,6 +84,30 @@ UPDATE config
    AND NOT EXISTS (SELECT 1 FROM config
                     WHERE role = 'capture' AND name = 'exposuregroup');
 
+-- ── Re-measured factory values ──────────────────────────────────────────────
+-- A seed whose factory value changed.  INSERT OR IGNORE alone cannot bring
+-- the new value in: the old seed row still holds the one isdefault slot
+-- (ux_config_one_default), so the new row would be skipped.  The old seed row
+-- is therefore demoted first, to an inactive 'history' row: the new seed row
+-- below then goes in, and the activation UPDATE puts it in force -- but only
+-- where the old factory value was the one in force.  An operator's own value
+-- stays in force.  A no-op once nothing matches.
+--
+-- capture.padfind_offset_pre / _post (2026-11-15).  Re-measured when pad
+-- finding began to measure the pad's top instead of placing it one fixed
+-- height above the bottom (src/padfind.py step 5): the top terms moved,
+-- pre 0.33 -> 0.43 and post 0.11 -> 0.33.
+UPDATE config
+   SET active = 0, isdefault = 0, source = 'history',
+       remark = 'pad finding offset before 2026-11-15, when the top was placed from a fixed height'
+ WHERE role = 'capture' AND name = 'padfind_offset_pre'
+   AND value = '0.10,0.44,0.33,0.33' AND source = 'seed';
+UPDATE config
+   SET active = 0, isdefault = 0, source = 'history',
+       remark = 'pad finding offset before 2026-11-15, when the top was placed from a fixed height'
+ WHERE role = 'capture' AND name = 'padfind_offset_post'
+   AND value = '0.13,0.35,0.11,0.11' AND source = 'seed';
+
 -- ── capture ─────────────────────────────────────────────────────────────────
 INSERT OR IGNORE INTO config (active, isdefault, editable, add_dt, role, name,
                               vtype, value, source, remark)
@@ -111,9 +136,9 @@ INSERT OR IGNORE INTO config (active, isdefault, editable, add_dt, role, name,
   (0, 1, 1, '2026-08-01 00:00:00', 'capture', 'prefetch_budget_s', 'float', '20.0', 'seed',
    'reserved time for camera setup and focus during the reagent2 countdown'),
   (0, 1, 1, '2026-08-01 00:00:00', 'capture', 'layer_keep_min_dn', 'int', '96', 'seed',
-   'a Bayer layer is too dark to store when its scaled p10 falls below this (signal DN)'),
+   'group rule and white photo only: a Bayer layer is too dark to store when its scaled p10 falls below this (signal DN); the strip rule ignores it'),
   (0, 1, 1, '2026-08-01 00:00:00', 'capture', 'layer_keep_max_dn', 'int', '863', 'seed',
-   'a Bayer layer is too bright to store when its scaled p90 rises above this (signal DN)'),
+   'group rule and white photo only: a Bayer layer is too bright to store when its scaled p90 rises above this (signal DN); the strip rule ignores it'),
   (0, 1, 1, '2026-08-12 00:00:00', 'capture', 'photo_enabled', 'bool', '1', 'seed',
    'take a colour-balanced JPEG under the white LED as the last step of a run'),
   (0, 1, 1, '2026-08-12 00:00:00', 'capture', 'photo_wb_gains', 'str', '1.0,1.0', 'seed',
@@ -123,6 +148,51 @@ INSERT OR IGNORE INTO config (active, isdefault, editable, add_dt, role, name,
   (0, 1, 1, '2026-08-18 00:00:00', 'capture', 'preimage_led_order', 'str',
    'royal_blue,red', 'seed',
    'LEDs the pre-image sweeps; keep it short — this light falls on an unreacted pad');
+-- ── capture: the strip exposure rule (2026-11-14) ───────────────────────────
+-- How a pre-image or a measurement sets each LED's exposure_us from the strip
+-- itself (src/exposure_rule.py, which explains every value; its constants of
+-- the same names are these factory values, and a test keeps the two equal).
+-- Read once at the start of each sweep.  The limits are raw DN, dark level
+-- (64) included.  The pad-finding rows are for the one photo_red frame that
+-- locates the pad before each sweep (src/padfind.py, capture_runner).
+INSERT OR IGNORE INTO config (active, isdefault, editable, add_dt, role, name,
+                              vtype, value, source, remark)
+     VALUES
+  (0, 1, 1, '2026-11-14 00:00:00', 'capture', 'exposure_rule', 'str', 'strip', 'seed',
+   'how a pre-image and a measurement set exposure_us: strip (from the strip itself) or group (the stored exposure group, as before 2026-11-14)'),
+  (0, 1, 1, '2026-11-14 00:00:00', 'capture', 'clip_top_dn', 'int', '1023', 'seed',
+   'strip rule: a pixel at or above this raw DN is clipped at the top'),
+  (0, 1, 1, '2026-11-14 00:00:00', 'capture', 'clip_bottom_dn', 'int', '65', 'seed',
+   'strip rule: a pixel at or below this raw DN (dark + 1) is clipped at the bottom; counted only'),
+  (0, 1, 1, '2026-11-14 00:00:00', 'capture', 'noise_floor_dn', 'int', '164', 'seed',
+   'strip rule: an analysis-channel pixel below this raw DN (dark + 100) at Tus calls for a Bus frame'),
+  (0, 1, 1, '2026-11-14 00:00:00', 'capture', 'top_target_fraction', 'float', '0.85', 'seed',
+   'strip rule: a re-aimed frame puts its brightest pixel at this fraction of clip_top_dn'),
+  (0, 1, 1, '2026-11-14 00:00:00', 'capture', 'top_floor_fraction', 'float', '0.80', 'seed',
+   'strip rule: a frame is accepted when nothing clips and its brightest pixel is at least this fraction of clip_top_dn'),
+  (0, 1, 1, '2026-11-14 00:00:00', 'capture', 'clip_step_factor', 'float', '0.7', 'seed',
+   'strip rule: exposure_us is multiplied by this after a clipped frame'),
+  (0, 1, 1, '2026-11-14 00:00:00', 'capture', 'max_exposure_tries', 'int', '4', 'seed',
+   'strip rule: frames taken to find Tus, the first included'),
+  (0, 1, 1, '2026-11-14 00:00:00', 'capture', 'exposure_cap_us', 'int', '200000', 'seed',
+   'strip rule: longest exposure_us it may ask for, in microseconds'),
+  (0, 1, 1, '2026-11-14 00:00:00', 'capture', 'bus_margin', 'float', '1.1', 'seed',
+   'strip rule: Bus is lengthened by this factor past what puts the darkest pixel on the floor'),
+  (0, 1, 1, '2026-11-14 00:00:00', 'capture', 'edge_darkening_factor', 'float', '5.0', 'seed',
+   'strip rule: a left/right edge pixel darker than this times band 1 is left out of the noise-floor test'),
+  (0, 1, 1, '2026-11-14 00:00:00', 'capture', 'edge_signal_fraction', 'float', '0.5', 'seed',
+   'strip rule: such an edge pixel is left out only if its signal is also below this fraction of the pad interior''s'),
+  (0, 1, 1, '2026-11-16 00:00:00', 'capture', 'save_all_layers', 'bool', '0', 'seed',
+   'development override: 1 saves every Bayer layer of every kept frame (Tus, Bus, the white frame), dark or clipped; exposure decisions unchanged'),
+  (0, 1, 1, '2026-11-14 00:00:00', 'capture', 'padfind_led', 'str', 'photo_red', 'seed',
+   'pad finding: the LED lighting the one frame the pad is located on'),
+  (0, 1, 1, '2026-11-14 00:00:00', 'capture', 'padfind_exposure_us', 'int', '10000', 'seed',
+   'pad finding: that frame''s exposure_us, in microseconds'),
+  (0, 1, 1, '2026-11-15 00:00:00', 'capture', 'padfind_offset_pre', 'str', '0.10,0.44,0.43,0.33', 'seed',
+   'pad finding: left,right,top,bottom shift (layer px, + = right/down) moving a pre-image photo_red fit to where the desktop all-channel fit puts it'),
+  (0, 1, 1, '2026-11-15 00:00:00', 'capture', 'padfind_offset_post', 'str', '0.13,0.35,0.33,0.11', 'seed',
+   'pad finding: the same shift for a measurement (post-image)');
+
 -- ── calibration ─────────────────────────────────────────────────────────────
 -- The window every stored exposure bracket must fit on the test pad (white,
 -- yellow and brown patches) and the gray chips.  Placeholders for Bill to tune.
@@ -189,7 +259,14 @@ INSERT OR IGNORE INTO config (active, isdefault, editable, add_dt, role, name,
   (0, 1, 1, '2026-08-19 00:00:00', 'protocol', 'reagent2_stir_seconds', 'int', '0', 'seed',
    'stir duration in seconds at 25 C reference; 0 = stir continuously, no sub-alarm'),
   (0, 1, 1, '2026-10-29 00:00:00', 'protocol', 'test_variant', 'int', '0', 'seed',
-   '1 = show the test-variant screen and record a treatments row; 0 = production run');
+   '1 = show the test-variant screen and record a treatments row; 0 = production run'),
+  (0, 1, 1, '2026-11-14 00:00:00', 'protocol', 'multiple_exposure_count', 'int', '1', 'seed',
+   'strip rule: frames kept per LED at Tus, all at one exposure_us; 3 for the trial strips'),
+  (0, 1, 1, '2026-11-14 00:00:00', 'protocol', 'bus_exposure_count', 'int', '1', 'seed',
+   'strip rule: frames kept per LED at Bus when one is needed'),
+  (0, 1, 1, '2026-11-14 00:00:00', 'protocol', 'analysis_channels', 'str',
+   'violet.B,royal_blue.B,cyan.B,green.Gb,green.Gr,green.B,photo_red.R', 'seed',
+   'LED.layer pairs the yellow/brown analysis reads; they decide Tus and only they can call for Bus');
 
 -- ── test_equip ──────────────────────────────────────────────────────────────
 -- The test-variant screen's equipment pick list.  code is UNIQUE, so a re-run
@@ -409,3 +486,75 @@ DELETE FROM config WHERE role = 'capture' AND name = 'preimage_rung_shift';
 -- samples, exposure, colorcard and data are intentionally left empty: they
 -- hold run data, calibration results, and card geometry, all produced by the
 -- application rather than commissioned.
+
+
+-- ────────────────────────────────────────────────────────────────────────────
+-- ── exposure: the strip rule's factory seeds (2026-11-14) ───────────────────
+-- One 'tus' row per LED: the first exposure_us a pre-image tries for it
+-- (capture_runner._seed_exposure; see the `exposure` table in db_DDL.sql).
+-- Inserted only for an LED with no active seed row, so a seed a pre-image
+-- has since replaced is kept.  Sources (Bill, 2026-11-13/14):
+--   royal_blue, violet, cyan, green, photo_red: D1, the exposure_us predicted
+--     to put the brightest non-hot test-region pixel at 0.85 x 1023 raw,
+--     scaled from unclipped frames of C1038-C1047
+--     (desktop/padanalysis/preexposure_study.py).  The blue side rests on
+--     C1038 alone.
+--   red, red_orange, amber, blue: the accepted Tus on C1048 (rpizero3,
+--     captures_exposure_test/20261114_1655.h5).  They are not in the
+--     pre-image, so nothing updates them; the brightest pixel there was in
+--     the pad's white end rows, so the stain barely moves them.
+-- `layers` is the layer that decided the value.
+INSERT INTO exposure (active, add_dt, exposuregroup, LED, microseconds,
+                      remark, layers, preimage, role, samp_no)
+SELECT 1, '2026-11-14 00:00:00', NULL, 'royal_blue', 2260,
+       'factory seed: D1: preexposure_study.py, C1038-C1047 (blue side on C1038 alone)', 'B', 0, 'tus', NULL
+ WHERE NOT EXISTS (SELECT 1 FROM exposure
+                    WHERE LED = 'royal_blue' AND role = 'tus' AND active = 1);
+INSERT INTO exposure (active, add_dt, exposuregroup, LED, microseconds,
+                      remark, layers, preimage, role, samp_no)
+SELECT 1, '2026-11-14 00:00:00', NULL, 'violet', 14850,
+       'factory seed: D1: preexposure_study.py, C1038-C1047 (blue side on C1038 alone)', 'B', 0, 'tus', NULL
+ WHERE NOT EXISTS (SELECT 1 FROM exposure
+                    WHERE LED = 'violet' AND role = 'tus' AND active = 1);
+INSERT INTO exposure (active, add_dt, exposuregroup, LED, microseconds,
+                      remark, layers, preimage, role, samp_no)
+SELECT 1, '2026-11-14 00:00:00', NULL, 'cyan', 16070,
+       'factory seed: D1: preexposure_study.py, C1038-C1047 (blue side on C1038 alone)', 'B', 0, 'tus', NULL
+ WHERE NOT EXISTS (SELECT 1 FROM exposure
+                    WHERE LED = 'cyan' AND role = 'tus' AND active = 1);
+INSERT INTO exposure (active, add_dt, exposuregroup, LED, microseconds,
+                      remark, layers, preimage, role, samp_no)
+SELECT 1, '2026-11-14 00:00:00', NULL, 'green', 8760,
+       'factory seed: D1: preexposure_study.py, C1038-C1047', 'Gb', 0, 'tus', NULL
+ WHERE NOT EXISTS (SELECT 1 FROM exposure
+                    WHERE LED = 'green' AND role = 'tus' AND active = 1);
+INSERT INTO exposure (active, add_dt, exposuregroup, LED, microseconds,
+                      remark, layers, preimage, role, samp_no)
+SELECT 1, '2026-11-14 00:00:00', NULL, 'photo_red', 37900,
+       'factory seed: D1: preexposure_study.py, C1038-C1047', 'R', 0, 'tus', NULL
+ WHERE NOT EXISTS (SELECT 1 FROM exposure
+                    WHERE LED = 'photo_red' AND role = 'tus' AND active = 1);
+INSERT INTO exposure (active, add_dt, exposuregroup, LED, microseconds,
+                      remark, layers, preimage, role, samp_no)
+SELECT 1, '2026-11-14 00:00:00', NULL, 'red', 19301,
+       'factory seed: Tus on C1048, rpizero3 2026-11-14 (not in the pre-image; fixed)', 'R', 0, 'tus', NULL
+ WHERE NOT EXISTS (SELECT 1 FROM exposure
+                    WHERE LED = 'red' AND role = 'tus' AND active = 1);
+INSERT INTO exposure (active, add_dt, exposuregroup, LED, microseconds,
+                      remark, layers, preimage, role, samp_no)
+SELECT 1, '2026-11-14 00:00:00', NULL, 'red_orange', 22999,
+       'factory seed: Tus on C1048, rpizero3 2026-11-14 (not in the pre-image; fixed)', 'R', 0, 'tus', NULL
+ WHERE NOT EXISTS (SELECT 1 FROM exposure
+                    WHERE LED = 'red_orange' AND role = 'tus' AND active = 1);
+INSERT INTO exposure (active, add_dt, exposuregroup, LED, microseconds,
+                      remark, layers, preimage, role, samp_no)
+SELECT 1, '2026-11-14 00:00:00', NULL, 'amber', 44728,
+       'factory seed: Tus on C1048, rpizero3 2026-11-14 (not in the pre-image; fixed)', 'R', 0, 'tus', NULL
+ WHERE NOT EXISTS (SELECT 1 FROM exposure
+                    WHERE LED = 'amber' AND role = 'tus' AND active = 1);
+INSERT INTO exposure (active, add_dt, exposuregroup, LED, microseconds,
+                      remark, layers, preimage, role, samp_no)
+SELECT 1, '2026-11-14 00:00:00', NULL, 'blue', 7351,
+       'factory seed: Tus on C1048, rpizero3 2026-11-14 (not in the pre-image; fixed)', 'B', 0, 'tus', NULL
+ WHERE NOT EXISTS (SELECT 1 FROM exposure
+                    WHERE LED = 'blue' AND role = 'tus' AND active = 1);

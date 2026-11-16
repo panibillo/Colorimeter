@@ -303,6 +303,30 @@ class TestCalibrationWindowCheck(ChecksTestCase):
         self.assertEqual(startup_checks.check_calibration_window().status, WARN)
 
 
+class TestExposureRuleCheck(ChecksTestCase):
+    """The strip rule's settings must make sense together; a warning only."""
+
+    def set_value(self, role, name, value):
+        self.sql("UPDATE config SET value = ? WHERE role = ? "
+                 "AND name = ? AND active = 1", (value, role, name))
+
+    def test_the_seeded_settings_pass(self):
+        result = startup_checks.check_exposure_rule()
+        self.assertEqual(result.status, OK)
+        self.assertIn("strip", result.detail)
+
+    def test_a_floor_above_the_ceiling_warns_and_names_the_row(self):
+        self.set_value("capture", "noise_floor_dn", "1100")
+        result = startup_checks.check_exposure_rule()
+        self.assertEqual(result.status, WARN)
+        self.assertTrue(any("capture.noise_floor_dn" in m
+                            for m in result.messages()))
+
+    def test_an_unknown_rule_warns(self):
+        self.set_value("capture", "exposure_rule", "ladder")
+        self.assertEqual(startup_checks.check_exposure_rule().status, WARN)
+
+
 class TestCaptureFolderCheck(ChecksTestCase):
     """Somewhere to write archives to — a Config-editor problem, so it fails."""
 

@@ -77,9 +77,16 @@ def reflectance(c: Capture, led: str, rung: str, layer: str):
     return got[0] / ref
 
 
-def composite(c: Capture, rung: str = "e1"):
+def composite(c: Capture, rung: str = "e1", cells=None):
     """
     Mean reflectance over every stored (LED, Bayer layer) of one rung.
+
+    Args:
+        c: The capture section.
+        rung: Exposure rung.
+        cells: Optional (led, layer) channels to use instead of all of
+            them (chain_samples.PAD_FIT_CELLS: a pad stained so dark that
+            the average loses its edges is located on photo_red).
 
     Returns:
         (comp, cells) -- the field, and the list of (led, layer) that went
@@ -88,16 +95,20 @@ def composite(c: Capture, rung: str = "e1"):
     Raises:
         RuntimeError: if the capture holds no usable cell at this rung.
     """
-    acc, cells = [], []
+    wanted = cells
+    acc, used = [], []
     for led in c.leds:
         for layer in BAYER:
+            if wanted is not None and (led, layer) not in wanted:
+                continue
             r = reflectance(c, led, rung, layer)
             if r is not None:
                 acc.append(r)
-                cells.append((led, layer))
+                used.append((led, layer))
     if not acc:
-        raise RuntimeError(f"{c.label()}: no usable cell at rung {rung}")
-    return np.mean(acc, axis=0), cells
+        raise RuntimeError(f"{c.label()}: no usable cell at rung {rung}"
+                           + (f" among {list(wanted)}" if wanted else ""))
+    return np.mean(acc, axis=0), used
 
 
 def strip_column(c: Capture) -> int:

@@ -248,6 +248,30 @@ class ILI9341:
         self._trim()
         self.fig.canvas.draw_idle()
 
+    def text_width(self, text: str, size: int = 16) -> int:
+        """
+        Width in screen pixels (axis units) of one line of `text` as draw_text
+        renders it at `size` pt — measured from matplotlib itself, because the
+        mock's glyphs are scaled to the figure, not to the panel.  Cached: the
+        same strings are measured on every redraw of a scrolling text box.
+        """
+        if not text or not self._initialized:
+            return 0
+        key = (text, size)
+        cache = self.__dict__.setdefault("_width_cache", {})
+        if key not in cache:
+            if len(cache) > 4000:
+                cache.clear()
+            # Same fontsize rule as draw_text below (size * 2, then // 2).
+            t = self.ax.text(0, 0, text, fontsize=max(6, (size * 2) // 2))
+            renderer = self.fig.canvas.get_renderer()
+            box = t.get_window_extent(renderer=renderer)
+            t.remove()
+            (x0, _), (x1, _) = self.ax.transData.inverted().transform(
+                [(box.x0, box.y0), (box.x1, box.y0)])
+            cache[key] = int(round(abs(x1 - x0)))
+        return cache[key]
+
     def draw_text(
         self,
         text: str,

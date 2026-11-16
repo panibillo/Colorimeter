@@ -113,12 +113,19 @@ class TestBaroSignal(unittest.TestCase):
         baro_signal.send("START", "ZZ1001", "Reagent2")
         baro_signal.send("MARK", "ZZ1001", "EndReagent2")
         baro_signal.send("STOP", "ZZ1001")
-        self.assertEqual(self.listener.wait_for(4), [
+        baro_signal.send("STOP", "ZZ1001", "Canceled")
+        self.assertEqual(self.listener.wait_for(5), [
             "NEWRUN\tZZ1001",
             "START\tZZ1001\tReagent2",
             "MARK\tZZ1001\tEndReagent2",
             "STOP\tZZ1001",
+            "STOP\tZZ1001\tCanceled",
         ])
+
+    def test_calibrate_carries_no_arguments(self):
+        self._enable_to(Listener(answer=True))
+        baro_signal.send("CALIBRATE")
+        self.assertEqual(self.listener.wait_for(1), ["CALIBRATE"])
 
     def test_a_tab_or_line_break_inside_a_part_becomes_a_space(self):
         self._enable_to(Listener(answer=True))

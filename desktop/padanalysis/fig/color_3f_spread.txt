@@ -1,0 +1,49 @@
+color_3f_*.png -- step 3f, how many color directions the strips of
+2026-11-16 need (made by color_study.py, color_count_3f and show_3f)
+
+Strips: C1052 12.8 ug/L, C1053 20 ug/L, C1054 40 ug/L (file C1054.h5, was C1054-a.h5),
+C1055 600 ug/L; holder H.  Pixels: every interior pad pixel (8 or more
+layer pixels from every edge) of each post-image.
+
+A (absorbance) = -log10(post-image / the strip's own pre-image lined up),
+per channel (LED . camera layer).  Bigger A = darker, more dye; 0 = no
+change.  Every channel is the average of 4 repeat photos in both images.
+Channels: every LED but white (no pre-image) x every camera layer that is
+usable in both images of all four strips.
+
+Noise units: each channel's A is divided by its camera noise per pixel
+(post and pre-image combined, from the spread between the 4 repeat
+photos).  In these units pure camera noise spreads about 1 along every
+direction.  Paper texture that does not cancel between pre and post
+images, and small misalignment, add to that, so the last directions sit
+somewhat above 1 (3d found 2.5-3.9).
+
+Through zero: spread is measured from A = 0 (no dye), not from the average.
+Darkening kept / removed: the even darkening is the same added A in every
+channel (overall brightness).  'Kept' leaves it in, so it can show up as a
+direction; 'removed' takes it out first, as step 3d did.
+
+color_3f_spread.png: y axis, the spread along each direction (mean squared
+distance of the pixels along it), noise units squared, log scale; x axis,
+directions, largest first.  Top: all channels, darkening kept (Bill's
+hypothesis predicts 4 directions well above the rest: yellow, brown,
+orange and brightness).  Middle: darkening removed (predicts 3).  Bottom:
+one layer per LED (the least noisy), darkening kept: the same count here
+means the four layers of one LED are not just repeating each other.
+
+color_3f_directions.png: each panel one direction, drawn as the change in
+A per channel that moving along it makes, scaled so the largest entry is
++1.  The sign is arbitrary (a direction and its mirror are the same
+direction).  Gray lines separate LEDs; LEDs run from violet (shortest
+wavelength) to photo_red (longest).
+
+color_3f_scores.png: top row, a plain picture from the white LED (post
+only, for the eye, not used in any number).  Below, each pixel's position
+along directions 1-4, noise units: where on the pad each direction is
+found.  Direction 1 runs from 0 up (darker); the others are centered on 0,
+red and blue being opposite signs.
+
+color_3f_leftover.png: top row as above.  Below, per pixel, what is left
+after keeping the first k directions: the length of the rest, noise
+units, divided by sqrt(number of directions left) so that noise alone gives
+about 1.  Bright = the kept directions do not describe that pixel.

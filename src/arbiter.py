@@ -36,6 +36,7 @@ from __future__ import annotations
 import datetime
 import functools
 import logging
+import math
 import os
 import signal
 import subprocess
@@ -72,6 +73,7 @@ from widgets import Button, TextBox
 from pool import Pool
 from slot import Slot
 from phases import (build_phases, EntryPhase, Entry2Phase, ReadPhase,
+                    AnalysisPhase,
                     VariantPhase, ReagentWeights,
                     _factor_value, _image_reps, _mmss, _to_float)
 
@@ -494,6 +496,10 @@ class Arbiter:
         self._view_step      = 1       # edit nudge, image px: 1 or 10; also
                                        # picks the view-mode pan fraction
         self._view_status    = ""      # transient message for the name strip
+        # The pad Find/Pad last found, outlined on the canvas: (padfind.PadFit
+        # after its offset, the bound Rect its layer px are measured from), or
+        # None.  Cleared when the viewer opens and closes.
+        self._view_pad_fit   = None
         # The exposure the last preview settled on, in µs — the starting point
         # for the next one, so re-imaging normally converges on its first frame
         # instead of walking back from the stored calibration every time.
@@ -1028,7 +1034,9 @@ class Arbiter:
             n: 1 for reagent 1, 2 for reagent 2.
 
         Returns:
-            A ReagentWeights(initial, final, net, target, overage, tol).
+            A ReagentWeights(initial, final, net, target, overage, tol,
+            packet).  `packet` is target plus the empty packet's weight: what
+            a correctly filled packet reads on the balance.
         """
         prefix = f"reagent{n}_"
         empty_wt = (config.reagent1_empty_packet_wt() if n == 1
@@ -1051,9 +1059,11 @@ class Arbiter:
         target = (None if sample_wt is None else sample_wt / 100.0 * ratio
                   * _factor_value(slot.record.get(f"R{n}_wt_factor")))
         overage = None if (net is None or target is None) else net - target
+        packet = None if target is None else target + empty_wt
 
         return ReagentWeights(initial=initial, final=final, net=net,
-                              target=target, overage=overage, tol=tol)
+                              target=target, overage=overage, tol=tol,
+                              packet=packet)
 
     def reagent_time_factor(self, slot: Slot, n: int) -> float:
         """
@@ -1092,6 +1102,18 @@ class Arbiter:
         fn = getattr(self._beeper, "beep", None)
         if callable(fn):
             fn(duration=2.0)
+
+    def _set_done_beep(self, slot: Slot) -> None:
+        """
+        One short beep when an image set is stored and another is still to
+        come: the cassette has to be repositioned before the next set, and
+        the operator may have looked away during the imaging.  Not after the
+        last set, whose end moves the run on by itself.
+        """
+        log.info("Arbiter: image set stored for slot %s, next set due", slot.name)
+        fn = getattr(self._beeper, "beep", None) if self._beeper else None
+        if callable(fn):
+            fn()
 
     # ── Phase contract: database / sample lifecycle ────────────────────────────
 
@@ -1214,6 +1236,7 @@ class Arbiter:
             sample_repo.save_treatment(
                 r.get("samp_no"), test_equip=r.get("test_equip"),
                 image_reps=int(r.get("image_reps") or 1),
+                standard_conc=_to_float(r.get("standard_conc")),   # "" -> NULL
                 **{k: _to_float(r.get(k)) for k in VariantPhase.FIELDS.values()})
         except sqlite3.Error:
             log.exception("Arbiter: save_treatment failed for slot %s", slot.name)
@@ -1245,7 +1268,7 @@ class Arbiter:
         if slot.phase == "entry":
             self.persist(slot, user=r["user"], test_kit=r["test_kit"],
                          test_lot=r["test_lot"])
-        elif slot.phase == "read":
+        elif slot.phase in ("read", "analysis"):
             self.persist(slot, manual_read=r["manual_read"])
 
     # ── Phase contract: navigation / render ────────────────────────────────────
@@ -1805,7 +1828,7 @@ class Arbiter:
     def _suite_capture(self) -> None:
         """Run the measurement sweep and save it under the typed name."""
         import capture_image
-        from capture_runner import CaptureConfig, MODE_NORMAL
+        from capture_runner import CaptureConfig, MODE_NORMAL, RULE_GROUP
         self._suite_read_fields()
         if not self._ledtest_available():
             self._suite_hint("Camera busy - try again later")
@@ -1817,10 +1840,14 @@ class Arbiter:
         part = capture_image.suite_part_path(self._suite_name)
         capture_image.discard_suite(part)       # a leftover from a crashed run
         # The same configuration a sample's measurement gets (see
-        # _measurement_config), less the sample, and written to the part file.
+        # _measurement_config), less the sample, and written to the part file
+        # -- except the exposure rule: a suite shows and shoots the exposure
+        # group's spread ("Exposure spread N"), so it keeps the group rule
+        # rather than the strip rule a sample now uses (2026-11-14).
         cfg = CaptureConfig(mode=MODE_NORMAL,
                             exposure_group=self._initial_exposure_group(),
-                            archive_path=part)
+                            archive_path=part,
+                            exposure_rule=RULE_GROUP)
         session = self._new_session(cfg)
         if not session.start():
             log.error("Arbiter: image suite failed to start: %s", session.error)
@@ -2709,10 +2736,17 @@ class Arbiter:
         buttons: what screen this is, then what it is showing.
         """
         if self._cfge_view == "roles":
-            return "Config\nRoles"
-        if self._cfge_view == "role":
-            return f"Config\n{self._cfge_role}"
-        return f"{self._cfge_role}\n{_cfge_fit(self._cfge_name)}"
+            title = "Config\nRoles"
+        elif self._cfge_view == "role":
+            title = f"Config\n{self._cfge_role}"
+        else:
+            title = f"{self._cfge_role}\n{_cfge_fit(self._cfge_name)}"
+        # Say why the fields are grey when a live sample has locked them —
+        # otherwise an editable=1 row looks broken.  Only if a line is free.
+        live = self._live_slots()
+        if live and title.count("\n") < 2:
+            title += f"\nlocked: run {'+'.join(live)}"
+        return title
 
     def _cfge_put_roles(self) -> None:
         from palette import color
@@ -2902,8 +2936,9 @@ class Arbiter:
         """
         Validate every pending edit, then write them all with `writer`.
 
-        Nothing is written unless all of them read back as their declared type,
-        so a page of edits either lands together or not at all.
+        Nothing is written unless all of them read back as their declared type
+        and none would be refused by the next capture (_cfge_refused), so a
+        page of edits either lands together or not at all.
 
         Args:
             writer: config.save or config.set_default.
@@ -2924,6 +2959,9 @@ class Arbiter:
                 self._cfge_hold = dict(pending)
                 self._cfge_warn(f"{name}\nis not a valid {vtypes[name]}")
                 return False
+        if self._cfge_refused(dict(pending)):
+            self._cfge_hold = dict(pending)
+            return False
         for name, text in pending:
             writer(self._cfge_role, name, text)
         self._cfge_hold = {}
@@ -2933,7 +2971,13 @@ class Arbiter:
         return True
 
     def _cfge_activate(self, value: str) -> None:
-        """Put a value from the Browse list back in force."""
+        """
+        Put a value from the Browse list back in force, unless the next
+        capture would refuse it (a bad value kept as history, such as the
+        'red_R' typo of 2026-11-16).
+        """
+        if self._cfge_refused({self._cfge_name: value}):
+            return
         config.save(self._cfge_role, self._cfge_name, value)
         # Picking a value here settles this parameter — a half-typed one held
         # from the role view would otherwise reappear over what was just chosen.
@@ -2957,6 +3001,32 @@ class Arbiter:
         """
         self._load_defaults()
         self._apply_reagent_secs()
+
+    def _cfge_refused(self, edits: dict) -> bool:
+        """
+        Check edits the way the next capture will, and refuse them here.
+
+        A value can be a valid number or text and still stop every capture:
+        on 2026-11-16 protocol.analysis_channels was saved with 'red_R' for
+        'red.R', and each pre-image then stopped before its first LED.  The
+        strip rule's own check (exposure_rule.check_edits) is run on the
+        edited rows, with the other rows as they are in force.
+
+        Args:
+            edits: {name: text} in the role being edited.
+
+        Returns:
+            True if refused, with a dialog up giving the reason; False if
+            the edits may be written.
+        """
+        import exposure_rule              # lazy: numpy, like the capture code
+        problems = exposure_rule.check_edits(self._cfge_role, edits)
+        if not problems:
+            return False
+        log.error("config editor: refused %s.%s: %s", self._cfge_role,
+                  ", ".join(edits), "; ".join(problems))
+        self._cfge_warn("; ".join(problems), heading="Not saved:")
+        return True
 
     # ── confirms ───────────────────────────────────────────────────────────────
 
@@ -2988,21 +3058,42 @@ class Arbiter:
         p.hide_all()
         p.put("modal_panel")
         p.put("modal_msg", msg)
+        # The message widget is shared: undo a tall dialog's size and layout.
+        import pool as _pool
+        m = p["modal_msg"]
+        m.size, m.align, m.valign = _pool.MODAL_MSG_SIZE, "center", "middle"
         names = p.layout_modal_buttons(2)
         p.put(names[0], "OK",     on=on_ok)
         p.put(names[1], "Cancel", on=self._cfge_render)
         p.render(self._disp)
         self._rebuild_focus()
 
-    def _cfge_warn(self, msg: str) -> None:
-        """A one-button modal explaining why a write was refused."""
+    def _cfge_warn(self, msg: str, heading: "str | None" = None) -> None:
+        """
+        A one-button modal explaining why a write was refused.
+
+        Args:
+            msg:     The reason.  Short, already broken into lines, when
+                     there is no heading.
+            heading: Given for a long reason: the tall dialog is used, with
+                     this as its first line and msg word-wrapped below.
+        """
         p = self._pool
         if p is None:
             return
+        import pool as _pool
+        tall = heading is not None
+        if tall:
+            msg = _pool.wrap_tall(heading, msg)
         p.hide_all()
         p.put("modal_panel")
         p.put("modal_msg", msg)
-        names = p.layout_modal_buttons(1)
+        # Set every time: the message widget is shared by every dialog (see
+        # phases.ModalPhase), so size and alignment would otherwise carry over.
+        m = p["modal_msg"]
+        m.size = _pool.TALL_MSG_SIZE if tall else _pool.MODAL_MSG_SIZE
+        m.align, m.valign = ("left", "top") if tall else ("center", "middle")
+        names = p.layout_modal_buttons(1, tall=tall)
         p.put(names[0], "OK", on=self._cfge_render)
         p.render(self._disp)
         self._rebuild_focus()
@@ -3900,8 +3991,21 @@ class Arbiter:
         must not change out from under a slot that has already read it, so
         every editor screen gates its editable state on this.
         """
-        return any(s.active_phase not in ("entry", "entry2", "variant")
-                   for s in self._slots.values())
+        return bool(self._live_slots())
+
+    def _live_slots(self) -> "list[str]":
+        """
+        Names of the slots holding a live sample, e.g. ['A'].
+
+        Live means past the entry screens and not yet finished.  A run whose
+        analysis result is in is finished even though it stays on the
+        analysis screen until NEXT: nothing in it reads configuration any
+        more.  It used to count as live, so a finished run left on screen kept
+        Menu -> Config read-only, with no word of why (2026-11-16).
+        """
+        return [s.name for s in self._slots.values()
+                if s.active_phase not in ("entry", "entry2", "variant")
+                and not (s.active_phase == "analysis" and s.result)]
 
     @property
     def cap_mode(self) -> str:
@@ -4017,7 +4121,7 @@ class Arbiter:
         session = self._new_session(self._preimage_config(slot))
         if not session.start():
             log.error("Arbiter: pre-image failed to start: %s", session.error)
-            slot.progress = "Camera failed"
+            self._capture_failed(slot, "Pre-image", session.error)
             return False
         self._capture = session
         self._capture_slot = slot
@@ -4059,14 +4163,14 @@ class Arbiter:
                     return True
                 log.error("Arbiter: failed to resume prefetch into capture "
                          "for slot %s: %s", slot.name, session.error)
-                slot.progress = "Camera failed"
+                self._capture_failed(slot, "Capture", session.error)
                 return False
             session.cancel()
 
         session = self._new_session(self._measurement_config(slot))
         if not session.start():
             log.error("Arbiter: capture failed to start: %s", session.error)
-            slot.progress = "Camera failed"
+            self._capture_failed(slot, "Capture", session.error)
             return False
         self._capture = session
         self._capture_slot = slot
@@ -4122,6 +4226,7 @@ class Arbiter:
 
     def next_sample(self, slot: Slot) -> None:
         log.info("Arbiter: next sample in slot %s", slot.name)
+        self._end_run(slot, row_deleted=False)
         slot.clear_run()
         self.goto(slot, "entry")
 
@@ -4132,38 +4237,148 @@ class Arbiter:
         as-is ('Keep row').  Either way the slot resets to a fresh entry.
         """
         log.info("Arbiter: cancel test in slot %s (delete=%s)", slot.name, delete)
+        # Archives a cancelled capture was writing.  Its file is not yet in the
+        # record (that happens when a capture finishes), and cancel() is what
+        # closes it, so the path is taken from the session after the cancel.
+        cut_short = []
         if self._capture_slot is slot and self._capture is not None:
             self._capture.cancel()
+            cut_short.append(getattr(self._capture, "out_path", None))
             self._capture = None
             self._capture_slot = None
         if self._prefetch_slot is slot and self._prefetch is not None:
             self._prefetch.cancel()
+            cut_short.append(getattr(self._prefetch, "out_path", None))
             self._prefetch = None
             self._prefetch_slot = None
             self._prefetch_epoch = None
+        # BARO-UDP begin: the laptop records from reagent 2's START until the
+        # measurement capture's STOP (capture_start is stamped with it), so a
+        # cancel in between stops it here.
+        if (slot.record.get("reagent2_start")
+                and slot.record.get("capture_start") is None):
+            baro_signal.send("STOP", slot.record.get("samp_no"), "Canceled")
+        # BARO-UDP end
+        deleted = False
         if delete:
             rowid = slot.record.get("db_rowid")
             if rowid is not None:
                 try:
                     sample_repo.delete_sample(rowid)
+                    deleted = True
                     # A test variant's treatment goes with its sample.
                     sample_repo.delete_treatment(slot.record.get("samp_no"))
                 except sqlite3.Error:
                     log.exception("Arbiter: delete_sample failed (rowid=%s)", rowid)
+        self._end_run(slot, row_deleted=deleted, cut_short=cut_short)
         slot.clear_run()
         self.goto(slot, "entry")
 
-    def reset_timer(self, slot: Slot) -> None:
-        # Reset re-arms the reagent step, so its recorded start is no longer valid.
-        ap = slot.active_phase
-        if ap in ("reagent1", "reagent2"):
-            self.persist(slot, **{f"{ap}_start": None})
-        slot.timer = None
-        slot.running = False
-        slot.stir_deadline = None
-        slot.stir_role = None
-        slot.stir_fired = False
-        self.close_modal(slot)
+    # ── End of a run ───────────────────────────────────────────────────────────
+    # A run leaves scope in one of two ways, NEXT or Cancel, and both clear the
+    # slot straight after.  Whatever the run still holds only in memory has to
+    # be settled first, or clear_run() throws it away.
+
+    def _end_run(self, slot: Slot, row_deleted: bool,
+                 cut_short: "list | None" = None) -> None:
+        """
+        Settle a run's loose ends before its slot is cleared.
+
+        Row kept (NEXT, or Cancel -> Keep row):
+          - The manual reading is written to the row.  It is otherwise flushed
+            only when the view leaves its screen, and NEXT pressed straight
+            after typing it on the analysis screen never did.
+          - A capture cancelled before it finished never got to record its
+            file, so a row with no h5file is given that file.
+        Row deleted (Cancel -> Delete row):
+          - Every archive the run wrote is moved to <captures>/abandoned/.
+            Deleting the row frees the sample number for reuse, and the next
+            run to take it found its name taken by this run's file and wrote
+            to "-a" instead (C1054, 2026-11-16: C1054.h5 held only an
+            abandoned pre-image, and the real run went to C1054-a.h5).
+            Moved, not deleted: a pre-image cannot be taken again.
+
+        Never raises: a failure here is logged and the slot still clears.
+
+        Args:
+            slot:        The run that is ending.
+            row_deleted: True once its samples row has been deleted.
+            cut_short:   Archive paths of captures cancelled just now (None
+                         entries are ignored).
+        """
+        r = slot.record
+        archives = self._run_archives(slot, cut_short or [])
+        try:
+            if not row_deleted:
+                if r.get("db_rowid") is not None:
+                    cols = {"manual_read": r.get("manual_read", "")}
+                    if not r.get("h5file") and archives:
+                        cols["h5file"] = str(archives[0])
+                    self.persist(slot, **cols)
+                return
+            for path in archives:
+                self._abandon_archive(path, r.get("samp_no") or "")
+        except Exception:
+            log.exception("Arbiter: end-of-run cleanup failed for slot %s (%s)",
+                          slot.name, r.get("samp_no"))
+
+    @staticmethod
+    def _run_archives(slot: Slot, extra) -> "list[Path]":
+        """
+        Every archive file this run wrote that is still on disk, set 1 first,
+        each once (a measurement joins its pre-image's file, so the same path
+        can be listed twice).
+        """
+        found, seen = [], set()
+        candidates = ([slot.record.get("h5file")]
+                      + [slot.rep_files[k] for k in sorted(slot.rep_files)]
+                      + list(extra))
+        for c in candidates:
+            if not c:
+                continue
+            path = Path(c)
+            key = os.path.abspath(path)
+            if key in seen or not path.is_file():
+                continue
+            seen.add(key)
+            found.append(path)
+        return found
+
+    @staticmethod
+    def _abandon_archive(path: Path, samp_no: str) -> "Path | None":
+        """
+        Move a deleted run's archive into <captures>/abandoned/, freeing its
+        name, and point its exposure_log rows at the new place.
+
+        Named "<old stem>_<last written, YYYYMMDD_HHMM>.h5", e.g.
+        abandoned/C1054_20261116_1225.h5, so two abandoned runs of the same
+        sample number do not collide (and if they still do, a letter is added
+        as for any archive — config.capture_archive_path).
+
+        Returns:
+            The new path, or None if the file could not be moved (logged).
+        """
+        import shutil
+        import exposure_log_repo
+        dest_dir = config.capture_dir() / "abandoned"
+        try:
+            dest_dir.mkdir(parents=True, exist_ok=True)
+            stamp = datetime.datetime.fromtimestamp(
+                path.stat().st_mtime).strftime("%Y%m%d_%H%M")
+            dest = config.capture_archive_path(dest_dir, f"{path.stem}_{stamp}")
+            shutil.move(str(path), str(dest))
+        except OSError:
+            log.exception("Arbiter: could not move abandoned archive %s", path)
+            return None
+        log.info("Arbiter: run %s deleted; its archive %s moved to %s",
+                 samp_no, path, dest)
+        try:
+            exposure_log_repo.rename_archive(
+                samp_no, path.name, f"{dest_dir.name}/{dest.name}")
+        except sqlite3.Error:
+            log.exception("Arbiter: exposure_log rows for %s still name %s",
+                          samp_no, path.name)
+        return dest
 
     def retry_capture(self, slot: Slot) -> None:
         # Return to the read phase; the operator presses CAPTURE again.
@@ -4242,6 +4457,35 @@ class Arbiter:
                 if slot is self._focused:
                     self.render(slot)
 
+    def _capture_failed(self, slot: Slot, what: str, error) -> None:
+        """
+        Tell the operator a capture stopped, and why, in a dialog.
+
+        Before 2026-11-16 the reason was cut to about 28 characters on
+        slot.progress, which the pre-image and read screens do not show, so a
+        failed capture looked as if it had simply not started (Bill: a typo
+        in protocol.analysis_channels stopped C1052's pre-image before its
+        first LED).  The dialog shows the whole reason (phases
+        _capture_failed_message); OK returns to the screen, whose button is
+        live again.  The full reason is also in the log.
+
+        For an unfocused slot the dialog waits until that slot is shown.  A
+        dialog already up (Cancel) is replaced, keeping the screen it returns
+        to.
+
+        Args:
+            slot:  The slot whose capture failed.
+            what:  "Pre-image" or "Capture".
+            error: The exception (session.error), or its text.
+        """
+        slot.progress = f"{what} failed:\n{error}"
+        slot.capturing = False
+        if slot.modal_return is not None:
+            slot.phase = "capture_failed"
+            self.render(slot)
+        else:
+            self.open_modal(slot, "capture_failed")
+
     def pump_capture(self) -> None:
         """
         Drive the in-flight capture forward and mirror its progress onto the
@@ -4293,11 +4537,8 @@ class Arbiter:
                                              # imports; loaded already by now
         is_pre = str(session.config.mode).lower() == MODE_PRE
         if session.error is not None:
-            owner.progress = (f"Pre-image failed: {str(session.error)[:28]}"
-                              if is_pre else
-                              f"Capture failed: {str(session.error)[:30]}")
-            owner.capturing = False
-            self.render(owner)
+            self._capture_failed(owner, "Pre-image" if is_pre else "Capture",
+                                 session.error)
             return
         if is_pre:
             # A pre-image ends by handing the reading its archive and getting
@@ -4320,6 +4561,7 @@ class Arbiter:
             if k < reps:
                 owner.progress = f"Pre-image {k} of {reps} stored"
                 self.render(owner)
+                self._set_done_beep(owner)
                 return
             owner.progress = "Pre-image stored"
             self.goto(owner, "reagent1")
@@ -4335,6 +4577,7 @@ class Arbiter:
             # phase asks for the cassette to be replaced and offers the next.
             owner.progress = f"Set {k} of {reps} stored"
             self.render(owner)
+            self._set_done_beep(owner)
             if (self._focused is not None and self._focused is not owner
                     and self._focused.phase == "read"):
                 self.render(self._focused)
@@ -4635,11 +4878,12 @@ class Arbiter:
         prefetch is live.
 
         The prefetch check matters even though a parked prefetch's slot is
-        (by definition) within _camera_wanted()'s own reagent2 threshold: an
-        operator can RESET the reagent2 timer while a prefetch is in flight
-        or parked, which clears slot.timer without changing active_phase —
-        _reagent2_within() then reads False for that slot, so this guard is
-        what actually keeps the camera from being pulled out from under it.
+        (by definition) within _camera_wanted()'s own reagent2 threshold: if
+        the reagent2 timer is cleared while a prefetch is in flight or parked
+        without active_phase changing (the old RESET button did this; it was
+        removed on 2026-11-04, but the guard costs nothing),
+        _reagent2_within() reads False for that slot, and this guard is what
+        keeps the camera from being pulled out from under it.
         """
         if self._camera is None and self._leds is None:
             return
@@ -5034,6 +5278,7 @@ class Arbiter:
         self._view_armed = None
         self._focused = None
         self._view_pad = pad
+        self._view_pad_fit = None
         self._view_rois = self._load_view_rois()
         # Resolve the requested role to the name the rest of the viewer keys
         # on — tap selection and the edit path both work in names. An
@@ -5111,13 +5356,17 @@ class Arbiter:
         """Build (or rebuild) the whole viewer screen."""
         if self._pool is None:
             return
+        editing_now = self._view_mode == "edit"
         self._pool.hide_all()
         self._pool.put("img_canvas", on=self._view_canvas_press)
         self._pool.put("img_zoom_in",  "+",    on=self._view_zoom_in)
         self._pool.put("img_up",       "▲",    on=lambda: self._view_arrow(0, -1))
         self._pool.put("img_zoom_out", "−",    on=self._view_zoom_out)
         self._pool.put("img_left",     "◀",    on=lambda: self._view_arrow(-1, 0))
-        self._pool.put("img_fit",      "Fit",  on=self._view_fit)
+        self._pool.put("img_find_pad", "Find/\nPad", on=self._view_find_pad,
+                       enabled=self._view_frame is not None
+                               and not self._view_pad
+                               and not editing_now)
         self._pool.put("img_right",    "▶",    on=lambda: self._view_arrow(1, 0))
         self._pool.put("img_step",     f"{self._view_step}px",
                        on=self._view_toggle_step)
@@ -5361,7 +5610,24 @@ class Arbiter:
                 overlays.append((edge, rgb888("roi_edge")))
 
         self._pool["img_canvas"].set_image(
-            image_view.compose(self._view_frame, self._view_state, overlays))
+            image_view.compose(self._view_frame, self._view_state, overlays,
+                               masks=self._view_pad_outline()))
+
+    def _view_pad_outline(self) -> list:
+        """
+        The found pad as an image_view.MaskOutline, or [] when there is none.
+
+        The pad's mask is in Bayer-layer px of the bound crop, so each mask
+        cell is a 2 x 2 block of image px starting at the bound ROI's corner
+        (the convention of roi.to_layer_rect_within).
+        """
+        if self._view_pad_fit is None:
+            return []
+        import image_view
+        from palette import rgb888
+        fit, bound = self._view_pad_fit
+        return [image_view.MaskOutline(fit.mask(), bound.x, bound.y, 2.0,
+                                       rgb888("roi_edge"))]
 
     def _armed_edge_rect(self):
         """
@@ -5547,6 +5813,129 @@ class Arbiter:
             self._view_state.centre_on_edge(self._view_editing, side)
         else:
             self._view_state.centre_on_rect(self._view_editing)
+
+    def _view_find_pad(self) -> None:
+        """
+        Find/Pad: find the pad the way a sample's pre-image does, outline it
+        on the canvas, and zoom to it.
+
+        One frame lit by capture.padfind_led (photo_red) at
+        capture.padfind_exposure_us, taken by the same steps as a sweep's
+        pad-finding frame (capture_runner.flash_frame), then
+        padfind.find_pad on its R layer with the pre-image offset
+        (capture.padfind_offset_pre).  The viewer cannot tell a stained pad
+        from a fresh one, and a fresh pad is what it is mostly used on, so it
+        always fits as a pre-image (no prior fit to be guided by).
+
+        The picture on the canvas becomes the flash's own frame: its photo_red
+        layer in gray (image_view.layer_to_frame), each layer pixel a 2 x 2
+        block, black at the dark level and white at the bound's brightest
+        half percent.  So the outline is judged against the pixels it was
+        fitted on, not the white-LED frame shown before, where the pad's
+        edges can sit a pixel or so elsewhere (Bill, 2026-11-15).  It is
+        shown even when the pad is not found, to see why.  The raw mosaic
+        kept for recapture saves (_view_bayer) is dropped, since it no longer
+        matches the picture; a recapture takes a fresh one.  The name strip
+        says what was found; the full fit goes to the log.
+        """
+        if not self.capture_available():
+            self._toast("Capture running")
+            return
+        if self._view_frame is None or self._view_state is None:
+            return
+        import capture_runner
+        import padfind
+        import roi as _roi
+        hw = self._ensure_camera()
+        if hw is None:
+            self._view_status = "Camera unavailable"
+            self._repaint_canvas()
+            return
+        cam, leds = hw
+        self._view_status = "Finding pad..."
+        self._repaint_canvas()
+        # The flash changes the camera's exposure, so a parked prefetch can
+        # no longer trust it (see _prefetch_epoch), as in preview_frame.
+        self._camera_epoch += 1
+        self._view_pad_fit = None
+        try:
+            size = getattr(cam, "config_size", None) or (None, None)
+            rois = _roi.load_active(size[0], size[1],
+                                    getattr(cam, "model", None))
+            bound = _roi.by_role(rois, _roi.ROLE_BOUND)
+            rects = capture_runner.padfind_rects(rois)
+            led = config.capture_padfind_led()
+            exposure_us = config.capture_padfind_exposure_us()
+            offset = config.capture_padfind_offset(padfind.SECTION_PRE)
+            channel = leds.channel_of(led)
+            bayer, info = capture_runner.flash_frame(
+                cam, exposure_us,
+                led_on=lambda: leds.set_channel(channel, True),
+                led_off=lambda: leds.set_channel(channel, False))
+            pattern = getattr(cam, "bayer_pattern", "BGGR")
+            layer = capture_runner._roi_bound_layers(bayer, pattern, bound)["R"]
+            self._view_show_layer(bayer, pattern, layer)
+            _before, fit = padfind.find_pad(
+                layer, capture_runner.PADFIND_DARK_DN, rects,
+                padfind.SECTION_PRE, offset=offset)
+        except padfind.PadFindError as exc:
+            log.warning("Arbiter: Find/Pad — pad not found: %s", exc)
+            self._view_status = "Pad not found"
+            self._repaint_canvas()
+            return
+        except Exception:
+            log.exception("Arbiter: Find/Pad failed")
+            self._view_status = "Find/Pad failed"
+            self._repaint_canvas()
+            return
+        self._view_pad_fit = (fit, bound)
+        problem = fit.qc()
+        log.info("Arbiter: Find/Pad (%s %d us, %s) — %s%s", led,
+                 info.get("applied_us", exposure_us),
+                 info.get("lit_frame_rule"), fit.describe(),
+                 f"; QC: {problem}" if problem else "")
+        # The strip holds about 16 characters: the first QC problem without
+        # its expected range (e.g. "QC width 37.9 px"); the log has it all.
+        self._view_status = (f"QC {problem.split(' (')[0]}" if problem
+                             else f"Pad {fit.width:.1f}x{fit.height:.1f}")
+        # Frame the pad: the box round its four corners, in image px.
+        from rect import Rect
+        xs = [bound.x + 2 * c for c, _ in fit.corners()]
+        ys = [bound.y + 2 * r for _, r in fit.corners()]
+        x0, y0 = math.floor(min(xs)), math.floor(min(ys))
+        self._view_state.fit_to(Rect(x0, y0, math.ceil(max(xs)) - x0,
+                                     math.ceil(max(ys)) - y0, name="pad"))
+        self._repaint_canvas()
+
+    def _view_show_layer(self, bayer, pattern: str, bound_layer) -> None:
+        """
+        Show the R layer of a raw frame in gray, in place of the picture.
+
+        For Find/Pad (see _view_find_pad).  The view box is kept: the frame
+        has the stream's size, so where you were looking is unchanged.
+
+        Args:
+            bayer:       The whole raw mosaic, (H, W).
+            pattern:     The camera's Bayer pattern ("BGGR" or "RGGB").
+            bound_layer: The R layer of the bound crop, raw DN; its 99.5th
+                         percentile is shown as white.
+        """
+        import numpy as np
+        import capture_runner
+        import image_view
+        from bayer_cam import BayerCam
+        whole = BayerCam.extract_bayer_layers(bayer, pattern)["R"]
+        white = float(np.percentile(bound_layer, 99.5))
+        frame = image_view.layer_to_frame(
+            whole, capture_runner.PADFIND_DARK_DN, white)
+        if (self._view_frame is not None
+                and frame.shape != self._view_frame.shape):
+            log.warning("Arbiter: Find/Pad frame %s does not match the view "
+                        "%s; picture not replaced", frame.shape,
+                        self._view_frame.shape)
+            return
+        self._view_frame = frame
+        self._view_bayer = None
 
     def _view_fit(self) -> None:
         if self._view_state is None:
@@ -5762,6 +6151,7 @@ class Arbiter:
         self._view_frame = None          # ~9 MB; do not hold it past the screen
         self._view_bayer = None          # ~6 MB raw mosaic behind that frame
         self._view_state = None
+        self._view_pad_fit = None
         self._view_rois = {}
         self._view_selected = None
         self._view_editing = None
@@ -5793,9 +6183,35 @@ class Arbiter:
     # ── Focus / keyboard (over the pool) ───────────────────────────────────────
 
     def _rebuild_focus(self) -> None:
+        """
+        Recompute the keyboard focus list after a render.
+
+        Focus normally goes to the first focusable widget.  A box that was
+        being typed into is the exception: a render the operator did not ask
+        for (a capture finishing, a timer advancing the phase) must not take
+        the keyboard away from it.  It used to, and the box went on looking
+        as if it were being edited while keys went to the first widget — on
+        the pre-image screen that is View Sample, so the Enter that was meant
+        to finish a weight opened the image viewer.
+
+        So a box still editing and still on screen keeps focus and its edit.
+        One that is no longer on screen has its edit ended, so it cannot come
+        back later looking active.
+        """
         self._focusables = self._pool.focusable_widgets()
         self._focus_idx  = -1
-        if self._focusables:
+        keep = None
+        for name in self._pool.names:
+            w = self._pool[name]
+            if isinstance(w, TextBox) and w.editing:
+                if w in self._focusables and keep is None:
+                    keep = w
+                else:
+                    w.editing = False
+                    w.focused = False
+        if keep is not None:
+            self._move_focus(self._focusables.index(keep))
+        elif self._focusables:
             self._move_focus(0)
 
     def _focused_widget(self):
@@ -5851,7 +6267,10 @@ class Arbiter:
             return
 
         if isinstance(w, TextBox) and w.editing and w.enabled:
-            if key in ("backspace", "delete") or (len(key) == 1 and key.isprintable()):
+            if key in TextBox.CURSOR_KEYS:
+                # Moves the cursor only; the value, and so the record, is unchanged.
+                w.handle_char(key, self._disp)
+            elif key in ("backspace", "delete") or (len(key) == 1 and key.isprintable()):
                 w.handle_char(key, self._disp)
                 self._writethrough(w)
 
@@ -5862,12 +6281,32 @@ class Arbiter:
             if not self._pool.handle_touch(px, py, self._disp):
                 self._tcal_mark(px, py)
             return
+        # The boxes being edited before this touch.  Touching a different box
+        # ends their edit (through _move_focus below) without Enter or Tab, and
+        # those are the only other paths to _field_commit.  So the edit is
+        # committed here instead.  Otherwise the typed value reaches the record,
+        # but the screen never redraws from it, and on a reagent screen START
+        # stays hidden until some later Enter happens to redraw it.
+        was_editing = [w for w in self._focusables
+                       if isinstance(w, TextBox) and w.editing]
         if self._pool.handle_touch(px, py, self._disp):
             # A touch may have started editing a TextBox — sync keyboard focus.
-            for i, w in enumerate(self._focusables):
-                if isinstance(w, TextBox) and w.editing and i != self._focus_idx:
-                    self._move_focus(i)
-                    break
+            self._focus_editing_box()
+        ended = [w for w in was_editing if not w.editing]
+        if ended:
+            for w in ended:
+                self._field_commit(w)
+            # The commit's redraw rebuilt the focus list and put keyboard focus
+            # on the first widget.  Hand it back to the box this touch opened,
+            # so typing goes where the operator is looking.
+            self._focus_editing_box()
+
+    def _focus_editing_box(self) -> None:
+        """Move keyboard focus to the TextBox being edited, if there is one."""
+        for i, w in enumerate(self._focusables):
+            if isinstance(w, TextBox) and w.editing and i != self._focus_idx:
+                self._move_focus(i)
+                break
 
     def _writethrough(self, textbox) -> None:
         """
@@ -5897,8 +6336,9 @@ class Arbiter:
 
         fields = {"entry":   EntryPhase.FIELDS,
                   "entry2":  Entry2Phase.FIELDS,
-                  "variant": VariantPhase.FIELDS,
-                  "read":    ReadPhase.FIELDS}.get(slot.phase)
+                  "variant": VariantPhase.BOXES,
+                  "read":    ReadPhase.FIELDS,
+                  "analysis": AnalysisPhase.FIELDS}.get(slot.phase)
         if not fields:
             return
         key = fields.get(textbox.name)
@@ -5914,23 +6354,35 @@ class Arbiter:
             if begin.enabled != want:
                 begin.enabled = want
                 begin.draw(self._disp)
-        # Likewise a factor box decides whether Continue is available.
-        if slot.phase == "variant" and slot.active_phase == "variant":
+        # Likewise Entry 2's temperature and weight, and the test-variant
+        # factors, decide whether Continue is available.  Only on the live
+        # screen: a preview's main button is Resume.
+        if (slot.phase in ("entry2", "variant")
+                and slot.active_phase == slot.phase
+                and slot.record.get("db_rowid") is not None):
             cont = self._pool["main_btn"]
-            want = self._phases["variant"].ready(slot)
+            want = self._phases[slot.phase].ready(slot)
             if cont.enabled != want:
                 cont.enabled = want
                 cont.draw(self._disp)
 
     def _field_commit(self, textbox) -> None:
         """
-        A box just stopped being edited.  The weight grid and the test-variant
-        factors both colour cells by what was typed, so each repaints here.
+        A box just stopped being edited.  The weight grid, the entry screens
+        and the test-variant factors all mark boxes by what was typed (which
+        one is pending, which are invalid), so each repaints here.  On the
+        entry screens that is what moves the pending mark on to the next row.
         """
         if str(textbox.name) in WT_FIELD_KEYS:
             self._weight_field_commit(textbox)
-        elif (str(textbox.name) in VariantPhase.FIELDS
+        elif (any(str(textbox.name) in f for f in
+                  (EntryPhase.FIELDS, Entry2Phase.FIELDS, VariantPhase.BOXES))
+              and str(textbox.name) != "id_fld"
               and self._focused is not None):
+            # Not the ID box: rendering the unclaimed entry screen with an
+            # empty ID runs autofill(), which would put a new number straight
+            # back into a box the operator has just cleared.  Begin's enabling
+            # already follows each keystroke (_writethrough).
             self.render(self._focused)
 
     def _weight_field_commit(self, textbox) -> None:
@@ -6353,6 +6805,113 @@ def _selftest() -> None:
     check("camera freed",        arb.capture_available(), True)
     check("not capturing",       A.capturing, False)
 
+    print("== a failed pre-image shows its whole reason (C1052, 2026-11-16) ==")
+    arb.focus(A)
+    _was = (A.phase, A.active_phase, A.pre_rep)     # put back at the end
+    A.active_phase = A.phase = "preimage"
+    A.pre_rep = 0
+    _why = ("exposure rule settings: protocol.analysis_channels: not "
+            "LED.layer (layer one of R, Gr, Gb, B): red_R")
+    cap_bad = _FakeCapture(mode="pre")
+    def _bad_step():
+        cap_bad.active = False
+        cap_bad.error = ValueError(_why)
+        return None
+    cap_bad.step = _bad_step
+    arb._capture_factory = lambda: cap_bad
+    check("pre-image granted",   arb.request_preimage(A), True)
+    A.capturing = True
+    arb.pump_capture()
+    check("the dialog is up",    A.phase, "capture_failed")
+    check("still live on the pre-image", A.active_phase, "preimage")
+    check("not capturing",       A.capturing, False)
+    check("camera freed",        arb.capture_available(), True)
+    _txt = arb._pool["modal_msg"].text
+    check("says what failed",    _txt.splitlines()[0], "Pre-image failed:")
+    check("the whole reason",    " ".join(_txt.splitlines()[1:]), _why)
+    arb._pool["modal_yes"].on_press()
+    check("OK returns to the pre-image", A.phase, "preimage")
+    check("the button is live again", arb._pool["run_btn"].enabled, True)
+
+    print("== a capture that cannot start says why too ==")
+    cap_nostart = _FakeCapture(mode="pre")
+    def _no_start():
+        cap_nostart.error = RuntimeError("camera not found")
+        return False
+    cap_nostart.start = _no_start
+    arb._capture_factory = lambda: cap_nostart
+    check("not granted",         arb.request_preimage(A), False)
+    check("the dialog is up",    A.phase, "capture_failed")
+    check("with the reason",     "camera not found" in arb._pool["modal_msg"].text,
+          True)
+    arb._pool["modal_yes"].on_press()
+    check("back",                A.phase, "preimage")
+    arb._capture_factory = lambda: cap_pre
+    A.phase, A.active_phase, A.pre_rep = _was
+
+    print("== touching another box commits the weight it leaves (C1042) ==")
+    # A packet first weighed light, corrected by touch, then left by touching
+    # the next box rather than pressing Enter: START must follow the
+    # correction without any further key.
+    arb.focus(A)
+    _saved_wt = {k: A.record.get(k) for k in
+                 ("samp_grams", "reagent1_initial_wt", "reagent1_final_wt")}
+    _saved_run = (A.running, A.timer)
+    A.running, A.timer = False, None         # armed: waiting for START
+    A.record.update(samp_grams="100.0", reagent1_initial_wt="",
+                    reagent1_final_wt="")
+    arb.render(A)
+    _init, _fin = arb._pool["wt1_init_fld"], arb._pool["wt1_final_fld"]
+
+    def _touch_type(box, text):
+        arb.on_touch(box.rect.x + 5, box.rect.y + 5)
+        for _ in range(8):
+            arb.on_key("backspace")
+        for ch in text:
+            arb.on_key(ch)
+
+    _touch_type(_init, "3.000"); arb.on_key("enter")
+    check("light packet: no START",  arb._pool["run_btn"].visible, False)
+    _touch_type(_init, "3.500")
+    check("still editing: no START yet", arb._pool["run_btn"].visible, False)
+    arb.on_touch(_fin.rect.x + 5, _fin.rect.y + 5)
+    check("touching away offers START", arb._pool["run_btn"].visible, True)
+    check("the new box is editing",  _fin.editing, True)
+    check("keyboard follows the touch", arb._focused_widget() is _fin, True)
+    arb.on_key("7")
+    check("typing lands in the new box", A.record["reagent1_final_wt"], "7")
+    arb.on_touch(5, 5)                       # empty space: the edit stays open
+    check("empty space leaves the edit", _fin.editing, True)
+    arb.on_key("enter")
+    A.record.update(_saved_wt)
+    A.running, A.timer = _saved_run
+
+    print("== entry 2 by keyboard: one pending item at a time, Continue gated ==")
+    # Typing writes through without a redraw; Enter commits the box and
+    # redraws, which is what moves the pending mark on to the next row.  The
+    # Continue gate follows each keystroke.
+    _saved_e2 = (A.phase, A.active_phase,
+                 {k: A.record.get(k) for k in ("samp_degC", "samp_grams")})
+    A.phase = A.active_phase = "entry2"
+    A.record.update(samp_degC="", samp_grams="")
+    arb.focus(A)
+    _temp, _wt = arb._pool["temp_fld"], arb._pool["weight_fld"]
+    check("temperature is the pending item",
+          (widgets.style_state(_temp), widgets.style_state(_wt),
+           arb._pool["main_btn"].enabled), ("pending", "normal", False))
+    _touch_type(_temp, "21.5"); arb.on_key("enter")
+    check("Enter moves the mark to weight",
+          (widgets.style_state(_temp), widgets.style_state(_wt)),
+          ("normal", "pending"))
+    _touch_type(_wt, "10")
+    check("Continue lights as the weight is typed",
+          arb._pool["main_btn"].enabled, True)
+    arb.on_key("enter")
+    check("then Continue is the pending item",
+          widgets.style_state(arb._pool["main_btn"]), "pending")
+    A.phase, A.active_phase, _vals = _saved_e2
+    A.record.update(_vals)
+
     print("== the measurement adds to the pre-image's archive ==")
     cfg = arb._measurement_config(A)
     check("no archive to join (fake.h5 is not on disk)", cfg.archive_path, None)
@@ -6375,6 +6934,12 @@ def _selftest() -> None:
     config.capture_dir = lambda: _capdir
     _cm.update_archive_sample = lambda p, rowid: _refreshed.append(str(p)) or True
     _rep2 = _capdir / f"ZP9001rep2{config.get('capture', 'extension')}"
+    # A fake beeper, so the beep after each set but the last can be counted.
+    _beeps = []
+    class _FakeBeeper:
+        def beep(self, duration=None):
+            _beeps.append("pre" if A.phase == "preimage" else "cap")
+    _real_beeper, arb._beeper = arb._beeper, _FakeBeeper()
     A.record.update(db_rowid=None, samp_no="ZP9001", image_reps=2,
                     h5file="", capture_start=None, capture_end=None)
     A.pre_rep = A.cap_rep = 0; A.rep_files = {}
@@ -6384,12 +6949,40 @@ def _selftest() -> None:
     cap_pre = _FakeCapture(mode="pre")
     arb._capture_factory = lambda: cap_pre
     arb.request_preimage(A); A.capturing = True
+    # The operator weighs reagent 1 while the pre-image runs, as the
+    # instruction asks.  The capture finishing redraws the screen, and View
+    # Sample comes back as the first focusable widget; the box being typed in
+    # must keep the keyboard, or the Enter that finishes the weight presses
+    # View Sample instead (seen on rpizero3, 2026-11-03).
+    arb.focus(A)
+    A.record["reagent1_initial_wt"] = ""
+    _w1 = arb._pool["wt1_init_fld"]
+    _views = []
+    _real_view = arb.open_image_view
+    arb.open_image_view = lambda *a, **k: _views.append(k)
+    _touch_type(_w1, "3.2")
+    # The weight was owed when the screen was drawn, and typing does not
+    # redraw, so the box is yellow in the pending red frame while it is typed.
+    check("typed while owed: editing and pending",
+          widgets.style_state(_w1), "editing_pending")
     for _ in range(5):
         arb.pump_capture()
     check("stays on preimage",   A.phase, "preimage")
     check("set 1 is the h5file", A.record["h5file"], "fake.h5")
+    check("View Sample is back", arb._pool["view_sample_btn"].visible, True)
+    check("the weight box keeps the keyboard",
+          (arb._focused_widget() is _w1, _w1.editing), (True, True))
+    # The capture's redraw read the 3.2 g already written through: the weight
+    # is no longer owed, so the frame turns from pending red to editing green.
+    check("redrawn with a weight: editing only",
+          widgets.style_state(_w1), "editing")
+    arb.on_key("5"); arb.on_key("enter")
+    check("Enter finishes the weight", (A.record["reagent1_initial_wt"], _w1.editing),
+          ("3.25", False))
+    check("and opens no viewer", _views, [])
+    arb.open_image_view = _real_view
     arb.focus(A)
-    check("button offers set 2", arb._pool["run_btn"].label, "Pre-image\n2 of 2")
+    check("button offers set 2", arb._pool["run_btn"].label, "Pre\nimage\n2 of 2")
     check("set 2 pre-image: its own file",
           arb._preimage_config(A).archive_path, _rep2)
     cap_pre2 = _FakeCapture(mode="pre"); cap_pre2.out_path = _rep2
@@ -6399,6 +6992,7 @@ def _selftest() -> None:
     for _ in range(5):
         arb.pump_capture()
     check("last set moves on",   A.phase, "reagent1")
+    check("no beep after the last pre-image set", _beeps, ["pre"])
     check("both sets remembered", A.rep_files, {1: Path("fake.h5"), 2: _rep2})
     check("h5file still set 1",  A.record["h5file"], "fake.h5")
 
@@ -6421,8 +7015,9 @@ def _selftest() -> None:
     check("stays on read",       A.phase, "read")
     check("no capture_end yet",  A.record["capture_end"], None)
     check("button offers set 2", arb._pool["run_btn"].label, "Capture\n2 of 2")
-    check("asks for a swap",     arb._pool["color_lbl"].text,
-          "Remove & replace cassette")
+    check("asks for a swap",     arb._pool["instr1"].text,
+          "Reposition cassette")
+    check("beeped once per set but the last", _beeps, ["pre", "cap"])
     check("no archive refreshed yet", _refreshed, [])
     A.record["capture_start"] = 123                 # marks set 1's stamp
     cap_m2 = _FakeCapture(); cap_m2.out_path = _rep2
@@ -6433,6 +7028,8 @@ def _selftest() -> None:
     for _ in range(5):
         arb.pump_capture()
     check("capture_end after the last", bool(A.record["capture_end"]), True)
+    check("no beep after the last capture set", _beeps, ["pre", "cap"])
+    arb._beeper = _real_beeper
     check("h5file is set 1's",   A.record["h5file"], "fake.h5")
     check("every set's archive refreshed",
           sorted(_refreshed), sorted(["fake.h5", str(_rep2)]))
@@ -6766,6 +7363,10 @@ def _selftest() -> None:
     import test_image_repo as _tir
     _img_dir = Path(_tmpdir) / "test_image"
     config.save("capture", "test_image_directory", str(_img_dir))
+    # The throwaway database is a copy of the live one, which holds whatever
+    # test images this instrument has taken, and next_name() counts on from
+    # those.  Empty the copy's table so the names below start at IMG0001.
+    _db.write_one("DELETE FROM test_image")
     _er.write_led_exposures("green", "5", [2000, 2500, 3200, 4000, 5000])
     _er.write_led_exposures("green", "4", [2000, 2800, 3600, 5000])
     arb._render_advanced()
@@ -7187,7 +7788,11 @@ def _selftest() -> None:
         that role.  Finding the page rather than assuming the first one keeps
         this test about the config editor instead of about the seed list.
         """
-        for page in range(len(arb._cfge_list) + 1):
+        # Step until the page is clamped: the page count is the role's, not
+        # that of whatever list was open before (a short Browse list).
+        page = -1
+        while True:
+            page += 1
             arb._cfge_open_role(role, page=page)
             if arb._cfge_page != page:      # clamped: past the last page
                 break
@@ -7309,6 +7914,54 @@ def _selftest() -> None:
           arb._cfge_pending(), [("reagent1_secs", "two minutes")])
     arb._pool["cfge_rollback"].on_press()
     check("Rollback abandons it", arb._cfge_pending(), [])
+
+    print("== config editor: a value the next capture would refuse is refused ==")
+    # 2026-11-16: 'red_R' for 'red.R' was saved and stopped every pre-image.
+    import pool as _pool_mod
+    _ch0 = config.get("protocol", "analysis_channels")
+    _chrow = cfge_open_at("protocol", "analysis_channels")
+    _fld = arb._pool[f"cfge_fld{_chrow}"]
+    _fld.set_value("violet.B,red_R,photo_red.R")
+    arb._writethrough(_fld)
+    check("refused",            arb._cfge_write(config.save), False)
+    check("unchanged",          config.get("protocol", "analysis_channels"), _ch0)
+    _txt = arb._pool["modal_msg"].text
+    check("says Not saved",     _txt.splitlines()[0], "Not saved:")
+    check("names the bad entry", "red_R" in _txt, True)
+    check("names the row",      "analysis_channels" in _txt, True)
+    check("lines fit the panel",
+          max(len(l) for l in _txt.splitlines()) <= _pool_mod.TALL_MSG_CHARS, True)
+    check("tall dialog",        arb._pool["modal_yes"].rect, layout.MODAL_TALL_ONE)
+    arb._pool["modal_yes"].on_press()
+    check("text kept to correct",
+          arb._cfge_pending(), [("analysis_channels", "violet.B,red_R,photo_red.R")])
+    _fld = arb._pool[f"cfge_fld{cfge_row_of('analysis_channels')}"]
+    _fld.set_value("violet.B,red.R,photo_red.R")
+    arb._writethrough(_fld)
+    check("corrected, saved",   arb._cfge_write(config.save), True)
+    check("in force",           config.get("protocol", "analysis_channels"),
+          "violet.B,red.R,photo_red.R")
+    # A bad value kept as history (written around the editor) cannot be put
+    # back in force from Browse either.
+    config.save("protocol", "analysis_channels", "violet.B,red_R")
+    config.save("protocol", "analysis_channels", _ch0)
+    arb._cfge_open_browse("analysis_channels")
+    arb._cfge_activate("violet.B,red_R")
+    check("Browse refuses it",  config.get("protocol", "analysis_channels"), _ch0)
+    check("and says why",       "red_R" in arb._pool["modal_msg"].text, True)
+    arb._pool["modal_yes"].on_press()
+    # A row that joins two others: noise_floor_dn below clip_bottom_dn.
+    _nfrow = cfge_open_at("capture", "noise_floor_dn")
+    _fld = arb._pool[f"cfge_fld{_nfrow}"]
+    _fld.set_value("40")
+    arb._writethrough(_fld)
+    check("cross-row rule refused", arb._cfge_write(config.save), False)
+    arb._pool["modal_yes"].on_press()
+    arb._pool["cfge_rollback"].on_press()
+    # A different role is untouched by the strip rule's check.
+    check("an unrelated edit is not checked",
+          __import__("exposure_rule").check_edits("device", {"description": "x"}), [])
+    cfge_open_at("protocol", "reagent1_secs")      # where the next part expects
 
     print("== config editor: a saved edit reaches the running program ==")
     _fld = arb._pool[f"cfge_fld{cfge_row_of('reagent1_secs')}"]
@@ -7467,15 +8120,28 @@ def _selftest() -> None:
     _fld.set_value("1.25")
     arb._writethrough(_fld)
     check("a good one releases it",  arb._pool["main_btn"].enabled, True)
+    _conc = arb._pool["var_conc_fld"]
+    _conc.set_value("-1")
+    arb._writethrough(_conc)
+    check("a negative concentration holds Continue back",
+          (A.record["standard_conc"], arb._pool["main_btn"].enabled), ("-1", False))
+    _conc.set_value("10")
+    arb._writethrough(_conc)
+    check("10 ug/L releases it",     arb._pool["main_btn"].enabled, True)
     arb._pool["var_reps_btn"].on_press()            # 1 -> 2
     arb._pool["main_btn"].on_press()                # Continue
     check("on to the vent reminder", A.phase, "vent")
-    _row = _db.read_one("SELECT test_equip, image_reps, R2_time_factor "
+    _row = _db.read_one("SELECT test_equip, image_reps, R2_time_factor, standard_conc "
                         "FROM treatments WHERE samp_no = ?", (A.record["samp_no"],))
     check("treatment row written",
-          _row, (sample_repo.equipment_list()[0], 2, 1.25))
+          _row, (sample_repo.equipment_list()[0], 2, 1.25, 10.0))
     check("and is what the next run starts from",
           arb.latest_treatment()["R2_time_factor"], 1.25)
+    A.record["standard_conc"] = ""
+    arb.save_treatment(A)
+    check("an empty concentration is stored as NULL",
+          _db.read_val("SELECT standard_conc FROM treatments WHERE samp_no = ?",
+                       (A.record["samp_no"],)), None)
 
     print("== test variant: the factors reach the targets and countdowns ==")
     _grams_was = A.record.get("samp_grams")
@@ -7502,6 +8168,93 @@ def _selftest() -> None:
                        (_samp,)), 0)
     arb._phases = _saved_phases
     A.clear_run(); B.clear_run()
+
+    # BARO-UDP begin
+    print("== CANCEL stops the baro logger only while it records ==")
+    _sent = []
+    _send_was = baro_signal.send
+    baro_signal.send = lambda *parts: _sent.append(parts)
+    try:
+        for r2, cap, want in [(None, None, []),
+                              (111,  None, [("STOP", "ZZ9001", "Canceled")]),
+                              (111,  222,  [])]:
+            _sent.clear()
+            A.record.update(samp_no="ZZ9001", reagent2_start=r2,
+                            capture_start=cap)
+            arb.cancel_test(A, delete=False)
+            check(f"reagent2_start={r2}, capture_start={cap}", _sent, want)
+    finally:
+        baro_signal.send = _send_was
+    A.clear_run()
+    # BARO-UDP end
+
+    print("== end of a run: Delete row moves its archives aside ==")
+    # C1054 (2026-11-16): a run deleted after its pre-image left C1054.h5
+    # behind, so the reissued C1054 wrote to C1054-a.h5.
+    _ext = config.get("capture", "extension")
+    _enddir = Path(_tf.mkdtemp())
+    _real_capdir2 = config.capture_dir
+    config.capture_dir = lambda: _enddir
+    try:
+        _rid = sample_repo.insert_sample("ZZ9054", "u", "t", "l", "sn")
+        _pre, _rep = _enddir / f"ZZ9054{_ext}", _enddir / f"ZZ9054rep2{_ext}"
+        _pre.write_bytes(b"pre"); _rep.write_bytes(b"rep")
+        A.record.update(samp_no="ZZ9054", db_rowid=_rid, h5file=str(_pre))
+        A.rep_files = {1: _pre, 2: _rep}
+        A.active_phase = A.phase = "reagent1"
+        arb.cancel_test(A, delete=True)
+        check("name freed for the next run",
+              config.capture_archive_path(_enddir, "ZZ9054").name,
+              f"ZZ9054{_ext}")
+        _moved = sorted(p.name for p in (_enddir / "abandoned").iterdir())
+        check("both sets kept, under abandoned/",
+              [n.split("_")[0] for n in _moved], [f"ZZ9054", "ZZ9054rep2"])
+        check("contents intact",
+              sorted((_enddir / "abandoned" / n).read_bytes() for n in _moved),
+              [b"pre", b"rep"])
+
+        print("== end of a run: Keep row leaves the archive and names it ==")
+        _rid = sample_repo.insert_sample("ZZ9055", "u", "t", "l", "sn")
+        _cut = _enddir / f"ZZ9055{_ext}"
+        _cut.write_bytes(b"half")
+        A.record.update(samp_no="ZZ9055", db_rowid=_rid)
+        A.active_phase = A.phase = "preimage"
+        class _CutCapture:                 # a pre-image cancelled mid-sweep
+            out_path = None
+            def cancel(self): self.out_path = _cut
+        arb._capture, arb._capture_slot = _CutCapture(), A
+        arb.cancel_test(A, delete=False)
+        check("file left where it is", _cut.is_file(), True)
+        check("row given the cut-short file",
+              _db.read_val("SELECT h5file FROM samples WHERE rowid = ?", (_rid,)),
+              str(_cut))
+    finally:
+        config.capture_dir = _real_capdir2
+    A.clear_run()
+
+    print("== end of a run: a reading typed on the analysis screen ==")
+    _rid = sample_repo.insert_sample("ZZ9056", "u", "t", "l", "sn")
+    A.record.update(samp_no="ZZ9056", db_rowid=_rid)
+    A.active_phase = A.phase = "analysis"
+    A.result = "done"
+    arb.focus(A)
+    check("the reading box is on the analysis screen",
+          (arb._pool["color_fld"].visible, arb._pool["color_fld"].editable),
+          (True, True))
+    check("a finished run does not lock Config", arb._any_slot_active(), False)
+    _fld = arb._pool["color_fld"]
+    _fld.set_value("40")
+    arb._writethrough(_fld)
+    check("lands in the record", A.record["manual_read"], "40")
+    arb.next_sample(A)                    # NEXT, with no flush in between
+    check("reaches the row",
+          _db.read_val("SELECT manual_read FROM samples WHERE rowid = ?", (_rid,)),
+          "40")
+    A.active_phase = A.phase = "analysis"
+    A.result = ""
+    check("an analysis still running does lock Config",
+          arb._any_slot_active(), True)
+    A.clear_run()
 
     print("== config editor: Restore Factory Defaults undoes all of it ==")
     arb._cfge_open()
@@ -7699,6 +8452,9 @@ def _selftest() -> None:
     class _PreviewLeds:
         def __init__(self): self.history = []; self.closed = False
         def set_channel(self, ch, on): self.history.append((ch, on))
+        def channel_of(self, name):
+            from lighting_cal8 import LEDBank
+            return LEDBank.color_names().index(name) + 1
         def close(self): self.closed = True
 
     arb._release_camera()
@@ -7778,6 +8534,95 @@ def _selftest() -> None:
     check("◀ pans back",  round(arb._view_state.cx), round(cx_before))
     arb._view_fit()
     check("Fit restores", arb._view_state.scale, fit_scale)
+
+    print("== image viewer: Find/Pad flashes the pad LED and outlines the pad ==")
+    import capture_runner as _cr
+    import padfind as _pf
+    check("the centre button is Find/Pad",
+          arb._pool["img_find_pad"].label, "Find/\nPad")
+    check("and is enabled on a frame", arb._pool["img_find_pad"].enabled, True)
+    _flashes = []
+    def _fake_flash(cam, us, led_on, led_off, prof=None):
+        """flash_frame without a camera: switch the LED as it would."""
+        _flashes.append(us)
+        led_on(); led_off()
+        return _np.zeros((1296, 2304), _np.uint16), {"applied_us": us}
+    _bound = _roi.by_role(_roi.load_active(2304, 1296, "imx708"),
+                          _roi.ROLE_BOUND)
+    _rows, _cols = _bound.h // 2, _bound.w // 2
+    # A pad 41 x 30 layer px whose top-left corner is at layer (10, 20).
+    _fit = _pf.PadFit(aL=10.0, aR=51.0, m=0.0, yc=35.0, top=20.0, bot=50.0,
+                      shape=(_rows, _cols), strip_top=0.0,
+                      window_rows=(0, _rows - 1), pad_level=1.5,
+                      top_obs=20.0, bot_slope=0.3, bot_source="window",
+                      side_rule="guided", n_rows=30, n_rejected=0,
+                      edge_rms=0.1)
+    _find_calls = []
+    def _fake_find(layer, dark, rects, section, prior=None, offset=None):
+        _find_calls.append((layer.shape, section, set(rects)))
+        return _fit, _fit
+    _real_flash, _real_find = _cr.flash_frame, _pf.find_pad
+    _cr.flash_frame, _pf.find_pad = _fake_flash, _fake_find
+    try:
+        pleds.history.clear()
+        arb._view_find_pad()
+        _ch = pleds.channel_of(config.capture_padfind_led())
+        check("one flash at capture.padfind_exposure_us", _flashes,
+              [config.capture_padfind_exposure_us()])
+        check("the pad LED went on, then off", pleds.history,
+              [(_ch, True), (_ch, False)])
+        check("the picture is now the flash's own frame, in gray",
+              (arb._view_frame.shape, bool(
+                  (arb._view_frame[..., 0] == arb._view_frame[..., 1]).all()
+                  and (arb._view_frame[..., 1]
+                       == arb._view_frame[..., 2]).all())),
+              ((1296, 2304, 3), True))
+        check("and the raw mosaic of the old picture is dropped",
+              arb._view_bayer, None)
+        check("fitted on the bound crop's R layer, as a pre-image",
+              _find_calls, [((_rows, _cols), _pf.SECTION_PRE,
+                             {"sample", "gray1", "gray2"})])
+        check("the name strip gives the pad's size",
+              arb._pool["img_name"].text, "Pad 41.0x30.0")
+        # The left edge of the pad's mask on a row half way down it, in image
+        # px (each layer px is 2 image px from the bound ROI's corner).
+        _first = int(_np.argmax(_fit.mask()[35]))
+        _px = _bound.x + 2 * _first
+        _py = _bound.y + 2 * 35 + 1
+        import image_view as _ivp
+        _cx, _cy = _ivp.image_to_canvas(arb._view_state, _px, _py)
+        check("the view zoomed in to the pad",
+              arb._view_state.scale > fit_scale * 4, True)
+        _img = arb._pool["img_canvas"].image
+        from palette import rgb888 as _rgb888
+        check("outline 1 px outside the pad's left edge",
+              _img.getpixel((int(math.floor(_cx)) - 1, int(_cy))),
+              _rgb888("roi_edge"))
+        check("the pad's own first pixel is not drawn over",
+              _img.getpixel((int(math.floor(_cx)), int(_cy)))
+              != _rgb888("roi_edge"), True)
+
+        _narrow = _fit.shifted((0.0, -21.0, 0.0, 0.0))
+        _pf.find_pad = lambda *a, **k: (_narrow, _narrow)
+        arb._view_find_pad()
+        check("a fit that fails QC says which check, briefly",
+              arb._pool["img_name"].text, "QC width 20.0 px")
+        check("and is still outlined", arb._view_pad_fit is not None, True)
+
+        def _no_pad(*a, **k):
+            raise _pf.PadFindError("no window")
+        _pf.find_pad = _no_pad
+        pleds.history.clear()
+        arb._view_find_pad()
+        check("a pad not found says so", arb._pool["img_name"].text,
+              "Pad not found")
+        check("and drops the old outline", arb._view_pad_fit, None)
+        check("the LED is off after a failure too", pleds.history[-1],
+              (_ch, False))
+    finally:
+        _cr.flash_frame, _pf.find_pad = _real_flash, _real_find
+    arb._view_status = ""
+    arb._view_fit()
 
     print("== image viewer: canvas taps select, ambiguity cycles ==")
     import image_view as _iv

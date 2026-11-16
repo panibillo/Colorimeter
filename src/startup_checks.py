@@ -343,10 +343,14 @@ def check_exposures(**_) -> CheckResult:
 
     name = "Exposures"
     groups = exposure_repo.available_groups()
+    # The strip rule's seed rows (one per LED; factory ones are seeded at
+    # start-up, so none at all means a damaged table).
+    seeds = len(exposure_repo.read_seeds())
     if not groups:
         return CheckResult(name, WARN,
                            "none — run the exposure calibration")
-    return CheckResult(name, OK, detail=f"groups: {', '.join(groups)}")
+    return CheckResult(name, OK, detail=f"groups: {', '.join(groups)}; "
+                                        f"seeds: {seeds} LEDs")
 
 
 def check_calibration_window(**_) -> CheckResult:
@@ -374,6 +378,32 @@ def check_calibration_window(**_) -> CheckResult:
     if problems:
         return CheckResult(name, WARN, "; ".join(problems))
     return CheckResult(name, OK, detail=f"{low}-{high} DN")
+
+
+def check_exposure_rule(**_) -> CheckResult:
+    """
+    The strip exposure rule's settings must make sense together.
+
+    Each is checked for its type when it is saved, but not against the others
+    (e.g. capture.noise_floor_dn must sit between the two clip limits).  A
+    capture reads them at the start of its prefetch and stops there on a bad
+    one; this says so at start-up instead.  A warning, never a failure: the
+    operator can fix it in the Config editor.
+    """
+    import config_repo as config
+    import exposure_rule
+
+    name = "Exposure rule"
+    try:
+        rule = config.capture_exposure_rule()
+        s = exposure_rule.RuleSettings.from_config()
+        config.capture_padfind_offset("pre")
+        config.capture_padfind_offset("post")
+    except (ValueError, config.ConfigMissing) as exc:
+        return CheckResult(name, WARN, str(exc))
+    return CheckResult(
+        name, OK, detail=f"{rule}; {s.multiple_exposure_count} at Tus, "
+                         f"{s.bus_exposure_count} at Bus")
 
 
 def check_layermodels(**_) -> CheckResult:
@@ -561,6 +591,7 @@ CHECKS = (
     check_capture_dir,
     check_exposures,
     check_calibration_window,
+    check_exposure_rule,
     check_layermodels,
     check_buses,
     check_groups,

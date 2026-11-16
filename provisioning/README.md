@@ -28,7 +28,9 @@ Development shares these, so they live at the repo root, not here:
 | `sync_to_pi.sh` | Curated firmware push (the `sync_pi_files.txt` list) → Pi. |
 | `bulk_sync_to_pi.sh` | Blanket push of every `*.py/*.yaml/*.csv` under `src/ dev/ config/`. |
 | `push_pi_scripts.sh` | Upload `provisioning/deploy/` → `~/pi/Colorimeter/provisioning/`. |
-| `sync_from_pi.sh` | Pi → desktop pull (development convenience). |
+
+Pi → desktop pulls (captures, database rows) are listed in
+[docs/desktop_tools/pi_transfer_tools.md](../docs/desktop_tools/pi_transfer_tools.md).
 
 The prose docs stay under `docs/commissioning/` (linked above), including the two
 local-only `ssh-*.md` guide symlinks.

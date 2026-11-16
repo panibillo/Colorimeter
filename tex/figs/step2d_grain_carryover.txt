@@ -1,0 +1,54 @@
+step2d_grain_carryover.png: what the axes measure
+Made by desktop/padanalysis/white_study.show_carryover, 2026-11-11, from
+white_out/carryover.json and white_out/sharpness.json.
+
+THE IDEA
+The paper has a fine grain: a fixed pattern of slightly lighter and darker
+spots, one or two pixels across, about 0.005-0.007 A in size.  It is found
+by subtracting a smoothed copy of a photo from the photo, which removes slow
+changes (shading, the dye's broad darkening) and keeps the fine pattern.
+The chain divides the post-image by the pre-image so that this grain
+cancels.  That works only if the post-image shows the same grain at the
+same strength as the pre-image.
+
+HOW TWO PHOTOS ARE "MATCHED"
+Take the grain of photo 1 and the grain of photo 2, lined up on the same
+paper.  At each pixel multiply the two, and average over the pad's
+interior.  Where both are light together or dark together the products are
+positive; unrelated patterns average to about zero.  Camera noise is
+different in every photo, so it averages away and does not inflate the
+match.  Each match is taken at the small extra shift (up to 1 pixel) that
+makes it largest, so a lining-up misfit does not look like missing grain.
+
+HORIZONTAL AXIS (all panels): "repeat number"
+The order in which the strip's photos were taken: 1 is the first photo of
+the series, 5 the fifth.  The post-images of one strip were taken about a
+minute apart, starting 2-22 s after reagent 2 ended (samples table).
+The order follows the file names (rep2, rep3, ...); the time stamps in
+the files confirm it (drift_study.photo_time, 2026-11-13).
+
+TOP TWO PANELS, VERTICAL AXIS: "c (1 = all of it)"
+The share of the paper's grain that shows in that post-image:
+    c = (post-image matched with the strip's pre-images)
+        / (one pre-image matched with another pre-image of the strip).
+The bottom of the fraction is the full-strength match: two photos that both
+carry the whole grain.  c = 1 means the post-image shows the grain in full;
+c = 0.5 means only half of it.  One panel per channel (LED color and
+camera color layer).  The label gives each sample's dye level in that
+channel (A = absorbance; bigger means darker).  C1042 and C1044 have only
+two repeat files, so their full-strength match rests on one pair of
+pre-images and their c is unreliable (values above 1 are not physical).
+
+BOTTOM PANEL, VERTICAL AXIS: "steepest step / pad level"
+How sharp the photo is.  At the pad's left and right sides the brightness
+drops from the pad to the dark surround.  The largest drop between two
+neighboring pixels, as a fraction of the pad's brightness, is bigger in a
+sharp photo and smaller in a blurry one.  Solid lines: post-images.
+Dashed, lighter lines: the pre-images of the same strip.
+
+HOW TO READ IT
+In the C1038-C1041 series (holder F), c falls from near 1 at the first
+post-image to about 0.5 by the fifth, with or without dye, and the
+post-images' sides get softer over the same repeats: later photos are
+blurrier, and a blurrier photo shows less grain.  C1045 (holder G1) does not
+get blurrier, yet its c is also below 1, so blur is not the whole story.

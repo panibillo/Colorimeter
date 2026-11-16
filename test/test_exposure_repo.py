@@ -178,5 +178,76 @@ class TestExposureTable(unittest.TestCase):
         self.assertEqual(er.read_exposures("white", "1"), [])
 
 
+
+class TestSeedRows(TestExposureTable):
+    """The strip rule's seed rows (role 'tus', 2026-11-14)."""
+
+    def test_a_seed_reads_back_and_a_new_one_supersedes_it(self):
+        er.write_seed("violet", 14_850, None, remark="factory")
+        er.write_seed("violet", 12_000, "C2000", low_dn=150.0, high_dn=860.0,
+                      layers="B", remark="re-aimed")
+        seed = er.read_seed("violet")
+        self.assertEqual((seed.microseconds, seed.samp_no, seed.layers,
+                          seed.high_dn), (12_000, "C2000", "B", 860.0))
+        self.assertEqual(db.read_val(
+            "SELECT COUNT(*) FROM exposure WHERE LED = 'violet'"), 2)
+        self.assertEqual(set(er.read_seeds()), {"violet"})
+        self.assertIsNone(er.read_seed("amber"))
+
+    def test_a_recalibration_leaves_the_seed_alone(self):
+        er.write_seed("green", 8760, None)
+        er.write_all_groups("green", ladder(10_000), preimage_group="1")
+        er.write_all_groups("green", ladder(12_000), preimage_group="1")
+        self.assertEqual(er.read_seed("green").microseconds, 8760)
+
+    def test_ladder_reads_ignore_the_seed(self):
+        er.write_seed("green", 8760, None)
+        er.write_all_groups("green", ladder(10_000), preimage_group="1")
+        self.assertNotIn(8760, er.read_led_exposures("green"))
+        self.assertEqual(er.read_preimage_exposures("green"), [10_000])
+        self.assertEqual(er.read_group("1"), {"green": [10_000]})
+        self.assertEqual(er.available_groups(), ["1", "2", "3", "4", "5"])
+        er.write_led_exposures("green", "1", [11_000])
+        self.assertEqual(er.read_seed("green").microseconds, 8760)
+
+
+class TestSeedBootstrap(unittest.TestCase):
+    """What start-up does to the exposure table (db_bootstrap, 4c)."""
+
+    def setUp(self):
+        self._dir = Path(tempfile.mkdtemp())
+        self._saved = db.DBNAME
+        db.DBNAME = str(self._dir / "fresh.sqlite")
+        db_bootstrap.ensure(db.DBNAME)
+
+    def tearDown(self):
+        db.DBNAME = self._saved
+        shutil.rmtree(self._dir, ignore_errors=True)
+
+    def test_a_new_database_has_the_nine_factory_seeds(self):
+        seeds = er.read_seeds()
+        self.assertEqual(
+            {k: v.microseconds for k, v in seeds.items()},
+            {"royal_blue": 2260, "violet": 14850, "cyan": 16070,
+             "green": 8760, "photo_red": 37900, "red": 19301,
+             "red_orange": 22999, "amber": 44728, "blue": 7351})
+        self.assertTrue(all(v.samp_no is None for v in seeds.values()))
+
+    def test_a_replaced_seed_is_kept_by_the_next_start(self):
+        er.write_seed("violet", 12_000, "C2000")
+        db_bootstrap.ensure(db.DBNAME)
+        self.assertEqual(er.read_seed("violet").microseconds, 12_000)
+        self.assertEqual(db.read_val(
+            "SELECT COUNT(*) FROM exposure WHERE LED = 'violet'"), 2)
+
+    def test_rows_from_before_roles_become_ladder_rows(self):
+        db.write_one("INSERT INTO exposure (active, exposuregroup, LED, "
+                     "microseconds) VALUES (1, '1', 'amber', 30000)")
+        db_bootstrap.ensure(db.DBNAME)
+        self.assertEqual(db.read_val(
+            "SELECT role FROM exposure WHERE LED = 'amber' "
+            "AND exposuregroup = '1'"), "ladder")
+        self.assertEqual(er.read_exposures("amber", "1"), [30000])
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
