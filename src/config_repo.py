@@ -71,6 +71,7 @@ Public surface
 --------------
     load(reload=False) -> dict            {role: {name: coerced value}}
     get(role, name)                       the value in force
+    parse(role, name, text)               typed text, read as the parameter's type
     default(role, name)                   what Default offers, or None
     snapshot()               -> dict      every active value, for the archive
 
@@ -281,6 +282,34 @@ def valid(value: str, vtype: str) -> bool:
         (True, False)
     """
     return _coerce(value, vtype) is not _INVALID
+
+
+def parse(role: str, name: str, text: str) -> Any:
+    """
+    Read text an operator typed as the parameter's declared type, as get()
+    would read it once saved.  For checks that need the value, not just
+    whether it parses (exposure_rule.check_edits).
+
+    Args:
+        role: The section, e.g. 'protocol'.
+        name: The parameter, e.g. 'analysis_channels'.
+        text: The typed text.
+
+    Raises:
+        ConfigMissing: no parameter of that name.
+        ValueError:    the text does not read as the parameter's type.
+
+    Example:
+        >>> parse('capture', 'max_exposure_tries', '6')   # doctest: +SKIP
+        6
+    """
+    vtype = _vtype_of(role, name)
+    if vtype is None:
+        raise ConfigMissing(f"{role}.{name}")
+    value = _coerce(text, vtype, role, name)
+    if value is _INVALID:
+        raise ValueError(f"{role}.{name}: {text!r} is not a valid {vtype}")
+    return value
 
 
 # ── Reads ───────────────────────────────────────────────────────────────────

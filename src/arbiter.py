@@ -2928,8 +2928,9 @@ class Arbiter:
         """
         Validate every pending edit, then write them all with `writer`.
 
-        Nothing is written unless all of them read back as their declared type,
-        so a page of edits either lands together or not at all.
+        Nothing is written unless all of them read back as their declared type
+        and none would be refused by the next capture (_cfge_refused), so a
+        page of edits either lands together or not at all.
 
         Args:
             writer: config.save or config.set_default.
@@ -2950,6 +2951,9 @@ class Arbiter:
                 self._cfge_hold = dict(pending)
                 self._cfge_warn(f"{name}\nis not a valid {vtypes[name]}")
                 return False
+        if self._cfge_refused(dict(pending)):
+            self._cfge_hold = dict(pending)
+            return False
         for name, text in pending:
             writer(self._cfge_role, name, text)
         self._cfge_hold = {}
@@ -2959,7 +2963,13 @@ class Arbiter:
         return True
 
     def _cfge_activate(self, value: str) -> None:
-        """Put a value from the Browse list back in force."""
+        """
+        Put a value from the Browse list back in force, unless the next
+        capture would refuse it (a bad value kept as history, such as the
+        'red_R' typo of 2026-11-16).
+        """
+        if self._cfge_refused({self._cfge_name: value}):
+            return
         config.save(self._cfge_role, self._cfge_name, value)
         # Picking a value here settles this parameter — a half-typed one held
         # from the role view would otherwise reappear over what was just chosen.
@@ -2983,6 +2993,32 @@ class Arbiter:
         """
         self._load_defaults()
         self._apply_reagent_secs()
+
+    def _cfge_refused(self, edits: dict) -> bool:
+        """
+        Check edits the way the next capture will, and refuse them here.
+
+        A value can be a valid number or text and still stop every capture:
+        on 2026-11-16 protocol.analysis_channels was saved with 'red_R' for
+        'red.R', and each pre-image then stopped before its first LED.  The
+        strip rule's own check (exposure_rule.check_edits) is run on the
+        edited rows, with the other rows as they are in force.
+
+        Args:
+            edits: {name: text} in the role being edited.
+
+        Returns:
+            True if refused, with a dialog up giving the reason; False if
+            the edits may be written.
+        """
+        import exposure_rule              # lazy: numpy, like the capture code
+        problems = exposure_rule.check_edits(self._cfge_role, edits)
+        if not problems:
+            return False
+        log.error("config editor: refused %s.%s: %s", self._cfge_role,
+                  ", ".join(edits), "; ".join(problems))
+        self._cfge_warn("; ".join(problems), heading="Not saved:")
+        return True
 
     # ── confirms ───────────────────────────────────────────────────────────────
 
@@ -3014,21 +3050,42 @@ class Arbiter:
         p.hide_all()
         p.put("modal_panel")
         p.put("modal_msg", msg)
+        # The message widget is shared: undo a tall dialog's size and layout.
+        import pool as _pool
+        m = p["modal_msg"]
+        m.size, m.align, m.valign = _pool.MODAL_MSG_SIZE, "center", "middle"
         names = p.layout_modal_buttons(2)
         p.put(names[0], "OK",     on=on_ok)
         p.put(names[1], "Cancel", on=self._cfge_render)
         p.render(self._disp)
         self._rebuild_focus()
 
-    def _cfge_warn(self, msg: str) -> None:
-        """A one-button modal explaining why a write was refused."""
+    def _cfge_warn(self, msg: str, heading: "str | None" = None) -> None:
+        """
+        A one-button modal explaining why a write was refused.
+
+        Args:
+            msg:     The reason.  Short, already broken into lines, when
+                     there is no heading.
+            heading: Given for a long reason: the tall dialog is used, with
+                     this as its first line and msg word-wrapped below.
+        """
         p = self._pool
         if p is None:
             return
+        import pool as _pool
+        tall = heading is not None
+        if tall:
+            msg = _pool.wrap_tall(heading, msg)
         p.hide_all()
         p.put("modal_panel")
         p.put("modal_msg", msg)
-        names = p.layout_modal_buttons(1)
+        # Set every time: the message widget is shared by every dialog (see
+        # phases.ModalPhase), so size and alignment would otherwise carry over.
+        m = p["modal_msg"]
+        m.size = _pool.TALL_MSG_SIZE if tall else _pool.MODAL_MSG_SIZE
+        m.align, m.valign = ("left", "top") if tall else ("center", "middle")
+        names = p.layout_modal_buttons(1, tall=tall)
         p.put(names[0], "OK", on=self._cfge_render)
         p.render(self._disp)
         self._rebuild_focus()
@@ -4043,7 +4100,7 @@ class Arbiter:
         session = self._new_session(self._preimage_config(slot))
         if not session.start():
             log.error("Arbiter: pre-image failed to start: %s", session.error)
-            slot.progress = "Camera failed"
+            self._capture_failed(slot, "Pre-image", session.error)
             return False
         self._capture = session
         self._capture_slot = slot
@@ -4085,14 +4142,14 @@ class Arbiter:
                     return True
                 log.error("Arbiter: failed to resume prefetch into capture "
                          "for slot %s: %s", slot.name, session.error)
-                slot.progress = "Camera failed"
+                self._capture_failed(slot, "Capture", session.error)
                 return False
             session.cancel()
 
         session = self._new_session(self._measurement_config(slot))
         if not session.start():
             log.error("Arbiter: capture failed to start: %s", session.error)
-            slot.progress = "Camera failed"
+            self._capture_failed(slot, "Capture", session.error)
             return False
         self._capture = session
         self._capture_slot = slot
@@ -4263,6 +4320,35 @@ class Arbiter:
                 if slot is self._focused:
                     self.render(slot)
 
+    def _capture_failed(self, slot: Slot, what: str, error) -> None:
+        """
+        Tell the operator a capture stopped, and why, in a dialog.
+
+        Before 2026-11-16 the reason was cut to about 28 characters on
+        slot.progress, which the pre-image and read screens do not show, so a
+        failed capture looked as if it had simply not started (Bill: a typo
+        in protocol.analysis_channels stopped C1052's pre-image before its
+        first LED).  The dialog shows the whole reason (phases
+        _capture_failed_message); OK returns to the screen, whose button is
+        live again.  The full reason is also in the log.
+
+        For an unfocused slot the dialog waits until that slot is shown.  A
+        dialog already up (Cancel) is replaced, keeping the screen it returns
+        to.
+
+        Args:
+            slot:  The slot whose capture failed.
+            what:  "Pre-image" or "Capture".
+            error: The exception (session.error), or its text.
+        """
+        slot.progress = f"{what} failed:\n{error}"
+        slot.capturing = False
+        if slot.modal_return is not None:
+            slot.phase = "capture_failed"
+            self.render(slot)
+        else:
+            self.open_modal(slot, "capture_failed")
+
     def pump_capture(self) -> None:
         """
         Drive the in-flight capture forward and mirror its progress onto the
@@ -4314,11 +4400,8 @@ class Arbiter:
                                              # imports; loaded already by now
         is_pre = str(session.config.mode).lower() == MODE_PRE
         if session.error is not None:
-            owner.progress = (f"Pre-image failed: {str(session.error)[:28]}"
-                              if is_pre else
-                              f"Capture failed: {str(session.error)[:30]}")
-            owner.capturing = False
-            self.render(owner)
+            self._capture_failed(owner, "Pre-image" if is_pre else "Capture",
+                                 session.error)
             return
         if is_pre:
             # A pre-image ends by handing the reading its archive and getting
@@ -6581,6 +6664,50 @@ def _selftest() -> None:
     check("camera freed",        arb.capture_available(), True)
     check("not capturing",       A.capturing, False)
 
+    print("== a failed pre-image shows its whole reason (C1052, 2026-11-16) ==")
+    arb.focus(A)
+    _was = (A.phase, A.active_phase, A.pre_rep)     # put back at the end
+    A.active_phase = A.phase = "preimage"
+    A.pre_rep = 0
+    _why = ("exposure rule settings: protocol.analysis_channels: not "
+            "LED.layer (layer one of R, Gr, Gb, B): red_R")
+    cap_bad = _FakeCapture(mode="pre")
+    def _bad_step():
+        cap_bad.active = False
+        cap_bad.error = ValueError(_why)
+        return None
+    cap_bad.step = _bad_step
+    arb._capture_factory = lambda: cap_bad
+    check("pre-image granted",   arb.request_preimage(A), True)
+    A.capturing = True
+    arb.pump_capture()
+    check("the dialog is up",    A.phase, "capture_failed")
+    check("still live on the pre-image", A.active_phase, "preimage")
+    check("not capturing",       A.capturing, False)
+    check("camera freed",        arb.capture_available(), True)
+    _txt = arb._pool["modal_msg"].text
+    check("says what failed",    _txt.splitlines()[0], "Pre-image failed:")
+    check("the whole reason",    " ".join(_txt.splitlines()[1:]), _why)
+    arb._pool["modal_yes"].on_press()
+    check("OK returns to the pre-image", A.phase, "preimage")
+    check("the button is live again", arb._pool["run_btn"].enabled, True)
+
+    print("== a capture that cannot start says why too ==")
+    cap_nostart = _FakeCapture(mode="pre")
+    def _no_start():
+        cap_nostart.error = RuntimeError("camera not found")
+        return False
+    cap_nostart.start = _no_start
+    arb._capture_factory = lambda: cap_nostart
+    check("not granted",         arb.request_preimage(A), False)
+    check("the dialog is up",    A.phase, "capture_failed")
+    check("with the reason",     "camera not found" in arb._pool["modal_msg"].text,
+          True)
+    arb._pool["modal_yes"].on_press()
+    check("back",                A.phase, "preimage")
+    arb._capture_factory = lambda: cap_pre
+    A.phase, A.active_phase, A.pre_rep = _was
+
     print("== touching another box commits the weight it leaves (C1042) ==")
     # A packet first weighed light, corrected by touch, then left by touching
     # the next box rather than pressing Enter: START must follow the
@@ -7520,7 +7647,11 @@ def _selftest() -> None:
         that role.  Finding the page rather than assuming the first one keeps
         this test about the config editor instead of about the seed list.
         """
-        for page in range(len(arb._cfge_list) + 1):
+        # Step until the page is clamped: the page count is the role's, not
+        # that of whatever list was open before (a short Browse list).
+        page = -1
+        while True:
+            page += 1
             arb._cfge_open_role(role, page=page)
             if arb._cfge_page != page:      # clamped: past the last page
                 break
@@ -7642,6 +7773,54 @@ def _selftest() -> None:
           arb._cfge_pending(), [("reagent1_secs", "two minutes")])
     arb._pool["cfge_rollback"].on_press()
     check("Rollback abandons it", arb._cfge_pending(), [])
+
+    print("== config editor: a value the next capture would refuse is refused ==")
+    # 2026-11-16: 'red_R' for 'red.R' was saved and stopped every pre-image.
+    import pool as _pool_mod
+    _ch0 = config.get("protocol", "analysis_channels")
+    _chrow = cfge_open_at("protocol", "analysis_channels")
+    _fld = arb._pool[f"cfge_fld{_chrow}"]
+    _fld.set_value("violet.B,red_R,photo_red.R")
+    arb._writethrough(_fld)
+    check("refused",            arb._cfge_write(config.save), False)
+    check("unchanged",          config.get("protocol", "analysis_channels"), _ch0)
+    _txt = arb._pool["modal_msg"].text
+    check("says Not saved",     _txt.splitlines()[0], "Not saved:")
+    check("names the bad entry", "red_R" in _txt, True)
+    check("names the row",      "analysis_channels" in _txt, True)
+    check("lines fit the panel",
+          max(len(l) for l in _txt.splitlines()) <= _pool_mod.TALL_MSG_CHARS, True)
+    check("tall dialog",        arb._pool["modal_yes"].rect, layout.MODAL_TALL_ONE)
+    arb._pool["modal_yes"].on_press()
+    check("text kept to correct",
+          arb._cfge_pending(), [("analysis_channels", "violet.B,red_R,photo_red.R")])
+    _fld = arb._pool[f"cfge_fld{cfge_row_of('analysis_channels')}"]
+    _fld.set_value("violet.B,red.R,photo_red.R")
+    arb._writethrough(_fld)
+    check("corrected, saved",   arb._cfge_write(config.save), True)
+    check("in force",           config.get("protocol", "analysis_channels"),
+          "violet.B,red.R,photo_red.R")
+    # A bad value kept as history (written around the editor) cannot be put
+    # back in force from Browse either.
+    config.save("protocol", "analysis_channels", "violet.B,red_R")
+    config.save("protocol", "analysis_channels", _ch0)
+    arb._cfge_open_browse("analysis_channels")
+    arb._cfge_activate("violet.B,red_R")
+    check("Browse refuses it",  config.get("protocol", "analysis_channels"), _ch0)
+    check("and says why",       "red_R" in arb._pool["modal_msg"].text, True)
+    arb._pool["modal_yes"].on_press()
+    # A row that joins two others: noise_floor_dn below clip_bottom_dn.
+    _nfrow = cfge_open_at("capture", "noise_floor_dn")
+    _fld = arb._pool[f"cfge_fld{_nfrow}"]
+    _fld.set_value("40")
+    arb._writethrough(_fld)
+    check("cross-row rule refused", arb._cfge_write(config.save), False)
+    arb._pool["modal_yes"].on_press()
+    arb._pool["cfge_rollback"].on_press()
+    # A different role is untouched by the strip rule's check.
+    check("an unrelated edit is not checked",
+          __import__("exposure_rule").check_edits("device", {"description": "x"}), [])
+    cfge_open_at("protocol", "reagent1_secs")      # where the next part expects
 
     print("== config editor: a saved edit reaches the running program ==")
     _fld = arb._pool[f"cfge_fld{cfge_row_of('reagent1_secs')}"]

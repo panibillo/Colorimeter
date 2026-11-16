@@ -154,6 +154,48 @@ class TestStripRuleSeeds(ConfigTestCase):
         self.assertEqual(exposure_rule.RuleSettings.from_config(),
                          exposure_rule.RuleSettings())
 
+    def test_every_rule_field_has_its_config_row(self):
+        import dataclasses
+        import exposure_rule
+        fields = {f.name for f in dataclasses.fields(exposure_rule.RuleSettings)}
+        self.assertEqual(set(exposure_rule.CONFIG_ROWS), fields)
+        for role, name in exposure_rule.CONFIG_ROWS.values():
+            config.get(role, name)              # raises if the row is missing
+
+    def test_check_edits_refuses_a_channel_typo(self):
+        # 2026-11-16: 'red_R' for 'red.R' stopped every pre-image (C1052).
+        import exposure_rule
+        problems = exposure_rule.check_edits(
+            "protocol", {"analysis_channels": "violet.B,red_R"})
+        self.assertEqual(len(problems), 1)
+        self.assertIn("red_R", problems[0])
+        self.assertEqual(exposure_rule.check_edits(
+            "protocol", {"analysis_channels": "violet.B,red.R"}), [])
+
+    def test_check_edits_checks_rules_that_join_two_rows(self):
+        import exposure_rule
+        # noise_floor_dn below clip_bottom_dn (65)
+        problems = exposure_rule.check_edits("capture", {"noise_floor_dn": "40"})
+        self.assertEqual(len(problems), 1)
+        self.assertIn("capture.noise_floor_dn", problems[0])
+
+    def test_check_edits_ignores_a_bad_row_that_was_not_edited(self):
+        # A bad value already in force must not block an unrelated edit.
+        import exposure_rule
+        config.save("protocol", "analysis_channels", "violet.B,red_R")
+        self.assertEqual(exposure_rule.check_edits(
+            "capture", {"max_exposure_tries": "6"}), [])
+        self.assertEqual(exposure_rule.check_edits(
+            "device", {"description": "anything"}), [])
+
+    def test_parse_reads_text_as_the_declared_type(self):
+        self.assertEqual(config.parse("capture", "max_exposure_tries", "6"), 6)
+        self.assertIs(config.parse("capture", "save_all_layers", "1"), True)
+        with self.assertRaises(ValueError):
+            config.parse("capture", "max_exposure_tries", "six")
+        with self.assertRaises(config.ConfigMissing):
+            config.parse("capture", "no_such_row", "1")
+
     def test_the_rule_is_the_strip_rule(self):
         self.assertEqual(config.capture_exposure_rule(), "strip")
 

@@ -1593,8 +1593,8 @@ class ModalPhase(Phase):
     (the "incomplete" check's Continue) makes the safe choice green instead.
     """
 
-    _MSG_SIZE      = 16    # modal_msg as built in pool.build
-    _MSG_SIZE_TALL = 13
+    _MSG_SIZE      = 16    # modal_msg as built in pool.build (MODAL_MSG_SIZE)
+    _MSG_SIZE_TALL = 13    # pool.TALL_MSG_SIZE
 
     def __init__(self, phase_id: str, message, buttons: list, tall: bool = False,
                  green: int = 0):
@@ -1631,6 +1631,19 @@ class ModalPhase(Phase):
             on = ((lambda a=action: a(arb, slot)) if action
                   else (lambda: arb.close_modal(slot)))
             pool.put(name, label, on=on)
+
+
+def _capture_failed_message(arb, slot) -> str:
+    """
+    The "capture_failed" dialog's text: what failed, then the whole reason,
+    wrapped to fit (Bill, 2026-11-16: a pre-image stopped by a typo in
+    protocol.analysis_channels showed no reason on the screen, so it seemed
+    simply not to start).  The arbiter puts both on slot.progress as
+    "<what> failed:" and the reason on the next line.
+    """
+    from pool import wrap_tall
+    heading, _, reason = slot.progress.partition("\n")
+    return wrap_tall(heading, reason)
 
 
 def _renumber(arb, slot) -> None:
@@ -1713,6 +1726,11 @@ def build_phases(reagent1_secs: int = 120, preimage: bool = True,
         ModalPhase("incomplete_next", _incomplete_message,
                    [("Continue", _next_anyway), ("Return", None)], tall=True,
                    green=1),
+        # A capture (pre-image or measurement) that stopped or would not
+        # start: the reason, in full.  OK returns to the screen, where the
+        # button is live again for another try.
+        ModalPhase("capture_failed", _capture_failed_message,
+                   [("OK", None)], tall=True),
         ModalPhase("nosample", "INSERT SAMPLE AND CONTINUE",
                    [("CAPTURE", lambda arb, slot: arb.retry_capture(slot)),
                     ("RETURN",  None)]),

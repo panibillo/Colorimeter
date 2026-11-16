@@ -761,13 +761,15 @@ class Pool:
         Position the modal panel, message and action buttons for a
         1/2/3-choice dialog and return the button widget names in order.  One
         shared set of widgets is repositioned per dialog (centred / two-across
-        / three-across, or the tall two-button panel for a list), so
+        / three-across, or the tall panel for a list or a long reason), so
         ModalPhase never mentions pixels.
         """
         self["modal_panel"].rect = (layout.MODAL_TALL_PANEL if tall
                                     else layout.MODAL_PANEL)
         self["modal_msg"].rect = layout.MODAL_TALL_MSG if tall else layout.MODAL_MSG
-        if tall:
+        if tall and count <= 1:
+            names, rects = ["modal_yes"], [layout.MODAL_TALL_ONE]
+        elif tall:
             names, rects = ["modal_yes", "modal_no"], [layout.MODAL_TALL_YES,
                                                        layout.MODAL_TALL_NO]
         elif count <= 1:
@@ -780,6 +782,48 @@ class Pool:
         for name, r in zip(names, rects):
             self[name].rect = r
         return names
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Long messages in the tall modal
+# ─────────────────────────────────────────────────────────────────────────────
+
+#: Font size of the modal's message, pt: the usual dialog (as built in
+#: Pool.build) and the tall one.  phases.ModalPhase sets the same sizes.
+MODAL_MSG_SIZE = 16
+TALL_MSG_SIZE = 13
+
+#: Characters per line of the tall modal's message (MODAL_TALL_MSG, 256 px)
+#: at 13 pt.  The Pi's font (DejaVu Sans) averages 6.5 px a character on
+#: this kind of text, so 256 px holds about 39; 34 leaves room for wide
+#: letters.
+TALL_MSG_CHARS = 34
+#: Lines of the tall modal's message at 13 pt (132 px; layout.py says
+#: about 7 fit, so 7 is the limit).
+TALL_MSG_LINES = 7
+
+
+def wrap_tall(heading: str, text: str) -> str:
+    """
+    A heading line and a long reason, word-wrapped to fit the tall modal.
+
+    A reason too long for the panel is cut, and its last line ends in
+    "..."; the whole reason is in the log.
+
+    Args:
+        heading: First line, e.g. "Pre-image failed:".  Kept as is.
+        text:    The reason, any length.
+
+    Returns:
+        Lines joined with newlines, at most TALL_MSG_LINES.
+    """
+    import textwrap
+    body = textwrap.wrap(text, TALL_MSG_CHARS) or [""]
+    room = TALL_MSG_LINES - 1
+    if len(body) > room:
+        body = body[:room]
+        body[-1] = body[-1][:TALL_MSG_CHARS - 3] + "..."
+    return "\n".join([heading] + body)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

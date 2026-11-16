@@ -70,7 +70,8 @@ studies that have no database at hand.  A test checks the two agree.
 
 Public surface
 --------------
-    RuleSettings, RuleSettings.from_config(), DEFAULTS
+    RuleSettings, RuleSettings.from_config(), DEFAULTS, CONFIG_ROWS
+    check_edits(role, edits) -> problems an editor save would cause
     LayerStats, TestRegion
     measure(layers, region, s) -> {layer: LayerStats}
     analysis_layers(color, layers, s) / decision_layers(color, layers, s)
@@ -253,6 +254,18 @@ DIM     = "dim"
 LAYER_NAMES = ("R", "Gr", "Gb", "B")
 
 
+def _channel_tuple(channels) -> tuple:
+    """
+    analysis_channels as a tuple of stripped names.
+
+    Args:
+        channels: comma text ('violet.B,cyan.B') or a list or tuple.
+    """
+    if isinstance(channels, str):
+        channels = channels.split(",")
+    return tuple(c.strip() for c in channels if c.strip())
+
+
 @dataclass(frozen=True)
 class RuleSettings:
     """
@@ -322,11 +335,8 @@ class RuleSettings:
     def __post_init__(self):
         # Frozen: set through object.__setattr__.  A list or comma text is
         # accepted for analysis_channels and kept as a tuple.
-        ch = self.analysis_channels
-        if isinstance(ch, str):
-            ch = [c for c in ch.split(",")]
         object.__setattr__(self, "analysis_channels",
-                           tuple(c.strip() for c in ch if c.strip()))
+                           _channel_tuple(self.analysis_channels))
         problems = self._check()
         if problems:
             raise ValueError("exposure rule settings: " + "; ".join(problems))
@@ -375,6 +385,9 @@ class RuleSettings:
         """
         The settings in force, from the `config` table (config_repo).
 
+        Each field is read from its row in CONFIG_ROWS, as the row's
+        declared type.
+
         Raises:
             config_repo.ConfigMissing: a row is missing (db_bootstrap seeds
                 them all, so only a damaged database).
@@ -382,22 +395,8 @@ class RuleSettings:
         """
         import config_repo as config          # only here: keeps tests and
         #                                       desktop studies DB-free
-        return cls(
-            clip_top_dn=config.capture_clip_top_dn(),
-            clip_bottom_dn=config.capture_clip_bottom_dn(),
-            noise_floor_dn=config.capture_noise_floor_dn(),
-            top_target_fraction=config.capture_top_target_fraction(),
-            top_floor_fraction=config.capture_top_floor_fraction(),
-            clip_step_factor=config.capture_clip_step_factor(),
-            max_exposure_tries=config.capture_max_exposure_tries(),
-            exposure_cap_us=config.capture_exposure_cap_us(),
-            bus_margin=config.capture_bus_margin(),
-            multiple_exposure_count=config.protocol_multiple_exposure_count(),
-            bus_exposure_count=config.protocol_bus_exposure_count(),
-            analysis_channels=config.protocol_analysis_channels(),
-            edge_darkening_factor=config.capture_edge_darkening_factor(),
-            edge_signal_fraction=config.capture_edge_signal_fraction(),
-            save_all_layers=config.capture_save_all_layers())
+        return cls(**{f: config.get(role, name)
+                      for f, (role, name) in CONFIG_ROWS.items()})
 
     def to_dict(self) -> dict:
         """Plain values, for the archive's JSON record."""
@@ -408,6 +407,79 @@ class RuleSettings:
 
 #: The factory values, used when a caller passes no settings.
 DEFAULTS = RuleSettings()
+
+
+#: The `config` row behind each RuleSettings field, as (role, name).  The
+#: field and the row share a name; the role is where the row is listed in
+#: the config editor.
+CONFIG_ROWS = {
+    "clip_top_dn":             ("capture",  "clip_top_dn"),
+    "clip_bottom_dn":          ("capture",  "clip_bottom_dn"),
+    "noise_floor_dn":          ("capture",  "noise_floor_dn"),
+    "top_target_fraction":     ("capture",  "top_target_fraction"),
+    "top_floor_fraction":      ("capture",  "top_floor_fraction"),
+    "clip_step_factor":        ("capture",  "clip_step_factor"),
+    "max_exposure_tries":      ("capture",  "max_exposure_tries"),
+    "exposure_cap_us":         ("capture",  "exposure_cap_us"),
+    "bus_margin":              ("capture",  "bus_margin"),
+    "multiple_exposure_count": ("protocol", "multiple_exposure_count"),
+    "bus_exposure_count":      ("protocol", "bus_exposure_count"),
+    "analysis_channels":       ("protocol", "analysis_channels"),
+    "edge_darkening_factor":   ("capture",  "edge_darkening_factor"),
+    "edge_signal_fraction":    ("capture",  "edge_signal_fraction"),
+    "save_all_layers":         ("capture",  "save_all_layers"),
+}
+
+
+def check_edits(role: str, edits: dict) -> "list[str]":
+    """
+    What the next capture would refuse if these edits were saved.
+
+    For the config editor (Bill, 2026-11-16): a typo in
+    protocol.analysis_channels ('red_R' for 'red.R') was saved without
+    complaint and then stopped every pre-image before its first LED.  The
+    editor calls this before writing, so the same check that a capture runs
+    (RuleSettings._check) refuses the edit on the spot.
+
+    The edited values are put in place of the ones in force and the whole
+    set is checked, so rules that join two rows (clip_bottom_dn below
+    noise_floor_dn) are checked too.  Only problems naming an edited row
+    are returned: a bad value already in force elsewhere does not block an
+    unrelated edit, and fixing it is itself an edit to its own row.
+
+    Args:
+        role:  The section being edited, e.g. 'protocol'.
+        edits: {name: text} as typed, each already a valid value of its
+               declared type (the editor checks that first).
+
+    Returns:
+        One line per problem, each naming its config row as role.name;
+        empty when none, when no edited row belongs to the strip rule, or
+        when the settings in force cannot be read (logged; the capture
+        will report it).
+    """
+    import config_repo as config              # only here, as in from_config
+    touched = {f for f, (r, n) in CONFIG_ROWS.items()
+               if r == role and n in edits}
+    if not touched:
+        return []
+    try:
+        values = {f: config.get(r, n) for f, (r, n) in CONFIG_ROWS.items()}
+        for f in touched:
+            values[f] = config.parse(role, CONFIG_ROWS[f][1],
+                                     edits[CONFIG_ROWS[f][1]])
+    except (KeyError, ValueError):
+        import logging
+        logging.getLogger(__name__).exception(
+            "check_edits: could not read the strip rule's settings")
+        return []
+    s = RuleSettings.__new__(RuleSettings)    # unchecked: _check reports
+    for f, v in values.items():
+        object.__setattr__(s, f, v)
+    object.__setattr__(s, "analysis_channels",
+                       _channel_tuple(s.analysis_channels))
+    named = [f"{r}.{n}" for r, n in (CONFIG_ROWS[f] for f in touched)]
+    return [p for p in s._check() if any(n in p for n in named)]
 
 
 @dataclass
