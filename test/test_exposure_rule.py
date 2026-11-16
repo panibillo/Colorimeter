@@ -141,6 +141,26 @@ class TestLayersAndBus(unittest.TestCase):
         self.assertEqual(kept, ["R"])
         self.assertEqual((why["B"], why["Gr"]), ("clipped", "below floor"))
 
+    def test_save_layers_off_is_keep_layers(self):
+        st = R.measure({"B": layer(1023), "Gr": layer(150), "R": layer(500)},
+                       region())
+        self.assertEqual(R.save_layers("amber", st),
+                         R.keep_layers("amber", st))
+
+    def test_save_layers_on_saves_every_layer(self):
+        # Development override (2026-11-16): dark and clipped layers are
+        # saved too, marked with the reason keep_layers gives.
+        st = R.measure({"B": layer(1023), "Gb": layer(900),
+                        "Gr": layer(150), "R": layer(500)}, region())
+        s = R.RuleSettings(save_all_layers=True)
+        kept, why = R.save_layers("amber", st, s)
+        self.assertEqual(sorted(kept), ["B", "Gb", "Gr", "R"])
+        self.assertEqual(why["B"], "clipped, saved (save_all_layers)")
+        self.assertEqual(why["Gr"], "below floor, saved (save_all_layers)")
+        self.assertEqual(why["R"], "unclipped")
+        # keep_layers itself, which the coverage check uses, is unchanged
+        self.assertEqual(R.keep_layers("amber", st, s)[0], ["Gb", "R"])
+
     def test_coverage(self):
         tus = {"B": layer(400, at={(5, 5): 120, (6, 6): 130})}
         bus = {"B": layer(1023, at={(5, 5): 230, (6, 6): 150})}
@@ -232,6 +252,8 @@ class TestRuleSettings(unittest.TestCase):
                          (R.CLIP_TOP_DN, R.CLIP_BOTTOM_DN, R.NOISE_FLOOR_DN))
         self.assertEqual(d.multiple_exposure_count, 1)
         self.assertEqual(d.analysis_channels, R.ANALYSIS_CHANNELS)
+        self.assertIs(d.save_all_layers, R.SAVE_ALL_LAYERS)
+        self.assertFalse(d.save_all_layers)
 
     def test_channels_may_be_given_as_text(self):
         s = R.RuleSettings(analysis_channels=" violet.B, photo_red.R ,")

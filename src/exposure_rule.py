@@ -53,7 +53,8 @@ How one LED's exposure_us is found (capture_runner does the frames)
      at it.  The floor test leaves out side-edge pixels that are mostly
      outside the pad (edge_left_out(), below); the clipping test does not.
   6. Save every analysis channel of every frame, and any other layer only
-     when it is unclipped and above the noise floor (keep_layers()).
+     when it is unclipped and above the noise floor (keep_layers()); with
+     capture.save_all_layers on, save every layer (save_layers()).
   7. Check, pixel by pixel (coverage()), that every test-region pixel of
      every decision layer is below the top limit at Tus and above the floor
      at Tus or at Bus.  The counts that fail are recorded, not acted on.
@@ -76,6 +77,7 @@ Public surface
     judge(stats, decision, exposure_us, s) -> (verdict, next_us, layer)
     bus_exposure(stats, color, tus_us, s) -> (bus_us or None, layer, min_dn)
     keep_layers(color, stats, s) -> (kept layers, {layer: why})
+    save_layers(color, stats, s) -> (saved layers, {layer: why})
     edge_left_out(layer, region, s) -> mask of edge pixels the floor test skips
     coverage(tus_layers, bus_layers, region, decision, s) -> {layer: counts}
   `s` is a RuleSettings; it defaults to DEFAULTS (the factory values).  The
@@ -168,6 +170,17 @@ BUS_MARGIN = 1.1
 #                    MULTIPLE_EXPOSURE_COUNT for the yellow/brown trials.
 MULTIPLE_EXPOSURE_COUNT = 1
 BUS_EXPOSURE_COUNT      = 1
+
+# ── What is saved (Bill, 2026-11-16) ────────────────────────────────────
+#   SAVE_ALL_LAYERS  capture.save_all_layers.  A development override: when
+#                    on, every Bayer layer of every frame the sweep keeps
+#                    (Tus and Bus) is saved, dark or clipped, and the
+#                    desktop judges it.  Saving is then separate from the
+#                    exposure decisions: Tus, Bus and noise_floor_dn work
+#                    exactly as with it off.  The frames tried while finding
+#                    Tus are still not saved.  Off for routine use, when
+#                    keep_layers() decides (save_layers()).
+SAVE_ALL_LAYERS = False
 
 # ── Which channels matter ───────────────────────────────────────────────
 #   ANALYSIS_CHANNELS  protocol.analysis_channels.  The LED.layer pairs the
@@ -282,6 +295,8 @@ class RuleSettings:
                          of the floor test (EDGE_DARKENING_FACTOR).
         edge_signal_fraction: capture.edge_signal_fraction.  Its second
                          condition (EDGE_SIGNAL_FRACTION).
+        save_all_layers: capture.save_all_layers.  Save every layer of
+                         every kept frame (SAVE_ALL_LAYERS; save_layers()).
 
     Raises:
         ValueError: on construction, when a value makes no sense (see
@@ -302,6 +317,7 @@ class RuleSettings:
     analysis_channels: tuple = ANALYSIS_CHANNELS
     edge_darkening_factor: float = EDGE_DARKENING_FACTOR
     edge_signal_fraction: float = EDGE_SIGNAL_FRACTION
+    save_all_layers: bool = SAVE_ALL_LAYERS
 
     def __post_init__(self):
         # Frozen: set through object.__setattr__.  A list or comma text is
@@ -380,7 +396,8 @@ class RuleSettings:
             bus_exposure_count=config.protocol_bus_exposure_count(),
             analysis_channels=config.protocol_analysis_channels(),
             edge_darkening_factor=config.capture_edge_darkening_factor(),
-            edge_signal_fraction=config.capture_edge_signal_fraction())
+            edge_signal_fraction=config.capture_edge_signal_fraction(),
+            save_all_layers=config.capture_save_all_layers())
 
     def to_dict(self) -> dict:
         """Plain values, for the archive's JSON record."""
@@ -764,6 +781,35 @@ def keep_layers(color: str, stats: dict,
         if why[ch] in ("analysis channel", "unclipped"):
             kept.append(ch)
     return kept, why
+
+
+def save_layers(color: str, stats: dict,
+                s: RuleSettings = DEFAULTS) -> "tuple[list[str], dict]":
+    """
+    Which Bayer layers of one kept frame reach the archive.
+
+    With s.save_all_layers off: exactly keep_layers().  With it on (a
+    development override, Bill 2026-11-16): every layer, whatever
+    keep_layers() says; a layer it would have left out is marked
+    "<its reason>, saved (save_all_layers)" so the record still shows it is
+    clipped or below the floor.  keep_layers() itself is unchanged, and the
+    coverage check still uses it.
+
+    Args:
+        color: LED color name.
+        stats: measure()'s result for the frame.
+        s:     The settings.
+
+    Returns:
+        (saved layer names, {layer: why}).
+    """
+    kept, why = keep_layers(color, stats, s)
+    if not s.save_all_layers:
+        return kept, why
+    for ch in stats:
+        if ch not in kept:
+            why[ch] = f"{why[ch]}, saved (save_all_layers)"
+    return list(stats), why
 
 
 def coverage(tus_layers: dict, bus_layers: "dict | None",

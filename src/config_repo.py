@@ -92,7 +92,8 @@ Public surface
     capture_layer_keep_min_dn() / capture_layer_keep_max_dn()
     capture_exposure_rule() and the strip rule's rows: capture_clip_top_dn(),
         ... capture_edge_darkening_factor(), protocol_multiple_exposure_count(),
-        protocol_bus_exposure_count(), protocol_analysis_channels()
+        protocol_bus_exposure_count(), protocol_analysis_channels(),
+        capture_save_all_layers()
     capture_padfind_led() / capture_padfind_exposure_us()
     capture_padfind_offset(section)
     calibration_window_low_dn() / calibration_window_high_dn()
@@ -1047,6 +1048,16 @@ def capture_edge_darkening_factor() -> float:
 def capture_edge_signal_fraction() -> float:
     """The edge rule's second condition: below this x interior signal (0.5)."""
     return float(get("capture", "edge_signal_fraction"))
+
+
+def capture_save_all_layers() -> bool:
+    """
+    Development override (seeded off): save every Bayer layer of every kept
+    frame, dark or clipped, instead of the strip rule's and the layermodel
+    screen's choice (exposure_rule.save_layers, capture_runner._keep_channels).
+    Exposure decisions do not change.
+    """
+    return bool(get("capture", "save_all_layers"))
 
 
 def protocol_multiple_exposure_count() -> int:

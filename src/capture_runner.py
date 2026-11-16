@@ -1100,6 +1100,11 @@ class CaptureRunner:
         is far worse than storing a few dark frames — the archive is the only
         copy, and this decision is not reversible.
 
+        With capture.save_all_layers on (a development override, 2026-11-16)
+        the screen is skipped and every layer is stored.  Under the strip rule
+        this serves only the white frame; the strip rule's own frames use
+        exposure_rule.save_layers.
+
         Args:
             color: LED colour name.
             exposure_us: Exposure about to be stored, in microseconds.
@@ -1114,7 +1119,18 @@ class CaptureRunner:
 
         channels = tuple(layers)
         try:
-            keep = layermodel_repo.keep_channels(color, exposure_us, channels)
+            # capture.save_all_layers (a development override, 2026-11-16):
+            # store every layer.  A config that cannot be read falls through
+            # to the layermodel screen below.
+            save_all = config.capture_save_all_layers()
+        except Exception:                             # noqa: BLE001
+            log.exception("could not read capture.save_all_layers — "
+                          "using the layermodel screen")
+            save_all = False
+        try:
+            keep = (channels if save_all else
+                    layermodel_repo.keep_channels(color, exposure_us,
+                                                  channels))
         except Exception:                             # noqa: BLE001
             log.exception("could not read layermodels for %s at %dµs — "
                           "storing every layer", color, exposure_us)
@@ -2532,9 +2548,10 @@ class CaptureRunner:
         frames first, then any Bus frames.  Each label's group says its role
         ('tus' or 'bus') and the exposure_us the camera applied.  Which
         Bayer layers reach the file is the strip rule's own choice
-        (exposure_rule.keep_layers): every analysis channel, and any other
+        (exposure_rule.save_layers): every analysis channel, and any other
         layer that is unclipped and above the noise floor on the test
-        region.  The layermodel screen (_keep_channels) is not used here.
+        region; every layer when capture.save_all_layers is on.  The
+        layermodel screen (_keep_channels) is not used here.
 
         Args:
             color:  LED color name.
@@ -2552,7 +2569,7 @@ class CaptureRunner:
         roles, frame_stats, layer_why, captured = {}, {}, {}, {}
         for i, (role, f) in enumerate(result["frames"]):
             label = f"e{i}"
-            keep, layer_why[label] = exposure_rule.keep_layers(
+            keep, layer_why[label] = exposure_rule.save_layers(
                 color, f["stats"], self._rule)
             omit = [ch for ch in f["layers"] if ch not in keep]
             with self.prof.time("io.hdf5"):

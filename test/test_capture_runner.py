@@ -1992,6 +1992,30 @@ class TestStripRule(CalibratedExposures):
         self.assertIn("R", rec["coverage"])
         self.assertFalse([m for m in logs.output if "below the floor" in m])
 
+    def test_save_all_layers_saves_the_dark_layer_too(self):
+        """
+        capture.save_all_layers (development override, 2026-11-16): the
+        same far-too-dark B layer is now stored, marked with why it would
+        have been left out, and the coverage check still ignores it.
+        """
+        r, c = divmod(self.cam.bayer_pattern.index("B"), 2)
+        dim = np.ones((FRAME_H, FRAME_W))
+        dim[r::2, c::2] = 0.01
+        self.cam.dim = dim
+        config_repo.save("capture", "save_all_layers", 1)
+        runner = self.make_runner(mode="normal")
+        self.run_to_completion(runner)
+        rec = self.led_record(runner)
+        self.assertTrue(rec["settings"]["save_all_layers"])
+        self.assertEqual(rec["layers_why"]["e0"]["B"],
+                         "below floor, saved (save_all_layers)")
+        self.assertNotIn("B", rec["coverage"])
+        with self.archive(runner) as f:
+            for lab in f["leds/amber/lit"]:
+                for ch in ("B", "Gb", "Gr", "R"):
+                    self.assertFalse(capture_h5.is_omitted(
+                        f[f"leds/amber/lit/{lab}/{ch}"].attrs), (lab, ch))
+
     def test_the_group_rule_is_still_there(self):
         runner = self.make_runner(mode="normal", exposure_group="3",
                                   exposure_rule=capture_runner.RULE_GROUP)
