@@ -1,0 +1,26 @@
+color_3e_*.png -- step 3e, three reference colors
+(made by color_study.py, show_three_colors, 2026-11-15)
+
+Each pixel's absorbances in these channels: violet.B, royal_blue.B, cyan.B, green.B, green.Gb, green.Gr, photo_red.Gb, photo_red.Gr, photo_red.R.
+A = -log10(post-image / pre-image lined up), bigger = darker; every
+channel is the average of 4 repeat photos.  One matrix multiplication
+splits each pixel's list into an even darkening of every channel (not
+shown), and amounts of three reference colors:
+  yellow c_Y: 1 = the average of C1051's interior (12 ug/L);
+  brown c_B: 1 = the average of C1050's interior (600 ug/L);
+  dot color c_D: 1 = the average of C1049's dot center (20 ug/L; interior
+      pixels darker than 0.65 A in royal_blue.B).
+0 = none of that color.  Below 0 means the pixel's color lies outside
+what positive amounts of the three can make.
+
+color_3e_maps.png: columns = strips; rows = a plain color picture (white
+LED, for the eye only), the three amounts, then the leftover (what the
+darkening and the reference colors cannot describe, root mean square
+over the channels, A) with two references (yellow, brown) and with three,
+on one scale.  Camera noise alone gives about 0.004 A here.
+
+color_3e_dot_profile.png: C1049 only.  x axis, distance from the dot's
+center (the average position of its darkest pixels), in layer pixels
+(one layer pixel = 2 sensor pixels).  Each point is the average over a
+ring 1 px wide.  Top: the three amounts.  Middle: A in three channels.
+Bottom: the leftover with two and with three references.

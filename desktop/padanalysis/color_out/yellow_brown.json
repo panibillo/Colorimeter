@@ -1,0 +1,114 @@
+{
+ "about": {
+  "what": "Step 3c: yellow and brown reference lists, the unmixing matrix, and each pad's amounts.  color_study.yellow_brown().",
+  "A": "absorbance, -log10(R_post / R_pre lined up), bigger = darker; each R from the average of a channel's repeat frames",
+  "channels": "LED.layer of each entry in y, b and the columns of M",
+  "y, b": "yellow and brown reference lists: mean A over the interior of C1051 (yellow) and of C1050 (brown)",
+  "M": "rows gamma, c_Y, c_B: M = (S^T S)^-1 S^T with S = [1 y b]; (gamma, c_Y, c_B) = M A for a pixel's list A",
+  "gamma": "even darkening of every channel, A (interior median)",
+  "c_Y, c_B": "amounts of yellow and brown, no units: 1 = the reference pad's interior average (interior medians)",
+  "c_Y_pad_mean, c_B_pad_mean": "the same, mean over every pad pixel",
+  "leftover_rms": "median over the interior of the per-pixel root mean square of A - S (M A), A",
+  "conc": "arsenic, ug/L (chain_samples.concentration)",
+  "n": "pad pixels used"
+ },
+ "rows": {
+  "channels": [
+   "violet.B",
+   "royal_blue.B",
+   "cyan.B",
+   "green.Gb",
+   "green.Gr",
+   "green.B",
+   "photo_red.R"
+  ],
+  "y": [
+   0.37314312346386486,
+   0.29446146693824055,
+   0.15286856426145853,
+   0.08187121682079343,
+   0.08213403548514854,
+   0.0987636350822799,
+   0.002143026238907314
+  ],
+  "b": [
+   0.4827478097484737,
+   0.428613890090592,
+   0.32287146516310555,
+   0.2569759912900576,
+   0.2572789529595113,
+   0.2760279628844066,
+   0.0648336234684308
+  ],
+  "M": [
+   [
+    0.17365827686501226,
+    0.004280865237058279,
+    -0.19381342870935914,
+    -0.12811326599413883,
+    -0.12911314109242233,
+    -0.18698782007860107,
+    1.4600885137724484
+   ],
+   [
+    4.4293199658077915,
+    1.7902314171500566,
+    -2.257025455784876,
+    -3.200824177284846,
+    -3.2023078312756788,
+    -3.260719080106273,
+    5.701325161493822
+   ],
+   [
+    -2.404157476458818,
+    -0.46572218507318414,
+    2.3004457987755,
+    2.5706178537306292,
+    2.5747384954758883,
+    2.7989812113744432,
+    -7.374903697824435
+   ]
+  ],
+  "pads": [
+   {
+    "sample": "C1051",
+    "file": "C1051",
+    "pre": "C1051",
+    "conc": 12.0,
+    "n": 2170,
+    "gamma": -0.00018308631845911656,
+    "c_Y": 0.9968599391443104,
+    "c_B": 0.003399876963191116,
+    "c_Y_pad_mean": 0.93089362502877,
+    "c_B_pad_mean": -0.0632100619950506,
+    "leftover_rms": 0.003702631202128999
+   },
+   {
+    "sample": "C1049",
+    "file": "C1049",
+    "pre": "C1049",
+    "conc": 20.0,
+    "n": 2068,
+    "gamma": -0.021904830848657353,
+    "c_Y": 0.8196908606092475,
+    "c_B": 0.31179321420689426,
+    "c_Y_pad_mean": 0.7014633288162873,
+    "c_B_pad_mean": 0.2943293993684302,
+    "leftover_rms": 0.007620491084171935
+   },
+   {
+    "sample": "C1050",
+    "file": "C1050",
+    "pre": "C1050",
+    "conc": 600.0,
+    "n": 2102,
+    "gamma": -0.0004131732123902151,
+    "c_Y": 0.0005812334396924428,
+    "c_B": 0.992839951635726,
+    "c_Y_pad_mean": 0.059034202937018464,
+    "c_B_pad_mean": 0.8319868396937832,
+    "leftover_rms": 0.006475379634624339
+   }
+  ]
+ }
+}

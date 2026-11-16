@@ -1,0 +1,34 @@
+color_3d_*.png -- step 3d, how many color directions carry signal
+(made by color_study.py, show_color_count, 2026-11-15)
+
+Pixels: every interior pad pixel (8 or more layer pixels from every edge)
+of the post-images of C1049 (20 ug/L, dark dot), C1050 (600 ug/L) and
+C1051 (12 ug/L).  Each channel is the average of 4 repeat photos.
+
+Noise units: each channel's value is divided by its own camera noise per
+pixel (from the spread between the 4 repeat photos).  In these units,
+pure camera noise has a spread of about 1 in every direction.
+
+Even darkening removed: the part of each pixel's list that is the same
+added A in every channel is taken out first (chain step 8 measures it
+separately).
+
+Version A (9 channels with a pre-image white): A = -log10(post /
+pre-image lined up), 0 = no dye; spread is measured from 0.
+Version B (every channel the Pi stored, unclipped, with repeat photos,
+21; the white LED had one photo): the
+post-image alone, -log10(post / gray chips); spread is measured from the
+average over all pixels, which removes each channel's unknown white.
+
+color_3d_spread.png: y axis, the spread along each direction (mean
+squared distance of the pixels along it), noise units squared, log scale.
+x axis, the directions, largest first.  A direction near the dotted line
+at 1 holds only noise; well above it, real color differences.
+
+color_3d_directions_B.png: each panel one direction, as the change in A
+per channel that moving along it makes (largest = 1).  The sign is
+arbitrary: a direction and its mirror image are the same direction.
+
+color_3d_leftover.png: per pixel, what is left after keeping the first 2
+(or 3) directions, noise units, scaled so that noise alone gives about 1.
+Bright = the kept directions do not describe that pixel.
