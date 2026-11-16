@@ -36,6 +36,12 @@ THE PARTS (each is a guarded block in `run()`)
     3f  `color_count_3f`: principal components again on C1052-C1055
         (2026-11-16), every LED and layer with a pre-image white: how many
         colors plus brightness.
+    3f-2 `leave_one_out_3f`: the same with one strip left out.
+    3g  `three_refs_3g`: yellow C1052, orange C1054, brown C1055 as
+        reference colors; amounts and leftover per pixel.
+    3h  `generic_white_3h`: Bill's question -- could strips without a full
+        pre-image be divided by an average pre-image?  Measured on
+        C1052-C1055 by using the other three strips' pre-images.
 
 WORDS AND SYMBOLS
     R           a photo's reflectance at a pixel: the signal divided by
@@ -1614,6 +1620,26 @@ def pca_data_3f(files, chans):
                 sample=np.array(smp), where=where, photos=photos)
 
 
+_D3F = {}    # files key -> (channels kept, dropped, pca_data_3f result)
+
+
+def data_3f(files=None):
+    """
+    `white_channels_3f` and `pca_data_3f` for `files`, read once per run
+    and shared by steps 3f, 3f-2, 3g and 3h.
+
+    Returns:
+        (keep, dropped, d): the channels, the dropped channels with
+        reasons, and `pca_data_3f`'s dict.
+    """
+    files = files or FILES_3F
+    key = tuple(files.items())
+    if key not in _D3F:
+        keep, dropped = white_channels_3f(list(files.values()))
+        _D3F[key] = (keep, dropped, pca_data_3f(files, keep))
+    return _D3F[key]
+
+
 def one_layer_per_led(chans, sigma):
     """
     For each LED, the one usable layer with the smallest camera noise (A),
@@ -1681,8 +1707,7 @@ def color_count_3f(files=None):
         channel names.
     """
     files = files or FILES_3F
-    keep, dropped = white_channels_3f(list(files.values()))
-    d = pca_data_3f(files, keep)
+    keep, dropped, d = data_3f(files)
     names = [a1.cell_name(c) for c in keep]
     one = one_layer_per_led(keep, d["sigma"])
     plan = {"all, darkening kept": (list(range(len(keep))), False),
@@ -1930,6 +1955,413 @@ ABOUT_3F = {
 }
 
 
+# ── step 3f-2: does the third direction rest on one strip? ─────────────
+
+def leave_one_out_3f(files=None, ks=(2, 3, 4)):
+    """
+    Step 3f-2: find the directions with one strip left out, then measure
+    every strip -- the left-out one included -- against them.
+
+    If the left-out strip's leftover after 3 directions stays near the
+    others' (about 2 noise units), its color lies in the space the other
+    three strips already span: the third direction does not rest on it
+    alone.  If it jumps (like C1054's 10.5 after 2 directions in 3f), that
+    strip is the only one carrying the third color.
+
+    All 22 channels, through zero, darkening kept, noise units (as the
+    first run of 3f).
+
+    Returns:
+        list of dict per left-out strip: left_out, spread (first 6
+        directions of the other three strips, noise units squared),
+        leftover (strip -> k -> [median, LEFT_PCTL percentile], noise
+        units, 1 = noise only).
+    """
+    files = files or FILES_3F
+    _, _, d = data_3f(files)
+    Z = d["X"] / d["sigma"]                       # (pixels, channels)
+    rows = []
+    for out in files:
+        train = d["sample"] != out
+        _, s, Vt = np.linalg.svd(Z[train], full_matrices=False)
+        lev = {}
+        for k in ks:
+            left = leftover_after(Z, Vt, k, removed=0)
+            lev[k] = {sm: [float(np.median(left[d["sample"] == sm])),
+                           float(np.percentile(left[d["sample"] == sm],
+                                               LEFT_PCTL))] for sm in files}
+        rows.append(dict(left_out=out,
+                         spread=(s[:6] ** 2 / train.sum()).tolist(),
+                         leftover=lev))
+    return rows
+
+
+def summarize_leave_one_out(rows):
+    """Print the 3f-2 table."""
+    print("Step 3f-2: directions found with one strip left out; leftover "
+          f"per pixel, noise units, median ({LEFT_PCTL}th percentile)")
+    for r in rows:
+        print(f"\n  left out {r['left_out']}: spread of the other three "
+              "along directions 1-6: " + ", ".join(f"{v:.0f}" for v in
+                                                  r["spread"]))
+        for k, lv in r["leftover"].items():
+            print(f"    after {k}: " + "  ".join(
+                f"{s}{'*' if s == r['left_out'] else ' '} {v[0]:5.2f} "
+                f"({v[1]:5.2f})" for s, v in lv.items()))
+    print("  * = the strip left out of finding the directions")
+
+
+ABOUT_3F2 = {
+    "what": "Step 3f-2: color_study.leave_one_out_3f(); directions found "
+            "without one strip, every strip measured against them.",
+    "spread": "first 6 directions of the other three strips, noise units "
+              "squared",
+    "leftover": "strip -> k -> [median, 95th percentile] of the per-pixel "
+                "leftover after k directions, noise units, 1 = noise only",
+}
+
+
+# ── step 3g: three reference colors on C1052-C1055 ─────────────────────
+#
+# Each pixel's list of A (one per channel) is written as
+#     A = gamma*1 + c_Y*y + c_B*b + c_O*o + leftover,
+# where 1 is the list of all ones (even darkening), and y, b, o are the
+# reference lists: the average A over the interior of one strip each.
+# With S = [1 y b o] (one column each), M = (S^T S)^-1 S^T turns a pixel's
+# list into (gamma, c_Y, c_B, c_O) in one multiplication (`unmix_matrix`).
+# c = 1 means as much of that color as its reference strip's average.
+#
+# Caution: each reference strip gets its own color as 1 and the others as
+# 0 on average, by construction.  The tests are C1053 (not a reference),
+# and the pattern inside each strip (the dots).
+
+#: The reference strips (Bill, 2026-11-16, first pass): yellow from the
+#: lowest arsenic, orange from C1054 (Bill sees much orange), brown from the
+#: highest.  None of them is surely a pure color.
+REFS_3G = {"yellow": "C1052", "orange": "C1054", "brown": "C1055"}
+
+
+def three_refs_3g(files=None):
+    """
+    Step 3g: the reference lists, the matrix M, and per strip the amounts
+    and the leftover with two references (yellow, brown) and with three
+    (yellow, brown, orange).  Both keep the even-darkening column.
+
+    Returns:
+        dict: channels; y, b, o (A per channel); M2, M3 (rows gamma, c_Y,
+        c_B[, c_O]); row_len_2, row_len_3 (length of each row of M: how
+        much one unit of channel noise, the same in every channel, moves
+        that amount); strips (per strip: n, conc, and for each amount and
+        the leftover the median, 5th and 95th percentile; leftover is the
+        root mean square over the channels, A); and '_maps' (per pixel
+        amounts and leftover) for `show_3g`.
+    """
+    files = files or FILES_3F
+    keep, _, d = data_3f(files)
+    X, smp = d["X"], d["sample"]                   # (pixels, channels)
+    ref = {n: X[smp == s].mean(0) for n, s in REFS_3G.items()}
+    y, b, o = ref["yellow"], ref["brown"], ref["orange"]
+    S2, M2 = unmix_matrix(y, b)
+    S3, M3 = unmix_matrix(y, b, o)
+    per_px = {}
+    for tag, S_, M_ in (("2", S2, M2), ("3", S3, M3)):
+        c = M_ @ X.T                               # (amounts, pixels)
+        left = X.T - S_ @ c                        # (channels, pixels)
+        per_px[tag] = dict(c=c, left=np.sqrt((left ** 2).mean(0)))
+    names = {"2": ("gamma", "c_Y", "c_B"), "3": ("gamma", "c_Y", "c_B",
+                                                 "c_O")}
+
+    def stats(v):
+        return [float(np.median(v)), float(np.percentile(v, 5)),
+                float(np.percentile(v, 95))]
+    strips = {}
+    for s in files:
+        sel = smp == s
+        row = dict(n=int(sel.sum()), conc=AMOUNT_3F[s])
+        for tag in ("2", "3"):
+            for nm, v in zip(names[tag], per_px[tag]["c"]):
+                row[f"{nm}_{tag}"] = stats(v[sel])
+            row[f"leftover_{tag}"] = stats(per_px[tag]["left"][sel])
+        strips[s] = row
+    return dict(channels=[a1.cell_name(c) for c in keep], y=y.tolist(),
+                b=b.tolist(), o=o.tolist(), M2=M2.tolist(), M3=M3.tolist(),
+                row_len_2=np.linalg.norm(M2, axis=1).tolist(),
+                row_len_3=np.linalg.norm(M3, axis=1).tolist(),
+                strips=strips, _maps=(d["where"], smp, per_px))
+
+
+def summarize_3g(res):
+    """Print the 3g reference lists, noise multipliers and amounts."""
+    print("Step 3g: reference lists, A (bigger = darker), "
+          + ", ".join(f"{n} = {s} interior mean" for n, s in REFS_3G.items()))
+    for c, y, o, b in zip(res["channels"], res["y"], res["o"], res["b"]):
+        print(f"  {c:16s} yellow {y:7.4f}   orange {o:7.4f}   brown {b:7.4f}")
+    print("  row lengths of M (noise in each amount per unit of channel "
+          "noise): two colors gamma/c_Y/c_B "
+          + "/".join(f"{x:.2f}" for x in res["row_len_2"])
+          + "; three colors gamma/c_Y/c_B/c_O "
+          + "/".join(f"{x:.2f}" for x in res["row_len_3"]))
+    print("\n  per strip, median [5th, 95th percentile] over interior pixels;"
+          " leftover = rms over channels, A")
+    for s, r in res["strips"].items():
+        print(f"  {s} ({r['conc']:g} ug/L, {r['n']} px)")
+        for tag, nm in (("2", ("gamma", "c_Y", "c_B")),
+                        ("3", ("gamma", "c_Y", "c_B", "c_O"))):
+            print(f"    {tag} refs: " + "  ".join(
+                f"{n} {r[f'{n}_{tag}'][0]:+.3f} [{r[f'{n}_{tag}'][1]:+.3f},"
+                f"{r[f'{n}_{tag}'][2]:+.3f}]" for n in nm)
+                + f"  leftover {r[f'leftover_{tag}'][0]:.4f} "
+                f"[{r[f'leftover_{tag}'][1]:.4f},{r[f'leftover_{tag}'][2]:.4f}]")
+
+
+def show_3g(res, files=None, savefig=True):
+    """
+    Step 3g figures (each with NOTE_3G beside it as .txt):
+      fig/color_3g_refs.png: the three reference lists, A per channel;
+          below, the same scaled to largest = 1, to compare their shapes.
+      fig/color_3g_maps.png: per strip, the plain picture, then c_Y, c_O,
+          c_B, gamma and the leftover with two and with three references.
+    """
+    import matplotlib.pyplot as plt
+    files = files or FILES_3F
+    FIG.mkdir(exist_ok=True)
+    saved = []
+    ch = res["channels"]
+    x = np.arange(len(ch))
+    look = {"yellow": ("y", "goldenrod"), "orange": ("o", "darkorange"),
+            "brown": ("b", "saddlebrown")}
+    fig, axs = plt.subplots(2, 1, figsize=(11, 7), sharex=True)
+    for n, (k, col) in look.items():
+        v = np.array(res[k])
+        lab = f"{n} ({REFS_3G[n]}, {AMOUNT_3F[REFS_3G[n]]:g} ug/L)"
+        axs[0].plot(x, v, "o-", color=col, label=lab)
+        axs[1].plot(x, v / v.max(), "o-", color=col, label=lab)
+    for ax in axs:
+        for j in range(1, len(ch)):
+            if ch[j].split(".")[0] != ch[j - 1].split(".")[0]:
+                ax.axvline(j - 0.5, color="gray", lw=0.5)
+        ax.grid(alpha=0.3)
+        ax.legend(fontsize=8)
+    axs[0].set_ylabel("A, interior mean\n(bigger = darker)")
+    axs[1].set_ylabel("A scaled to\nlargest = 1")
+    axs[1].set_xticks(x)
+    axs[1].set_xticklabels(ch, rotation=70, fontsize=8)
+    fig.suptitle("Step 3g: the three reference colors, post vs own pre-image, "
+                 "A per channel (LEDs violet -> photo_red)", fontsize=10)
+    fig.tight_layout()
+    saved.append(("color_3g_refs", fig))
+    # maps
+    where, smp, per_px = res["_maps"]
+    strips = list(files)
+    rows = [("c_Y yellow", per_px["3"]["c"][1], (0, 1.5), "magma"),
+            ("c_O orange", per_px["3"]["c"][3], (0, 1.5), "magma"),
+            ("c_B brown", per_px["3"]["c"][2], (0, 1.5), "magma"),
+            ("gamma, A", per_px["3"]["c"][0], (-0.05, 0.05), "RdBu_r"),
+            ("leftover, 2 refs\nA", per_px["2"]["left"], (0, 0.03), "magma"),
+            ("leftover, 3 refs\nA", per_px["3"]["left"], (0, 0.03), "magma")]
+    fig, axs = plt.subplots(len(rows) + 1, len(strips),
+                            figsize=(2.6 * len(strips) + 1.5,
+                                     2.1 * (len(rows) + 1)), squeeze=False)
+    for j, s in enumerate(strips):
+        axs[0, j].imshow(true_color(files[s]))
+        _pad_axes(axs[0, j], files[s])
+        axs[0, j].set_title(f"{s} post, {AMOUNT_3F[s]:g} ug/L", fontsize=9)
+    axs[0, 0].set_ylabel("white LED\n(for the eye)", fontsize=9)
+    run = {"_maps": (where, smp, None, None)}
+    for i, (lab, vals, (lo, hi), cmap) in enumerate(rows, start=1):
+        maps = _strip_maps(run, files, vals)
+        for j, s in enumerate(strips):
+            im = axs[i, j].imshow(maps[s], cmap=cmap, vmin=lo, vmax=hi)
+            _pad_axes(axs[i, j], files[s])
+        axs[i, 0].set_ylabel(lab, fontsize=8)
+        fig.colorbar(im, ax=list(axs[i]), fraction=0.03, pad=0.01)
+    fig.suptitle("Step 3g: amounts of yellow (C1052 = 1), orange (C1054 = 1) "
+                 "and brown (C1055 = 1), even darkening, and leftover",
+                 fontsize=10)
+    saved.append(("color_3g_maps", fig))
+    a1.close_all()
+    if savefig:
+        for name, f in saved:
+            out = FIG / f"{name}.png"
+            f.savefig(out, dpi=100)
+            out.with_suffix(".txt").write_text(NOTE_3G)
+            print(f"fig saved to {out}")
+
+
+NOTE_3G = """\
+color_3g_*.png -- step 3g, three reference colors on the strips of
+2026-11-16 (made by color_study.py, three_refs_3g and show_3g)
+
+A (absorbance) = -log10(post-image / the strip's own pre-image lined up),
+per channel (LED . camera layer); bigger = darker; 4 repeat photos
+averaged; 22 channels (see color_3f_*.txt).  Interior pad pixels only.
+
+Reference lists: the average A over one strip's interior --
+  yellow y: C1052 (12.8 ug/L);  orange o: C1054 (40 ug/L);
+  brown b: C1055 (600 ug/L).
+None is surely a pure color.
+
+One matrix multiplication splits each pixel's list into
+  gamma: an even darkening, the same A in every channel;
+  c_Y, c_O, c_B: amounts of the three reference colors, 1 = as much as
+  the reference strip's average, 0 = none.  Below 0 means the pixel's
+  color lies outside what positive amounts of the three can make.
+By construction each reference strip averages 1 of its own color and 0
+of the other two; the real tests are C1053 and the pattern inside each
+strip.
+
+color_3g_refs.png: top, each reference list, A per channel; bottom, the
+same divided by its largest value, so the shapes (which light each color
+takes most) can be compared.  LEDs run from violet (shortest wavelength)
+to photo_red (longest); gray lines separate LEDs.
+
+color_3g_maps.png: columns = strips.  Rows: a plain picture from the white
+LED (for the eye only), c_Y, c_O, c_B (scale 0-1.5), gamma (A, -0.05 to
++0.05), and the leftover (root mean square over the channels of what the
+fit cannot describe, A, scale 0-0.03) with two references (yellow and
+brown) and with three.  Camera noise alone gives about 0.004 A; paper
+texture about 0.006-0.008 A.
+"""
+
+ABOUT_3G = {
+    "what": "Step 3g: color_study.three_refs_3g(); references yellow "
+            "C1052, orange C1054, brown C1055 (interior means).",
+    "A": "-log10(post / own pre-image lined up), bigger = darker",
+    "y, o, b": "reference lists, A per channel",
+    "M2, M3": "rows gamma, c_Y, c_B[, c_O]; M = (S^T S)^-1 S^T, "
+              "S = [1 y b (o)]",
+    "row_len_2, row_len_3": "length of each row of M: noise in that amount "
+                            "per unit of channel noise",
+    "strips": "per strip: [median, 5th, 95th percentile] over interior "
+              "pixels of each amount (1 = reference) and of the leftover "
+              "(rms over channels, A); suffix _2 two references, _3 three",
+}
+
+
+# ── step 3h: would a generic (average) pre-image do? ───────────────────
+#
+# Bill, 2026-11-16: many archives have good post-images but an incomplete
+# or missing pre-image.  Could they be divided by a generic pre-image (an
+# average dry pad) instead, adding some noise but many more strips?  For
+# now the aim is telling colors apart, not calibrating to arsenic.
+#
+# THE TEST: on the four strips that do have full pre-images, divide each
+# post-image by the average of the OTHER three strips' pre-images, lined up
+# onto it (`white_study._carry`), and compare with dividing by its own.
+# The difference,
+#     error = A_generic - A_own = log10(R_generic / R_own),
+# is exactly what a generic white would add.  Two parts matter:
+#   1. its average over the pad, per channel: a false color list added to
+#      the whole strip.  Turned into amounts with 3g's matrix, it says how
+#      far the strip's yellow / orange / brown would move.
+#   2. its spread from pixel to pixel: the dry pad's own pattern (paper
+#      texture), which no longer cancels.  It adds noise to each pixel.
+# The four strips are one paper lot, one holder, one day: older archives
+# (other holders, other lots, other calibrations) can only do worse, so
+# these numbers are a lower bound on the error.
+
+def generic_white_3h(files=None, refs=None):
+    """
+    Step 3h: the error a generic pre-image (the average of the other
+    strips' pre-images) adds, per strip.
+
+    Args:
+        files: sample -> file (the strips with full pre-images).
+        refs: the `three_refs_3g` result, for turning the average error
+            into amounts.
+
+    Returns:
+        dict: channels; strips: per strip,
+          mean_err   list per channel, interior mean of the error, A;
+          pixel_err  list per channel, spread (standard deviation) of the
+                     error over interior pixels, A;
+          shift_3    the mean error turned into (gamma, c_Y, c_B, c_O)
+                     with 3g's M3 (how far the strip's amounts move);
+          own_3      the strip's own median amounts (3g), to compare;
+          pixel_noise_3  the per-pixel error turned into amounts: the
+                     spread over pixels of M3 @ error, per amount.
+    """
+    files = files or FILES_3F
+    keep, _, _ = data_3f(files)
+    M3 = np.array(refs["M3"]) if refs else None
+    Rpre, Rpost = {}, {}
+    for s, f in files.items():
+        for c in keep:
+            Rpost[s, c] = np.array(sr.frame(f, c, "")["R"], float)
+            Rpre[s, c] = np.array(sr.frame(cs.pre_source(f), c, a1.PRE)["R"],
+                                  float)
+        a1.close_all()
+    out = {}
+    for s, f in files.items():
+        zone, _, _ = ws.zones_of(f, "")
+        z = zone["interior"]
+        E = []
+        for c in keep:
+            shape = Rpost[s, c].shape
+            own = ws._carry(cs.pre_source(f), a1.PRE, f, "", Rpre[s, c],
+                            shape)
+            others = [ws._carry(cs.pre_source(g), a1.PRE, f, "",
+                                Rpre[t, c], shape)
+                      for t, g in files.items() if t != s]
+            gen = np.mean(others, axis=0)
+            with np.errstate(invalid="ignore", divide="ignore"):
+                E.append(np.log10(gen / own))
+        E = np.stack(E)                            # (channels, rows, cols)
+        z = z & np.isfinite(E).all(0)
+        Ez = E[:, z]                               # (channels, pixels)
+        row = dict(n=int(z.sum()), mean_err=Ez.mean(1).tolist(),
+                   pixel_err=Ez.std(1).tolist())
+        if M3 is not None:
+            row["shift_3"] = (M3 @ Ez.mean(1)).tolist()
+            row["pixel_noise_3"] = (M3 @ (Ez - Ez.mean(1, keepdims=True))
+                                    ).std(1).tolist()
+            row["own_3"] = [refs["strips"][s][f"{n}_3"][0] for n in
+                            ("gamma", "c_Y", "c_B", "c_O")]
+        out[s] = row
+    a1.close_all()
+    return dict(channels=[a1.cell_name(c) for c in keep], strips=out)
+
+
+def summarize_3h(res):
+    """Print the 3h tables."""
+    print("Step 3h: error from dividing by the average of the OTHER strips' "
+          "pre-images instead of the strip's own, A (interior pixels)")
+    print(f"  {'channel':16s}" + "".join(f"{s:>18s}" for s in res["strips"]))
+    print(f"  {'':16s}" + "".join(f"{'mean   pixel sd':>18s}"
+                                   for _ in res["strips"]))
+    for i, c in enumerate(res["channels"]):
+        print(f"  {c:16s}" + "".join(
+            f"{r['mean_err'][i]:+9.4f}{r['pixel_err'][i]:8.4f} "
+            for r in res["strips"].values()))
+    print("\n  in amounts (3g matrix, three references): the strip's own "
+          "median, the shift a generic white adds to the whole strip, and "
+          "the per-pixel noise it adds")
+    for s, r in res["strips"].items():
+        if "shift_3" not in r:
+            continue
+        print(f"  {s}: " + "  ".join(
+            f"{n} own {o:+.3f} shift {sh:+.3f} px-noise {pn:.3f}"
+            for n, o, sh, pn in zip(("gamma", "c_Y", "c_B", "c_O"),
+                                    r["own_3"], r["shift_3"],
+                                    r["pixel_noise_3"])))
+
+
+ABOUT_3H = {
+    "what": "Step 3h: color_study.generic_white_3h(); each strip's post "
+            "divided by the mean of the other three strips' pre-images, "
+            "against its own pre-image.",
+    "error": "A_generic - A_own = log10(R_generic / R_own), A; positive = "
+             "the generic white reads the strip darker",
+    "mean_err, pixel_err": "per channel, interior mean and standard "
+                           "deviation over pixels of the error, A",
+    "shift_3": "M3 @ mean error: change in (gamma, c_Y, c_B, c_O) for the "
+               "whole strip; amounts in units of the reference strips",
+    "pixel_noise_3": "standard deviation over pixels of M3 @ (error - its "
+                     "mean): per-pixel noise added to each amount",
+    "own_3": "the strip's own median amounts from 3g, for comparison",
+}
+
+
 def _save(name, obj, about):
     """Write {"about": about, "rows": obj} to color_out/<name>.json."""
     OUT.mkdir(exist_ok=True)
@@ -1977,6 +2409,10 @@ def run():
         3f  color_count_3f -> color_out/color_count_3f.json, terminal
             show_3f -> fig/color_3f_spread.png, color_3f_directions.png,
                 color_3f_scores.png, color_3f_leftover.png (+ .txt)
+        3f-2 leave_one_out_3f -> color_out/leave_one_out_3f.json, terminal
+        3g  three_refs_3g -> color_out/three_refs_3g.json, terminal
+            show_3g -> fig/color_3g_refs.png, color_3g_maps.png (+ .txt)
+        3h  generic_white_3h -> color_out/generic_white_3h.json, terminal
     """
     if 0:
         _save("pairing", pairing_check(), ABOUT_PAIRING)
@@ -2006,11 +2442,27 @@ def run():
         _save("three_colors", res, ABOUT_3E)
         summarize_three_colors(res)
         show_three_colors(res)
-    if 1:   # 3f: how many colors on C1052-C1055 (all LEDs and layers)
+    if 0:   # 3f: how many colors on C1052-C1055 (all LEDs and layers)
         res = color_count_3f()
         _save("color_count_3f", _json_ready_3f(res), ABOUT_3F)
         summarize_3f(res)
         show_3f(res)
+    if 1:   # 3f-2: the directions with one strip left out
+        res = leave_one_out_3f()
+        _save("leave_one_out_3f", res, ABOUT_3F2)
+        summarize_leave_one_out(res)
+    if 1:   # 3g: three reference colors (yellow C1052, orange C1054,
+            # brown C1055)
+        res = three_refs_3g()
+        _save("three_refs_3g", {k: v for k, v in res.items()
+                                if k != "_maps"}, ABOUT_3G)
+        summarize_3g(res)
+        show_3g(res)
+    if 1:   # 3h: would a generic (average) pre-image do?
+        refs = _load("three_refs_3g")
+        res = generic_white_3h(refs=refs)
+        _save("generic_white_3h", res, ABOUT_3H)
+        summarize_3h(res)
 
 
 if __name__ == "__main__":

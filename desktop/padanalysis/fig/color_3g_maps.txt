@@ -1,0 +1,32 @@
+color_3g_*.png -- step 3g, three reference colors on the strips of
+2026-11-16 (made by color_study.py, three_refs_3g and show_3g)
+
+A (absorbance) = -log10(post-image / the strip's own pre-image lined up),
+per channel (LED . camera layer); bigger = darker; 4 repeat photos
+averaged; 22 channels (see color_3f_*.txt).  Interior pad pixels only.
+
+Reference lists: the average A over one strip's interior --
+  yellow y: C1052 (12.8 ug/L);  orange o: C1054 (40 ug/L);
+  brown b: C1055 (600 ug/L).
+None is surely a pure color.
+
+One matrix multiplication splits each pixel's list into
+  gamma: an even darkening, the same A in every channel;
+  c_Y, c_O, c_B: amounts of the three reference colors, 1 = as much as
+  the reference strip's average, 0 = none.  Below 0 means the pixel's
+  color lies outside what positive amounts of the three can make.
+By construction each reference strip averages 1 of its own color and 0
+of the other two; the real tests are C1053 and the pattern inside each
+strip.
+
+color_3g_refs.png: top, each reference list, A per channel; bottom, the
+same divided by its largest value, so the shapes (which light each color
+takes most) can be compared.  LEDs run from violet (shortest wavelength)
+to photo_red (longest); gray lines separate LEDs.
+
+color_3g_maps.png: columns = strips.  Rows: a plain picture from the white
+LED (for the eye only), c_Y, c_O, c_B (scale 0-1.5), gamma (A, -0.05 to
++0.05), and the leftover (root mean square over the channels of what the
+fit cannot describe, A, scale 0-0.03) with two references (yellow and
+brown) and with three.  Camera noise alone gives about 0.004 A; paper
+texture about 0.006-0.008 A.
