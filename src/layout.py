@@ -118,7 +118,14 @@ COLLECT_LINE = Rect(  8, 188, 224, 22)
 
 # ── body: wide label/field pairs (share y with USER and TEST rows) ─────────────
 COLOR_LBL   = Rect(  8,  95, 110, 35);  COLOR_FLD  = Rect(120,  93, 130, 39)
-RESULT_LBL  = Rect(  8, 135,  68, 35);  RESULT_FLD = Rect( 82, 133, 230, 39)
+
+# ── body: analysis result row (AnalysisPhase)  y125..153 ──────────────────────
+# Where the instruction line is on the other run screens, so the read screen's
+# manual-reading row (MANUAL_LBL / READ_FLD, y158..186) fits below it on the
+# analysis screen too: the reading can still be typed or corrected after the
+# capture, which is where the POST / NEXT "incomplete" dialog's Return lands.
+# It used to be body row 3 (y133..172), over the reading's row.
+RESULT_LBL  = Rect(  8, 125,  68, 28);  RESULT_FLD = Rect( 82, 125, 230, 28)
 
 # ── body: read-strip prompt (ReadPhase)  y158..186 ────────────────────────────
 # One row: the "Manually read color:" prompt and the reading entry side by side,

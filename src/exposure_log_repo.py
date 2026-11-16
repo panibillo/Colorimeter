@@ -218,6 +218,32 @@ def write_rows(rows: Sequence[dict]) -> int:
     return len(rows)
 
 
+def rename_archive(samp_no: str, old: str, new: str) -> int:
+    """
+    Point one sample's rows at an archive's new name.
+
+    Used when a cancelled run's archive is moved aside (arbiter's end-of-run
+    cleanup), so that the file name it leaves free, reused by the sample
+    number's next run, does not also collect the abandoned run's rows.
+
+    Args:
+        samp_no: The sample whose rows move.  Rows of any other sample that
+                 name the same file are left alone.
+        old:     The archive column as written, e.g. 'C1054.h5'.
+        new:     The new value, relative to the capture directory, e.g.
+                 'abandoned/C1054_20261116_1225.h5'.
+
+    Returns:
+        The number of rows changed.
+
+    Raises:
+        sqlite3.Error: the write failed.
+    """
+    return db.write_one(
+        "UPDATE exposure_log SET archive = ? WHERE samp_no = ? AND archive = ?",
+        (new, samp_no, old))
+
+
 def read_rows(samp_no: Optional[str] = None,
               archive: Optional[str] = None) -> List[dict]:
     """

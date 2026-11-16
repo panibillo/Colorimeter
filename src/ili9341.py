@@ -450,6 +450,21 @@ class ILI9341:
                     self._font_cache[size] = ImageFont.load_default()
         return self._font_cache[size]
 
+    def text_width(self, text: str, size: int = 16) -> int:
+        """
+        Width in pixels that draw_text gives one line of `text` at `size` pt.
+
+        Lets a TextBox decide how much of a long value fits, and where its
+        cursor goes (widgets.TextBox._fit).
+        """
+        if not text:
+            return 0
+        font = self._get_font(size)
+        if not hasattr(self, "_measure"):
+            self._measure = ImageDraw.Draw(Image.new("RGB", (1, 1)))
+        b = self._measure.textbbox((0, 0), text, font=font)
+        return b[2] - b[0]
+
     def draw_text(
         self,
         text:     str,

@@ -73,6 +73,7 @@ from widgets import Button, TextBox
 from pool import Pool
 from slot import Slot
 from phases import (build_phases, EntryPhase, Entry2Phase, ReadPhase,
+                    AnalysisPhase,
                     VariantPhase, ReagentWeights,
                     _factor_value, _image_reps, _mmss, _to_float)
 
@@ -1267,7 +1268,7 @@ class Arbiter:
         if slot.phase == "entry":
             self.persist(slot, user=r["user"], test_kit=r["test_kit"],
                          test_lot=r["test_lot"])
-        elif slot.phase == "read":
+        elif slot.phase in ("read", "analysis"):
             self.persist(slot, manual_read=r["manual_read"])
 
     # ── Phase contract: navigation / render ────────────────────────────────────
@@ -2735,10 +2736,17 @@ class Arbiter:
         buttons: what screen this is, then what it is showing.
         """
         if self._cfge_view == "roles":
-            return "Config\nRoles"
-        if self._cfge_view == "role":
-            return f"Config\n{self._cfge_role}"
-        return f"{self._cfge_role}\n{_cfge_fit(self._cfge_name)}"
+            title = "Config\nRoles"
+        elif self._cfge_view == "role":
+            title = f"Config\n{self._cfge_role}"
+        else:
+            title = f"{self._cfge_role}\n{_cfge_fit(self._cfge_name)}"
+        # Say why the fields are grey when a live sample has locked them —
+        # otherwise an editable=1 row looks broken.  Only if a line is free.
+        live = self._live_slots()
+        if live and title.count("\n") < 2:
+            title += f"\nlocked: run {'+'.join(live)}"
+        return title
 
     def _cfge_put_roles(self) -> None:
         from palette import color
@@ -3983,8 +3991,21 @@ class Arbiter:
         must not change out from under a slot that has already read it, so
         every editor screen gates its editable state on this.
         """
-        return any(s.active_phase not in ("entry", "entry2", "variant")
-                   for s in self._slots.values())
+        return bool(self._live_slots())
+
+    def _live_slots(self) -> "list[str]":
+        """
+        Names of the slots holding a live sample, e.g. ['A'].
+
+        Live means past the entry screens and not yet finished.  A run whose
+        analysis result is in is finished even though it stays on the
+        analysis screen until NEXT: nothing in it reads configuration any
+        more.  It used to count as live, so a finished run left on screen kept
+        Menu -> Config read-only, with no word of why (2026-11-16).
+        """
+        return [s.name for s in self._slots.values()
+                if s.active_phase not in ("entry", "entry2", "variant")
+                and not (s.active_phase == "analysis" and s.result)]
 
     @property
     def cap_mode(self) -> str:
@@ -4205,6 +4226,7 @@ class Arbiter:
 
     def next_sample(self, slot: Slot) -> None:
         log.info("Arbiter: next sample in slot %s", slot.name)
+        self._end_run(slot, row_deleted=False)
         slot.clear_run()
         self.goto(slot, "entry")
 
@@ -4215,12 +4237,18 @@ class Arbiter:
         as-is ('Keep row').  Either way the slot resets to a fresh entry.
         """
         log.info("Arbiter: cancel test in slot %s (delete=%s)", slot.name, delete)
+        # Archives a cancelled capture was writing.  Its file is not yet in the
+        # record (that happens when a capture finishes), and cancel() is what
+        # closes it, so the path is taken from the session after the cancel.
+        cut_short = []
         if self._capture_slot is slot and self._capture is not None:
             self._capture.cancel()
+            cut_short.append(getattr(self._capture, "out_path", None))
             self._capture = None
             self._capture_slot = None
         if self._prefetch_slot is slot and self._prefetch is not None:
             self._prefetch.cancel()
+            cut_short.append(getattr(self._prefetch, "out_path", None))
             self._prefetch = None
             self._prefetch_slot = None
             self._prefetch_epoch = None
@@ -4231,17 +4259,126 @@ class Arbiter:
                 and slot.record.get("capture_start") is None):
             baro_signal.send("STOP", slot.record.get("samp_no"), "Canceled")
         # BARO-UDP end
+        deleted = False
         if delete:
             rowid = slot.record.get("db_rowid")
             if rowid is not None:
                 try:
                     sample_repo.delete_sample(rowid)
+                    deleted = True
                     # A test variant's treatment goes with its sample.
                     sample_repo.delete_treatment(slot.record.get("samp_no"))
                 except sqlite3.Error:
                     log.exception("Arbiter: delete_sample failed (rowid=%s)", rowid)
+        self._end_run(slot, row_deleted=deleted, cut_short=cut_short)
         slot.clear_run()
         self.goto(slot, "entry")
+
+    # ── End of a run ───────────────────────────────────────────────────────────
+    # A run leaves scope in one of two ways, NEXT or Cancel, and both clear the
+    # slot straight after.  Whatever the run still holds only in memory has to
+    # be settled first, or clear_run() throws it away.
+
+    def _end_run(self, slot: Slot, row_deleted: bool,
+                 cut_short: "list | None" = None) -> None:
+        """
+        Settle a run's loose ends before its slot is cleared.
+
+        Row kept (NEXT, or Cancel -> Keep row):
+          - The manual reading is written to the row.  It is otherwise flushed
+            only when the view leaves its screen, and NEXT pressed straight
+            after typing it on the analysis screen never did.
+          - A capture cancelled before it finished never got to record its
+            file, so a row with no h5file is given that file.
+        Row deleted (Cancel -> Delete row):
+          - Every archive the run wrote is moved to <captures>/abandoned/.
+            Deleting the row frees the sample number for reuse, and the next
+            run to take it found its name taken by this run's file and wrote
+            to "-a" instead (C1054, 2026-11-16: C1054.h5 held only an
+            abandoned pre-image, and the real run went to C1054-a.h5).
+            Moved, not deleted: a pre-image cannot be taken again.
+
+        Never raises: a failure here is logged and the slot still clears.
+
+        Args:
+            slot:        The run that is ending.
+            row_deleted: True once its samples row has been deleted.
+            cut_short:   Archive paths of captures cancelled just now (None
+                         entries are ignored).
+        """
+        r = slot.record
+        archives = self._run_archives(slot, cut_short or [])
+        try:
+            if not row_deleted:
+                if r.get("db_rowid") is not None:
+                    cols = {"manual_read": r.get("manual_read", "")}
+                    if not r.get("h5file") and archives:
+                        cols["h5file"] = str(archives[0])
+                    self.persist(slot, **cols)
+                return
+            for path in archives:
+                self._abandon_archive(path, r.get("samp_no") or "")
+        except Exception:
+            log.exception("Arbiter: end-of-run cleanup failed for slot %s (%s)",
+                          slot.name, r.get("samp_no"))
+
+    @staticmethod
+    def _run_archives(slot: Slot, extra) -> "list[Path]":
+        """
+        Every archive file this run wrote that is still on disk, set 1 first,
+        each once (a measurement joins its pre-image's file, so the same path
+        can be listed twice).
+        """
+        found, seen = [], set()
+        candidates = ([slot.record.get("h5file")]
+                      + [slot.rep_files[k] for k in sorted(slot.rep_files)]
+                      + list(extra))
+        for c in candidates:
+            if not c:
+                continue
+            path = Path(c)
+            key = os.path.abspath(path)
+            if key in seen or not path.is_file():
+                continue
+            seen.add(key)
+            found.append(path)
+        return found
+
+    @staticmethod
+    def _abandon_archive(path: Path, samp_no: str) -> "Path | None":
+        """
+        Move a deleted run's archive into <captures>/abandoned/, freeing its
+        name, and point its exposure_log rows at the new place.
+
+        Named "<old stem>_<last written, YYYYMMDD_HHMM>.h5", e.g.
+        abandoned/C1054_20261116_1225.h5, so two abandoned runs of the same
+        sample number do not collide (and if they still do, a letter is added
+        as for any archive — config.capture_archive_path).
+
+        Returns:
+            The new path, or None if the file could not be moved (logged).
+        """
+        import shutil
+        import exposure_log_repo
+        dest_dir = config.capture_dir() / "abandoned"
+        try:
+            dest_dir.mkdir(parents=True, exist_ok=True)
+            stamp = datetime.datetime.fromtimestamp(
+                path.stat().st_mtime).strftime("%Y%m%d_%H%M")
+            dest = config.capture_archive_path(dest_dir, f"{path.stem}_{stamp}")
+            shutil.move(str(path), str(dest))
+        except OSError:
+            log.exception("Arbiter: could not move abandoned archive %s", path)
+            return None
+        log.info("Arbiter: run %s deleted; its archive %s moved to %s",
+                 samp_no, path, dest)
+        try:
+            exposure_log_repo.rename_archive(
+                samp_no, path.name, f"{dest_dir.name}/{dest.name}")
+        except sqlite3.Error:
+            log.exception("Arbiter: exposure_log rows for %s still name %s",
+                          samp_no, path.name)
+        return dest
 
     def retry_capture(self, slot: Slot) -> None:
         # Return to the read phase; the operator presses CAPTURE again.
@@ -6130,7 +6267,10 @@ class Arbiter:
             return
 
         if isinstance(w, TextBox) and w.editing and w.enabled:
-            if key in ("backspace", "delete") or (len(key) == 1 and key.isprintable()):
+            if key in TextBox.CURSOR_KEYS:
+                # Moves the cursor only; the value, and so the record, is unchanged.
+                w.handle_char(key, self._disp)
+            elif key in ("backspace", "delete") or (len(key) == 1 and key.isprintable()):
                 w.handle_char(key, self._disp)
                 self._writethrough(w)
 
@@ -6197,7 +6337,8 @@ class Arbiter:
         fields = {"entry":   EntryPhase.FIELDS,
                   "entry2":  Entry2Phase.FIELDS,
                   "variant": VariantPhase.BOXES,
-                  "read":    ReadPhase.FIELDS}.get(slot.phase)
+                  "read":    ReadPhase.FIELDS,
+                  "analysis": AnalysisPhase.FIELDS}.get(slot.phase)
         if not fields:
             return
         key = fields.get(textbox.name)
@@ -8046,6 +8187,74 @@ def _selftest() -> None:
         baro_signal.send = _send_was
     A.clear_run()
     # BARO-UDP end
+
+    print("== end of a run: Delete row moves its archives aside ==")
+    # C1054 (2026-11-16): a run deleted after its pre-image left C1054.h5
+    # behind, so the reissued C1054 wrote to C1054-a.h5.
+    _ext = config.get("capture", "extension")
+    _enddir = Path(_tf.mkdtemp())
+    _real_capdir2 = config.capture_dir
+    config.capture_dir = lambda: _enddir
+    try:
+        _rid = sample_repo.insert_sample("ZZ9054", "u", "t", "l", "sn")
+        _pre, _rep = _enddir / f"ZZ9054{_ext}", _enddir / f"ZZ9054rep2{_ext}"
+        _pre.write_bytes(b"pre"); _rep.write_bytes(b"rep")
+        A.record.update(samp_no="ZZ9054", db_rowid=_rid, h5file=str(_pre))
+        A.rep_files = {1: _pre, 2: _rep}
+        A.active_phase = A.phase = "reagent1"
+        arb.cancel_test(A, delete=True)
+        check("name freed for the next run",
+              config.capture_archive_path(_enddir, "ZZ9054").name,
+              f"ZZ9054{_ext}")
+        _moved = sorted(p.name for p in (_enddir / "abandoned").iterdir())
+        check("both sets kept, under abandoned/",
+              [n.split("_")[0] for n in _moved], [f"ZZ9054", "ZZ9054rep2"])
+        check("contents intact",
+              sorted((_enddir / "abandoned" / n).read_bytes() for n in _moved),
+              [b"pre", b"rep"])
+
+        print("== end of a run: Keep row leaves the archive and names it ==")
+        _rid = sample_repo.insert_sample("ZZ9055", "u", "t", "l", "sn")
+        _cut = _enddir / f"ZZ9055{_ext}"
+        _cut.write_bytes(b"half")
+        A.record.update(samp_no="ZZ9055", db_rowid=_rid)
+        A.active_phase = A.phase = "preimage"
+        class _CutCapture:                 # a pre-image cancelled mid-sweep
+            out_path = None
+            def cancel(self): self.out_path = _cut
+        arb._capture, arb._capture_slot = _CutCapture(), A
+        arb.cancel_test(A, delete=False)
+        check("file left where it is", _cut.is_file(), True)
+        check("row given the cut-short file",
+              _db.read_val("SELECT h5file FROM samples WHERE rowid = ?", (_rid,)),
+              str(_cut))
+    finally:
+        config.capture_dir = _real_capdir2
+    A.clear_run()
+
+    print("== end of a run: a reading typed on the analysis screen ==")
+    _rid = sample_repo.insert_sample("ZZ9056", "u", "t", "l", "sn")
+    A.record.update(samp_no="ZZ9056", db_rowid=_rid)
+    A.active_phase = A.phase = "analysis"
+    A.result = "done"
+    arb.focus(A)
+    check("the reading box is on the analysis screen",
+          (arb._pool["color_fld"].visible, arb._pool["color_fld"].editable),
+          (True, True))
+    check("a finished run does not lock Config", arb._any_slot_active(), False)
+    _fld = arb._pool["color_fld"]
+    _fld.set_value("40")
+    arb._writethrough(_fld)
+    check("lands in the record", A.record["manual_read"], "40")
+    arb.next_sample(A)                    # NEXT, with no flush in between
+    check("reaches the row",
+          _db.read_val("SELECT manual_read FROM samples WHERE rowid = ?", (_rid,)),
+          "40")
+    A.active_phase = A.phase = "analysis"
+    A.result = ""
+    check("an analysis still running does lock Config",
+          arb._any_slot_active(), True)
+    A.clear_run()
 
     print("== config editor: Restore Factory Defaults undoes all of it ==")
     arb._cfge_open()

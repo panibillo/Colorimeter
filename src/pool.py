@@ -228,8 +228,8 @@ class Pool:
         label("manual_lbl", L.MANUAL_LBL, "alert_text", "white", 16, align="left",
               text="Manually read color:")
         field("color_fld",  L.READ_FLD, 18, "field_red")
-        label("result_lbl", L.BODY_LBL3, "white", "label_coral", 13, text="Result")
-        field("result_fld", L.BODY_FLD3, 18, "field_blue", editable=False)
+        label("result_lbl", L.RESULT_LBL, "white", "label_coral", 13, text="Result")
+        field("result_fld", L.RESULT_FLD, 18, "field_blue", editable=False)
 
         # ── body: test-variant screen (VariantPhase) ─────────────────────────────
         # Row labels are Buttons, as on the entry screens: pressing one puts

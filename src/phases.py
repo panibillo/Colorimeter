@@ -1455,11 +1455,21 @@ class AnalysisPhase(Phase):
     POST only sends the data to the server, and NEXT ends the run.  Both first
     check the run for anything left undone (incomplete_items) and, if there
     is something, list it in a dialog offering Return and Continue.
+
+    The manual colour reading is shown here too, editable, in the same row as
+    on the read screen.  Once the capture is done the read screen gives that
+    row to the weight grid, so before 2026-11-16 a reading left blank could
+    not be typed anywhere: the dialog listed it as missing, and Return came
+    back to a screen with no box for it.
     """
 
     phase_id = "analysis"
     prior    = "read"          # usable once the result is in (see lock_nav)
     next     = None
+
+    # Same box and key as ReadPhase, so the arbiter's write-through and
+    # flush handle a reading typed here the same way.
+    FIELDS = {"color_fld": "manual_read"}
 
     def activate(self, arb, slot) -> None:
         slot.result   = ""
@@ -1474,6 +1484,11 @@ class AnalysisPhase(Phase):
         pool.put("result_lbl", "Result")
         done = bool(slot.result)
         pool.put("result_fld", slot.result if done else slot.progress)
+        is_live = slot.active_phase == self.phase_id
+        pool.show("manual_lbl")
+        manual = slot.record.get("manual_read", "")
+        pool.put("color_fld", manual)
+        pool.mark("color_fld", pending=is_live and not _filled(manual))
         pool.put("run_btn", "POST",
                  on=(lambda: _checked(arb, slot, "incomplete_post",
                                       lambda: arb.post_results(slot)))
