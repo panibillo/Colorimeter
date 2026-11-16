@@ -970,6 +970,46 @@ def rung_verdict(samp_no, cell, sec="", erode=ERODE) -> tuple:
     return (best[0], "ok") if best else (None, why)
 
 
+def repeat_labels(samp_no, cell, rung, sec="", erode=ERODE) -> list:
+    """
+    The frames to average for one channel: `rung` and every other frame of
+    the same LED taken at the same exposure_us, that clips nowhere in the
+    pad and the gray chips (`_measured_region`).
+
+    Since 2026-11-15 the Pi can take N repeat frames at one exposure_us
+    (`protocol.multiple_exposure_count` for Tus, `bus_exposure_count` for
+    Bus; C1049-C1051 have N = 4).  The repeats differ only by camera noise,
+    so averaging their dark-corrected signals cuts that noise by about
+    sqrt(N) (half, for 4 frames).  Averaging is done on the signal (light),
+    before any ratio or logarithm.  Tus and Bus frames have different
+    exposure_us, so they are never mixed here.  Archives before C1049 hold
+    one frame per exposure_us, and get back just [rung].
+
+    Args:
+        samp_no: Capture name.
+        cell: (led, layer).
+        rung: the label `rung_verdict` chose, e.g. 'e1'.
+        sec: '' measurement, 'pre' pre-image.
+        erode: layer px backed off the pad edge for the clipping test.
+
+    Returns:
+        list of labels, `rung` first.
+    """
+    c = open_sample(samp_no, sec)
+    led, layer = cell
+    us = c.exposure_us(led, rung)
+    region = _measured_region(samp_no, sec, erode)
+    out = [rung]
+    for lab in c.labels(led):
+        if lab == rung or c.exposure_us(led, lab) != us:
+            continue
+        got = c.layer(led, lab, layer)
+        if got is None or (got[1][region] >= SATURATED_DN).any():
+            continue
+        out.append(lab)
+    return out
+
+
 def _pick_rung(samp_no, cell, sec="", erode=ERODE):
     """The rung from `rung_verdict`, or None.  See it for the screens."""
     return rung_verdict(samp_no, cell, sec, erode)[0]

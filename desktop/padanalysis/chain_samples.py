@@ -87,6 +87,12 @@ DB = REPO / "src" / "colorimeter.sqlite"
 #: in all): its own pre-image is the already-stained C1047 strip, so it
 #: uses C1047's (PRE_FROM), and its pad is located on photo_red
 #: (PAD_FIT_CELLS).
+#: C1049 (20 ug/L, a dark dot in the center), C1050 (600 ug/L, brown) and
+#: C1051 (12 ug/L, yellow), holder H, 2026-11-15: the first strips with
+#: 4 repeat frames per LED at Tus (and 4 at Bus for green), which
+#: shading_review.frame averages.  C1049.h5 was renamed after an
+#: identifier mix-up: inside, its root samp_no attribute and its Pi
+#: samples.h5file still say C1048.  It is not the C1048 strip.
 SETS = {
     "F": {"C1038": ["C1038", "C1038rep2", "C1038rep3", "C1038rep4", "C1038rep5"],
           "C1039": ["C1039", "C1039rep2", "C1039rep3", "C1039rep4", "C1039rep5"],
@@ -96,7 +102,10 @@ SETS = {
     "H": {"C1044": ["C1044-e", "C1044rep2-b"],
           "C1046": ["C1046"],
           "C1047": ["C1047"],
-          "C1048": ["C1048"]},
+          "C1048": ["C1048"],
+          "C1049": ["C1049"],
+          "C1050": ["C1050"],
+          "C1051": ["C1051"]},
     "G": {"C1045": ["C1045-a", "C1045rep2-a", "C1045rep3", "C1045rep4"]},
 }
 

@@ -89,7 +89,14 @@ def frame(samp_no, cell, sec=a1.PRE) -> dict:
             'inner' array bool, the pad eroded INNER_PX;
             'chip1', 'chip2'  array bool, the gray chips;
             'rung'  scalar str, the exposure read;
+            'frames'  list of str, the frames averaged into 'sig': rung
+                    and its repeats at the same exposure_us
+                    (`a1.repeat_labels`; one frame before C1049);
             'exposure_us'  scalar float, its exposure time.
+
+    Repeat frames (C1049 on) are averaged on the dark-corrected signal,
+    before the ratio, so camera noise falls by about sqrt(frames)
+    (Bill, 2026-11-15).
     """
     led, layer = cell
     rung, why = a1.rung_verdict(samp_no, cell, sec)
@@ -97,7 +104,9 @@ def frame(samp_no, cell, sec=a1.PRE) -> dict:
         raise RuntimeError(f"{samp_no} {sec or 'post'} {a1.cell_name(cell)}: "
                            f"{why}")
     c = a1.open_sample(samp_no, sec)
-    sig = c.layer(led, rung, layer)[0].astype(float)
+    frames = a1.repeat_labels(samp_no, cell, rung, sec)
+    sig = np.mean([c.layer(led, lab, layer)[0] for lab in frames],
+                  axis=0).astype(float)   # (rows, cols): mean over frames
     hot = a1._hot(samp_no, sec)
     chip1 = a1._region(samp_no, a1.ROIGRAY1, sec) & ~hot
     chip2 = a1._region(samp_no, a1.ROIGRAY2, sec) & ~hot
@@ -106,7 +115,7 @@ def frame(samp_no, cell, sec=a1.PRE) -> dict:
     pad = a1.pad_of(samp_no, sec)
     return dict(sig=sig, div=div, R=sig / div,
                 pad=pad.mask(0) & ~hot, inner=pad.mask(INNER_PX) & ~hot,
-                chip1=chip1, chip2=chip2, rung=rung,
+                chip1=chip1, chip2=chip2, rung=rung, frames=frames,
                 exposure_us=float(c.exposure_us(led, rung)))
 
 
