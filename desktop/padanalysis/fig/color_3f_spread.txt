@@ -1,7 +1,7 @@
 color_3f_*.png -- step 3f, how many color directions the strips of
 2026-11-16 need (made by color_study.py, color_count_3f and show_3f)
 
-Strips: C1052 12.8 ug/L, C1053 20 ug/L, C1054 40 ug/L (file C1054-a.h5),
+Strips: C1052 12.8 ug/L, C1053 20 ug/L, C1054 40 ug/L (file C1054.h5, was C1054-a.h5),
 C1055 600 ug/L; holder H.  Pixels: every interior pad pixel (8 or more
 layer pixels from every edge) of each post-image.
 

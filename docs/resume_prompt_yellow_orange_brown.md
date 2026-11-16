@@ -49,7 +49,7 @@ on the signal before any ratio (`shading_review.frame`, Bill 2026-11-15).
 | C1051 | 12 | 5 LEDs | yellow |
 | C1052 | 12.8 | 9 LEDs, all layers | yellow reference since 3g |
 | C1053 | 20 | 9 LEDs, all layers | the one strip not used as a reference |
-| C1054 | 40 | 9 LEDs, all layers | **file `captures/C1054-a.h5`**; `C1054.h5` is an abandoned first try (pre-image photo_red and red only, no post-image); orange reference |
+| C1054 | 40 | 9 LEDs, all layers | file `captures/C1054.h5` (written as `C1054-a.h5`, renamed 2026-11-16); the abandoned first try that had the name is now `captures/abandoned/C1054_20261116_1225.h5` (pre-image photo_red and red only, no post-image); orange reference |
 | C1055 | 600 | 9 LEDs, all layers | brown reference |
 
 - C1052–C1055 were captured 2026-11-16 with `capture.save_all_layers` = 1
@@ -70,7 +70,7 @@ on the signal before any ratio (`shading_review.frame`, Bill 2026-11-15).
    with 2 or more photos.  **22 channels.**  Dropped: 13 weak layers with no
    flat-field model (violet.Gb/Gr/R, royal_blue.Gb/Gr/R, blue.R, cyan.R,
    green.R, amber.B, red_orange.B, red.B, photo_red.B; calibration p90 only
-   15–86 DN), and red.R (C1054-a's pre-image has one photo of it).
+   15–86 DN), and red.R (C1054's pre-image has one photo of it).
 2. A per pixel and channel, from each strip's **own** pre-image
    (`color_study.pca_data_3f`, the same arithmetic as `pair_A`).
 3. Interior pixels only, about 900 per strip.  **The pad rim was not

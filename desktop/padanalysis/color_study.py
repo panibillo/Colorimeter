@@ -1498,9 +1498,10 @@ ABOUT_3E = {
 
 #: The strips of 2026-11-16 (holder H; every LED but white in the
 #: pre-image; all four camera layers saved; 4 repeat photos per LED).
-#: sample -> file.  C1054's capture is in C1054-a.h5: C1054.h5 is an
-#: abandoned first try that holds only photo_red and red in its pre-image.
-FILES_3F = {"C1052": "C1052", "C1053": "C1053", "C1054": "C1054-a",
+#: sample -> file.  C1054's capture was written as C1054-a.h5 and renamed
+#: C1054.h5 on 2026-11-16; the abandoned first try that had the name is now
+#: captures/abandoned/C1054_20261116_1225.h5.
+FILES_3F = {"C1052": "C1052", "C1053": "C1053", "C1054": "C1054",
             "C1055": "C1055"}
 #: Arsenic in each sample, ug/L (Bill, 2026-11-16; also in the local
 #: samples.manual_read).
@@ -1891,7 +1892,7 @@ NOTE_3F = """\
 color_3f_*.png -- step 3f, how many color directions the strips of
 2026-11-16 need (made by color_study.py, color_count_3f and show_3f)
 
-Strips: C1052 12.8 ug/L, C1053 20 ug/L, C1054 40 ug/L (file C1054-a.h5),
+Strips: C1052 12.8 ug/L, C1053 20 ug/L, C1054 40 ug/L (file C1054.h5, was C1054-a.h5),
 C1055 600 ug/L; holder H.  Pixels: every interior pad pixel (8 or more
 layer pixels from every edge) of each post-image.
 
